@@ -2,8 +2,8 @@
 
 Rust 自进化智能体框架（Host + Skills）。
 
-- 官网: https://blockcell.ai
-- English: `README.md`
+- 官网: https://blockcell.dev
+- English: [README.md](README.md)
 
 ## 项目简介
 

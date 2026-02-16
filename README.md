@@ -2,8 +2,8 @@
 
 A self-evolving AI agent framework in Rust.
 
-- Website: https://blockcell.ai
-- 中文说明: `README.zh-CN.md`
+- Website: https://blockcell.dev
+- 中文说明: [README.zh-CN.md](README.zh-CN.md)
 
 ## What it is
 
