@@ -14,13 +14,26 @@ pub struct ProviderConfig {
     pub api_base: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommunityHubConfig {
     #[serde(default)]
     pub hub_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+fn default_community_hub_url() -> Option<String> {
+    Some("https://hub-api.blockcell.dev".to_string())
+}
+
+impl Default for CommunityHubConfig {
+    fn default() -> Self {
+        Self {
+            hub_url: default_community_hub_url(),
+            api_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
