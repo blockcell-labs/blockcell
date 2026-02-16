@@ -1,0 +1,11 @@
+{
+  "name": "open_github",
+  "input": "帮我打开GitHub",
+  "expected_output": "success",
+  "expected_tools": ["chrome_control", "chrome_control", "chrome_control"],
+  "context": {
+    "url": "https://github.com",
+    "search_term": "",
+    "search_engine": "baidu"
+  }
+}

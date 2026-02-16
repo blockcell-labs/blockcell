@@ -1,0 +1,33 @@
+name: app_control
+description: "通用应用控制技能 — 通过 AppleScript 控制任何 macOS 应用，支持截图、键盘输入、菜单操作、UI 树读取等"
+requires:
+  bins: []
+  env: []
+permissions:
+  - system.accessibility
+  - system.automation
+always: false
+triggers:
+  - "控制应用"
+  - "控制软件"
+  - "操作应用"
+  - "截图应用"
+  - "截图软件"
+  - "看看屏幕"
+  - "看看IDE"
+  - "看看编辑器"
+  - "windsurf"
+  - "vscode"
+  - "control app"
+  - "app screenshot"
+  - "what's on screen"
+  - "读取界面"
+  - "读取UI"
+  - "点击菜单"
+  - "操作IDE"
+capabilities:
+  - "app_control"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法控制应用。请确保在系统偏好设置 > 安全性与隐私 > 辅助功能中授权终端/blockcell。"

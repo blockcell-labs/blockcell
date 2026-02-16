@@ -1,0 +1,11 @@
+{
+  "name": "simple_capture",
+  "input": "帮我拍张照",
+  "expected_output": "success",
+  "expected_tools": ["camera_capture"],
+  "context": {
+    "device": "0",
+    "format": "jpg",
+    "output_path": ""
+  }
+}

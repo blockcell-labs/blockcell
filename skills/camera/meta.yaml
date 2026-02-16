@@ -1,0 +1,26 @@
+name: camera
+description: "拍照技能 — 使用连接的摄像头拍摄照片，支持设备选择、格式设置和自动保存"
+requires:
+  bins: []  # ffmpeg is optional, graceful degradation
+  env: []
+permissions:
+  - hardware.camera
+  - fs.write
+always: false
+triggers:
+  - "拍照"
+  - "拍张照"
+  - "帮我拍"
+  - "take a photo"
+  - "take photo"
+  - "capture photo"
+  - "拍一张"
+  - "照相"
+  - "自拍"
+  - "摄像头"
+capabilities:
+  - "camera_capture"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法使用摄像头拍照，已改为截屏。如需摄像头支持，请安装 ffmpeg: brew install ffmpeg"

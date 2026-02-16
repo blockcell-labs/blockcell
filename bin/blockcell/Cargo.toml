@@ -1,0 +1,49 @@
+[package]
+name = "blockcell"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "blockcell"
+path = "src/main.rs"
+
+[dependencies]
+blockcell-core = { path = "../../crates/core" }
+blockcell-agent = { path = "../../crates/agent" }
+blockcell-tools = { path = "../../crates/tools" }
+blockcell-providers = { path = "../../crates/providers" }
+blockcell-storage = { path = "../../crates/storage" }
+blockcell-scheduler = { path = "../../crates/scheduler" }
+blockcell-channels = { path = "../../crates/channels" }
+blockcell-skills = { path = "../../crates/skills" }
+blockcell-updater = { path = "../../crates/updater" }
+tokio = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+reqwest = { workspace = true }
+zip = { workspace = true }
+urlencoding = { workspace = true }
+
+[features]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord"]
+telegram = ["blockcell-channels/telegram"]
+whatsapp = ["blockcell-channels/whatsapp"]
+feishu = ["blockcell-channels/feishu"]
+slack = ["blockcell-channels/slack"]
+discord = ["blockcell-channels/discord"]

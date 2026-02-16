@@ -1,0 +1,475 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+
+use crate::error::Result;
+use crate::paths::Paths;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_base: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityHubConfig {
+    #[serde(default)]
+    pub hub_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefaults {
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: u32,
+}
+
+fn default_workspace() -> String {
+    "~/.blockcell/workspace".to_string()
+}
+
+fn default_model() -> String {
+    "anthropic/claude-sonnet-4-20250514".to_string()
+}
+
+fn default_max_tokens() -> u32 {
+    8192
+}
+
+fn default_temperature() -> f32 {
+    0.7
+}
+
+fn default_max_tool_iterations() -> u32 {
+    20
+}
+
+impl Default for AgentDefaults {
+    fn default() -> Self {
+        Self {
+            workspace: default_workspace(),
+            model: default_model(),
+            max_tokens: default_max_tokens(),
+            temperature: default_temperature(),
+            max_tool_iterations: default_max_tool_iterations(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhostConfig {
+    #[serde(default = "default_ghost_enabled")]
+    pub enabled: bool,
+    /// If None, uses the default agent model.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_ghost_schedule")]
+    pub schedule: String,
+    #[serde(default = "default_max_syncs")]
+    pub max_syncs_per_day: u32,
+    #[serde(default = "default_auto_social")]
+    pub auto_social: bool,
+}
+
+fn default_ghost_enabled() -> bool {
+    false
+}
+
+fn default_ghost_schedule() -> String {
+    "0 */4 * * *" .to_string() // Every 4 hours
+}
+
+fn default_max_syncs() -> u32 {
+    10
+}
+
+fn default_auto_social() -> bool {
+    true
+}
+
+impl Default for GhostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_ghost_enabled(),
+            model: None,
+            schedule: default_ghost_schedule(),
+            max_syncs_per_day: default_max_syncs(),
+            auto_social: default_auto_social(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub defaults: AgentDefaults,
+    #[serde(default)]
+    pub ghost: GhostConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WhatsAppConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_whatsapp_bridge_url")]
+    pub bridge_url: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+fn default_whatsapp_bridge_url() -> String {
+    "ws://localhost:3001".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub encrypt_key: String,
+    #[serde(default)]
+    pub verification_token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub app_token: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_slack_poll_interval")]
+    pub poll_interval_secs: u32,
+}
+
+fn default_slack_poll_interval() -> u32 {
+    3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelsConfig {
+    #[serde(default)]
+    pub whatsapp: WhatsAppConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub feishu: FeishuConfig,
+    #[serde(default)]
+    pub slack: SlackConfig,
+    #[serde(default)]
+    pub discord: DiscordConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayConfig {
+    #[serde(default = "default_gateway_host")]
+    pub host: String,
+    #[serde(default = "default_gateway_port")]
+    pub port: u16,
+    #[serde(default = "default_webui_host")]
+    pub webui_host: String,
+    #[serde(default = "default_webui_port")]
+    pub webui_port: u16,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+fn default_gateway_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_gateway_port() -> u16 {
+    18790
+}
+
+fn default_webui_host() -> String {
+    "localhost".to_string()
+}
+
+fn default_webui_port() -> u16 {
+    18791
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            host: default_gateway_host(),
+            port: default_gateway_port(),
+            webui_host: default_webui_host(),
+            webui_port: default_webui_port(),
+            api_token: None,
+            allowed_origins: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_max_results")]
+    pub max_results: u32,
+}
+
+fn default_max_results() -> u32 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecConfig {
+    #[serde(default = "default_exec_timeout")]
+    pub timeout: u32,
+    #[serde(default)]
+    pub restrict_to_workspace: bool,
+}
+
+fn default_exec_timeout() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebToolsConfig {
+    #[serde(default)]
+    pub search: WebSearchConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub web: WebToolsConfig,
+    #[serde(default)]
+    pub exec: ExecConfig,
+    /// Tick interval in seconds for the agent runtime loop (alert checks, cron, evolution).
+    /// Lower values enable faster alert response. Default: 30. Min: 10. Max: 300.
+    #[serde(default = "default_tick_interval")]
+    pub tick_interval_secs: u32,
+}
+
+fn default_tick_interval() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoUpgradeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_upgrade_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub manifest_url: String,
+    #[serde(default = "default_require_signature")]
+    pub require_signature: bool,
+    #[serde(default)]
+    pub maintenance_window: String,
+}
+
+fn default_upgrade_channel() -> String {
+    "stable".to_string()
+}
+
+fn default_require_signature() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+    #[serde(default, rename = "community_hub")]
+    pub community_hub: CommunityHubConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
+    #[serde(default)]
+    pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub gateway: GatewayConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub auto_upgrade: AutoUpgradeConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut providers = HashMap::new();
+        providers.insert("openrouter".to_string(), ProviderConfig {
+            api_key: String::new(),
+            api_base: Some("https://openrouter.ai/api/v1".to_string()),
+        });
+        providers.insert("anthropic".to_string(), ProviderConfig::default());
+        providers.insert("openai".to_string(), ProviderConfig::default());
+        providers.insert("deepseek".to_string(), ProviderConfig::default());
+        providers.insert("groq".to_string(), ProviderConfig::default());
+        providers.insert("zhipu".to_string(), ProviderConfig::default());
+        providers.insert("vllm".to_string(), ProviderConfig {
+            api_key: "dummy".to_string(),
+            api_base: Some("http://localhost:8000/v1".to_string()),
+        });
+        providers.insert("gemini".to_string(), ProviderConfig::default());
+        providers.insert("kimi".to_string(), ProviderConfig {
+            api_key: String::new(),
+            api_base: Some("https://api.moonshot.cn/v1".to_string()),
+        });
+        providers.insert("ollama".to_string(), ProviderConfig {
+            api_key: "ollama".to_string(),
+            api_base: Some("http://localhost:11434".to_string()),
+        });
+
+        Self {
+            providers,
+            community_hub: CommunityHubConfig::default(),
+            agents: AgentsConfig::default(),
+            channels: ChannelsConfig::default(),
+            gateway: GatewayConfig::default(),
+            tools: ToolsConfig::default(),
+            auto_upgrade: AutoUpgradeConfig::default(),
+        }
+    }
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Config = serde_json::from_str(&content)?;
+        Ok(config)
+    }
+
+    pub fn load_or_default(paths: &Paths) -> Result<Self> {
+        let config_path = paths.config_file();
+        if config_path.exists() {
+            Self::load(&config_path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let content = serde_json::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn get_api_key(&self) -> Option<(&str, &ProviderConfig)> {
+        let priority = [
+            "openrouter", "deepseek", "anthropic", "openai", "kimi", "gemini", "zhipu", "groq", "vllm", "ollama",
+        ];
+
+        for name in priority {
+            if let Some(provider) = self.providers.get(name) {
+                if !provider.api_key.is_empty() {
+                    return Some((name, provider));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
+        self.providers.get(name)
+    }
+
+    pub fn community_hub_url(&self) -> Option<String> {
+        if let Some(url) = self.community_hub.hub_url.as_ref() {
+            let url = url.trim();
+            if !url.is_empty() {
+                return Some(url.trim_end_matches('/').to_string());
+            }
+        }
+        None
+    }
+
+    pub fn community_hub_api_key(&self) -> Option<String> {
+        if let Some(key) = self.community_hub.api_key.as_ref() {
+            let key = key.trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_community_hub_top_level() {
+        let raw = r#"{
+  "community_hub": { "hubUrl": "http://example.com/", "apiKey": "k" },
+  "providers": {}
+}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.community_hub_url().as_deref(), Some("http://example.com"));
+        assert_eq!(cfg.community_hub_api_key().as_deref(), Some("k"));
+    }
+}

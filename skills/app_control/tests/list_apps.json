@@ -1,0 +1,7 @@
+{
+  "name": "list_apps",
+  "input": "现在电脑上开了什么应用",
+  "context": {},
+  "expected_tools": ["app_control"],
+  "expected_output": "list_apps"
+}

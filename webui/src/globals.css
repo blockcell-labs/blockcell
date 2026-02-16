@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 21 90% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 20% 94%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 20% 94%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 157 72% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 21 90% 48%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 47% 4%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 98%;
+    --primary: 21 90% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 217 33% 17%;
+    --input: 215 25% 22%;
+    --ring: 21 90% 48%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(var(--card));
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
+
+/* Brand glow effects */
+.glow-rust {
+  box-shadow: 0 0 20px rgba(234, 88, 12, 0.4);
+}
+.glow-rust:hover {
+  box-shadow: 0 0 30px rgba(234, 88, 12, 0.6);
+}
+.glow-text-rust {
+  text-shadow: 0 0 10px rgba(234, 88, 12, 0.5);
+}
+.glow-text-green {
+  text-shadow: 0 0 10px rgba(0, 255, 157, 0.5);
+}
+
+/* Dot-grid background pattern */
+.hex-bg {
+  background-image: radial-gradient(hsl(var(--border)) 0.5px, transparent 0.5px),
+    radial-gradient(hsl(var(--border)) 0.5px, hsl(var(--background)) 0.5px);
+  background-size: 20px 20px;
+  background-position: 0 0, 10px 10px;
+}
+
+/* Selection color — matches blockcell.dev */
+::selection {
+  background: hsl(21 90% 48%);
+  color: white;
+}
+
+/* Markdown content styling */
+.prose pre {
+  @apply rounded-lg overflow-x-auto;
+}
+.prose code {
+  @apply text-sm;
+}
+.prose table {
+  @apply w-full border-collapse;
+}
+.prose th, .prose td {
+  @apply border border-border px-3 py-1.5 text-sm;
+}
+.prose th {
+  @apply bg-muted font-medium;
+}

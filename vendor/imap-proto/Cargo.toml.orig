@@ -1,0 +1,22 @@
+[package]
+name = "imap-proto"
+version = "0.10.2"
+authors = ["Dirkjan Ochtman <dirkjan@ochtman.nl>"]
+description = "IMAP protocol parser and data structures"
+documentation = "https://docs.rs/imap-proto"
+keywords = ["imap", "email"]
+categories = ["email", "network-programming", "parser-implementations"]
+homepage = "https://github.com/djc/tokio-imap"
+repository = "https://github.com/djc/tokio-imap"
+license = "MIT/Apache-2.0"
+edition = "2018"
+
+[badges]
+azure-devops = { project = "dochtman/Projects", pipeline = "tokio-imap", build = "4" }
+maintenance = { status = "passively-maintained" }
+
+[dependencies]
+nom = { version = "5", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+assert_matches = "1.3"

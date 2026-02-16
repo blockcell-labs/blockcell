@@ -1,0 +1,18 @@
+{
+  "name": "Blockcell WebUI",
+  "short_name": "Blockcell",
+  "description": "Blockcell Agent Web Interface",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0f1a",
+  "theme_color": "#ea580c",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

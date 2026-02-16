@@ -1,0 +1,13 @@
+[package]
+name = "blockcell-providers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blockcell-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

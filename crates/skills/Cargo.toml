@@ -1,0 +1,19 @@
+[package]
+name = "blockcell-skills"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blockcell-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+rhai = { workspace = true }
+which = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+md5 = "0.7"
+tar = "0.4"
+flate2 = "1.0"

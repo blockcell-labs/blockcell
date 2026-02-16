@@ -1,0 +1,9 @@
+{
+  "name": "screenshot_windsurf",
+  "input": "看看 Windsurf 在干什么",
+  "context": {
+    "app": "Windsurf"
+  },
+  "expected_tools": ["app_control"],
+  "expected_output": "screenshot"
+}

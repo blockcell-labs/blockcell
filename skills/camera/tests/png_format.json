@@ -1,0 +1,11 @@
+{
+  "name": "png_format_capture",
+  "input": "拍一张 PNG 格式的照片",
+  "expected_output": "success",
+  "expected_tools": ["camera_capture"],
+  "context": {
+    "device": "0",
+    "format": "png",
+    "output_path": ""
+  }
+}

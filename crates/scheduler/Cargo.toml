@@ -1,0 +1,14 @@
+[package]
+name = "blockcell-scheduler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blockcell-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+uuid = { workspace = true }
