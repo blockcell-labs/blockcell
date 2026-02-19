@@ -1,0 +1,235 @@
+name: Build & Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.2 or v1.0.2)"
+        required: true
+
+env:
+  RUST_VERSION: "1.82"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (arm64)
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+            binary: blockcell
+            archive_ext: tar.gz
+
+          # macOS Intel (x86_64)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: amd64
+            binary: blockcell
+            archive_ext: tar.gz
+
+          # Linux x86_64 (musl — fully static, no glibc dependency)
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: amd64
+            binary: blockcell
+            archive_ext: tar.gz
+
+          # Windows x86_64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: amd64
+            binary: blockcell.exe
+            archive_ext: zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain ────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # ── Platform-specific dependencies ───────────────────────────────────
+      - name: Install musl tools (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools musl-dev pkg-config
+
+      - name: Install OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install openssl --no-progress -y
+          echo "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      - name: Build release binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-musl' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin blockcell
+
+      # ── Package ───────────────────────────────────────────────────────────
+      - name: Determine version string
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v="${{ inputs.version }}"
+            [[ "$v" == v* ]] || v="v$v"
+            echo "version=$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (Unix — tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          PKG="blockcell-${{ steps.ver.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p "dist/$PKG"
+          cp "$BIN" "dist/$PKG/"
+          cp README.md LICENSE 2>/dev/null || true
+          [ -f README.md ] && cp README.md "dist/$PKG/" || true
+          [ -f LICENSE ]   && cp LICENSE   "dist/$PKG/" || true
+          cd dist
+          tar -czf "${PKG}.tar.gz" "$PKG"
+          echo "ASSET=${PKG}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows — zip)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $BIN  = "target\${{ matrix.target }}\release\${{ matrix.binary }}"
+          $PKG  = "blockcell-${{ steps.ver.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "dist\$PKG" | Out-Null
+          Copy-Item $BIN "dist\$PKG\"
+          if (Test-Path README.md) { Copy-Item README.md "dist\$PKG\" }
+          if (Test-Path LICENSE)   { Copy-Item LICENSE   "dist\$PKG\" }
+
+          # Windows usage note
+          @"
+          Windows 下载/运行说明（重要）
+
+          从 GitHub Release 下载的 .zip/.exe 可能被 Windows 标记为"来自互联网"(MOTW)，
+          导致弹出 SmartScreen 警告或启动缓慢。
+
+          解决办法（任选其一）：
+          1) 右键 zip -> 属性 -> 勾选"解除锁定(Unblock)" -> 应用，再解压
+          2) 解压后右键 exe -> 属性 -> "解除锁定(Unblock)" -> 应用
+          3) PowerShell: Get-ChildItem -Recurse | Unblock-File
+          "@ | Out-File -Encoding utf8 "dist\$PKG\README-WINDOWS.txt"
+
+          Compress-Archive -Path "dist\$PKG\*" -DestinationPath "dist\${PKG}.zip"
+          echo "ASSET=${PKG}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockcell-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/blockcell-*.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release tag
+        id: reltag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v="${{ inputs.version }}"
+            [[ "$v" == v* ]] || v="v$v"
+            echo "tag=$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          TAG="${{ steps.reltag.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally, skipping."
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin, skipping push."
+          else
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort | while read f; do
+            sha256sum "$f"
+          done > ../checksums.txt
+          cat ../checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.reltag.outputs.tag }}
+          name: "blockcell ${{ steps.reltag.outputs.tag }}"
+          draft: false
+          prerelease: ${{ contains(steps.reltag.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            checksums.txt
