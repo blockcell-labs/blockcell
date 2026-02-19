@@ -40,9 +40,9 @@ jobs:
             binary: blockcell
             archive_ext: tar.gz
 
-          # Linux x86_64 (GNU)
+          # Linux x86_64 (musl — fully static, no glibc dependency)
           - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             platform: linux
             arch: amd64
             binary: blockcell
@@ -85,7 +85,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y pkg-config libssl-dev ca-certificates
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y ca-certificates musl-tools musl-dev pkg-config perl make gcc g++
+          else
+            sudo apt-get install -y ca-certificates pkg-config libssl-dev
+          fi
 
       - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
@@ -101,6 +105,10 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-musl' && '-C target-feature=+crt-static' || '' }}
         run: |
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            export OPENSSL_VENDORED=1
+            export OPENSSL_STATIC=1
+          fi
           cargo build --release --target ${{ matrix.target }} --bin blockcell
 
       # ── Package ───────────────────────────────────────────────────────────
