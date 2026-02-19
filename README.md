@@ -5,6 +5,14 @@ A self-evolving AI agent framework in Rust.
 - Website: https://blockcell.dev
 - 中文说明: [README.zh-CN.md](README.zh-CN.md)
 
+## Screenshots
+
+![Start gateway](screenshot/start-gateway.png)
+
+![WebUI login](screenshot/webui-login.png)
+
+![WebUI chat](screenshot/webui-chat.png)
+
 ## What it is
 
 blockcell uses a "Rust host + skills" architecture:
@@ -43,6 +51,8 @@ blockcell uses a "Rust host + skills" architecture:
 - `refs/` - reference implementation snapshots (for behavior alignment)
 
 ## Quick start
+
+For a step-by-step guide, see: [QUICKSTART.md](QUICKSTART.md)
 
 ### Install (recommended)
 

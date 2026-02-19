@@ -5,6 +5,14 @@ Rust 自进化智能体框架（Host + Skills）。
 - 官网: https://blockcell.dev
 - English: [README.md](README.md)
 
+## 项目截图
+
+![启动 gateway](screenshot/start-gateway.png)
+
+![WebUI 登录](screenshot/webui-login.png)
+
+![WebUI 对话](screenshot/webui-chat.png)
+
 ## 项目简介
 
 blockcell 采用“Rust 宿主 + 可变技能”的架构：
@@ -43,6 +51,8 @@ blockcell 采用“Rust 宿主 + 可变技能”的架构：
 - `refs/` - 参考实现快照（用于行为对齐/对照）
 
 ## 快速开始
+
+更详细的步骤请看：[QUICKSTART.zh-CN.md](QUICKSTART.zh-CN.md)
 
 ### 安装（推荐）
 
