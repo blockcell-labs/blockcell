@@ -25,23 +25,23 @@ jobs:
       matrix:
         include:
           # macOS Apple Silicon (arm64)
-          - os: macos-15
-            target: aarch64-apple-darwin
-            platform: darwin
-            arch: arm64
-            binary: blockcell
-            archive_ext: tar.gz
+          # - os: macos-15
+          #   target: aarch64-apple-darwin
+          #   platform: darwin
+          #   arch: arm64
+          #   binary: blockcell
+          #   archive_ext: tar.gz
 
-          # macOS Intel (x86_64) — cross-compiled from arm64 runner
-          - os: macos-15
-            target: x86_64-apple-darwin
-            platform: darwin
-            arch: amd64
-            binary: blockcell
-            archive_ext: tar.gz
+          # # macOS Intel (x86_64) — cross-compiled from arm64 runner
+          # - os: macos-15
+          #   target: x86_64-apple-darwin
+          #   platform: darwin
+          #   arch: amd64
+          #   binary: blockcell
+          #   archive_ext: tar.gz
 
           # Linux x86_64 (GNU)
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: amd64
@@ -49,12 +49,12 @@ jobs:
             archive_ext: tar.gz
 
           # Windows x86_64
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            platform: windows
-            arch: amd64
-            binary: blockcell.exe
-            archive_ext: zip
+          # - os: windows-2022
+          #   target: x86_64-pc-windows-msvc
+          #   platform: windows
+          #   arch: amd64
+          #   binary: blockcell.exe
+          #   archive_ext: zip
 
     runs-on: ${{ matrix.os }}
 
