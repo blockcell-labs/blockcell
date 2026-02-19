@@ -69,32 +69,41 @@ pub async fn search(query: &str, graph_name: Option<String>, limit: usize) -> an
 
     let conn = rusqlite::Connection::open(&db_path)?;
 
-    // Use FTS5 search
-    let fts_query = query.replace("'", "''");
-    let sql = format!(
-        "SELECT e.id, e.name, e.entity_type, e.description \
+    // Use FTS5 search with parameter binding to prevent SQL injection
+    let fts_sql = "SELECT e.id, e.name, e.entity_type, e.description \
          FROM entities_fts f JOIN entities e ON f.rowid = e.rowid \
-         WHERE entities_fts MATCH '{}' LIMIT {}",
-        fts_query, limit
-    );
+         WHERE entities_fts MATCH ?1 LIMIT ?2";
 
-    let mut stmt = conn.prepare(&sql).unwrap_or_else(|_| {
-        // Fallback to LIKE search if FTS fails
-        conn.prepare(&format!(
-            "SELECT id, name, entity_type, description FROM entities \
-             WHERE name LIKE '%{}%' OR description LIKE '%{}%' LIMIT {}",
-            fts_query, fts_query, limit
-        )).unwrap()
-    });
+    let like_pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+    let like_sql = "SELECT id, name, entity_type, description FROM entities \
+         WHERE name LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\' LIMIT ?2";
 
-    let results: Vec<(String, String, String, String)> = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2).unwrap_or_default(),
-            row.get::<_, String>(3).unwrap_or_default(),
-        ))
-    })?.filter_map(|r| r.ok()).collect();
+    let limit_i64 = limit as i64;
+    let results: Vec<(String, String, String, String)> =
+        if let Ok(mut stmt) = conn.prepare(fts_sql) {
+            stmt.query_map(rusqlite::params![query, limit_i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, String>(3).unwrap_or_default(),
+                ))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        } else {
+            let mut stmt = conn.prepare(like_sql)?;
+            stmt.query_map(rusqlite::params![like_pattern, limit_i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, String>(3).unwrap_or_default(),
+                ))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
 
     if results.is_empty() {
         println!("No entities matching '{}' found.", query);

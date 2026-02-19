@@ -138,25 +138,26 @@ impl VersionManager {
     /// 回滚到上一个版本
     pub fn rollback(&self, skill_name: &str) -> Result<()> {
         let history = self.get_history(skill_name)?;
-        
-        // 找到当前版本的父版本
-        let current = history
-            .versions
-            .iter()
-            .find(|v| v.version == history.current_version)
-            .ok_or_else(|| Error::NotFound("Current version not found".to_string()))?;
 
-        let parent_version = current
-            .parent_version
-            .as_ref()
-            .ok_or_else(|| Error::Other("No parent version to rollback to".to_string()))?;
+        if history.versions.len() < 2 {
+            return Err(Error::Other(format!(
+                "No previous version to rollback to for skill '{}'",
+                skill_name
+            )));
+        }
 
-        self.switch_to_version(skill_name, parent_version)?;
+        // 取列表中的倒数第二个版本（比 parent_version 字段更可靠，
+        // 因为 parent_version 可能指向已被 cleanup_old_versions 删除的版本）
+        let prev_version = &history.versions[history.versions.len() - 2];
+        let prev_version_str = prev_version.version.clone();
+        let current_version_str = history.current_version.clone();
+
+        self.switch_to_version(skill_name, &prev_version_str)?;
 
         warn!(
             skill = %skill_name,
-            from = %history.current_version,
-            to = %parent_version,
+            from = %current_version_str,
+            to = %prev_version_str,
             "Rolled back skill version"
         );
 

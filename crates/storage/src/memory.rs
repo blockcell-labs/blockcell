@@ -1,10 +1,17 @@
 use blockcell_core::Result;
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
+
+/// 预编译的 FTS5 特殊字符正则，避免每次调用重新编译
+static FTS_SPECIAL_CHARS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"[*"():^{}]"#).expect("FTS special chars regex is valid")
+});
 
 /// Scope of a memory item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -435,58 +442,62 @@ impl MemoryStore {
 
         let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
 
-        let rows = stmt.query_map(bind_refs.as_slice(), |row| {
-            let fts_score: f64 = row.get("fts_score")?;
-            let importance: f64 = row.get("importance")?;
-            let tags_str: String = row.get("tags")?;
+        // 先收集所有结果，释放 stmt 对 conn 的借用，再更新 access_count
+        let results: Vec<MemoryResult> = {
+            let rows = stmt.query_map(bind_refs.as_slice(), |row| {
+                let fts_score: f64 = row.get("fts_score")?;
+                let importance: f64 = row.get("importance")?;
+                let tags_str: String = row.get("tags")?;
 
-            Ok(MemoryResult {
-                item: MemoryItem {
-                    id: row.get("id")?,
-                    scope: row.get("scope")?,
-                    item_type: row.get("type")?,
-                    title: row.get("title")?,
-                    content: row.get("content")?,
-                    summary: row.get("summary")?,
-                    tags: if tags_str.is_empty() {
-                        vec![]
-                    } else {
-                        tags_str.split(',').map(|s| s.trim().to_string()).collect()
+                Ok(MemoryResult {
+                    item: MemoryItem {
+                        id: row.get("id")?,
+                        scope: row.get("scope")?,
+                        item_type: row.get("type")?,
+                        title: row.get("title")?,
+                        content: row.get("content")?,
+                        summary: row.get("summary")?,
+                        tags: if tags_str.is_empty() {
+                            vec![]
+                        } else {
+                            tags_str.split(',').map(|s| s.trim().to_string()).collect()
+                        },
+                        source: row.get("source")?,
+                        channel: row.get("channel")?,
+                        session_key: row.get("session_key")?,
+                        importance,
+                        created_at: row.get("created_at")?,
+                        updated_at: row.get("updated_at")?,
+                        last_accessed_at: row.get("last_accessed_at")?,
+                        access_count: row.get("access_count")?,
+                        expires_at: row.get("expires_at")?,
+                        deleted_at: row.get("deleted_at")?,
+                        dedup_key: row.get("dedup_key")?,
                     },
-                    source: row.get("source")?,
-                    channel: row.get("channel")?,
-                    session_key: row.get("session_key")?,
-                    importance,
-                    created_at: row.get("created_at")?,
-                    updated_at: row.get("updated_at")?,
-                    last_accessed_at: row.get("last_accessed_at")?,
-                    access_count: row.get("access_count")?,
-                    expires_at: row.get("expires_at")?,
-                    deleted_at: row.get("deleted_at")?,
-                    dedup_key: row.get("dedup_key")?,
-                },
-                score: -fts_score * 10.0 + importance * 5.0,
-            })
-        }).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Query error: {}", e))
-        })?;
+                    score: -fts_score * 10.0 + importance * 5.0,
+                })
+            }).map_err(|e| {
+                blockcell_core::Error::Storage(format!("Query error: {}", e))
+            })?;
 
-        let mut results = Vec::new();
-        for row in rows {
-            match row {
-                Ok(r) => results.push(r),
-                Err(e) => warn!(error = %e, "Error reading memory row"),
+            let mut collected = Vec::new();
+            for row in rows {
+                match row {
+                    Ok(r) => collected.push(r),
+                    Err(e) => warn!(error = %e, "Error reading memory row"),
+                }
             }
-        }
+            collected
+        };
+        // stmt 在此处已 drop，conn 的不可变借用已释放，可以安全地执行写操作
 
-        // Update access stats for returned items
-        let ids: Vec<String> = results.iter().map(|r| r.item.id.clone()).collect();
-        if !ids.is_empty() {
+        // 更新访问统计
+        if !results.is_empty() {
             let now = Utc::now().to_rfc3339();
-            for id in &ids {
+            for r in &results {
                 let _ = conn.execute(
                     "UPDATE memory_items SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-                    params![now, id],
+                    params![now, r.item.id],
                 );
             }
         }
@@ -501,7 +512,9 @@ impl MemoryStore {
         })?;
         match self.get_by_id_inner(&conn, id) {
             Ok(item) => Ok(Some(item)),
-            Err(_) => Ok(None),
+            // 仅当记录不存在时返回 None，其他数据库错误向上传播
+            Err(blockcell_core::Error::Storage(ref msg)) if msg.contains("QueryReturnedNoRows") => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -984,9 +997,8 @@ impl MemoryStore {
 
 /// Sanitize a user query for FTS5 (escape special characters, use implicit AND).
 fn sanitize_fts_query(query: &str) -> String {
-    // FTS5 special chars that need quoting
-    let special = regex::Regex::new(r#"[*"():^{}]"#).unwrap();
-    let cleaned = special.replace_all(query, " ");
+    // 使用预编译的静态正则，避免每次调用重新编译
+    let cleaned = FTS_SPECIAL_CHARS.replace_all(query, " ");
     // Split into tokens and wrap each in quotes for exact matching
     let tokens: Vec<String> = cleaned
         .split_whitespace()
@@ -1001,21 +1013,24 @@ fn sanitize_fts_query(query: &str) -> String {
 }
 
 /// Parse markdown content into (heading, body) sections.
+/// 识别 ## 和 ### 级别的标题（# 为文档标题，跳过）。
 fn parse_markdown_sections(content: &str) -> Vec<(String, String)> {
     let mut sections = Vec::new();
     let mut current_heading: Option<String> = None;
     let mut current_body = String::new();
 
     for line in content.lines() {
-        if line.starts_with("## ") {
-            // Save previous section
+        if line.starts_with("## ") || line.starts_with("### ") {
+            // 保存上一个 section
             if let Some(heading) = current_heading.take() {
                 sections.push((heading, current_body.clone()));
             }
-            current_heading = Some(line.trim_start_matches("## ").trim().to_string());
+            // 剥离前缀 # 字符和空格
+            let heading_text = line.trim_start_matches('#').trim().to_string();
+            current_heading = Some(heading_text);
             current_body.clear();
         } else if line.starts_with("# ") && current_heading.is_none() {
-            // Top-level heading, skip (it's the document title)
+            // 顶级标题为文档标题，跳过
             continue;
         } else if current_heading.is_some() {
             current_body.push_str(line);
@@ -1023,7 +1038,7 @@ fn parse_markdown_sections(content: &str) -> Vec<(String, String)> {
         }
     }
 
-    // Save last section
+    // 保存最后一个 section
     if let Some(heading) = current_heading {
         sections.push((heading, current_body));
     }

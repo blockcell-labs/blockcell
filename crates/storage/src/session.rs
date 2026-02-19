@@ -70,12 +70,19 @@ impl SessionStore {
         }
 
         let now = chrono::Utc::now().to_rfc3339();
+
+        // 保留原始 created_at：若文件已存在则从第一行读取，否则使用当前时间
+        let created_at = if path.exists() {
+            self.read_created_at(&path).unwrap_or_else(|| now.clone())
+        } else {
+            now.clone()
+        };
         
         let mut file = File::create(&path)?;
 
         // Write metadata
         let metadata = SessionLine::Metadata {
-            created_at: now.clone(),
+            created_at,
             updated_at: now,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
         };
@@ -89,6 +96,19 @@ impl SessionStore {
         Ok(())
     }
 
+    /// 从 session 文件第一行读取 created_at 字段。
+    fn read_created_at(&self, path: &std::path::Path) -> Option<String> {
+        let file = File::open(path).ok()?;
+        let mut reader = BufReader::new(file);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line).ok()?;
+        let line: SessionLine = serde_json::from_str(first_line.trim()).ok()?;
+        match line {
+            SessionLine::Metadata { created_at, .. } => Some(created_at),
+            _ => None,
+        }
+    }
+
     pub fn append(&self, session_key: &str, message: &ChatMessage) -> Result<()> {
         let path = self.paths.session_file(session_key);
         
@@ -97,17 +117,24 @@ impl SessionStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Create file with metadata if it doesn't exist
-        if !path.exists() {
-            let now = chrono::Utc::now().to_rfc3339();
-            let mut file = File::create(&path)?;
-            let metadata = SessionLine::Metadata {
-                created_at: now.clone(),
-                updated_at: now,
-                metadata: serde_json::Value::Object(serde_json::Map::new()),
-            };
-            writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
-        }
+        // 使用 create_new 原子性地判断文件是否为首次创建，消除 TOCTOU 竞态
+        let is_new = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map(|mut f| {
+                let now = chrono::Utc::now().to_rfc3339();
+                let metadata = SessionLine::Metadata {
+                    created_at: now.clone(),
+                    updated_at: now,
+                    metadata: serde_json::Value::Object(serde_json::Map::new()),
+                };
+                // 写入 metadata 行；若失败忽略（后续 append 仍可工作）
+                let _ = writeln!(f, "{}", serde_json::to_string(&metadata).unwrap_or_default());
+                true
+            })
+            .unwrap_or(false);
+        let _ = is_new; // 仅用于首次写入 metadata，无需后续使用
 
         // Append message
         let mut file = OpenOptions::new().append(true).open(&path)?;

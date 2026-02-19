@@ -2,6 +2,7 @@ use blockcell_agent::{
     AgentRuntime, CapabilityRegistryAdapter, CoreEvolutionAdapter,
     MemoryStoreAdapter, MessageBus, ProviderLLMBridge, TaskManager,
 };
+use blockcell_skills::{EvolutionService, EvolutionServiceConfig};
 use blockcell_channels::ChannelManager;
 #[cfg(feature = "telegram")]
 use blockcell_channels::telegram::TelegramChannel;
@@ -80,6 +81,10 @@ struct GatewayState {
     tool_registry: Arc<ToolRegistry>,
     /// Password for WebUI login (configured or auto-generated)
     web_password: String,
+    /// Channel manager for status reporting
+    channel_manager: Arc<blockcell_channels::ChannelManager>,
+    /// Shared EvolutionService for trigger/delete/status handlers
+    evolution_service: Arc<Mutex<EvolutionService>>,
 }
 
 fn secure_eq(a: &str, b: &str) -> bool {
@@ -267,13 +272,19 @@ struct LoginRequest {
 async fn handle_login(
     State(state): State<GatewayState>,
     Json(req): Json<LoginRequest>,
-) -> impl IntoResponse {
-    if req.password == state.web_password {
-        // Return the api_token as the Bearer token for subsequent requests
-        let token = state.api_token.clone().unwrap_or_default();
-        Json(serde_json::json!({ "token": token }))
-    } else {
-        Json(serde_json::json!({ "error": "Invalid password" }))
+) -> Response {
+    if !secure_eq(&req.password, &state.web_password) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Invalid password" }))).into_response();
+    }
+    // Return the api_token as the Bearer token for subsequent API requests
+    match &state.api_token {
+        Some(token) if !token.is_empty() => {
+            Json(serde_json::json!({ "token": token })).into_response()
+        }
+        _ => {
+            // Should never happen after the defensive guarantee above
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Server token not configured" }))).into_response()
+        }
     }
 }
 
@@ -457,7 +468,7 @@ async fn handle_session_get(
 ) -> impl IntoResponse {
     let session_key = session_id.replace('_', ":");
     match state.session_store.load(&session_key) {
-        Ok(messages) => {
+        Ok(messages) if !messages.is_empty() => {
             let msgs: Vec<serde_json::Value> = messages.iter().map(|m| {
                 serde_json::json!({
                     "role": m.role,
@@ -470,6 +481,11 @@ async fn handle_session_get(
             (StatusCode::OK, Json(serde_json::json!({
                 "session_id": session_id,
                 "messages": msgs,
+            }))).into_response()
+        }
+        Ok(_) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "error": "Session not found or empty"
             }))).into_response()
         }
         Err(e) => {
@@ -554,8 +570,41 @@ async fn handle_session_rename(
 async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<GatewayState>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state))
+    // Validate token inside the WS handler so we can close with code 4401
+    // instead of rejecting the HTTP upgrade with 401 (which gives client code 1006).
+    let token_valid = match &state.api_token {
+        Some(t) if !t.is_empty() => {
+            let auth_header = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+            let from_header = match auth_header {
+                Some(h) if h.starts_with("Bearer ") => secure_eq(&h[7..], t.as_str()),
+                _ => false,
+            };
+            let from_query = token_from_query(&req)
+                .map(|v| secure_eq(&v, t.as_str()))
+                .unwrap_or(false);
+            from_header || from_query
+        }
+        _ => true, // no token configured → open access
+    };
+
+    ws.on_upgrade(move |socket| async move {
+        if !token_valid {
+            let mut socket = socket;
+            let _ = socket
+                .send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4401,
+                    reason: std::borrow::Cow::Borrowed("Unauthorized"),
+                })))
+                .await;
+            return;
+        }
+        handle_ws_connection(socket, state).await;
+    })
 }
 
 async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
@@ -930,9 +979,10 @@ async fn handle_ghost_activity(
         }
     }
 
+    let count = activities.len();
     Json(serde_json::json!({
         "activities": activities,
-        "count": activities.len(),
+        "count": count,
     }))
 }
 
@@ -1062,9 +1112,10 @@ async fn handle_tools(State(state): State<GatewayState>) -> impl IntoResponse {
         }
     }).collect();
 
+    let count = tools.len();
     Json(serde_json::json!({
         "tools": tools,
-        "count": tools.len(),
+        "count": count,
     }))
 }
 
@@ -1127,9 +1178,10 @@ async fn handle_skills(State(state): State<GatewayState>) -> impl IntoResponse {
         }
     }
 
+    let count = skills.len();
     Json(serde_json::json!({
         "skills": skills,
-        "count": skills.len(),
+        "count": count,
     }))
 }
 
@@ -1277,9 +1329,10 @@ async fn handle_skills_search(
         sb.cmp(&sa)
     });
 
+    let count = results.len();
     Json(serde_json::json!({
         "results": results,
-        "count": results.len(),
+        "count": count,
         "query": req.query,
     }))
 }
@@ -1302,9 +1355,10 @@ async fn handle_evolution(State(state): State<GatewayState>) -> impl IntoRespons
         }
     }
 
+    let count = records.len();
     Json(serde_json::json!({
         "records": records,
-        "count": records.len(),
+        "count": count,
     }))
 }
 
@@ -1363,9 +1417,10 @@ async fn handle_evolution_tool_evolutions(State(state): State<GatewayState>) -> 
         tb.cmp(&ta)
     });
 
+    let count = records.len();
     Json(serde_json::json!({
         "records": records,
-        "count": records.len(),
+        "count": count,
     }))
 }
 
@@ -1380,51 +1435,27 @@ async fn handle_evolution_trigger(
     State(state): State<GatewayState>,
     Json(req): Json<EvolutionTriggerRequest>,
 ) -> impl IntoResponse {
-    // Create a manual evolution record directly on disk
-    let records_dir = state.paths.workspace().join("evolution_records");
-    let _ = std::fs::create_dir_all(&records_dir);
+    // Use EvolutionService so active_evolutions is properly updated and tick() can drive the pipeline
+    let evo = state.evolution_service.lock().await;
+    match evo.trigger_manual_evolution(&req.skill_name, &req.description).await {
+        Ok(evolution_id) => {
+            // Broadcast WS event so WebUI refreshes immediately without waiting for 10s poll
+            let event = serde_json::json!({
+                "type": "evolution_triggered",
+                "skill_name": req.skill_name,
+                "evolution_id": evolution_id,
+            });
+            let _ = state.ws_broadcast.send(event.to_string());
 
-    let evolution_id = format!("evo_{}_{}", req.skill_name, chrono::Utc::now().timestamp());
-    let now = chrono::Utc::now().timestamp();
-
-    // Try to load existing SKILL.rhai source for context
-    let skill_path = state.paths.skills_dir().join(&req.skill_name).join("SKILL.rhai");
-    let source_snippet = if skill_path.exists() {
-        std::fs::read_to_string(&skill_path).ok()
-    } else {
-        None
-    };
-
-    let record = serde_json::json!({
-        "id": evolution_id,
-        "skill_name": req.skill_name,
-        "context": {
-            "skill_name": req.skill_name,
-            "current_version": "unknown",
-            "trigger": { "ManualRequest": { "description": req.description } },
-            "error_stack": null,
-            "source_snippet": source_snippet,
-            "tool_schemas": [],
-            "timestamp": now,
-        },
-        "patch": null,
-        "audit": null,
-        "shadow_test": null,
-        "rollout": null,
-        "status": "Triggered",
-        "attempt": 1,
-        "feedback_history": [],
-        "created_at": now,
-        "updated_at": now,
-    });
-
-    let record_file = records_dir.join(format!("{}.json", evolution_id));
-    match std::fs::write(&record_file, serde_json::to_string_pretty(&record).unwrap_or_default()) {
-        Ok(_) => Json(serde_json::json!({
-            "status": "triggered",
-            "evolution_id": evolution_id,
+            Json(serde_json::json!({
+                "status": "triggered",
+                "evolution_id": evolution_id,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": format!("{}", e),
         })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
@@ -1433,12 +1464,30 @@ async fn handle_evolution_delete(
     State(state): State<GatewayState>,
     AxumPath(evolution_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    // Try skill evolution records
+    // Try skill evolution records first
     let records_dir = state.paths.workspace().join("evolution_records");
     let path = records_dir.join(format!("{}.json", evolution_id));
     if path.exists() {
+        // Read skill_name before deleting so we can clean up EvolutionService state
+        let skill_name = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| v.get("skill_name").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
         return match std::fs::remove_file(&path) {
-            Ok(_) => Json(serde_json::json!({ "status": "deleted", "id": evolution_id })),
+            Ok(_) => {
+                // Clean up in-memory EvolutionService state so the skill can be re-triggered
+                if let Some(ref sn) = skill_name {
+                    let evo_guard = state.evolution_service.lock().await;
+                    let _ = evo_guard.delete_records_by_skill(sn).await;
+                }
+                // Broadcast WS event for real-time UI refresh
+                let _ = state.ws_broadcast.send(serde_json::json!({
+                    "type": "evolution_deleted",
+                    "id": evolution_id,
+                }).to_string());
+                Json(serde_json::json!({ "status": "deleted", "id": evolution_id }))
+            }
             Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
         };
     }
@@ -1448,7 +1497,13 @@ async fn handle_evolution_delete(
     let cap_path = cap_records_dir.join(format!("{}.json", evolution_id));
     if cap_path.exists() {
         return match std::fs::remove_file(&cap_path) {
-            Ok(_) => Json(serde_json::json!({ "status": "deleted", "id": evolution_id })),
+            Ok(_) => {
+                let _ = state.ws_broadcast.send(serde_json::json!({
+                    "type": "evolution_deleted",
+                    "id": evolution_id,
+                }).to_string());
+                Json(serde_json::json!({ "status": "deleted", "id": evolution_id }))
+            }
             Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
         };
     }
@@ -1825,6 +1880,26 @@ async fn handle_stats(State(state): State<GatewayState>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Channels status endpoint
+// ---------------------------------------------------------------------------
+
+/// GET /v1/channels/status — connection status for all configured channels
+async fn handle_channels_status(State(state): State<GatewayState>) -> impl IntoResponse {
+    let statuses = state.channel_manager.get_status();
+    let channels: Vec<serde_json::Value> = statuses
+        .into_iter()
+        .map(|(name, active, detail)| {
+            serde_json::json!({
+                "name": name,
+                "active": active,
+                "detail": detail,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "channels": channels }))
+}
+
+// ---------------------------------------------------------------------------
 // P1: Cron management endpoints
 // ---------------------------------------------------------------------------
 
@@ -1837,9 +1912,10 @@ async fn handle_cron_list(State(state): State<GatewayState>) -> impl IntoRespons
         serde_json::to_value(j).unwrap_or_default()
     }).collect();
 
+    let count = jobs_json.len();
     Json(serde_json::json!({
         "jobs": jobs_json,
-        "count": jobs_json.len(),
+        "count": count,
     }))
 }
 
@@ -1928,7 +2004,7 @@ async fn handle_cron_run(
     AxumPath(job_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let jobs = state.cron_service.list_jobs().await;
-    let job = jobs.iter().find(|j| j.id == job_id || j.id.starts_with(&job_id));
+    let job = jobs.iter().find(|j| j.id == job_id);
 
     match job {
         Some(job) => {
@@ -2409,10 +2485,11 @@ async fn handle_files_list(
         }
     });
 
+    let count = entries.len();
     Json(serde_json::json!({
         "path": params.path,
         "entries": entries,
-        "count": entries.len(),
+        "count": count,
     }))
 }
 
@@ -2667,7 +2744,7 @@ async fn handle_files_upload(
 async fn outbound_to_ws_bridge(
     mut outbound_rx: mpsc::Receiver<blockcell_core::OutboundMessage>,
     ws_broadcast: broadcast::Sender<String>,
-    channel_manager: ChannelManager,
+    channel_manager: Arc<ChannelManager>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     loop {
@@ -2724,9 +2801,22 @@ async fn handle_webui_static(uri: axum::http::Uri) -> impl IntoResponse {
                 .first_or_octet_stream()
                 .to_string();
             let body: Vec<u8> = content.data.into();
+            // index.html must never be cached: a stale index.html that references
+            // old hashed JS/CSS bundle filenames causes a blank page after rebuild.
+            // Hashed assets (/assets/*.js, /assets/*.css) are safe to cache forever.
+            let cache_control = if file_path == "index.html" {
+                "no-store, no-cache, must-revalidate"
+            } else if file_path.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=3600"
+            };
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, mime)],
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, cache_control.to_string()),
+                ],
                 body,
             )
                 .into_response()
@@ -2738,7 +2828,10 @@ async fn handle_webui_static(uri: axum::http::Uri) -> impl IntoResponse {
                     let body: Vec<u8> = content.data.into();
                     (
                         StatusCode::OK,
-                        [(header::CONTENT_TYPE, "text/html".to_string())],
+                        [
+                            (header::CONTENT_TYPE, "text/html".to_string()),
+                            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate".to_string()),
+                        ],
                         body,
                     )
                         .into_response()
@@ -2768,13 +2861,22 @@ mod ansi {
     pub const NEON_GREEN: &str = "\x1b[38;2;0;255;157m"; // #00ff9d
 }
 
+fn rand_u32() -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut h);
+    std::process::id().hash(&mut h);
+    h.finish() as u32
+}
+
 fn print_startup_banner(
     config: &Config,
     host: &str,
     webui_host: &str,
     webui_port: u16,
     web_password: &str,
-    is_first_run: bool,
+    webui_pass_is_temp: bool,
     is_exposed: bool,
     bind_addr: &str,
 ) {
@@ -2811,44 +2913,70 @@ fn print_startup_banner(
     );
     eprintln!();
 
-    // ── Password box ──
-    if is_first_run {
-        // First run: auto-generated and saved — show prominently
-        let box_w = 62;
-        eprintln!("  {}┌{}┐{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
-        let pw_visible = 2 + 2 + 12 + web_password.len(); // 2 spaces + 🔑(2col) + " Password: " + pw
+    // ── WebUI Password box ──
+    let box_w = 62;
+    if webui_pass_is_temp {
+        // Temp password — show prominently, warn it changes each restart
+        eprintln!("  {}┌{}┐{}", ansi::YELLOW, "─".repeat(box_w), ansi::RESET);
+        let pw_label = "🔑 WebUI Password: ";
+        let pw_visible = 2 + display_width(pw_label) + web_password.len();
         let pw_pad = box_w.saturating_sub(pw_visible);
         eprintln!(
-            "  {}│{}  {}{}🔑 Password: {}{}{}{}│{}",
-            ansi::GREEN, ansi::RESET,
-            ansi::BOLD, ansi::GREEN,
-            web_password,
+            "  {}│{}  {}{}{}{}{}{}│",
+            ansi::YELLOW, ansi::RESET,
+            ansi::BOLD, ansi::YELLOW,
+            pw_label, web_password,
             ansi::RESET,
             " ".repeat(pw_pad),
-            ansi::GREEN, ansi::RESET,
         );
-        let hint = "  Auto-generated and saved to config.json (gateway.apiToken)";
-        let hint_visible = hint.len();
-        let hint_pad = box_w.saturating_sub(hint_visible);
+        let hint1 = "  Temporary — changes every restart. Set gateway.webuiPass";
+        let hint1_pad = box_w.saturating_sub(hint1.len());
         eprintln!(
-            "  {}│{}  {}Auto-generated and saved to config.json (gateway.apiToken){}{}{}│{}",
+            "  {}│{}  {}Temporary — changes every restart. Set gateway.webuiPass{}{}{}│{}",
+            ansi::YELLOW, ansi::RESET,
+            ansi::DIM, ansi::RESET,
+            " ".repeat(hint1_pad),
+            ansi::YELLOW, ansi::RESET,
+        );
+        let hint2 = "  in config.json for a stable password.";
+        let hint2_pad = box_w.saturating_sub(hint2.len());
+        eprintln!(
+            "  {}│{}  {}in config.json for a stable password.{}{}{}│{}",
+            ansi::YELLOW, ansi::RESET,
+            ansi::DIM, ansi::RESET,
+            " ".repeat(hint2_pad),
+            ansi::YELLOW, ansi::RESET,
+        );
+        eprintln!("  {}└{}┘{}", ansi::YELLOW, "─".repeat(box_w), ansi::RESET);
+    } else {
+        // Configured stable password
+        eprintln!("  {}┌{}┐{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
+        let pw_label = "🔑 WebUI Password: ";
+        let pw_visible = 2 + display_width(pw_label) + web_password.len();
+        let pw_pad = box_w.saturating_sub(pw_visible);
+        eprintln!(
+            "  {}│{}  {}{}{}{}{}{}│",
             ansi::GREEN, ansi::RESET,
-            ansi::DIM,
+            ansi::BOLD, ansi::GREEN,
+            pw_label, web_password,
             ansi::RESET,
+            " ".repeat(pw_pad),
+        );
+        let hint = "  Configured via gateway.webuiPass in config.json";
+        let hint_pad = box_w.saturating_sub(hint.len());
+        eprintln!(
+            "  {}│{}  {}Configured via gateway.webuiPass in config.json{}{}{}│{}",
+            ansi::GREEN, ansi::RESET,
+            ansi::DIM, ansi::RESET,
             " ".repeat(hint_pad),
             ansi::GREEN, ansi::RESET,
         );
         eprintln!("  {}└{}┘{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
-    } else {
-        // Configured password — subtle confirmation
-        eprintln!(
-            "  {}🔒 Password: configured (gateway.apiToken){}", ansi::GREEN, ansi::RESET
-        );
     }
     eprintln!();
 
     // ── Security warning ──
-    if is_exposed && is_first_run {
+    if is_exposed && webui_pass_is_temp {
         eprintln!(
             "  {}{}⚠  SECURITY: Binding to {} with an auto-generated token.{}",
             ansi::BG_YELLOW, ansi::BOLD, host, ansi::RESET
@@ -3044,13 +3172,23 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let paths = Paths::new();
     let mut config = Config::load_or_default(&paths)?;
 
+    // Auto-generate and persist node_alias if not set (short 8-char hex, e.g. "54c6be7b").
+    // This becomes the stable display name for this node in the community hub.
+    if config.community_hub.node_alias.is_none() {
+        let alias = uuid::Uuid::new_v4().to_string().replace('-', "")[..8].to_string();
+        config.community_hub.node_alias = Some(alias.clone());
+        if let Err(e) = config.save(&paths.config_file()) {
+            warn!("Failed to persist node_alias to config.json: {}", e);
+        } else {
+            info!(node_alias = %alias, "Generated and persisted node_alias to config.json");
+        }
+    }
+
     // If Community Hub is configured but apiKey is missing/empty, auto-register and persist.
     if let Some(hub_url) = config.community_hub_url() {
         if config.community_hub_api_key().is_none() {
             let register_url = format!("{}/v1/auth/register", hub_url.trim_end_matches('/'));
-            let name = std::env::var("BLOCKCELL_NODE_NAME")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
+            let name = config.community_hub.node_alias.clone()
                 .unwrap_or_else(|| "blockcell-gateway".to_string());
 
             let client = reqwest::Client::builder()
@@ -3096,19 +3234,25 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let host = cli_host.unwrap_or_else(|| config.gateway.host.clone());
     let port = cli_port.unwrap_or(config.gateway.port);
 
-    // Auto-generate and persist api_token if not configured.
-    // This ensures a stable password across restarts without manual setup.
-    let mut token_just_generated = false;
-    if config.gateway.api_token.is_none() {
-        let env_token = std::env::var("BLOCKCELL_API_TOKEN").ok();
+    // Auto-generate and persist api_token if not configured or empty.
+    // This ensures a stable token across restarts without manual setup.
+    let needs_token = config.gateway.api_token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true);
+    if needs_token {
+        let env_token = std::env::var("BLOCKCELL_API_TOKEN").ok().filter(|t| !t.trim().is_empty());
         if let Some(token) = env_token {
             // Use env var but don't persist — user manages it externally
             config.gateway.api_token = Some(token);
         } else {
-            // Generate a stable token and persist to config.json
-            let generated = format!("bc_{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+            // Generate a 64-char token (bc_ + 4×UUID hex = 3+32*4=131 chars, take first 61 for bc_+61=64)
+            let raw = format!(
+                "{}{}{}{}",
+                uuid::Uuid::new_v4().to_string().replace('-', ""),
+                uuid::Uuid::new_v4().to_string().replace('-', ""),
+                uuid::Uuid::new_v4().to_string().replace('-', ""),
+                uuid::Uuid::new_v4().to_string().replace('-', ""),
+            );
+            let generated = format!("bc_{}", &raw[..61]);
             config.gateway.api_token = Some(generated);
-            token_just_generated = true;
             if let Err(e) = config.save(&paths.config_file()) {
                 warn!("Failed to persist auto-generated apiToken to config.json: {}", e);
             } else {
@@ -3216,6 +3360,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         } else {
             None
         };
+        let node_alias = config.community_hub.node_alias.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(240));
@@ -3223,6 +3368,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 interval.tick().await;
 
                 let body = serde_json::json!({
+                    "name": node_alias,
                     "version": version,
                     "public_url": public_url,
                     "tags": ["gateway", "cli"],
@@ -3248,15 +3394,20 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let ghost_service = GhostService::new(ghost_config, paths.clone(), inbound_tx.clone());
 
     // ── Spawn core tasks ──
+    let runtime_shutdown_rx = shutdown_tx.subscribe();
     let runtime_handle = tokio::spawn(async move {
-        runtime.run_loop(inbound_rx).await;
+        runtime.run_loop(inbound_rx, Some(runtime_shutdown_rx)).await;
     });
+
+    // Wrap channel_manager in Arc so it can be shared between the outbound bridge and gateway state
+    let channel_manager = Arc::new(channel_manager);
 
     // Outbound → WS broadcast bridge + external channel dispatch
     let ws_broadcast_for_bridge = ws_broadcast_tx.clone();
     let outbound_shutdown_rx = shutdown_tx.subscribe();
+    let channel_manager_for_bridge = Arc::clone(&channel_manager);
     let outbound_handle = tokio::spawn(async move {
-        outbound_to_ws_bridge(outbound_rx, ws_broadcast_for_bridge, channel_manager, outbound_shutdown_rx).await;
+        outbound_to_ws_bridge(outbound_rx, ws_broadcast_for_bridge, channel_manager_for_bridge, outbound_shutdown_rx).await;
     });
 
     let cron_handle = {
@@ -3329,11 +3480,40 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     };
 
     // ── Build HTTP/WebSocket server ──
-    // api_token is guaranteed to be Some at this point (auto-generated + persisted above if needed)
+    // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above
+    // somehow produced None or empty (e.g. env var was whitespace-only).
+    if config.gateway.api_token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+        let raw = format!(
+            "{}{}{}{}",
+            uuid::Uuid::new_v4().to_string().replace('-', ""),
+            uuid::Uuid::new_v4().to_string().replace('-', ""),
+            uuid::Uuid::new_v4().to_string().replace('-', ""),
+            uuid::Uuid::new_v4().to_string().replace('-', ""),
+        );
+        let fallback = format!("bc_{}", &raw[..61]);
+        warn!("api_token was missing/empty before building GatewayState; using in-memory fallback");
+        config.gateway.api_token = Some(fallback);
+    }
     let api_token = config.gateway.api_token.clone();
-    let web_password = api_token.clone().unwrap_or_default();
+
+    // Determine WebUI login password:
+    // - If gateway.webuiPass is set in config → use it (stable across restarts)
+    // - Otherwise → generate a random temp password printed at startup (NOT saved)
+    let (web_password, webui_pass_is_temp) = match &config.gateway.webui_pass {
+        Some(p) if !p.is_empty() => (p.clone(), false),
+        _ => {
+            let tmp = format!("{:08x}", rand_u32());
+            (tmp, true)
+        }
+    };
 
     let is_exposed = host == "0.0.0.0" || host == "::";
+
+    // Create a shared EvolutionService for the HTTP handlers (trigger, delete, status).
+    // This is separate from the one inside AgentRuntime but shares the same disk records.
+    let shared_evo_service = Arc::new(Mutex::new(
+        EvolutionService::new(paths.skills_dir(), EvolutionServiceConfig::default())
+    ));
 
     let gateway_state = GatewayState {
         inbound_tx: inbound_tx.clone(),
@@ -3347,6 +3527,8 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         memory_store: memory_store_handle.clone(),
         tool_registry: tool_registry_shared,
         web_password: web_password.clone(),
+        channel_manager: Arc::clone(&channel_manager),
+        evolution_service: shared_evo_service,
     };
 
     let app = Router::new()
@@ -3385,6 +3567,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/evolution/versions/:skill", get(handle_evolution_versions))
         .route("/v1/evolution/tool-versions/:id", get(handle_evolution_tool_versions))
         .route("/v1/evolution/:id", get(handle_evolution_detail).delete(handle_evolution_delete))
+        .route("/v1/channels/status", get(handle_channels_status))
         .route("/v1/stats", get(handle_stats))
         // P1: Cron
         .route("/v1/cron", get(handle_cron_list).post(handle_cron_create))
@@ -3443,7 +3626,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     });
 
     // ── Print beautiful startup banner ──
-    print_startup_banner(&config, &host, &webui_host, webui_port, &web_password, token_just_generated, is_exposed, &bind_addr);
+    print_startup_banner(&config, &host, &webui_host, webui_port, &web_password, webui_pass_is_temp, is_exposed, &bind_addr);
 
     // ── Wait for shutdown signal ──
     tokio::signal::ctrl_c().await?;

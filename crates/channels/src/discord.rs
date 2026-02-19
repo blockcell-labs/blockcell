@@ -1,6 +1,7 @@
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -92,6 +93,7 @@ pub struct DiscordChannel {
     config: Config,
     client: Client,
     inbound_tx: mpsc::Sender<InboundMessage>,
+    media_dir: PathBuf,
 }
 
 impl DiscordChannel {
@@ -101,10 +103,16 @@ impl DiscordChannel {
             .build()
             .expect("Failed to create HTTP client");
 
+        let media_dir = std::env::var("BLOCKCELL_WORKSPACE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("workspace"))
+            .join("media");
+
         Self {
             config,
             client,
             inbound_tx,
+            media_dir,
         }
     }
 
@@ -335,11 +343,51 @@ impl DiscordChannel {
         Ok(())
     }
 
+    /// Download a Discord attachment to the media directory.
+    /// Returns the local file path on success.
+    async fn download_attachment(&self, attachment: &DiscordAttachment) -> Result<String> {
+        let url = match &attachment.url {
+            Some(u) => u.clone(),
+            None => return Err(Error::Channel("Attachment has no URL".to_string())),
+        };
+
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Discord attachment download failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Err(Error::Channel(format!(
+                "Discord attachment HTTP {}",
+                resp.status()
+            )));
+        }
+
+        tokio::fs::create_dir_all(&self.media_dir)
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+        let filename = format!("discord_{}_{}", &attachment.id, &attachment.filename);
+        let path = self.media_dir.join(&filename);
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to read attachment bytes: {}", e)))?;
+
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to write attachment: {}", e)))?;
+
+        Ok(path.to_string_lossy().to_string())
+    }
+
     async fn handle_message_create(&self, data: serde_json::Value) -> Result<()> {
         let msg: DiscordMessage = serde_json::from_value(data)
             .map_err(|e| Error::Channel(format!("Failed to parse Discord message: {}", e)))?;
 
-        // Skip bot messages
         if msg.author.bot.unwrap_or(false) {
             return Ok(());
         }
@@ -357,12 +405,25 @@ impl DiscordChannel {
             return Ok(());
         }
 
+        // Download attachments concurrently
+        let mut media_paths = Vec::new();
+        for attachment in &msg.attachments {
+            match self.download_attachment(attachment).await {
+                Ok(path) => media_paths.push(path),
+                Err(e) => error!(
+                    error = %e,
+                    filename = %attachment.filename,
+                    "Failed to download Discord attachment"
+                ),
+            }
+        }
+
         let inbound = InboundMessage {
             channel: "discord".to_string(),
             sender_id: msg.author.id.clone(),
             chat_id: msg.channel_id.clone(),
             content: msg.content,
-            media: vec![],
+            media: media_paths,
             metadata: serde_json::json!({
                 "message_id": msg.id,
                 "username": msg.author.username,
@@ -383,34 +444,49 @@ impl DiscordChannel {
 /// Send a message to a Discord channel via REST API.
 /// Discord has a 2000 character limit per message, so long messages are split.
 pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<()> {
+    send_message_reply(config, chat_id, text, None).await
+}
+
+/// Send a message to a Discord channel, optionally replying to a specific message.
+/// `reply_to_message_id` sets the `message_reference` for Discord thread replies.
+pub async fn send_message_reply(
+    config: &Config,
+    chat_id: &str,
+    text: &str,
+    reply_to_message_id: Option<&str>,
+) -> Result<()> {
+    crate::rate_limit::discord_limiter().acquire().await;
     let client = Client::new();
     let token = &config.channels.discord.bot_token;
 
-    #[derive(Serialize)]
-    struct CreateMessage<'a> {
-        content: &'a str,
-    }
-
-    // Split long messages at 2000 char boundary (Discord limit)
     let chunks = split_message(text, 2000);
 
-    for chunk in &chunks {
-        let request = CreateMessage { content: chunk };
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut body = serde_json::json!({ "content": chunk });
+        // Only attach message_reference on the first chunk
+        if i == 0 {
+            if let Some(msg_id) = reply_to_message_id {
+                body["message_reference"] = serde_json::json!({
+                    "message_id": msg_id,
+                    "channel_id": chat_id,
+                    "fail_if_not_exists": false,
+                });
+            }
+        }
 
         let response = client
             .post(&format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
             .header("Authorization", format!("Bot {}", token))
-            .json(&request)
+            .json(&body)
             .send()
             .await
             .map_err(|e| Error::Channel(format!("Failed to send Discord message: {}", e)))?;
 
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Channel(format!("Discord API error: {}", body)));
+            let err_body = response.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!("Discord API error: {}", err_body)));
         }
 
-        // Small delay between chunks to avoid rate limiting
         if chunks.len() > 1 {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

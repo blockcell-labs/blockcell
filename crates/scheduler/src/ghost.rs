@@ -209,7 +209,10 @@ impl GhostService {
         let mut check_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let mut last_run: Option<chrono::DateTime<Utc>> = None;
+        // 修复：记录下一次计划执行时间，当 now >= next_scheduled 时触发。
+        // 原逻辑用 upcoming().next() 返回未来时间再判断差值 <= 60s，
+        // 由于 check_interval 也是 60s，两次 check 之间的触发点可能被完全错过。
+        let mut next_scheduled: Option<chrono::DateTime<Utc>> = schedule.upcoming(Utc).next();
 
         // Clone paths for config reloading
         let config_paths = self.paths.clone();
@@ -222,8 +225,9 @@ impl GhostService {
                         let new_ghost = GhostServiceConfig::from_config(&new_config);
                         
                         // Check if relevant fields changed
+                        let schedule_changed = new_ghost.schedule != self.config.schedule;
                         let changed = new_ghost.enabled != self.config.enabled || 
-                                     new_ghost.schedule != self.config.schedule ||
+                                     schedule_changed ||
                                      new_ghost.model != self.config.model ||
                                      new_ghost.max_syncs_per_day != self.config.max_syncs_per_day ||
                                      new_ghost.auto_social != self.config.auto_social;
@@ -233,19 +237,24 @@ impl GhostService {
                             self.config = new_ghost;
 
                             // Re-parse schedule if changed
-                            schedule = match Self::parse_cron_schedule(&self.config.schedule) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    let normalized = Self::normalize_cron_schedule(&self.config.schedule);
-                                    error!(
-                                        error = %e,
-                                        schedule = %self.config.schedule,
-                                        normalized_schedule = %normalized,
-                                        "Ghost: invalid cron schedule, falling back to every 4 hours"
-                                    );
-                                    "0 0 */4 * * *".parse::<cron::Schedule>().unwrap()
-                                }
-                            };
+                            if schedule_changed {
+                                schedule = match Self::parse_cron_schedule(&self.config.schedule) {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        let normalized = Self::normalize_cron_schedule(&self.config.schedule);
+                                        error!(
+                                            error = %e,
+                                            schedule = %self.config.schedule,
+                                            normalized_schedule = %normalized,
+                                            "Ghost: invalid cron schedule, falling back to every 4 hours"
+                                        );
+                                        "0 0 */4 * * *".parse::<cron::Schedule>().unwrap()
+                                    }
+                                };
+                                // 修复：schedule 变更后重置 next_scheduled，
+                                // 避免旧的 last_run 去重逻辑阻止新 schedule 的首次执行。
+                                next_scheduled = schedule.upcoming(Utc).next();
+                            }
                             
                             if !self.config.enabled {
                                 info!("👻 GhostService disabled via config");
@@ -261,27 +270,15 @@ impl GhostService {
 
                     let now = Utc::now();
 
-                    // Check if we should run based on the cron schedule
-                    let should_run = match schedule.upcoming(Utc).next() {
-                        Some(next_time) => {
-                            // If the next scheduled time is within the past 60 seconds,
-                            // or if we haven't run since the last scheduled time
-                            let diff = (next_time - now).num_seconds().abs();
-                            if diff <= 60 {
-                                // Check we haven't already run for this slot
-                                match last_run {
-                                    Some(lr) => (now - lr).num_seconds() > 60,
-                                    None => true,
-                                }
-                            } else {
-                                false
-                            }
-                        }
+                    // 触发判断：当前时间已超过或到达计划时间则执行。
+                    let should_run = match next_scheduled {
+                        Some(scheduled_at) => now >= scheduled_at,
                         None => false,
                     };
 
                     if should_run {
-                        last_run = Some(now);
+                        // 推进到下一个计划时间
+                        next_scheduled = schedule.upcoming(Utc).next();
                         if let Err(e) = self.run_routine().await {
                             warn!(error = %e, "Ghost routine failed");
                         }

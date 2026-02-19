@@ -12,6 +12,25 @@ use tracing::{debug, error, info, warn};
 use crate::context::ContextBuilder;
 use crate::task_manager::TaskManager;
 
+/// Adapter that wraps a Provider to implement the skills::LLMProvider trait.
+/// This allows EvolutionService to call the LLM for code generation without
+/// depending on the full provider stack.
+struct ProviderLLMAdapter {
+    provider: Arc<dyn blockcell_providers::Provider>,
+}
+
+#[async_trait::async_trait]
+impl blockcell_skills::LLMProvider for ProviderLLMAdapter {
+    async fn generate(&self, prompt: &str) -> blockcell_core::Result<String> {
+        let messages = vec![
+            ChatMessage::system("You are a skill evolution assistant. Follow instructions precisely."),
+            ChatMessage::user(prompt),
+        ];
+        let response = self.provider.chat(&messages, &[]).await?;
+        Ok(response.content.unwrap_or_default())
+    }
+}
+
 /// A SpawnHandle implementation that captures everything needed to spawn
 /// subagents, without requiring a reference to AgentRuntime.
 #[derive(Clone)]
@@ -53,18 +72,8 @@ impl SpawnHandle for RuntimeSpawnHandle {
         let origin_channel = origin_channel.to_string();
         let origin_chat_id = origin_chat_id.to_string();
 
-        // Register the task
-        let tm_for_create = task_manager.clone();
-        let tid = task_id.clone();
-        let lbl = label.to_string();
-        let desc = task.to_string();
-        let oc = origin_channel.clone();
-        let oci = origin_chat_id.clone();
-        tokio::spawn(async move {
-            tm_for_create.create_task(&tid, &lbl, &desc, &oc, &oci).await;
-        });
-
-        // Spawn the background task
+        // Spawn the background task. Task registration (create_task) happens inside
+        // run_subagent_task before set_running(), eliminating the race condition.
         tokio::spawn(run_subagent_task(
             config,
             paths,
@@ -140,7 +149,7 @@ pub struct AgentRuntime {
     config: Config,
     paths: Paths,
     context_builder: ContextBuilder,
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
     session_store: SessionStore,
     audit_logger: AuditLogger,
@@ -172,7 +181,16 @@ impl AgentRuntime {
         provider: Box<dyn Provider>,
         tool_registry: ToolRegistry,
     ) -> Result<Self> {
-        let context_builder = ContextBuilder::new(paths.clone(), config.clone());
+        let mut context_builder = ContextBuilder::new(paths.clone(), config.clone());
+
+        // Wrap the provider in an Arc so it can be shared with the EvolutionService.
+        // This enables tick() to automatically drive the full evolution pipeline.
+        let provider_arc: Arc<dyn Provider> = Arc::from(provider);
+        let llm_adapter = Arc::new(ProviderLLMAdapter {
+            provider: provider_arc.clone(),
+        });
+        context_builder.set_evolution_llm_provider(llm_adapter);
+
         let session_store = SessionStore::new(paths.clone());
         let audit_logger = AuditLogger::new(paths.clone());
 
@@ -180,7 +198,7 @@ impl AgentRuntime {
             config,
             paths,
             context_builder,
-            provider,
+            provider: provider_arc,
             tool_registry,
             session_store,
             audit_logger,
@@ -623,6 +641,7 @@ impl AgentRuntime {
 
                 // Execute each tool call, with dynamic tool supplement for intent misclassification
                 let mut supplemented_tools = false;
+                let mut tool_results: Vec<ChatMessage> = Vec::new();
                 for tool_call in &response.tool_calls {
                     let result = self.execute_tool_call(tool_call, &msg).await;
 
@@ -643,14 +662,25 @@ impl AgentRuntime {
                         }
                     }
 
-                    let tool_msg = ChatMessage::tool_result(&tool_call.id, &result);
-                    current_messages.push(tool_msg.clone());
-                    history.push(tool_msg);
+                    let mut tool_msg = ChatMessage::tool_result(&tool_call.id, &result);
+                    tool_msg.name = Some(tool_call.name.clone());
+                    tool_results.push(tool_msg);
                 }
 
-                // If we supplemented tools, don't count this iteration
+                // If we supplemented tools, roll back the assistant message and tool results
+                // so the LLM retries with the full tool schema available.
                 if supplemented_tools {
+                    // Remove the assistant message we just pushed (last element)
+                    current_messages.pop();
+                    history.pop();
+                    // Do NOT push tool results — the LLM will retry from scratch
                     continue;
+                }
+
+                // Normal path: commit tool results to messages and history
+                for tool_msg in tool_results {
+                    current_messages.push(tool_msg.clone());
+                    history.push(tool_msg);
                 }
             } else {
                 // No tool calls, we have the final response
@@ -965,8 +995,12 @@ impl AgentRuntime {
                     tool_call.name
                 ));
             } else if let Some(evo_service) = self.context_builder.evolution_service() {
+                // Try to load the current SKILL.rhai source for context
+                let source_snippet = self.context_builder.skill_manager()
+                    .and_then(|sm| sm.get(&tool_call.name))
+                    .and_then(|skill| skill.load_rhai());
                 match evo_service
-                    .report_error(&tool_call.name, &result_str, None, vec![])
+                    .report_error(&tool_call.name, &result_str, source_snippet, vec![])
                     .await
                 {
                     Ok(report) => {
@@ -1143,7 +1177,11 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn run_loop(&mut self, mut inbound_rx: mpsc::Receiver<InboundMessage>) {
+    pub async fn run_loop(
+        &mut self,
+        mut inbound_rx: mpsc::Receiver<InboundMessage>,
+        mut shutdown_rx: Option<broadcast::Receiver<()>>,
+    ) {
         info!("AgentRuntime started");
 
         // 启动灰度发布调度器（每 60 秒 tick 一次）
@@ -1159,6 +1197,15 @@ impl AgentRuntime {
 
         loop {
             tokio::select! {
+                _ = async {
+                    if let Some(ref mut rx) = shutdown_rx {
+                        let _ = rx.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    break;
+                }
                 msg = inbound_rx.recv() => {
                     match msg {
                         Some(msg) => {
@@ -1410,6 +1457,9 @@ async fn run_subagent_task(
     origin_channel: String,
     origin_chat_id: String,
 ) {
+    // Create the task entry first, then immediately mark it running.
+    // This ensures set_running() never operates on a non-existent task ID.
+    task_manager.create_task(&task_id, &label, &task_str, &origin_channel, &origin_chat_id).await;
     task_manager.set_running(&task_id).await;
     task_manager.set_progress(&task_id, "Processing...").await;
 

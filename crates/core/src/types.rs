@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use tracing::warn;
 
 /// A tool call request that serializes to the OpenAI-compatible format:
 /// `{id, type: "function", function: {name, arguments}}`
@@ -42,7 +43,10 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
                 .to_string();
             let arguments = match func.get("arguments") {
                 Some(serde_json::Value::String(s)) => {
-                    serde_json::from_str(s).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                    serde_json::from_str(s).unwrap_or_else(|e| {
+                        warn!(error = %e, raw = %s, "Failed to parse tool call arguments as JSON, using empty object");
+                        serde_json::Value::Object(serde_json::Map::new())
+                    })
                 }
                 Some(v) => v.clone(),
                 None => serde_json::Value::Object(serde_json::Map::new()),
@@ -70,6 +74,18 @@ pub struct LLMResponse {
     pub tool_calls: Vec<ToolCallRequest>,
     pub finish_reason: String,
     pub usage: serde_json::Value,
+}
+
+impl Default for LLMResponse {
+    fn default() -> Self {
+        Self {
+            content: None,
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: String::new(),
+            usage: serde_json::Value::Null,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

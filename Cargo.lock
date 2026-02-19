@@ -547,6 +547,7 @@ version = "0.1.0"
 dependencies = [
  "blockcell-core",
  "chrono",
+ "once_cell",
  "regex",
  "rusqlite",
  "serde",

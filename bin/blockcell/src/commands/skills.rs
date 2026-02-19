@@ -1,6 +1,5 @@
 use blockcell_agent::AgentRuntime;
 use blockcell_core::{Config, InboundMessage, Paths};
-use blockcell_providers::OpenAIProvider;
 use blockcell_skills::evolution::EvolutionRecord;
 use blockcell_skills::is_builtin_tool;
 use blockcell_storage::MemoryStore;
@@ -174,28 +173,8 @@ pub async fn learn(description: &str) -> anyhow::Result<()> {
     let paths = Paths::new();
     let config = Config::load_or_default(&paths)?;
 
-    // Create provider (same pattern as agent.rs)
-    let (provider_name, provider_config) = config
-        .get_api_key()
-        .ok_or_else(|| anyhow::anyhow!("No provider configured with API key"))?;
-
-    let api_base = provider_config.api_base.as_deref().unwrap_or_else(|| {
-        match provider_name {
-            "openrouter" => "https://openrouter.ai/api/v1",
-            "anthropic" => "https://api.anthropic.com/v1",
-            "openai" => "https://api.openai.com/v1",
-            "deepseek" => "https://api.deepseek.com/v1",
-            _ => "https://api.openai.com/v1",
-        }
-    });
-
-    let provider = Box::new(OpenAIProvider::new(
-        &provider_config.api_key,
-        Some(api_base),
-        &config.agents.defaults.model,
-        config.agents.defaults.max_tokens,
-        config.agents.defaults.temperature,
-    ));
+    // Create provider using shared multi-provider dispatch
+    let provider = super::provider::create_provider(&config)?;
 
     // Create runtime
     let tool_registry = ToolRegistry::with_defaults();

@@ -1,7 +1,8 @@
 use blockcell_core::{Config, Paths};
 use blockcell_core::types::ChatMessage;
-use blockcell_skills::{EvolutionService, EvolutionServiceConfig, SkillManager};
+use blockcell_skills::{EvolutionService, EvolutionServiceConfig, LLMProvider, SkillManager};
 use blockcell_tools::MemoryStoreHandle;
+use std::sync::Arc;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -70,6 +71,17 @@ impl ContextBuilder {
 
     pub fn evolution_service(&self) -> Option<&EvolutionService> {
         self.skill_manager.as_ref().and_then(|m| m.evolution_service())
+    }
+
+    /// Wire an LLM provider into the EvolutionService so that tick() can automatically
+    /// drive the full generate→audit→dry run→shadow test→rollout pipeline.
+    /// Call this after the provider is created in agent startup.
+    pub fn set_evolution_llm_provider(&mut self, provider: Arc<dyn LLMProvider>) {
+        if let Some(ref mut manager) = self.skill_manager {
+            if let Some(evo) = manager.evolution_service_mut() {
+                evo.set_llm_provider(provider);
+            }
+        }
     }
 
     /// Re-scan skill directories and pick up newly created skills.
@@ -288,11 +300,24 @@ impl ContextBuilder {
                     caps.iter().any(|c| ["email", "social_media", "notification"].contains(&c.as_str()))
                 }
                 _ => {
-                    // For other intents, check if any trigger words overlap
-                    triggers.iter().any(|t| {
-                        let t_lower = t.to_lowercase();
-                        intents.iter().any(|_| t_lower.len() > 2)
-                    })
+                    // For other intents, check if any trigger keyword overlaps with the skill name
+                    // or if the skill name contains intent-relevant keywords.
+                    let intent_keywords: &[&str] = match intent {
+                        IntentCategory::Organization => &["日程", "任务", "提醒", "记忆", "笔记", "calendar", "task", "reminder", "note", "cron"],
+                        IntentCategory::WebSearch => &["搜索", "网页", "浏览", "search", "web", "browse"],
+                        IntentCategory::FileOps => &["文件", "代码", "脚本", "file", "code", "script"],
+                        IntentCategory::DataAnalysis => &["数据", "图表", "统计", "data", "chart", "analysis"],
+                        IntentCategory::DevOps => &["部署", "服务器", "git", "cloud", "deploy", "server"],
+                        IntentCategory::Lifestyle => &["健康", "地图", "联系人", "health", "map", "contact"],
+                        IntentCategory::IoT => &["智能家居", "传感器", "iot", "smart", "sensor"],
+                        _ => &[],
+                    };
+                    let name_lower = name.to_lowercase();
+                    intent_keywords.iter().any(|kw| name_lower.contains(kw))
+                        || triggers.iter().any(|t| {
+                            let t_lower = t.to_lowercase();
+                            intent_keywords.iter().any(|kw| t_lower.contains(kw))
+                        })
                 }
             };
             if matched {
@@ -482,7 +507,9 @@ impl ContextBuilder {
                     result.push((*msg).clone());
                 }
             } else {
-                // Older rounds: keep user question + final assistant text reply only
+                // Older rounds: keep user question + final assistant text reply only.
+                // IMPORTANT: always push both a user AND an assistant message to maintain
+                // the alternating-role invariant required by Anthropic/Gemini providers.
                 let user_msg = round.iter().find(|m| m.role == "user");
                 let final_assistant = round.iter().rev().find(|m| {
                     m.role == "assistant" && m.tool_calls.is_none()
@@ -494,12 +521,8 @@ impl ContextBuilder {
                         .map(|m| Self::content_text(m))
                         .unwrap_or_else(|| "(completed with tool calls)".to_string());
 
-                    let summary = format!(
-                        "[Earlier] User: {}\nAssistant: {}",
-                        Self::trim_text_head_tail(&user_text, 200),
-                        Self::trim_text_head_tail(&assistant_text, 400),
-                    );
-                    result.push(ChatMessage::user(&summary));
+                    result.push(ChatMessage::user(&Self::trim_text_head_tail(&user_text, 200)));
+                    result.push(ChatMessage::assistant(&Self::trim_text_head_tail(&assistant_text, 400)));
                 }
             }
         }

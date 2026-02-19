@@ -1,4 +1,5 @@
 pub mod manager;
+pub mod rate_limit;
 
 #[cfg(feature = "telegram")]
 pub mod telegram;

@@ -159,7 +159,10 @@ export function EvolutionPage() {
     fetchAll();
     const interval = setInterval(fetchAll, 10000);
     const offSkills = wsManager.on('skills_updated', () => fetchAllRef.current());
-    return () => { clearInterval(interval); offSkills(); };
+    // Real-time refresh when evolution is triggered or deleted via API
+    const offTriggered = wsManager.on('evolution_triggered', () => fetchAllRef.current());
+    const offDeleted = wsManager.on('evolution_deleted', () => fetchAllRef.current());
+    return () => { clearInterval(interval); offSkills(); offTriggered(); offDeleted(); };
   }, []);
 
   async function fetchAll() {
@@ -1094,14 +1097,29 @@ function SkillRecordCard({
           {/* Shadow test */}
           {record.shadow_test && (
             <DetailSection title={t('evolution.shadowTest')}>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 mb-1">
                 {record.shadow_test.passed
                   ? <CheckCircle size={12} className="text-cyber" />
                   : <XCircle size={12} className="text-red-400" />}
                 <span className={record.shadow_test.passed ? 'text-cyber' : 'text-red-400'}>
                   {record.shadow_test.passed ? t('evolution.testPassed') : t('evolution.testFailed')}
                 </span>
+                {record.shadow_test.test_cases_run != null && (
+                  <span className="text-[10px] text-muted-foreground ml-auto">
+                    {record.shadow_test.test_cases_passed}/{record.shadow_test.test_cases_run} passed
+                  </span>
+                )}
               </div>
+              {record.shadow_test.errors?.length > 0 && (
+                <div className="space-y-0.5 mt-1">
+                  {record.shadow_test.errors.map((err, i) => (
+                    <div key={i} className="flex items-start gap-1.5">
+                      <AlertTriangle size={10} className="text-red-400 mt-0.5 shrink-0" />
+                      <span className="text-[10px] text-red-400 font-mono">{err}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </DetailSection>
           )}
 
@@ -1119,7 +1137,7 @@ function SkillRecordCard({
                     className={`flex-1 h-1.5 rounded-full ${
                       i <= record.rollout!.current_stage ? 'bg-cyber' : 'bg-muted'
                     }`}
-                    title={`${stage.percentage}% — ${stage.duration_hours}h`}
+                    title={`${stage.percentage}% — ${stage.duration_minutes}min`}
                   />
                 ))}
               </div>

@@ -102,6 +102,11 @@ impl HeartbeatService {
         info!(interval_secs = self.interval.as_secs(), "HeartbeatService started");
         
         let mut interval = tokio::time::interval(self.interval);
+        // 修复：设置 Skip 行为，避免服务暂停后积压的 tick 批量触发。
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 修复：跳过第一次立即触发的 tick（tokio interval 默认首次立即返回），
+        // 确保心跳在等待完整间隔后才首次发送。
+        interval.tick().await;
 
         loop {
             tokio::select! {

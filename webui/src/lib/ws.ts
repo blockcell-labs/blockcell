@@ -98,16 +98,19 @@ class WebSocketManager {
       };
 
       this.ws.onclose = (event) => {
-        const wasConnecting = !this._wasConnected || this._reason === 'connecting';
-
-        // Detect auth failure: WS upgrade rejected by auth middleware returns
-        // close code 1006 (abnormal) when the HTTP upgrade gets 401.
-        // Also check for explicit 4401 custom close code if we add it later.
-        if (event.code === 4401 || (event.code === 1006 && wasConnecting)) {
-          // Could be auth failure or server down — probe /v1/health to distinguish
-          this.probeHealthAndSetReason(this._generation);
+        // Only treat explicit 4401 as auth failure.
+        // code 1006 (abnormal close) is ambiguous — it fires on server restarts,
+        // network blips, and CORS issues, NOT just auth failures. Treating it as
+        // auth_failed causes logged-in users to be kicked out on page refresh.
+        if (event.code === 4401) {
+          this._reason = 'auth_failed';
+          this.shouldReconnect = false;
+          if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+          }
         } else if (event.code === 1006) {
-          this._reason = 'network_error';
+          this._reason = this._wasConnected ? 'network_error' : 'server_down';
         } else {
           this._reason = this._wasConnected ? 'network_error' : 'server_down';
         }

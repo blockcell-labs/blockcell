@@ -146,10 +146,11 @@ export function ChatPage() {
       timestamp: Date.now(),
     });
 
-    // Derive chat_id from session
-    const chatId = currentSessionId.startsWith('ws_')
-      ? currentSessionId.replace('ws_', '')
-      : currentSessionId.replace(/_/g, ':');
+    // Derive chat_id from session — use the session ID directly so the
+    // runtime saves history under the same key shown in the sessions list.
+    // The session_file() helper on the server normalises ':' → '_', so
+    // "ws_1234567890" and "ws:1234567890" both map to the same file.
+    const chatId = currentSessionId.replace(/_/g, ':');
 
     // Send via WebSocket
     wsManager.sendChat(content, chatId, mediaPaths);

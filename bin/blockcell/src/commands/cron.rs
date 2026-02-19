@@ -47,7 +47,7 @@ pub async fn list(show_all: bool) -> anyhow::Result<()> {
 
         println!(
             "{:<8} {:<20} {:<10} {:<20} {}",
-            &job.id[..8],
+            &job.id.chars().take(8).collect::<String>(),
             truncate(&job.name, 20),
             if job.enabled { "yes" } else { "no" },
             next_run,
@@ -149,12 +149,12 @@ pub async fn remove(job_id: &str) -> anyhow::Result<()> {
         1 => {
             let job = matching[0];
             service.remove_job(&job.id).await?;
-            println!("Removed job: {} ({})", job.name, &job.id[..8]);
+            println!("Removed job: {} ({})", job.name, &job.id.chars().take(8).collect::<String>());
         }
         _ => {
             println!("Multiple jobs match '{}'. Be more specific:", job_id);
             for job in matching {
-                println!("  {} - {}", &job.id[..8], job.name);
+                println!("  {} - {}", &job.id.chars().take(8).collect::<String>(), job.name);
             }
         }
     }
@@ -194,14 +194,14 @@ pub async fn run_job(job_id: &str, _force: bool) -> anyhow::Result<()> {
         }
         1 => {
             let job = matching[0];
-            println!("Running job: {} ({})", job.name, &job.id[..8]);
+            println!("Running job: {} ({})", job.name, &job.id.chars().take(8).collect::<String>());
             println!("Message: {}", job.payload.message);
             // In a real implementation, this would trigger the job through the agent
         }
         _ => {
             println!("Multiple jobs match '{}'. Be more specific:", job_id);
             for job in matching {
-                println!("  {} - {}", &job.id[..8], job.name);
+                println!("  {} - {}", &job.id.chars().take(8).collect::<String>(), job.name);
             }
         }
     }
@@ -209,10 +209,11 @@ pub async fn run_job(job_id: &str, _force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }

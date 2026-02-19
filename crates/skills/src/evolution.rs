@@ -197,12 +197,23 @@ impl SkillEvolution {
         self.evolution_db.parent().unwrap().join("evolution_records")
     }
 
+    /// Load the current SKILL.rhai source for a skill (returns None if not found).
+    pub fn load_skill_source(&self, skill_name: &str) -> Result<Option<String>> {
+        let rhai_path = self.skills_dir.join(skill_name).join("SKILL.rhai");
+        if rhai_path.exists() {
+            Ok(std::fs::read_to_string(&rhai_path).ok())
+        } else {
+            Ok(None)
+        }
+    }
+
     /// 触发技能进化
     pub async fn trigger_evolution(&self, context: EvolutionContext) -> Result<String> {
+        // Use milliseconds + random suffix to guarantee uniqueness even within the same second
         let evolution_id = format!(
-            "evo_{}_{}", 
-            context.skill_name, 
-            chrono::Utc::now().timestamp()
+            "evo_{}_{:x}",
+            context.skill_name,
+            chrono::Utc::now().timestamp_millis()
         );
 
         info!(
@@ -985,26 +996,31 @@ or\n\
 
     fn apply_diff(&self, original: &str, diff: &str) -> Result<String> {
         // 逐行应用 unified diff 补丁
+        // hunk header 中的行号是 1-indexed，result_lines 是 0-indexed
         let result_lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
         let diff_lines: Vec<&str> = diff.lines().collect();
-        
+
         let mut orig_idx: usize = 0;
         let mut i = 0;
         let mut output = Vec::new();
         let mut in_hunk = false;
+        let mut misaligned_context = 0usize;
 
         while i < diff_lines.len() {
             let line = diff_lines[i];
-            
+
             // 解析 hunk header: @@ -start,count +start,count @@
             if line.starts_with("@@") {
                 if let Some(hunk_start) = Self::parse_hunk_header(line) {
+                    // hunk_start 是 1-indexed，转换为 0-indexed 目标位置
+                    let target_idx = hunk_start.saturating_sub(1);
                     // 先输出 hunk 之前未处理的原始行
-                    while orig_idx < hunk_start.saturating_sub(1) && orig_idx < result_lines.len() {
+                    while orig_idx < target_idx && orig_idx < result_lines.len() {
                         output.push(result_lines[orig_idx].clone());
                         orig_idx += 1;
                     }
                     in_hunk = true;
+                    misaligned_context = 0;
                 }
                 i += 1;
                 continue;
@@ -1015,21 +1031,44 @@ or\n\
                 continue;
             }
 
-            if line.starts_with('-') {
-                // 删除行：跳过原始行
-                orig_idx += 1;
+            if line.starts_with("---") || line.starts_with("+++") {
+                // diff 文件头行，跳过
+            } else if line.starts_with('-') {
+                // 删除行：跳过原始行（不输出）
+                if orig_idx < result_lines.len() {
+                    orig_idx += 1;
+                }
             } else if line.starts_with('+') {
-                // 新增行
+                // 新增行：输出到结果
                 output.push(line[1..].to_string());
-            } else if line.starts_with(' ') || line.is_empty() {
-                // 上下文行
+            } else if line.starts_with(' ') {
+                // 上下文行：验证内容匹配，然后输出原始行
+                let ctx = &line[1..];
+                if orig_idx < result_lines.len() {
+                    if result_lines[orig_idx].trim() != ctx.trim() {
+                        // 内容不匹配，记录但继续（宽松模式）
+                        misaligned_context += 1;
+                        if misaligned_context > 3 {
+                            // 太多不匹配，说明 diff 与原文严重偏差，回退到原始内容
+                            warn!(
+                                "Diff context mismatch at line {}: expected {:?}, got {:?}. \
+                                Falling back to original content.",
+                                orig_idx + 1, ctx.trim(), result_lines[orig_idx].trim()
+                            );
+                            return Ok(original.to_string());
+                        }
+                    }
+                    output.push(result_lines[orig_idx].clone());
+                    orig_idx += 1;
+                }
+            } else if line.is_empty() {
+                // 空行作为上下文行处理
                 if orig_idx < result_lines.len() {
                     output.push(result_lines[orig_idx].clone());
                     orig_idx += 1;
                 }
-            } else {
-                // 非 diff 行，跳过（如 --- / +++ header）
             }
+            // 其他行（如 diff 文件头 --- / +++）已在上面处理，这里跳过
 
             i += 1;
         }

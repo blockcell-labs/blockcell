@@ -235,10 +235,15 @@ impl OllamaProvider {
         debug!(body_len = raw_body.len(), "Ollama raw response");
 
         let resp: OllamaChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            let preview_end = raw_body
+                .char_indices()
+                .nth(500)
+                .map(|(i, _)| i)
+                .unwrap_or(raw_body.len());
             Error::Provider(format!(
                 "Failed to parse Ollama response: {}. Body: {}",
                 e,
-                &raw_body[..raw_body.len().min(500)]
+                &raw_body[..preview_end]
             ))
         })?;
 

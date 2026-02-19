@@ -192,6 +192,10 @@ impl SkillManager {
         self.evolution_service.as_ref()
     }
 
+    pub fn evolution_service_mut(&mut self) -> Option<&mut EvolutionService> {
+        self.evolution_service.as_mut()
+    }
+
     pub fn load_from_paths(&mut self, paths: &Paths) -> Result<()> {
         // Load built-in skills first (lower priority)
         let builtin_dir = paths.builtin_skills_dir();

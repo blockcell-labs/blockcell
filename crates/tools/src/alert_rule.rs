@@ -253,18 +253,31 @@ impl Tool for AlertRuleTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let paths = Paths::new();
         let action = params["action"].as_str().unwrap();
 
         match action {
-            "create" => action_create(&paths, &params),
-            "list" => action_list(&paths),
-            "get" => action_get(&paths, &params),
-            "update" => action_update(&paths, &params),
-            "delete" => action_delete(&paths, &params),
-            "evaluate" => action_evaluate(&paths, &ctx, &params).await,
-            "history" => action_history(&paths, &params),
-            _ => Err(Error::Tool(format!("Unknown action: {}", action))),
+            "evaluate" => {
+                let paths = Paths::new();
+                action_evaluate(&paths, &ctx, &params).await
+            }
+            _ => {
+                let p = params.clone();
+                let a = action.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let paths = Paths::new();
+                    match a.as_str() {
+                        "create" => action_create(&paths, &p),
+                        "list" => action_list(&paths),
+                        "get" => action_get(&paths, &p),
+                        "update" => action_update(&paths, &p),
+                        "delete" => action_delete(&paths, &p),
+                        "history" => action_history(&paths, &p),
+                        _ => Err(Error::Tool(format!("Unknown action: {}", a))),
+                    }
+                })
+                .await
+                .map_err(|e| Error::Tool(format!("Alert rule task failed: {}", e)))?
+            }
         }
     }
 }

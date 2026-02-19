@@ -1,5 +1,4 @@
 use blockcell_core::{Config, Paths};
-use blockcell_providers::OpenAIProvider;
 use blockcell_skills::evolution::{
     EvolutionRecord, EvolutionStatus, LLMProvider, ShadowTestExecutor, ShadowTestResult,
 };
@@ -12,33 +11,12 @@ use std::io::Write;
 // skills::evolution::LLMProvider trait (just generate(prompt) -> String).
 
 struct OpenAILLMAdapter {
-    provider: OpenAIProvider,
+    provider: Box<dyn blockcell_providers::Provider>,
 }
 
 impl OpenAILLMAdapter {
     fn new(config: &Config) -> anyhow::Result<Self> {
-        let (provider_name, provider_config) = config
-            .get_api_key()
-            .ok_or_else(|| anyhow::anyhow!("No provider configured with API key"))?;
-
-        let api_base = provider_config.api_base.as_deref().unwrap_or_else(|| {
-            match provider_name {
-                "openrouter" => "https://openrouter.ai/api/v1",
-                "anthropic" => "https://api.anthropic.com/v1",
-                "openai" => "https://api.openai.com/v1",
-                "deepseek" => "https://api.deepseek.com/v1",
-                _ => "https://api.openai.com/v1",
-            }
-        });
-
-        let provider = OpenAIProvider::new(
-            &provider_config.api_key,
-            Some(api_base),
-            &config.agents.defaults.model,
-            config.agents.defaults.max_tokens,
-            config.agents.defaults.temperature,
-        );
-
+        let provider = super::provider::create_provider(config)?;
         Ok(Self { provider })
     }
 }
@@ -74,9 +52,6 @@ impl ShadowTestExecutor for BasicTestExecutor {
         })
     }
 }
-
-// === Provider trait import (needed for .chat()) ===
-use blockcell_providers::Provider;
 
 /// Trigger a manual evolution and drive the full pipeline.
 ///
@@ -296,23 +271,86 @@ pub async fn list(all: bool, verbose: bool) -> anyhow::Result<()> {
 // --- Internal helpers ---
 
 /// Derive a skill name from a description string.
+/// Handles both ASCII and CJK (Chinese/Japanese/Korean) descriptions.
 fn derive_skill_name(description: &str) -> String {
-    // Take meaningful chars, replace spaces with underscores, limit length
-    let cleaned: String = description
+    // First try ASCII-only path: keep alphanumeric, underscore, hyphen, space
+    let ascii_cleaned: String = description
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == ' ')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == ' ')
         .collect();
-    let name = cleaned.trim().replace(' ', "_").to_lowercase();
-    if name.len() > 40 {
-        name.char_indices()
-            .take_while(|&(i, _)| i < 40)
-            .map(|(_, c)| c)
-            .collect()
-    } else if name.is_empty() {
+    let ascii_name = ascii_cleaned.trim().replace(' ', "_").to_lowercase();
+
+    if !ascii_name.is_empty() {
+        // ASCII name is usable
+        let name = if ascii_name.chars().count() > 40 {
+            ascii_name.chars().take(40).collect()
+        } else {
+            ascii_name
+        };
+        return name;
+    }
+
+    // For CJK or other non-ASCII descriptions, generate a stable short name
+    // by taking the first few characters and appending a short hash
+    let preview: String = description.chars().take(8).collect();
+    // Simple hash: sum of char values mod 9999
+    let hash_val: u32 = description.chars().fold(0u32, |acc, c| {
+        acc.wrapping_add(c as u32).wrapping_mul(31)
+    }) % 9999;
+
+    // Transliterate common Chinese skill keywords to English
+    let keyword = match_chinese_keyword(description);
+    if let Some(kw) = keyword {
+        format!("{}_{:04}", kw, hash_val)
+    } else if preview.is_empty() {
         format!("skill_{}", chrono::Utc::now().timestamp())
     } else {
-        name
+        // Use hash-based name since CJK chars aren't safe for all filesystems
+        format!("skill_{:04}", hash_val)
     }
+}
+
+/// Match common Chinese skill description keywords to English equivalents.
+fn match_chinese_keyword(description: &str) -> Option<&'static str> {
+    let kw_map: &[(&str, &'static str)] = &[
+        ("翻译", "translate"),
+        ("搜索", "search"),
+        ("查询", "query"),
+        ("下载", "download"),
+        ("上传", "upload"),
+        ("发送", "send"),
+        ("邮件", "email"),
+        ("日历", "calendar"),
+        ("提醒", "reminder"),
+        ("天气", "weather"),
+        ("股票", "stock"),
+        ("加密", "encrypt"),
+        ("解密", "decrypt"),
+        ("截图", "screenshot"),
+        ("录音", "record"),
+        ("拍照", "camera"),
+        ("文件", "file"),
+        ("图片", "image"),
+        ("视频", "video"),
+        ("音频", "audio"),
+        ("网页", "webpage"),
+        ("数据", "data"),
+        ("分析", "analyze"),
+        ("报告", "report"),
+        ("监控", "monitor"),
+        ("通知", "notify"),
+        ("聊天", "chat"),
+        ("地图", "map"),
+        ("导航", "navigate"),
+        ("计算", "calculate"),
+        ("转换", "convert"),
+    ];
+    for (cn, en) in kw_map {
+        if description.contains(cn) {
+            return Some(en);
+        }
+    }
+    None
 }
 
 /// Resolve a possibly-abbreviated evolution ID to the full ID.

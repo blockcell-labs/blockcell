@@ -122,6 +122,15 @@ impl UpdateManager {
         let staging_path = staging_dir.join(format!("blockcell-{}", manifest.version));
         std::fs::write(&staging_path, &bytes)?;
 
+        // 设置可执行权限（Unix），否则 HealthChecker 运行 --version 会因权限不足失败
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&staging_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&staging_path, perms)?;
+        }
+
         info!(path = %staging_path.display(), "Update downloaded and verified");
 
         Ok(staging_path)
@@ -138,7 +147,7 @@ impl UpdateManager {
         }
     }
 
-    pub async fn apply(&self, staging_path: &PathBuf, version: &str) -> Result<()> {
+    pub async fn apply(&self, staging_path: &std::path::Path, version: &str) -> Result<()> {
         info!(version = %version, "Applying update");
 
         // 1. 检查维护窗口
@@ -150,7 +159,7 @@ impl UpdateManager {
         }
 
         // 2. 运行 Healthcheck（在切换前）
-        let checker = HealthChecker::new(staging_path.clone());
+        let checker = HealthChecker::new(staging_path.to_path_buf());
         let health_result = checker.check(30).await?;
         
         if !health_result.passed {
@@ -220,8 +229,13 @@ impl UpdateManager {
         };
 
         let current_version = env!("CARGO_PKG_VERSION");
-        if manifest.version == current_version {
-            info!("Already on latest version");
+        // 使用语义版本比较：若 manifest 版本不高于当前版本，无需更新
+        if !Self::version_greater(&manifest.version, current_version) {
+            info!(
+                current = %current_version,
+                manifest = %manifest.version,
+                "Already on latest version or manifest is older"
+            );
             return Ok(());
         }
 
@@ -252,22 +266,24 @@ impl UpdateManager {
 
     /// 检查当前版本是否满足最低版本要求 (简单的 semver 比较)
     fn version_satisfies(current: &str, minimum: &str) -> bool {
-        let parse = |v: &str| -> Vec<u64> {
-            v.trim_start_matches('v')
-                .split('.')
-                .filter_map(|s| s.parse::<u64>().ok())
-                .collect()
-        };
-        let cur = parse(current);
-        let min = parse(minimum);
-        let max_len = cur.len().max(min.len());
-        for i in 0..max_len {
-            let c = cur.get(i).copied().unwrap_or(0);
-            let m = min.get(i).copied().unwrap_or(0);
-            if c > m { return true; }
-            if c < m { return false; }
-        }
-        true // equal
+        Self::parse_version(current) >= Self::parse_version(minimum)
+    }
+
+    /// 检查 candidate 版本是否严格大于 base 版本
+    fn version_greater(candidate: &str, base: &str) -> bool {
+        Self::parse_version(candidate) > Self::parse_version(base)
+    }
+
+    fn parse_version(v: &str) -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| {
+                // 只取数字部分，忽略预发标识符如 -beta.1
+                s.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+            })
+            .collect()
     }
 }
 

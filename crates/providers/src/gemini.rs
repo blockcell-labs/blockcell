@@ -142,8 +142,12 @@ impl GeminiProvider {
                     }));
                 }
                 "tool" => {
-                    // Gemini expects function responses as user messages with functionResponse parts
+                    // Gemini expects function responses as user messages with functionResponse parts.
+                    // The `name` field must be the function name (not the call ID).
+                    // msg.name holds the tool function name set by the runtime; fall back to
+                    // tool_call_id only when name is unavailable (e.g. older history entries).
                     let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("");
+                    let func_name = msg.name.as_deref().unwrap_or(tool_call_id);
                     let result_text = msg.content.as_str().unwrap_or("").to_string();
 
                     // Try to parse result as JSON, fallback to text wrapper
@@ -152,7 +156,7 @@ impl GeminiProvider {
 
                     let func_response = serde_json::json!({
                         "functionResponse": {
-                            "name": tool_call_id,
+                            "name": func_name,
                             "response": response_value,
                         }
                     });
@@ -187,7 +191,40 @@ impl GeminiProvider {
             }
         }
 
-        (system_text, gemini_contents)
+        // Gemini requires strictly alternating user/model turns.
+        // Merge consecutive same-role messages to satisfy this requirement.
+        let merged = Self::merge_consecutive_roles(gemini_contents);
+        (system_text, merged)
+    }
+
+    /// Merge consecutive messages with the same role (Gemini requirement).
+    fn merge_consecutive_roles(messages: Vec<Value>) -> Vec<Value> {
+        let mut result: Vec<Value> = Vec::new();
+
+        for msg in messages {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let last_role = result
+                .last()
+                .and_then(|v| v.get("role"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if role == last_role && !result.is_empty() {
+                // Merge parts arrays
+                if let Some(last) = result.last_mut() {
+                    if let (Some(last_parts), Some(new_parts)) = (
+                        last.get_mut("parts").and_then(|v| v.as_array_mut()),
+                        msg.get("parts").and_then(|v| v.as_array()),
+                    ) {
+                        last_parts.extend(new_parts.iter().cloned());
+                    }
+                }
+            } else {
+                result.push(msg);
+            }
+        }
+
+        result
     }
 
     /// Convert OpenAI-style tool schemas to Gemini function declarations.
@@ -284,10 +321,15 @@ impl Provider for GeminiProvider {
         debug!(body_len = raw_body.len(), "Gemini raw response");
 
         let resp: GeminiResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            let preview_end = raw_body
+                .char_indices()
+                .nth(500)
+                .map(|(i, _)| i)
+                .unwrap_or(raw_body.len());
             Error::Provider(format!(
                 "Failed to parse Gemini response: {}. Body: {}",
                 e,
-                &raw_body[..raw_body.len().min(500)]
+                &raw_body[..preview_end]
             ))
         })?;
 

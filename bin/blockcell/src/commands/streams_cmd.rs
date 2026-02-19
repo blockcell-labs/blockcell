@@ -31,7 +31,8 @@ pub async fn list() -> anyhow::Result<()> {
         let url = rule["url"].as_str().unwrap_or("?");
         let auto_restore = rule["auto_restore"].as_bool().unwrap_or(false);
 
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
+        let short_id_owned: String = id.chars().take(8).collect();
+        let short_id = short_id_owned.as_str();
         let short_url: String = url.chars().take(38).collect();
         let url_ellipsis = if url.chars().count() > 38 { ".." } else { "" };
 
@@ -138,8 +139,8 @@ pub async fn restore() -> anyhow::Result<()> {
     for rule in &restorable {
         let id = rule["id"].as_str().unwrap_or("?");
         let url = rule["url"].as_str().unwrap_or("?");
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
-        println!("  {} — {}", short_id, url);
+        let short_id_owned: String = id.chars().take(8).collect();
+        println!("  {} — {}", short_id_owned, url);
     }
     println!();
     println!("Note: Subscriptions are auto-restored when the agent starts.");

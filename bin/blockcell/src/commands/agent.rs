@@ -323,7 +323,7 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
 
         // Spawn runtime loop
         let runtime_handle = tokio::spawn(async move {
-            runtime.run_loop(inbound_rx).await;
+            runtime.run_loop(inbound_rx, None).await;
         });
 
         // Split outbound: channel messages go to ChannelManager, CLI messages go to printer
@@ -457,15 +457,17 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
                                 "failed" => "❌",
                                 _ => "•",
                             };
-                            let short_id = if t.id.len() > 12 { &t.id[..12] } else { &t.id };
+                            let short_id_str: String = t.id.chars().take(12).collect();
+                            let short_id = short_id_str.as_str();
                             println!("  {} [{}] {} - {}",
                                 status_icon, short_id, t.status, t.label);
                             if let Some(ref progress) = t.progress {
                                 println!("    Progress: {}", progress);
                             }
                             if let Some(ref result) = t.result {
-                                let preview = if result.len() > 100 {
-                                    format!("{}...", &result[..100])
+                                let preview = if result.chars().count() > 100 {
+                                    let truncated: String = result.chars().take(100).collect();
+                                    format!("{}...", truncated)
                                 } else {
                                     result.clone()
                                 };
@@ -721,8 +723,9 @@ fn print_skills_status(paths: &Paths) {
                     println!("    • {}", name);
                 } else {
                     // Truncate long descriptions
-                    let short: String = desc.chars().take(40).collect();
-                    if short.len() < desc.len() {
+                    let char_count = desc.chars().count();
+                    if char_count > 40 {
+                        let short: String = desc.chars().take(40).collect();
                         println!("    • {} — {}…", name, short);
                     } else {
                         println!("    • {} — {}", name, desc);
@@ -743,8 +746,9 @@ fn print_skills_status(paths: &Paths) {
             if desc.is_empty() {
                 println!("    • {}", name);
             } else {
-                let short: String = desc.chars().take(40).collect();
-                if short.len() < desc.len() {
+                let char_count = desc.chars().count();
+                if char_count > 40 {
+                    let short: String = desc.chars().take(40).collect();
                     println!("    • {} — {}…", name, short);
                 } else {
                     println!("    • {} — {}", name, desc);

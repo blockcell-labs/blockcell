@@ -1,4 +1,5 @@
 use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -8,6 +9,9 @@ pub struct ChannelManager {
     paths: Paths,
     #[allow(dead_code)]
     inbound_tx: mpsc::Sender<InboundMessage>,
+    /// Persistent WhatsApp channel instance for connection reuse.
+    #[cfg(feature = "whatsapp")]
+    whatsapp_channel: Option<Arc<crate::whatsapp::WhatsAppChannel>>,
 }
 
 impl ChannelManager {
@@ -20,7 +24,16 @@ impl ChannelManager {
             config,
             paths,
             inbound_tx,
+            #[cfg(feature = "whatsapp")]
+            whatsapp_channel: None,
         }
+    }
+
+    /// Register the running WhatsApp channel so outbound messages can reuse
+    /// its persistent WebSocket connection.
+    #[cfg(feature = "whatsapp")]
+    pub fn set_whatsapp_channel(&mut self, ch: Arc<crate::whatsapp::WhatsAppChannel>) {
+        self.whatsapp_channel = Some(ch);
     }
 
     pub async fn start_outbound_dispatcher(
@@ -49,7 +62,11 @@ impl ChannelManager {
             "whatsapp" => {
                 #[cfg(feature = "whatsapp")]
                 {
-                    crate::whatsapp::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if let Some(ref ch) = self.whatsapp_channel {
+                        ch.send(&msg.chat_id, &msg.content).await?;
+                    } else {
+                        crate::whatsapp::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "feishu" => {
@@ -61,13 +78,23 @@ impl ChannelManager {
             "slack" => {
                 #[cfg(feature = "slack")]
                 {
-                    crate::slack::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    let thread_ts = msg.metadata
+                        .get("thread_ts")
+                        .and_then(|v| v.as_str());
+                    crate::slack::send_message_threaded(
+                        &self.config, &msg.chat_id, &msg.content, thread_ts,
+                    ).await?;
                 }
             }
             "discord" => {
                 #[cfg(feature = "discord")]
                 {
-                    crate::discord::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    let reply_to = msg.metadata
+                        .get("reply_to_message_id")
+                        .and_then(|v| v.as_str());
+                    crate::discord::send_message_reply(
+                        &self.config, &msg.chat_id, &msg.content, reply_to,
+                    ).await?;
                 }
             }
             "cli" | "cron" | "ws" => {

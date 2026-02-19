@@ -12,11 +12,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   const res = await fetch(url, { ...options, headers });
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
-      // Only force re-login when backend explicitly rejects the token.
-      localStorage.removeItem('blockcell_token');
-      window.location.reload();
-    }
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
   }
@@ -319,11 +314,13 @@ export interface EvolutionRecord {
   };
   shadow_test?: {
     passed: boolean;
-    results: any[];
+    test_cases_run: number;
+    test_cases_passed: number;
+    errors: string[];
     tested_at: number;
   };
   rollout?: {
-    stages: { percentage: number; duration_hours: number; error_threshold: number }[];
+    stages: { percentage: number; duration_minutes: number; error_threshold: number }[];
     current_stage: number;
     started_at: number;
   };

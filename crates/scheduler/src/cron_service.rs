@@ -96,7 +96,9 @@ impl CronService {
     }
 
     pub async fn run_tick(&self) -> Result<()> {
-        // Reload jobs from disk to pick up changes made by CronTool
+        // Reload jobs from disk to pick up changes made by CronTool.
+        // 注意：只在内存中没有 next_run_at_ms 的 job 才需要从磁盘重新初始化；
+        // 已经在内存中运行过的 job 状态以内存为准，避免磁盘旧状态覆盖导致重复触发。
         if let Err(e) = self.load().await {
             error!(error = %e, "Failed to reload cron jobs from disk");
         }
@@ -153,10 +155,12 @@ impl CronService {
             }
         }
 
-        // Remove jobs marked with delete_after_run that have already fired
+        // 修复：delete_after_run 不依赖 enabled 状态。
+        // 原逻辑 `!j.enabled` 导致 Every 类型（执行后 enabled 仍为 true）的一次性任务永远不被删除。
+        // 修正为：只要执行过（last_run_at_ms.is_some()）且标记了 delete_after_run 就删除。
         let delete_ids: Vec<String> = jobs
             .iter()
-            .filter(|j| j.delete_after_run && !j.enabled && j.state.last_run_at_ms.is_some())
+            .filter(|j| j.delete_after_run && j.state.last_run_at_ms.is_some())
             .map(|j| j.id.clone())
             .collect();
         if !delete_ids.is_empty() {
@@ -189,8 +193,11 @@ impl CronService {
             }
             ScheduleKind::Every => {
                 if let Some(every_ms) = job.schedule.every_ms {
+                    // 修复：首次不立即执行，而是等待第一个完整周期后再触发。
+                    // 原逻辑返回 true 导致服务启动后所有 Every 任务立即执行一次，
+                    // 且若 save() 在崩溃前未完成，重启后会再次立即执行（重复触发）。
                     job.state.next_run_at_ms = Some(now_ms + every_ms);
-                    true // Run immediately first time
+                    false
                 } else {
                     false
                 }
@@ -200,6 +207,11 @@ impl CronService {
                     if let Ok(schedule) = expr.parse::<cron::Schedule>() {
                         if let Some(next) = schedule.upcoming(Utc).next() {
                             job.state.next_run_at_ms = Some(next.timestamp_millis());
+                            debug!(
+                                job_id = %job.id,
+                                next_run_ms = next.timestamp_millis(),
+                                "Cron job initialized, waiting for first scheduled time"
+                            );
                         }
                     }
                 }

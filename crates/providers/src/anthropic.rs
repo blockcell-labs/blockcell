@@ -334,10 +334,15 @@ impl Provider for AnthropicProvider {
         debug!(body_len = raw_body.len(), "Anthropic raw response");
 
         let resp: AnthropicResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            let preview_end = raw_body
+                .char_indices()
+                .nth(500)
+                .map(|(i, _)| i)
+                .unwrap_or(raw_body.len());
             Error::Provider(format!(
                 "Failed to parse Anthropic response: {}. Body: {}",
                 e,
-                &raw_body[..raw_body.len().min(500)]
+                &raw_body[..preview_end]
             ))
         })?;
 

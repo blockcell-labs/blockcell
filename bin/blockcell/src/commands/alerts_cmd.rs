@@ -76,9 +76,17 @@ pub async fn history(limit: usize) -> anyhow::Result<()> {
 
     for entry in recent.iter().rev() {
         let rule_name = entry["rule_name"].as_str().unwrap_or("?");
-        let triggered_at = entry["triggered_at"].as_str()
-            .or_else(|| entry["triggered_at_ms"].as_i64().map(|_| ""))
-            .unwrap_or("?");
+        let triggered_at: String = if let Some(s) = entry["triggered_at"].as_str() {
+            s.to_string()
+        } else if let Some(ms) = entry["triggered_at_ms"].as_i64() {
+            use chrono::{TimeZone, Utc};
+            Utc.timestamp_millis_opt(ms)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "?".to_string())
+        } else {
+            "?".to_string()
+        };
         let value = &entry["value"];
 
         println!("  🔔 {} — value: {} — {}", rule_name, value, triggered_at);
@@ -162,7 +170,7 @@ pub async fn add(
     let content = serde_json::to_string_pretty(&rules)?;
     std::fs::write(&rules_file, content)?;
 
-    println!("✓ Alert rule created: {} ({})", name, &id[..8]);
+    println!("✓ Alert rule created: {} ({})", name, &id.chars().take(8).collect::<String>());
     Ok(())
 }
 

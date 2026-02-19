@@ -15,8 +15,20 @@ impl SignatureVerifier {
     pub fn from_pem(pem: &str) -> Result<Self> {
         // 解析 PEM 格式
         let decoded = Self::decode_pem(pem)?;
-        let key_bytes: [u8; 32] = decoded.try_into()
-            .map_err(|_| Error::Validation("Public key must be 32 bytes".to_string()))?;
+        // ed25519 SubjectPublicKeyInfo (PKCS#8) 格式包含 12 字节 ASN.1 头部，
+        // 原始公钥在最后 32 字节；若已是裸 32 字节则直接使用
+        let key_bytes: [u8; 32] = if decoded.len() == 32 {
+            decoded.try_into().unwrap()
+        } else if decoded.len() > 32 {
+            decoded[decoded.len() - 32..]
+                .try_into()
+                .map_err(|_| Error::Validation("Failed to extract key bytes from PEM".to_string()))?
+        } else {
+            return Err(Error::Validation(format!(
+                "PEM decoded data too short: {} bytes (expected >= 32)",
+                decoded.len()
+            )));
+        };
         
         let public_key = VerifyingKey::from_bytes(&key_bytes)
             .map_err(|e| Error::Validation(format!("Invalid public key: {}", e)))?;
@@ -37,13 +49,21 @@ impl SignatureVerifier {
         Ok(Self { public_key })
     }
 
-    /// 验证签名
-    pub fn verify(&self, message: &[u8], signature_hex: &str) -> Result<()> {
-        let sig_bytes = hex::decode(signature_hex)
-            .map_err(|e| Error::Validation(format!("Invalid signature hex: {}", e)))?;
+    /// 验证签名（自动检测 hex 或 base64 格式）
+    pub fn verify(&self, message: &[u8], signature_str: &str) -> Result<()> {
+        // 自动检测签名编码格式：hex 只含 0-9a-fA-F，否则尝试 base64
+        let sig_bytes = if signature_str.chars().all(|c| c.is_ascii_hexdigit()) && signature_str.len() == 128 {
+            hex::decode(signature_str)
+                .map_err(|e| Error::Validation(format!("Invalid signature hex: {}", e)))?
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(signature_str)
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_str))
+                .map_err(|e| Error::Validation(format!("Invalid signature encoding (not hex or base64): {}", e)))?
+        };
+
         let sig_array: [u8; 64] = sig_bytes.try_into()
             .map_err(|_| Error::Validation("Signature must be 64 bytes".to_string()))?;
-
         let signature = Signature::from_bytes(&sig_array);
 
         self.public_key

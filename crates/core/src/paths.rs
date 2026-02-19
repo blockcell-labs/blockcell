@@ -141,6 +141,8 @@ impl Paths {
         std::fs::create_dir_all(self.cron_dir())?;
         std::fs::create_dir_all(self.media_dir())?;
         std::fs::create_dir_all(self.update_dir())?;
+        std::fs::create_dir_all(self.bridge_dir())?;
+        std::fs::create_dir_all(self.whatsapp_auth_dir())?;
         std::fs::create_dir_all(self.memory_dir())?;
         std::fs::create_dir_all(self.skills_dir())?;
         std::fs::create_dir_all(self.evolved_tools_dir())?;

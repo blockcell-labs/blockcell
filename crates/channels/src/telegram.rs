@@ -322,18 +322,29 @@ impl TelegramChannel {
             }
         }
 
-        // Handle voice messages
+        // Handle voice messages — download then auto-transcribe
         if let Some(voice) = &message.voice {
             let filename = format!("telegram_voice_{}_{}.ogg", message.message_id, voice.file_unique_id);
             match self.download_file(&voice.file_id, &filename).await {
                 Ok(path) => {
                     media_files.push(path.clone());
-                    // TODO: Optional voice transcription with Groq Whisper
-                    // For now, just note that it's a voice message
-                    if content.is_empty() {
-                        content = format!("[Voice message: {}]", path);
-                    } else {
-                        content = format!("{} [Voice: {}]", content, path);
+                    let transcript = self.transcribe_voice(&path).await;
+                    match transcript {
+                        Some(text) => {
+                            info!(path = %path, "Voice transcribed");
+                            if content.is_empty() {
+                                content = text;
+                            } else {
+                                content = format!("{}\n[Voice transcript: {}]", content, text);
+                            }
+                        }
+                        None => {
+                            if content.is_empty() {
+                                content = format!("[Voice message: {}]", path);
+                            } else {
+                                content = format!("{} [Voice: {}]", content, path);
+                            }
+                        }
                     }
                     debug!("Downloaded voice: {}", filename);
                 }
@@ -384,9 +395,124 @@ impl TelegramChannel {
 
         Ok(())
     }
+
+    /// Attempt to transcribe a voice file.
+    /// Priority: local `whisper` CLI → OpenAI Whisper API → None (caller shows raw path).
+    async fn transcribe_voice(&self, path: &str) -> Option<String> {
+        // 1. Try local whisper CLI
+        if let Ok(output) = tokio::process::Command::new("whisper")
+            .args([path, "--model", "base", "--output_format", "txt", "--output_dir", "/tmp"])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                // whisper writes <filename>.txt in output_dir
+                let txt_path = format!(
+                    "/tmp/{}.txt",
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("voice")
+                );
+                if let Ok(text) = tokio::fs::read_to_string(&txt_path).await {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+
+        // 2. Try OpenAI Whisper API
+        let api_key = self
+            .config
+            .providers
+            .get("openai")
+            .map(|p| p.api_key.clone())
+            .filter(|k| !k.is_empty())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()));
+
+        let api_key = match api_key {
+            Some(k) => k,
+            None => {
+                debug!("No OpenAI API key for voice transcription");
+                return None;
+            }
+        };
+
+        let file_bytes = match tokio::fs::read(path).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "Failed to read voice file for transcription");
+                return None;
+            }
+        };
+
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("voice.ogg")
+            .to_string();
+
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(filename)
+            .mime_str("audio/ogg")
+            .ok()?;
+
+        let form = reqwest::multipart::Form::new()
+            .text("model", "whisper-1")
+            .part("file", part);
+
+        match self
+            .client
+            .post("https://api.openai.com/v1/audio/transcriptions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .multipart(form)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(serde::Deserialize)]
+                struct TranscribeResp { text: String }
+                if let Ok(body) = resp.json::<TranscribeResp>().await {
+                    let trimmed = body.text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+                None
+            }
+            Ok(resp) => {
+                warn!(status = %resp.status(), "OpenAI Whisper API error");
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "OpenAI Whisper API request failed");
+                None
+            }
+        }
+    }
+}
+
+/// Escape special characters for Telegram MarkdownV2 parse mode.
+/// All characters outside code spans that have special meaning must be escaped.
+pub fn escape_markdown_v2(text: &str) -> String {
+    // Characters that must be escaped in MarkdownV2 outside code/pre blocks
+    const SPECIAL: &[char] = &[
+        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+    ];
+    let mut out = String::with_capacity(text.len() + 32);
+    for ch in text.chars() {
+        if SPECIAL.contains(&ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<()> {
+    crate::rate_limit::telegram_limiter().acquire().await;
     let mut builder = Client::builder().timeout(Duration::from_secs(30));
     if let Some(proxy) = config.channels.telegram.proxy.as_deref() {
         if let Ok(p) = Proxy::all(proxy) {
@@ -400,16 +526,18 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     );
 
     #[derive(Serialize)]
-    struct SendMessageRequest<'a> {
-        chat_id: &'a str,
-        text: &'a str,
-        parse_mode: &'a str,
+    struct SendMessageRequest {
+        chat_id: String,
+        text: String,
+        parse_mode: String,
     }
 
+    // Try MarkdownV2 first; fall back to plain text if Telegram rejects the formatting.
+    let escaped = escape_markdown_v2(text);
     let request = SendMessageRequest {
-        chat_id,
-        text,
-        parse_mode: "Markdown",
+        chat_id: chat_id.to_string(),
+        text: escaped,
+        parse_mode: "MarkdownV2".to_string(),
     };
 
     let response = client
@@ -419,10 +547,65 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
         .await
         .map_err(|e| Error::Channel(format!("Failed to send Telegram message: {}", e)))?;
 
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!("Telegram API error: {}", text)));
+    if response.status().is_success() {
+        return Ok(());
     }
 
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    // 400 with "can't parse entities" → retry as plain text
+    if status.as_u16() == 400 && body.contains("parse") {
+        warn!("Telegram MarkdownV2 parse error, retrying as plain text");
+        let plain_request = SendMessageRequest {
+            chat_id: chat_id.to_string(),
+            text: text.to_string(),
+            parse_mode: String::new(),
+        };
+        // Send without parse_mode by using a plain JSON body
+        let plain_body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        });
+        let retry = client
+            .post(&url)
+            .json(&plain_body)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to send Telegram plain message: {}", e)))?;
+        if !retry.status().is_success() {
+            let err = retry.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!("Telegram API error (plain): {}", err)));
+        }
+        let _ = plain_request; // suppress unused warning
+        return Ok(());
+    }
+
+    Err(Error::Channel(format!("Telegram API error: {}", body)))
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::escape_markdown_v2;
+
+    #[test]
+    fn test_escape_plain_text() {
+        assert_eq!(escape_markdown_v2("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_escape_special_chars() {
+        let result = escape_markdown_v2("price: $1.99 (sale!)");
+        assert!(result.contains("\\."));
+        assert!(result.contains("\\!"));
+        assert!(result.contains("\\("));
+        assert!(result.contains("\\)"));
+    }
+
+    #[test]
+    fn test_escape_markdown_symbols() {
+        let result = escape_markdown_v2("**bold** _italic_");
+        assert!(result.contains("\\*"));
+        assert!(result.contains("\\_"));
+    }
 }

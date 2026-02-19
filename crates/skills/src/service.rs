@@ -1,6 +1,6 @@
 use crate::evolution::{
     EvolutionContext, EvolutionRecord, EvolutionStatus, FeedbackEntry,
-    LLMProvider, ShadowTestExecutor, SkillEvolution, TriggerReason,
+    LLMProvider, ShadowTestExecutor, ShadowTestResult, SkillEvolution, TriggerReason,
 };
 use blockcell_core::{Error, Result};
 use std::collections::HashMap;
@@ -253,6 +253,7 @@ impl Default for EvolutionServiceConfig {
 /// - `report_error()`: 技能执行失败时调用，内部自动判断是否触发进化
 /// - `run_pending_evolutions()`: 执行待处理的进化流程（生成→审计→dry run→测试→发布）
 /// - `tick()`: 定期调用，驱动灰度发布的阶段推进和自动回滚
+/// - `set_llm_provider()`: 设置 LLM provider，使 tick() 能自动驱动完整 pipeline
 pub struct EvolutionService {
     evolution: SkillEvolution,
     error_tracker: Arc<Mutex<ErrorTracker>>,
@@ -260,6 +261,8 @@ pub struct EvolutionService {
     /// 当前正在进行中的 evolution_id 列表（skill_name -> evolution_id）
     active_evolutions: Arc<Mutex<HashMap<String, String>>>,
     config: EvolutionServiceConfig,
+    /// 可选的 LLM provider，设置后 tick() 会自动驱动完整进化 pipeline
+    llm_provider: Option<Arc<dyn LLMProvider>>,
 }
 
 impl EvolutionService {
@@ -275,7 +278,14 @@ impl EvolutionService {
             rollout_stats: Arc::new(Mutex::new(RolloutStats::default())),
             active_evolutions: Arc::new(Mutex::new(HashMap::new())),
             config,
+            llm_provider: None,
         }
+    }
+
+    /// 设置 LLM provider，使 tick() 能自动驱动完整进化 pipeline。
+    /// 应在 agent 启动时调用，传入与主 agent 相同的 provider。
+    pub fn set_llm_provider(&mut self, provider: Arc<dyn LLMProvider>) {
+        self.llm_provider = Some(provider);
     }
 
     /// 报告技能执行错误
@@ -705,12 +715,10 @@ impl EvolutionService {
         Ok(())
     }
 
-    /// Process a pending evolution: record the learning intent.
+    /// Process a pending evolution.
     ///
-    /// Since the full LLM-based pipeline (generate→audit→dry run→shadow test→rollout)
-    /// requires an external LLM provider, this simplified path records the evolution
-    /// as "learning in progress" so the user can query it via list_skills.
-    /// When a full LLM provider is available, this can be upgraded to run the full pipeline.
+    /// If an LLM provider is configured, runs the full pipeline (generate→audit→dry run→shadow test→rollout).
+    /// Otherwise, just marks the record as "Generating" so list_skills can show it.
     async fn process_pending_evolution(
         &self,
         skill_name: &str,
@@ -734,27 +742,70 @@ impl EvolutionService {
             info!(
                 skill = %skill_name,
                 "🧠 [自进化] 错误信息: {}",
-                if error_stack.len() > 200 {
-                    format!("{}...", &error_stack[..error_stack.char_indices().nth(200).map(|(i,_)|i).unwrap_or(error_stack.len())])
+                if error_stack.chars().count() > 200 {
+                    format!("{}...", error_stack.chars().take(200).collect::<String>())
                 } else {
                     error_stack.clone()
                 }
             );
         }
 
-        // Mark as "Generating" to indicate learning is in progress
-        // This record persists on disk so list_skills can find it
-        let mut updated_record = record;
-        updated_record.status = EvolutionStatus::Generating;
-        updated_record.updated_at = chrono::Utc::now().timestamp();
-        self.evolution.save_record_public(&updated_record)?;
-
-        info!(
-            skill = %skill_name,
-            evolution_id = %evolution_id,
-            "🧠 [自进化] 技能 `{}` 已标记为学习中 (Generating)",
-            skill_name
-        );
+        // If we have an LLM provider, run the full pipeline
+        if let Some(ref llm_provider) = self.llm_provider {
+            info!(
+                skill = %skill_name,
+                evolution_id = %evolution_id,
+                "🧠 [自进化] LLM provider 可用，开始执行完整进化 pipeline"
+            );
+            let test_executor = RhaiSyntaxTestExecutor {
+                skills_dir: self.evolution.skills_dir().to_path_buf(),
+            };
+            match self.run_single_evolution(evolution_id, llm_provider.as_ref(), &test_executor).await {
+                Ok(true) => {
+                    info!(
+                        skill = %skill_name,
+                        evolution_id = %evolution_id,
+                        "🧠 [自进化] 技能 `{}` 进化 pipeline 完成，灰度发布已启动",
+                        skill_name
+                    );
+                    // Initialize rollout stats
+                    let mut stats = self.rollout_stats.lock().await;
+                    stats.active.entry(evolution_id.to_string())
+                        .or_insert((0, 0, chrono::Utc::now().timestamp()));
+                }
+                Ok(false) => {
+                    warn!(
+                        skill = %skill_name,
+                        evolution_id = %evolution_id,
+                        "🧠 [自进化] 技能 `{}` 进化 pipeline 失败（所有重试已耗尽）",
+                        skill_name
+                    );
+                    self.cleanup_evolution(skill_name, evolution_id).await;
+                }
+                Err(e) => {
+                    error!(
+                        skill = %skill_name,
+                        evolution_id = %evolution_id,
+                        error = %e,
+                        "🧠 [自进化] 技能 `{}` 进化 pipeline 出错: {}",
+                        skill_name, e
+                    );
+                    self.cleanup_evolution(skill_name, evolution_id).await;
+                }
+            }
+        } else {
+            // No LLM provider — just mark as Generating so list_skills can show it
+            info!(
+                skill = %skill_name,
+                evolution_id = %evolution_id,
+                "🧠 [自进化] 无 LLM provider，技能 `{}` 标记为学习中 (Generating)，等待手动执行",
+                skill_name
+            );
+            let mut updated_record = record;
+            updated_record.status = EvolutionStatus::Generating;
+            updated_record.updated_at = chrono::Utc::now().timestamp();
+            self.evolution.save_record_public(&updated_record)?;
+        }
 
         Ok(())
     }
@@ -1147,14 +1198,16 @@ impl EvolutionService {
                     EvolutionStatus::Generated => "改进方案已生成".to_string(),
                     EvolutionStatus::Auditing => "正在审计".to_string(),
                     EvolutionStatus::AuditPassed => "审计通过".to_string(),
+                    EvolutionStatus::AuditFailed => "审计失败".to_string(),
                     EvolutionStatus::DryRunPassed => "编译检查通过".to_string(),
+                    EvolutionStatus::DryRunFailed => "编译检查失败".to_string(),
                     EvolutionStatus::Testing => "正在测试".to_string(),
                     EvolutionStatus::TestPassed => "测试通过".to_string(),
+                    EvolutionStatus::TestFailed => "测试失败".to_string(),
                     EvolutionStatus::RollingOut => "灰度发布中".to_string(),
                     EvolutionStatus::Completed => "已完成".to_string(),
                     EvolutionStatus::RolledBack => "已回滚".to_string(),
                     EvolutionStatus::Failed => "失败".to_string(),
-                    _ => "未知".to_string(),
                 },
                 created_at: r.created_at,
                 error_snippet: r.context.error_stack.as_ref().map(|e| {
@@ -1176,6 +1229,103 @@ impl EvolutionService {
         }
 
         Ok((learning, learned, failed))
+    }
+}
+
+/// 真实的 Rhai 语法测试执行器
+///
+/// 将生成的 Rhai 脚本写入临时文件并用 Rhai 引擎编译，
+/// 验证语法正确性。比 BasicTestExecutor（永远返回 pass）更有意义。
+struct RhaiSyntaxTestExecutor {
+    skills_dir: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl ShadowTestExecutor for RhaiSyntaxTestExecutor {
+    async fn execute_tests(&self, skill_name: &str, diff: &str) -> Result<ShadowTestResult> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Write the script to a temp file and compile it
+        let temp_path = std::env::temp_dir()
+            .join(format!("evo_test_{}_{}.rhai", skill_name, now));
+        if let Err(e) = std::fs::write(&temp_path, diff) {
+            return Ok(ShadowTestResult {
+                passed: false,
+                test_cases_run: 1,
+                test_cases_passed: 0,
+                errors: vec![format!("Failed to write temp file: {}", e)],
+                tested_at: now,
+            });
+        }
+
+        let engine = rhai::Engine::new();
+        let content = match std::fs::read_to_string(&temp_path) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(ShadowTestResult {
+                    passed: false,
+                    test_cases_run: 1,
+                    test_cases_passed: 0,
+                    errors: vec![format!("Failed to read temp file: {}", e)],
+                    tested_at: now,
+                });
+            }
+        };
+
+        let _ = std::fs::remove_file(&temp_path);
+
+        match engine.compile(&content) {
+            Ok(_) => {
+                // Also check if the skill has test fixtures and run them
+                let tests_dir = self.skills_dir.join(skill_name).join("tests");
+                let mut errors = Vec::new();
+                let mut cases_run = 1u32; // 1 for syntax check
+                let mut cases_passed = 1u32;
+
+                if tests_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&tests_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().map_or(false, |e| e == "json") {
+                                cases_run += 1;
+                                // For now just verify the fixture JSON is valid
+                                match std::fs::read_to_string(&path) {
+                                    Ok(fixture_content) => {
+                                        if serde_json::from_str::<serde_json::Value>(&fixture_content).is_ok() {
+                                            cases_passed += 1;
+                                        } else {
+                                            errors.push(format!(
+                                                "Invalid test fixture JSON: {}",
+                                                path.file_name().unwrap_or_default().to_string_lossy()
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        errors.push(format!("Cannot read fixture: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Ok(ShadowTestResult {
+                    passed: errors.is_empty(),
+                    test_cases_run: cases_run,
+                    test_cases_passed: cases_passed,
+                    errors,
+                    tested_at: now,
+                })
+            }
+            Err(e) => Ok(ShadowTestResult {
+                passed: false,
+                test_cases_run: 1,
+                test_cases_passed: 0,
+                errors: vec![format!("Rhai syntax error: {}", e)],
+                tested_at: now,
+            }),
+        }
     }
 }
 

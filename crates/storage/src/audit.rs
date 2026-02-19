@@ -109,13 +109,7 @@ impl AuditLogger {
     }
 
     fn write_event(&mut self, event: AuditEvent) -> Result<()> {
-        // Check if date changed (for log rotation)
-        let now_date = Utc::now().format("%Y-%m-%d").to_string();
-        if now_date != self.current_date {
-            self.current_date = now_date;
-        }
-
-        let log_file = self.get_log_file_path();
+        let log_file = self.current_log_file_path();
         
         // Ensure audit directory exists
         if let Some(parent) = log_file.parent() {
@@ -135,7 +129,12 @@ impl AuditLogger {
         Ok(())
     }
 
-    fn get_log_file_path(&self) -> PathBuf {
+    /// 获取当前日期对应的日志文件路径，并同步更新缓存的 current_date。
+    fn current_log_file_path(&mut self) -> PathBuf {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        if today != self.current_date {
+            self.current_date = today;
+        }
         self.paths.audit_dir().join(format!("{}.jsonl", self.current_date))
     }
 
@@ -167,7 +166,9 @@ impl AuditLogger {
 
     /// Read today's audit events
     pub fn read_today(&self) -> Result<Vec<AuditEvent>> {
-        self.read_events(&self.current_date)
+        // 实时获取当前日期，避免跨日期后读到旧日期的文件
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        self.read_events(&today)
     }
 }
 

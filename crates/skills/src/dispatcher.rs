@@ -293,25 +293,15 @@ pub fn dynamic_to_json(val: &Dynamic) -> Value {
         let arr = val.clone().into_array().unwrap_or_default();
         Value::Array(arr.iter().map(dynamic_to_json).collect())
     } else if val.is::<Map>() {
-        let map = val.clone().into_typed_array::<(String, Dynamic)>().ok();
-        if let Some(pairs) = map {
-            let mut obj = serde_json::Map::new();
-            for (k, v) in pairs {
-                obj.insert(k, dynamic_to_json(&v));
-            }
-            Value::Object(obj)
-        } else {
-            // Try as Map directly
-            match val.clone().try_cast::<Map>() {
-                Some(m) => {
-                    let mut obj = serde_json::Map::new();
-                    for (k, v) in m {
-                        obj.insert(k.to_string(), dynamic_to_json(&v));
-                    }
-                    Value::Object(obj)
+        match val.clone().try_cast::<Map>() {
+            Some(m) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in m {
+                    obj.insert(k.to_string(), dynamic_to_json(&v));
                 }
-                None => Value::String(format!("{}", val)),
+                Value::Object(obj)
             }
+            None => Value::String(format!("{}", val)),
         }
     } else {
         Value::String(format!("{}", val))

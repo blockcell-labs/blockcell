@@ -9,6 +9,139 @@ use crate::{Tool, ToolContext, ToolSchema};
 
 pub struct CronTool;
 
+fn execute_cron_action(action: &str, params: &Value) -> Result<Value> {
+    let paths = Paths::new();
+
+    match action {
+        "add" => {
+            let mut store = load_store(&paths)?;
+            let now_ms = Utc::now().timestamp_millis();
+            let name = params["name"].as_str().unwrap();
+            let message = params["message"].as_str().unwrap();
+            let delete_after_run = params.get("delete_after_run").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let (kind, schedule) = if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
+                let at_ms = now_ms + delay * 1000;
+                ("at", json!({
+                    "kind": "at",
+                    "atMs": at_ms
+                }))
+            } else if let Some(at_ms) = params.get("at_ms").and_then(|v| v.as_i64()) {
+                ("at", json!({
+                    "kind": "at",
+                    "atMs": at_ms
+                }))
+            } else if let Some(every) = params.get("every_seconds").and_then(|v| v.as_i64()) {
+                ("every", json!({
+                    "kind": "every",
+                    "everyMs": every * 1000
+                }))
+            } else if let Some(expr) = params.get("cron_expr").and_then(|v| v.as_str()) {
+                ("cron", json!({
+                    "kind": "cron",
+                    "expr": expr
+                }))
+            } else {
+                return Err(Error::Validation("No schedule specified".to_string()));
+            };
+
+            let job_id = Uuid::new_v4().to_string();
+
+            let skill_name = params.get("skill_name").and_then(|v| v.as_str());
+            let payload_kind = if skill_name.is_some() { "skill_rhai" } else { "agent_turn" };
+
+            let mut payload = json!({
+                "kind": payload_kind,
+                "message": message,
+                "deliver": false
+            });
+            if let Some(sn) = skill_name {
+                payload["skillName"] = json!(sn);
+            }
+
+            let job = json!({
+                "id": job_id,
+                "name": name,
+                "enabled": true,
+                "schedule": schedule,
+                "payload": payload,
+                "state": {},
+                "createdAtMs": now_ms,
+                "updatedAtMs": now_ms,
+                "deleteAfterRun": delete_after_run
+            });
+
+            store.jobs.push(job);
+            save_store(&paths, &store)?;
+
+            let schedule_desc = match kind {
+                "at" => {
+                    if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
+                        format!("{}秒后执行", delay)
+                    } else {
+                        "指定时间执行".to_string()
+                    }
+                }
+                "every" => {
+                    let secs = params.get("every_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
+                    format!("每{}秒执行", secs)
+                }
+                "cron" => {
+                    let expr = params.get("cron_expr").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("cron: {}", expr)
+                }
+                _ => "unknown".to_string(),
+            };
+
+            Ok(json!({
+                "status": "created",
+                "job_id": job_id,
+                "name": name,
+                "schedule": schedule_desc,
+                "message": message
+            }))
+        }
+        "list" => {
+            let store = load_store(&paths)?;
+            let jobs: Vec<Value> = store.jobs.iter().map(|j| {
+                json!({
+                    "id": j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "name": j.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "enabled": j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "schedule": j.get("schedule"),
+                    "state": j.get("state"),
+                })
+            }).collect();
+
+            Ok(json!({
+                "jobs": jobs,
+                "count": jobs.len()
+            }))
+        }
+        "remove" => {
+            let mut store = load_store(&paths)?;
+            let job_id = params["job_id"].as_str().unwrap();
+
+            let before = store.jobs.len();
+            store.jobs.retain(|j| {
+                let id = j.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                !id.starts_with(job_id)
+            });
+            let removed = before - store.jobs.len();
+
+            if removed > 0 {
+                save_store(&paths, &store)?;
+            }
+
+            Ok(json!({
+                "removed": removed,
+                "job_id_prefix": job_id
+            }))
+        }
+        _ => Err(Error::Tool(format!("Unknown action: {}", action))),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JobStore {
     version: u32,
@@ -139,137 +272,10 @@ impl Tool for CronTool {
     }
 
     async fn execute(&self, _ctx: ToolContext, params: Value) -> Result<Value> {
-        let paths = Paths::new();
-        let action = params["action"].as_str().unwrap();
-
-        match action {
-            "add" => {
-                let mut store = load_store(&paths)?;
-                let now_ms = Utc::now().timestamp_millis();
-                let name = params["name"].as_str().unwrap();
-                let message = params["message"].as_str().unwrap();
-                let delete_after_run = params.get("delete_after_run").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                let (kind, schedule) = if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
-                    let at_ms = now_ms + delay * 1000;
-                    ("at", json!({
-                        "kind": "at",
-                        "atMs": at_ms
-                    }))
-                } else if let Some(at_ms) = params.get("at_ms").and_then(|v| v.as_i64()) {
-                    ("at", json!({
-                        "kind": "at",
-                        "atMs": at_ms
-                    }))
-                } else if let Some(every) = params.get("every_seconds").and_then(|v| v.as_i64()) {
-                    ("every", json!({
-                        "kind": "every",
-                        "everyMs": every * 1000
-                    }))
-                } else if let Some(expr) = params.get("cron_expr").and_then(|v| v.as_str()) {
-                    ("cron", json!({
-                        "kind": "cron",
-                        "expr": expr
-                    }))
-                } else {
-                    return Err(Error::Validation("No schedule specified".to_string()));
-                };
-
-                let job_id = Uuid::new_v4().to_string();
-
-                let skill_name = params.get("skill_name").and_then(|v| v.as_str());
-                let payload_kind = if skill_name.is_some() { "skill_rhai" } else { "agent_turn" };
-
-                let mut payload = json!({
-                    "kind": payload_kind,
-                    "message": message,
-                    "deliver": false
-                });
-                if let Some(sn) = skill_name {
-                    payload["skillName"] = json!(sn);
-                }
-
-                let job = json!({
-                    "id": job_id,
-                    "name": name,
-                    "enabled": true,
-                    "schedule": schedule,
-                    "payload": payload,
-                    "state": {},
-                    "createdAtMs": now_ms,
-                    "updatedAtMs": now_ms,
-                    "deleteAfterRun": delete_after_run
-                });
-
-                store.jobs.push(job);
-                save_store(&paths, &store)?;
-
-                let schedule_desc = match kind {
-                    "at" => {
-                        if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
-                            format!("{}秒后执行", delay)
-                        } else {
-                            "指定时间执行".to_string()
-                        }
-                    }
-                    "every" => {
-                        let secs = params.get("every_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
-                        format!("每{}秒执行", secs)
-                    }
-                    "cron" => {
-                        let expr = params.get("cron_expr").and_then(|v| v.as_str()).unwrap_or("");
-                        format!("cron: {}", expr)
-                    }
-                    _ => "unknown".to_string(),
-                };
-
-                Ok(json!({
-                    "status": "created",
-                    "job_id": job_id,
-                    "name": name,
-                    "schedule": schedule_desc,
-                    "message": message
-                }))
-            }
-            "list" => {
-                let store = load_store(&paths)?;
-                let jobs: Vec<Value> = store.jobs.iter().map(|j| {
-                    json!({
-                        "id": j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                        "name": j.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        "enabled": j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
-                        "schedule": j.get("schedule"),
-                        "state": j.get("state"),
-                    })
-                }).collect();
-
-                Ok(json!({
-                    "jobs": jobs,
-                    "count": jobs.len()
-                }))
-            }
-            "remove" => {
-                let mut store = load_store(&paths)?;
-                let job_id = params["job_id"].as_str().unwrap();
-
-                let before = store.jobs.len();
-                store.jobs.retain(|j| {
-                    let id = j.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    !id.starts_with(job_id)
-                });
-                let removed = before - store.jobs.len();
-
-                if removed > 0 {
-                    save_store(&paths, &store)?;
-                }
-
-                Ok(json!({
-                    "removed": removed,
-                    "job_id_prefix": job_id
-                }))
-            }
-            _ => Err(Error::Tool(format!("Unknown action: {}", action))),
-        }
+        let action = params["action"].as_str().unwrap().to_string();
+        tokio::task::spawn_blocking(move || execute_cron_action(&action, &params))
+            .await
+            .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?
     }
 }
 

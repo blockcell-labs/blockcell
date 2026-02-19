@@ -193,11 +193,24 @@ impl SkillExecutor {
             scope.push(name, value);
         }
 
-        let value = self.engine.eval(&ast, &mut scope)?;
+        // 使用带计数器的 engine 以正确追踪操作数
+        let (engine, ops_counter, _) = self.engine.create_engine_with_limits();
+        let result = engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast);
+        let operations = ops_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => {
+                if let rhai::EvalAltResult::ErrorTerminated(ref reason, _) = *e {
+                    return Err(blockcell_core::Error::Skill(format!("Script terminated: {}", reason)));
+                }
+                return Err(blockcell_core::Error::Skill(format!("Runtime error: {}", e)));
+            }
+        };
 
         Ok(ExecutionResult {
             value,
-            operations: 0, // Would need to track this differently
+            operations,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
     }

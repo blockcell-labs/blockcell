@@ -51,11 +51,24 @@ impl AtomicSwitcher {
             std::fs::set_permissions(new_binary, perms)?;
         }
 
-        // 5. 原子替换（使用 rename，这在大多数文件系统上是原子的）
+        // 5. 原子替换
         #[cfg(unix)]
         {
-            // Unix: 直接 rename
-            std::fs::rename(new_binary, &current_binary)?;
+            // Unix: 若跨文件系统（如 staging 在 /tmp），rename 会失败，需先 copy 再 rename
+            // 先将新文件复制到目标目录下的临时文件，再原子改名
+            let tmp_path = current_binary.with_extension("tmp_new");
+            if let Err(e) = std::fs::rename(new_binary, &tmp_path) {
+                // rename 跨文件系统失败，改用 copy + rename
+                debug!(error = %e, "Cross-filesystem rename failed, falling back to copy+rename");
+                std::fs::copy(new_binary, &tmp_path)
+                    .map_err(|e| Error::Other(format!("Failed to copy new binary: {}", e)))?;
+            }
+            std::fs::rename(&tmp_path, &current_binary)
+                .map_err(|e| {
+                    // 如果 rename 失败，清理临时文件
+                    let _ = std::fs::remove_file(&tmp_path);
+                    Error::Other(format!("Atomic rename failed: {}", e))
+                })?;
             info!("Binary replaced atomically");
         }
 
@@ -143,8 +156,21 @@ impl AtomicSwitcher {
         }
 
         #[cfg(target_os = "macos")]
-        if &magic[0..2] != b"\xcf\xfa" && &magic[0..2] != b"\xce\xfa" {
-            return Err(Error::Validation("Not a valid Mach-O binary".to_string()));
+        {
+            // Mach-O 魔数：小端 64-bit (\xcf\xfa\xed\xfe), 小端 32-bit (\xce\xfa\xed\xfe),
+            // 大端 64-bit (\xfe\xed\xfa\xcf), 大端 32-bit (\xfe\xed\xfa\xce),
+            // Fat Binary (\xca\xfe\xba\xbe)
+            let is_macho = matches!(
+                magic,
+                [0xcf, 0xfa, 0xed, 0xfe]  // 小端 64-bit
+                | [0xce, 0xfa, 0xed, 0xfe]  // 小端 32-bit
+                | [0xfe, 0xed, 0xfa, 0xcf]  // 大端 64-bit
+                | [0xfe, 0xed, 0xfa, 0xce]  // 大端 32-bit
+                | [0xca, 0xfe, 0xba, 0xbe]  // Fat Binary (Universal)
+            );
+            if !is_macho {
+                return Err(Error::Validation("Not a valid Mach-O binary".to_string()));
+            }
         }
 
         #[cfg(target_os = "windows")]
@@ -166,54 +192,43 @@ impl AtomicSwitcher {
         Ok(env!("CARGO_PKG_VERSION").to_string())
     }
 
-    fn find_latest_backup(&self) -> Result<PathBuf> {
+    /// 返回按修改时间排序的备份文件列表（不包含失败备份）
+    fn list_backups_sorted(&self) -> Result<Vec<std::fs::DirEntry>> {
         let mut backups: Vec<_> = std::fs::read_dir(&self.backup_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("blockcell-")
-                    && !e.file_name().to_string_lossy().contains("failed")
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("blockcell-") && !name.contains("-failed-")
             })
             .collect();
 
-        if backups.is_empty() {
-            return Err(Error::NotFound("No backup found".to_string()));
-        }
-
-        // 按修改时间排序
         backups.sort_by_key(|e| {
             e.metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
         });
+
+        Ok(backups)
+    }
+
+    fn find_latest_backup(&self) -> Result<PathBuf> {
+        let backups = self.list_backups_sorted()?;
+
+        if backups.is_empty() {
+            return Err(Error::NotFound("No backup found for rollback".to_string()));
+        }
 
         Ok(backups.last().unwrap().path())
     }
 
     fn cleanup_old_backups(&self, keep_count: usize) -> Result<()> {
-        let mut backups: Vec<_> = std::fs::read_dir(&self.backup_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("blockcell-")
-                    && !e.file_name().to_string_lossy().contains("failed")
-            })
-            .collect();
+        let backups = self.list_backups_sorted()?;
 
         if backups.len() <= keep_count {
             return Ok(());
         }
 
-        // 按修改时间排序
-        backups.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-
-        // 删除旧的备份
         let to_remove = backups.len() - keep_count;
         for backup in backups.iter().take(to_remove) {
             if let Err(e) = std::fs::remove_file(backup.path()) {

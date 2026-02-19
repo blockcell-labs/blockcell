@@ -21,6 +21,11 @@ pub struct CommunityHubConfig {
     pub hub_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Short random identifier for this node (e.g. "54c6be7b").
+    /// Auto-generated on first gateway startup and persisted to config.
+    /// Used as the node display name in the community hub.
+    #[serde(default)]
+    pub node_alias: Option<String>,
 }
 
 fn default_community_hub_url() -> Option<String> {
@@ -32,6 +37,7 @@ impl Default for CommunityHubConfig {
         Self {
             hub_url: default_community_hub_url(),
             api_key: None,
+            node_alias: None,
         }
     }
 }
@@ -136,7 +142,7 @@ pub struct AgentsConfig {
     pub ghost: GhostConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WhatsAppConfig {
     #[serde(default)]
@@ -145,6 +151,16 @@ pub struct WhatsAppConfig {
     pub bridge_url: String,
     #[serde(default)]
     pub allow_from: Vec<String>,
+}
+
+impl Default for WhatsAppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bridge_url: default_whatsapp_bridge_url(),
+            allow_from: Vec::new(),
+        }
+    }
 }
 
 fn default_whatsapp_bridge_url() -> String {
@@ -245,6 +261,9 @@ pub struct GatewayConfig {
     pub api_token: Option<String>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// WebUI login password. If empty/None, a temporary password is printed at startup.
+    #[serde(default)]
+    pub webui_pass: Option<String>,
 }
 
 fn default_gateway_host() -> String {
@@ -272,11 +291,12 @@ impl Default for GatewayConfig {
             webui_port: default_webui_port(),
             api_token: None,
             allowed_origins: vec![],
+            webui_pass: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchConfig {
     #[serde(default)]
@@ -285,17 +305,35 @@ pub struct WebSearchConfig {
     pub max_results: u32,
 }
 
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            max_results: default_max_results(),
+        }
+    }
+}
+
 fn default_max_results() -> u32 {
     5
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecConfig {
     #[serde(default = "default_exec_timeout")]
     pub timeout: u32,
     #[serde(default)]
     pub restrict_to_workspace: bool,
+}
+
+impl Default for ExecConfig {
+    fn default() -> Self {
+        Self {
+            timeout: default_exec_timeout(),
+            restrict_to_workspace: false,
+        }
+    }
 }
 
 fn default_exec_timeout() -> u32 {
@@ -309,7 +347,7 @@ pub struct WebToolsConfig {
     pub search: WebSearchConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolsConfig {
     #[serde(default)]
@@ -320,6 +358,16 @@ pub struct ToolsConfig {
     /// Lower values enable faster alert response. Default: 30. Min: 10. Max: 300.
     #[serde(default = "default_tick_interval")]
     pub tick_interval_secs: u32,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            web: WebToolsConfig::default(),
+            exec: ExecConfig::default(),
+            tick_interval_secs: default_tick_interval(),
+        }
+    }
 }
 
 fn default_tick_interval() -> u32 {
@@ -354,7 +402,7 @@ fn default_require_signature() -> bool {
 pub struct Config {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    #[serde(default, rename = "community_hub")]
+    #[serde(default)]
     pub community_hub: CommunityHubConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
@@ -478,7 +526,7 @@ mod tests {
     #[test]
     fn test_community_hub_top_level() {
         let raw = r#"{
-  "community_hub": { "hubUrl": "http://example.com/", "apiKey": "k" },
+  "communityHub": { "hubUrl": "http://example.com/", "apiKey": "k" },
   "providers": {}
 }"#;
         let cfg: Config = serde_json::from_str(raw).unwrap();

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 /// 能力类型 — 对应文档中的 Capability Substrate 层
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityType {
     /// 硬件能力：camera, mic, gpu, storage, bluetooth, usb
     Hardware,
@@ -16,6 +17,7 @@ pub enum CapabilityType {
 
 /// 能力权限级别
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum PrivilegeLevel {
     /// 只读 / 观察
     ReadOnly,
@@ -27,6 +29,7 @@ pub enum PrivilegeLevel {
 
 /// 能力状态
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CapabilityStatus {
     /// 已发现但未激活
     Discovered,
@@ -59,6 +62,7 @@ pub struct CapabilityCost {
 
 /// 能力提供者类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// 内置 Rust 工具（编译进二进制）
     BuiltIn,
@@ -161,6 +165,7 @@ impl CapabilityDescriptor {
 /// 能力生命周期阶段 — 对应文档中的:
 /// draft → compile → validate → load → observe → optimize → replace
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityLifecycle {
     Draft,
     Compiling,
