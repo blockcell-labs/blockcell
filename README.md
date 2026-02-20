@@ -5,6 +5,21 @@ A self-evolving AI agent framework in Rust.
 - Website: https://blockcell.dev
 - 中文说明: [README.zh-CN.md](README.zh-CN.md)
 
+## The Name
+
+> *"Simplest units, most complex whole."*
+
+**Blockcell** is named after the **Replicators** from the sci-fi series *Stargate* — mechanical life forms built from countless tiny, independent **Blocks**. Each Block is simple on its own, but together they form ships, soldiers, and minds. They adapt instantly, evolve faster than any weapon can counter, and cannot be destroyed by breaking them apart — scattered Blocks simply find each other and reassemble.
+
+That philosophy lives in this framework:
+
+- **Block** → the Host and Tools: immutable, Rust-hard, deterministic.
+- **Cell** → the Skills and Self-Evolution: living, self-repairing, endlessly proliferating.
+
+Traditional software is dead the moment it ships. Blockcell is meant to be alive.
+
+→ [Full naming story](https://blockcell.dev/naming-story)
+
 ## Screenshots
 
 ![Start gateway](screenshot/start-gateway.png)

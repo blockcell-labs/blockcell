@@ -5,6 +5,21 @@ Rust 自进化智能体框架（Host + Skills）。
 - 官网: https://blockcell.dev
 - English: [README.md](README.md)
 
+## 名字由来
+
+> *"极简的单元，极繁的整体。"*
+
+**Blockcell** 的名字致敬了科幻剧集《星际之门》中最令人印象深刻的种族——**复制者（Replicators）**。复制者是由无数微小、独立的**模块块（Blocks）**组成的机械生命体。每个 Block 本身极其简单，但亿万个组合在一起，就能形成战舰、士兵乃至拟人的形态。它们瞬间学习敌人的技术，打碎后又重新聚合——永远无法被彻底消灭。
+
+这种哲学贯穿于整个框架：
+
+- **Block** → 宿主（Host）与工具（Tools）：不可变、Rust 铸就、确定性执行。
+- **Cell** → 技能（Skills）与自进化（Self-Evolution）：有生命、能自我修复、可无限增殖。
+
+传统软件在发布的那一刻就停止了生长。Blockcell 是活的。
+
+→ [完整命名故事](https://blockcell.dev/naming-story)
+
 ## 项目截图
 
 ![启动 gateway](screenshot/start-gateway.png)
