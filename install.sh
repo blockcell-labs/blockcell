@@ -88,13 +88,28 @@ install_from_source() {
   fi
 
   if [ -n "$target" ]; then
+    if ! command -v musl-gcc >/dev/null 2>&1; then
+      echo "Error: musl build requested but 'musl-gcc' was not found." 1>&2
+      echo "Please install musl tools, then re-run the install script." 1>&2
+      echo "Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y musl-tools" 1>&2
+      exit 1
+    fi
+
     if command -v rustup >/dev/null 2>&1; then
       rustup target add "$target" >/dev/null 2>&1 || true
     fi
+
+    # Some crates (e.g. ring) try to locate a target-specific gcc like
+    # x86_64-linux-musl-gcc. On many distros only 'musl-gcc' exists.
+    # Force the C compiler and linker explicitly.
+    target_env=$(echo "$target" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+
     (cd "$TMP_DIR/blockcell" \
       && export RUSTFLAGS="-C target-feature=+crt-static" \
       && export OPENSSL_VENDORED=1 \
       && export OPENSSL_STATIC=1 \
+      && eval "export CC_${target_env}=musl-gcc" \
+      && eval "export CARGO_TARGET_${target_env}_LINKER=musl-gcc" \
       && cargo build --release --target "$target")
   else
     (cd "$TMP_DIR/blockcell" && cargo build --release)
