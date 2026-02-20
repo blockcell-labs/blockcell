@@ -9,7 +9,7 @@ use crate::{Tool, ToolContext, ToolSchema};
 
 pub struct CronTool;
 
-fn execute_cron_action(action: &str, params: &Value) -> Result<Value> {
+fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origin_chat_id: &str) -> Result<Value> {
     let paths = Paths::new();
 
     match action {
@@ -50,10 +50,13 @@ fn execute_cron_action(action: &str, params: &Value) -> Result<Value> {
             let skill_name = params.get("skill_name").and_then(|v| v.as_str());
             let payload_kind = if skill_name.is_some() { "skill_rhai" } else { "agent_turn" };
 
+            let deliver = !matches!(origin_channel, "cli" | "cron" | "ghost" | "");
             let mut payload = json!({
                 "kind": payload_kind,
                 "message": message,
-                "deliver": false
+                "deliver": deliver,
+                "channel": origin_channel,
+                "to": origin_chat_id
             });
             if let Some(sn) = skill_name {
                 payload["skillName"] = json!(sn);
@@ -271,9 +274,11 @@ impl Tool for CronTool {
         Ok(())
     }
 
-    async fn execute(&self, _ctx: ToolContext, params: Value) -> Result<Value> {
+    async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let action = params["action"].as_str().unwrap().to_string();
-        tokio::task::spawn_blocking(move || execute_cron_action(&action, &params))
+        let origin_channel = ctx.channel.clone();
+        let origin_chat_id = ctx.chat_id.clone();
+        tokio::task::spawn_blocking(move || execute_cron_action(&action, &params, &origin_channel, &origin_chat_id))
             .await
             .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?
     }
@@ -297,6 +302,11 @@ mod tests {
         assert!(tool.validate(&json!({
             "action": "add", "name": "test", "message": "hi", "delay_seconds": 60
         })).is_ok());
+        // Verify execute_cron_action accepts origin params
+        let r = execute_cron_action("add", &json!({
+            "name": "t", "message": "m", "delay_seconds": 60
+        }), "telegram", "12345");
+        assert!(r.is_ok());
     }
 
     #[test]
