@@ -1949,6 +1949,59 @@ async fn handle_lark_webhook(
 }
 
 // ---------------------------------------------------------------------------
+// WeCom webhook handler (public, no auth)
+// ---------------------------------------------------------------------------
+
+/// GET/POST /webhook/wecom — receives events from WeCom (企业微信) via HTTP callback.
+/// This endpoint must be publicly accessible. Configure the URL in the WeCom admin console
+/// under "企业应用" → "接收消息" → "URL": https://your-domain/webhook/wecom
+///
+/// GET: URL verification (returns echostr if signature valid)
+/// POST: Message/event callback
+#[cfg(feature = "wecom")]
+async fn handle_wecom_webhook(
+    State(state): State<GatewayState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if !state.config.channels.wecom.enabled {
+        return (StatusCode::OK, "success".to_string()).into_response();
+    }
+
+    let http_method = req.method().as_str().to_uppercase();
+    let body = if http_method == "POST" {
+        match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+            Ok(b) => String::from_utf8_lossy(&b).to_string(),
+            Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    let (status, body_str) = blockcell_channels::wecom::process_webhook(
+        &state.config,
+        &http_method,
+        &query,
+        &body,
+        Some(&state.inbound_tx),
+    )
+    .await;
+
+    (StatusCode::from_u16(status).unwrap_or(StatusCode::OK), body_str).into_response()
+}
+
+#[cfg(not(feature = "wecom"))]
+async fn handle_wecom_webhook(
+    State(_state): State<GatewayState>,
+    axum::extract::Query(_query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    _req: axum::extract::Request,
+) -> impl IntoResponse {
+    (axum::http::StatusCode::OK, "success")
+}
+
+// ---------------------------------------------------------------------------
 // P1: Cron management endpoints
 // ---------------------------------------------------------------------------
 
@@ -3669,8 +3722,9 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/files/upload", post(handle_files_upload))
         .layer(middleware::from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(build_api_cors_layer(&config))
-        // Lark webhook — public endpoint (no auth), must be outside auth middleware
+        // Webhook endpoints — public (no auth), must be outside auth middleware
         .route("/webhook/lark", post(handle_lark_webhook))
+        .route("/webhook/wecom", get(handle_wecom_webhook).post(handle_wecom_webhook))
         .with_state(gateway_state);
 
     let bind_addr = format!("{}:{}", host, port);

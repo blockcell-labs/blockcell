@@ -1,3 +1,9 @@
+use aes::cipher::{BlockDecryptMut, KeyIvInit};
+use base64::{
+    alphabet,
+    engine::{general_purpose, DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
+    Engine as _,
+};
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::Deserialize;
@@ -5,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
 const WECOM_API_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
 /// WeCom single message character limit
@@ -173,14 +181,18 @@ impl WeComChannel {
             "WeCom channel started (polling mode)"
         );
 
-        // WeCom doesn't support direct message polling for app messages.
-        // The proper way is to set up a callback URL. We log a warning here.
-        warn!(
-            "WeCom polling mode: WeCom requires a callback URL for real-time message reception. \
-             Configure 'callback_token' and 'encoding_aes_key' and set up your server's \
-             callback URL in the WeCom admin console for full functionality. \
-             Polling mode will only process messages sent via the agent's send_message API."
-        );
+        // Only warn if callback credentials are missing — if they're configured,
+        // the user is using webhook mode via gateway and polling is just a heartbeat.
+        if self.config.channels.wecom.callback_token.is_empty()
+            || self.config.channels.wecom.encoding_aes_key.is_empty()
+        {
+            warn!(
+                "WeCom polling mode: WeCom requires a callback URL for real-time message reception. \
+                 Configure 'callback_token' and 'encoding_aes_key' and set up your server's \
+                 callback URL in the WeCom admin console for full functionality. \
+                 Polling mode will only process messages sent via the agent's send_message API."
+            );
+        }
 
         loop {
             tokio::select! {
@@ -312,6 +324,35 @@ impl WeComChannel {
     }
 }
 
+/// Percent-decode a URL query parameter value (%2B → +, %2F → /, %3D → =, etc.).
+/// Does NOT treat '+' as space (that's form-encoding, not used by WeCom).
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_nibble(bytes[i+1]), hex_nibble(bytes[i+2])) {
+                out.push(char::from(h << 4 | l));
+                i += 3;
+                continue;
+            }
+        }
+        out.push(char::from(bytes[i]));
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Simple SHA1 implementation for WeCom signature verification.
 fn sha1_hex(data: &[u8]) -> String {
     let hash = sha1_digest(data);
@@ -377,6 +418,337 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 }
 
 // ── send_message ──────────────────────────────────────────────────────────────
+
+/// Handle a WeCom webhook request.
+///
+/// WeCom sends two types of requests to the callback URL:
+/// - **GET**: URL verification — responds with `echostr` query param if signature is valid
+/// - **POST**: Message/event callback — parses XML body and forwards to inbound channel
+///
+/// Returns `(status_code, body_string)`.
+pub async fn process_webhook(
+    config: &Config,
+    method: &str,
+    query: &std::collections::HashMap<String, String>,
+    body: &str,
+    inbound_tx: Option<&tokio::sync::mpsc::Sender<blockcell_core::InboundMessage>>,
+) -> (u16, String) {
+    let wecom_cfg = &config.channels.wecom;
+
+    let has_wecom_params = query.contains_key("msg_signature")
+        || query.contains_key("signature")
+        || query.contains_key("echostr");
+
+    if method == "GET" {
+        if !has_wecom_params {
+            // Plain connectivity probe (e.g. wget/curl health check) — return 200
+            return (200, "ok".to_string());
+        }
+
+        // WeCom URL verification:
+        // 1. echostr is AES-encrypted Base64
+        // 2. Signature = SHA1(sort(token, timestamp, nonce, echostr_encrypted))
+        let msg_signature = query.get("msg_signature").or_else(|| query.get("signature")).map(|s| s.as_str()).unwrap_or("");
+        let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
+        let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
+        // URL-decode the echostr: WeCom percent-encodes '+' as '%2B' etc. in the query string,
+        // but signs and encrypts the plain base64 string. Decode before both sig check and decrypt.
+        let echostr_raw = query.get("echostr").map(|s| s.as_str()).unwrap_or("");
+        let echostr_enc_owned = percent_decode(echostr_raw);
+        let echostr_enc = echostr_enc_owned.as_str();
+
+        // ── 原始数据诊断日志（INFO级别，方便复制调试）──────────────────────
+        tracing::info!(
+            token        = %wecom_cfg.callback_token,
+            timestamp    = %timestamp,
+            nonce        = %nonce,
+            msg_signature= %msg_signature,
+            echostr      = %echostr_enc,
+            echostr_len  = echostr_enc.len(),
+            encoding_aes_key = %wecom_cfg.encoding_aes_key,
+            encoding_aes_key_len = wecom_cfg.encoding_aes_key.len(),
+            "WeCom GET 原始参数"
+        );
+
+        if !wecom_cfg.callback_token.is_empty() {
+            // 计算签名并打印，方便对比
+            let mut parts = vec![
+                wecom_cfg.callback_token.as_str(),
+                timestamp,
+                nonce,
+                echostr_enc,
+            ];
+            parts.sort_unstable();
+            let combined = parts.join("");
+            let computed = sha1_hex(combined.as_bytes());
+            tracing::info!(
+                computed_signature = %computed,
+                expected_signature = %msg_signature,
+                sort_input         = %combined,
+                "WeCom GET 签名计算"
+            );
+
+            // 4-param signature: sort(token, timestamp, nonce, msg_encrypt)
+            if computed != msg_signature {
+                tracing::warn!(
+                    computed  = %computed,
+                    expected  = %msg_signature,
+                    "WeCom webhook: GET 签名不匹配"
+                );
+                return (403, "Forbidden: invalid signature".to_string());
+            }
+        }
+
+        // Decrypt echostr to get plaintext msg
+        match decrypt_wecom_msg(echostr_enc, &wecom_cfg.encoding_aes_key) {
+            Ok(plain) => {
+                tracing::info!("WeCom webhook: URL verification OK, returning echostr plaintext");
+                return (200, plain);
+            }
+            Err(e) => {
+                tracing::error!("WeCom webhook: failed to decrypt echostr: {}", e);
+                return (500, "decrypt error".to_string());
+            }
+        }
+    }
+
+    // POST: parse XML body
+    if body.is_empty() {
+        return (200, "success".to_string());
+    }
+
+    // POST messages use <Encrypt> field (AES encrypted)
+    // Verify signature: SHA1(sort(token, timestamp, nonce, msg_encrypt))
+    let msg_encrypt = extract_xml_tag(body, "Encrypt").unwrap_or_default();
+    let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
+    let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
+    let msg_signature = query.get("msg_signature").or_else(|| query.get("signature")).map(|s| s.as_str()).unwrap_or("");
+
+    if !wecom_cfg.callback_token.is_empty() && !msg_encrypt.is_empty() {
+        if !verify_signature_4(&wecom_cfg.callback_token, timestamp, nonce, &msg_encrypt, msg_signature) {
+            tracing::warn!("WeCom webhook: POST signature verification failed");
+            return (403, "Forbidden: invalid signature".to_string());
+        }
+    }
+
+    // Decrypt the message body
+    let decrypted_body = if !msg_encrypt.is_empty() && !wecom_cfg.encoding_aes_key.is_empty() {
+        match decrypt_wecom_msg(&msg_encrypt, &wecom_cfg.encoding_aes_key) {
+            Ok(plain) => plain,
+            Err(e) => {
+                tracing::error!("WeCom webhook: failed to decrypt POST message: {}", e);
+                return (200, "success".to_string());
+            }
+        }
+    } else {
+        // No encryption configured — treat body as plain XML
+        body.to_string()
+    };
+
+    // Extract fields from decrypted XML
+    let from_user = extract_xml_tag(&decrypted_body, "FromUserName").unwrap_or_default();
+    let msg_type = extract_xml_tag(&decrypted_body, "MsgType").unwrap_or_default();
+    let content = extract_xml_tag(&decrypted_body, "Content").unwrap_or_default();
+    let _to_user = extract_xml_tag(&decrypted_body, "ToUserName").unwrap_or_default();
+    let msg_id = extract_xml_tag(&decrypted_body, "MsgId");
+
+    tracing::debug!(
+        from_user = %from_user,
+        msg_type = %msg_type,
+        content = %content,
+        "WeCom webhook: received message"
+    );
+
+    if msg_type != "text" {
+        return (200, "success".to_string());
+    }
+
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return (200, "success".to_string());
+    }
+
+    // Allowlist check
+    let allow_from = &wecom_cfg.allow_from;
+    if !allow_from.is_empty() && !allow_from.iter().any(|a| a == &from_user) {
+        tracing::debug!(from_user = %from_user, "WeCom webhook: user not in allowlist");
+        return (200, "success".to_string());
+    }
+
+    if let Some(tx) = inbound_tx {
+        let inbound = blockcell_core::InboundMessage {
+            channel: "wecom".to_string(),
+            sender_id: from_user.clone(),
+            chat_id: from_user.clone(),
+            content,
+            media: vec![],
+            metadata: serde_json::json!({
+                "msg_id": msg_id,
+                "msg_type": msg_type,
+                "mode": "webhook",
+            }),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        if let Err(e) = tx.send(inbound).await {
+            tracing::error!(error = %e, "WeCom webhook: failed to forward inbound message");
+        }
+    }
+
+    (200, "success".to_string())
+}
+
+/// Extract the text content of an XML tag (simple, no namespace support needed for WeCom).
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let content = &xml[start..end];
+    // Strip CDATA if present
+    let content = if content.starts_with("<![CDATA[") && content.ends_with("]]>") {
+        &content[9..content.len()-3]
+    } else {
+        content
+    };
+    Some(content.to_string())
+}
+
+/// Verify WeCom 4-param signature: SHA1(sort(token, timestamp, nonce, msg_encrypt))
+/// This is the correct signature for both GET (echostr) and POST (Encrypt) callbacks.
+fn verify_signature_4(token: &str, timestamp: &str, nonce: &str, msg_encrypt: &str, expected: &str) -> bool {
+    let mut parts = vec![token, timestamp, nonce, msg_encrypt];
+    parts.sort_unstable();
+    let combined = parts.join("");
+    let hash = sha1_hex(combined.as_bytes());
+    hash == expected
+}
+
+/// Decrypt a WeCom AES-256-CBC encrypted message.
+///
+/// Protocol:
+/// - AES key = Base64Decode(encodingAESKey + "=")  → 32 bytes
+/// - IV = first 16 bytes of AES key
+/// - Ciphertext = Base64Decode(msg_encrypt)
+/// - Plaintext layout: 16B random | 4B msg_len (big-endian) | msg | corpId
+fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::Result<String, String> {
+    if encoding_aes_key.is_empty() {
+        return Err("encodingAesKey not configured".to_string());
+    }
+
+    tracing::info!(
+        encoding_aes_key_raw = %encoding_aes_key,
+        msg_encrypt_raw = %msg_encrypt,
+        encoding_aes_key_len = encoding_aes_key.len(),
+        msg_encrypt_len = msg_encrypt.len(),
+        "WeCom decrypt: raw inputs"
+    );
+
+    // AES key: WeCom's EncodingAESKey is always exactly 43 chars of standard base64
+    // (no padding). Append one '=' to make it 44 chars (valid base64 group).
+    // Do NOT strip existing padding first — just normalise whitespace, then pad to 44.
+    let key_compact: String = encoding_aes_key
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let key_trimmed = key_compact.trim_end_matches('=');
+
+    tracing::info!(
+        key_trimmed = %key_trimmed,
+        key_trimmed_len = key_trimmed.len(),
+        "WeCom decrypt: key after normalisation"
+    );
+
+    let padded_key = match key_trimmed.len() % 4 {
+        0 => key_trimmed.to_string(),
+        2 => format!("{}==", key_trimmed),
+        3 => format!("{}=", key_trimmed),
+        // len % 4 == 1 is never valid base64
+        _ => {
+            return Err(format!(
+                "Invalid EncodingAESKey length: {} (after whitespace removal / padding strip)",
+                key_trimmed.len()
+            ))
+        }
+    };
+
+    tracing::info!(
+        padded_key = %padded_key,
+        padded_key_len = padded_key.len(),
+        "WeCom decrypt: padded key"
+    );
+
+    // WeCom's EncodingAESKey may have non-zero trailing bits in the last base64 character
+    // (e.g. '3' instead of the canonical '0'). Rust's STANDARD engine rejects this strictly,
+    // so use a lenient engine that ignores trailing bits and accepts optional padding.
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let key_bytes = LENIENT
+        .decode(&padded_key)
+        .map_err(|e| format!("Failed to decode EncodingAESKey: {}. Key was: '{}'", e, padded_key))?;
+    if key_bytes.len() != 32 {
+        return Err(format!(
+            "AES key length invalid after base64 decode: {} (expected 32). Please verify WeCom EncodingAESKey is correct (usually 43 chars, no '=').",
+            key_bytes.len()
+        ));
+    }
+
+    // IV = first 16 bytes of key
+    let iv = &key_bytes[..16];
+
+    // Decode ciphertext
+    tracing::info!(
+        msg_encrypt = %msg_encrypt,
+        msg_encrypt_len = msg_encrypt.len(),
+        "WeCom decrypt: decoding msg_encrypt ciphertext"
+    );
+    let ciphertext = general_purpose::STANDARD
+        .decode(msg_encrypt)
+        .map_err(|e| format!("Failed to decode msg_encrypt (len={}): {}. Value was: '{}'", msg_encrypt.len(), e, msg_encrypt))?;
+
+    // AES-256-CBC decrypt — WeCom uses PKCS7 with block size 32 (not 16),
+    // so pad values 1-32 are valid. Use NoPadding and unpad manually.
+    use aes::cipher::block_padding::NoPadding;
+    let decryptor = Aes256CbcDec::new_from_slices(&key_bytes, iv)
+        .map_err(|e| format!("Failed to create AES decryptor: {}", e))?;
+    let mut buf = ciphertext.clone();
+    let decrypted = decryptor
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|e| format!("AES decrypt failed: {}", e))?;
+    // Manual PKCS7 unpad with block size 32
+    let pad = *decrypted.last().ok_or("AES decrypt: empty output")? as usize;
+    if pad == 0 || pad > 32 {
+        return Err(format!("AES decrypt: invalid PKCS7 pad value {}", pad));
+    }
+    let plaintext = &decrypted[..decrypted.len() - pad];
+
+    // Layout: 16B random | 4B msg_len (big-endian) | msg | corpId
+    if plaintext.len() < 20 {
+        return Err(format!("Decrypted data too short: {} bytes", plaintext.len()));
+    }
+
+    let msg_len = u32::from_be_bytes([
+        plaintext[16], plaintext[17], plaintext[18], plaintext[19],
+    ]) as usize;
+
+    let content_start = 20;
+    let content_end = content_start + msg_len;
+    if content_end > plaintext.len() {
+        return Err(format!(
+            "msg_len {} exceeds plaintext length {}",
+            msg_len,
+            plaintext.len()
+        ));
+    }
+
+    let msg = std::str::from_utf8(&plaintext[content_start..content_end])
+        .map_err(|e| format!("UTF-8 decode failed: {}", e))?;
+
+    Ok(msg.to_string())
+}
 
 /// Send a text message to a WeCom user or group.
 /// `chat_id` can be a user_id (touser) or a group chat_id (chatid).
