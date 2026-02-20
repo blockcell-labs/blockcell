@@ -307,7 +307,8 @@ async fn action_send(workspace: &PathBuf, params: &Value) -> Result<Value> {
 async fn connect_imap(params: &Value) -> Result<async_imap::Session<tokio_util::compat::Compat<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>> {
     use tokio_util::compat::TokioAsyncReadCompatExt;
     use tokio_rustls::TlsConnector;
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, Certificate};
+    use tokio_rustls::rustls::ServerName;
     use std::sync::Arc;
 
     let host = params.get("imap_host").and_then(|v| v.as_str())
@@ -319,17 +320,19 @@ async fn connect_imap(params: &Value) -> Result<async_imap::Session<tokio_util::
         .ok_or_else(|| Error::Validation("IMAP requires 'password'".to_string()))?;
 
     let mut root_store = RootCertStore::empty();
-    let native_certs = rustls_native_certs::load_native_certs();
-    for cert in native_certs.certs {
-        let _ = root_store.add(cert);
+    let native_certs = rustls_native_certs::load_native_certs()
+        .map_err(|e| Error::Tool(format!("Failed to load native certs: {}", e)))?;
+    for cert in native_certs {
+        let _ = root_store.add(&Certificate(cert.as_ref().to_vec()));
     }
 
     let config = ClientConfig::builder()
+        .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
 
-    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+    let server_name = ServerName::try_from(host)
         .map_err(|e| Error::Tool(format!("Invalid IMAP hostname '{}': {}", host, e)))?;
 
     let tcp = tokio::net::TcpStream::connect((host, port)).await
