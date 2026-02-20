@@ -78,49 +78,23 @@ install_from_source() {
 
   echo "Building (release)..."
   os=$(detect_os)
-  arch=$(detect_arch)
-  target=""
+
   if [ "$os" = "linux" ]; then
-    case "$arch" in
-      x86_64) target="x86_64-unknown-linux-musl" ;;
-      aarch64) target="aarch64-unknown-linux-musl" ;;
-    esac
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "Installing build dependencies (pkg-config, libssl-dev, perl, make)..."
+      sudo apt-get update -qq
+      sudo apt-get install -y pkg-config libssl-dev perl make gcc 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y pkgconfig openssl-devel perl make gcc 2>/dev/null || true
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y pkgconfig openssl-devel perl make gcc 2>/dev/null || true
+    fi
   fi
 
-  if [ -n "$target" ]; then
-    if ! command -v musl-gcc >/dev/null 2>&1; then
-      echo "Error: musl build requested but 'musl-gcc' was not found." 1>&2
-      echo "Please install musl tools, then re-run the install script." 1>&2
-      echo "Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y musl-tools" 1>&2
-      exit 1
-    fi
-
-    if command -v rustup >/dev/null 2>&1; then
-      rustup target add "$target" >/dev/null 2>&1 || true
-    fi
-
-    # Some crates (e.g. ring) try to locate a target-specific gcc like
-    # x86_64-linux-musl-gcc. On many distros only 'musl-gcc' exists.
-    # Force the C compiler and linker explicitly.
-    target_env=$(echo "$target" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-
-    (cd "$TMP_DIR/blockcell" \
-      && export RUSTFLAGS="-C target-feature=+crt-static" \
-      && export OPENSSL_VENDORED=1 \
-      && export OPENSSL_STATIC=1 \
-      && eval "export CC_${target_env}=musl-gcc" \
-      && eval "export CARGO_TARGET_${target_env}_LINKER=musl-gcc" \
-      && cargo build --release --target "$target")
-  else
-    (cd "$TMP_DIR/blockcell" && cargo build --release)
-  fi
+  (cd "$TMP_DIR/blockcell" && cargo build --release)
 
   mkdir -p "$INSTALL_DIR"
-  if [ -n "$target" ]; then
-    cp "$TMP_DIR/blockcell/target/$target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-  else
-    cp "$TMP_DIR/blockcell/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-  fi
+  cp "$TMP_DIR/blockcell/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
   chmod +x "$INSTALL_DIR/$BIN_NAME" || true
 }
 

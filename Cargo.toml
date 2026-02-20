@@ -99,10 +99,10 @@ pdf-extract = "0.7"
 csv = "1.3"
 
 # Email
-lettre = { version = "0.11", features = ["smtp-transport", "tokio1-native-tls", "builder"] }
+lettre = { version = "0.11", features = ["smtp-transport", "tokio1-rustls-tls", "builder"], default-features = false }
 async-imap = "0.10"
-async-native-tls = "0.5"
-native-tls = { version = "0.2", features = ["vendored"] }
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"
 
 # SQLite
 rusqlite = { version = "0.31", features = ["bundled"] }

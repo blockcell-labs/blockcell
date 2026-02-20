@@ -304,8 +304,11 @@ async fn action_send(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-async fn connect_imap(params: &Value) -> Result<async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>> {
+async fn connect_imap(params: &Value) -> Result<async_imap::Session<tokio_util::compat::Compat<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>> {
     use tokio_util::compat::TokioAsyncReadCompatExt;
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+    use std::sync::Arc;
 
     let host = params.get("imap_host").and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("IMAP requires 'imap_host'".to_string()))?;
@@ -315,14 +318,26 @@ async fn connect_imap(params: &Value) -> Result<async_imap::Session<async_native
     let password = params.get("password").and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("IMAP requires 'password'".to_string()))?;
 
-    let tls = async_native_tls::TlsConnector::new();
+    let mut root_store = RootCertStore::empty();
+    let native_certs = rustls_native_certs::load_native_certs();
+    for cert in native_certs.certs {
+        let _ = root_store.add(cert);
+    }
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| Error::Tool(format!("Invalid IMAP hostname '{}': {}", host, e)))?;
+
     let tcp = tokio::net::TcpStream::connect((host, port)).await
         .map_err(|e| Error::Tool(format!("IMAP TCP connect error: {}", e)))?;
-    let tcp_compat = tcp.compat();
-    let tls_stream = tls.connect(host, tcp_compat).await
+    let tls_stream = connector.connect(server_name, tcp).await
         .map_err(|e| Error::Tool(format!("IMAP TLS error: {}", e)))?;
 
-    let client = async_imap::Client::new(tls_stream);
+    let client = async_imap::Client::new(tls_stream.compat());
 
     let session = client.login(username, password).await
         .map_err(|e| Error::Tool(format!("IMAP login error: {}", e.0)))?;
