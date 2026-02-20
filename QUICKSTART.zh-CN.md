@@ -10,7 +10,7 @@
 ### 方式 A：安装脚本（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 默认安装到 `~/.local/bin`。

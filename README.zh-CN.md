@@ -57,14 +57,14 @@ blockcell 采用“Rust 宿主 + 可变技能”的架构：
 ### 安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 默认安装到 `~/.local/bin`，也可以指定安装路径：
 
 ```bash
 BLOCKCELL_INSTALL_DIR="$HOME/bin" \
-  curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 ### 源码编译

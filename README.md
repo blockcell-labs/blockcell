@@ -57,14 +57,14 @@ For a step-by-step guide, see: [QUICKSTART.md](QUICKSTART.md)
 ### Install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 By default, this installs `blockcell` to `~/.local/bin`. You can override the location:
 
 ```bash
 BLOCKCELL_INSTALL_DIR="$HOME/bin" \
-  curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 ### Build from source

@@ -31,6 +31,30 @@ detect_arch() {
   esac
 }
 
+github_release_asset_url() {
+  require_cmd curl
+  require_cmd grep
+  require_cmd sed
+
+  os="$1"
+  arch="$2"
+
+  suffix="-${os}-${arch}.tar.gz"
+  api="https://api.github.com/repos/$REPO/releases"
+
+  if [ "$VERSION" = "latest" ]; then
+    json=$(curl -fsSL "$api/latest")
+  else
+    json=$(curl -fsSL "$api/tags/$VERSION")
+  fi
+
+  echo "$json" \
+    | grep -Eo '"browser_download_url"\s*:\s*"[^"]+"' \
+    | sed -E 's/^"browser_download_url"\s*:\s*"(.*)"$/\1/' \
+    | grep -F "$suffix" \
+    | head -n 1
+}
+
 install_from_source() {
   require_cmd git
 
@@ -53,10 +77,35 @@ install_from_source() {
   git clone --depth 1 "https://github.com/$REPO.git" "$TMP_DIR/blockcell"
 
   echo "Building (release)..."
-  (cd "$TMP_DIR/blockcell" && cargo build --release)
+  os=$(detect_os)
+  arch=$(detect_arch)
+  target=""
+  if [ "$os" = "linux" ]; then
+    case "$arch" in
+      x86_64) target="x86_64-unknown-linux-musl" ;;
+      aarch64) target="aarch64-unknown-linux-musl" ;;
+    esac
+  fi
+
+  if [ -n "$target" ]; then
+    if command -v rustup >/dev/null 2>&1; then
+      rustup target add "$target" >/dev/null 2>&1 || true
+    fi
+    (cd "$TMP_DIR/blockcell" \
+      && export RUSTFLAGS="-C target-feature=+crt-static" \
+      && export OPENSSL_VENDORED=1 \
+      && export OPENSSL_STATIC=1 \
+      && cargo build --release --target "$target")
+  else
+    (cd "$TMP_DIR/blockcell" && cargo build --release)
+  fi
 
   mkdir -p "$INSTALL_DIR"
-  cp "$TMP_DIR/blockcell/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  if [ -n "$target" ]; then
+    cp "$TMP_DIR/blockcell/target/$target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  else
+    cp "$TMP_DIR/blockcell/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  fi
   chmod +x "$INSTALL_DIR/$BIN_NAME" || true
 }
 
@@ -75,13 +124,18 @@ install_from_release() {
       ;;
   esac
 
-  asset="blockcell_${os}_${arch}.tar.gz"
-  base="https://github.com/$REPO/releases"
-  if [ "$VERSION" = "latest" ]; then
-    url="$base/latest/download/$asset"
-  else
-    url="$base/download/$VERSION/$asset"
+  case "$arch" in
+    x86_64) arch="amd64" ;;
+    aarch64) arch="arm64" ;;
+  esac
+
+  url=$(github_release_asset_url "$os" "$arch")
+  if [ -z "${url:-}" ]; then
+    echo "Failed to find a matching release asset for OS=$os ARCH=$arch VERSION=$VERSION" 1>&2
+    return 1
   fi
+
+  asset=$(basename "$url")
 
   TMP_DIR=$(mktemp -d)
   cleanup() {

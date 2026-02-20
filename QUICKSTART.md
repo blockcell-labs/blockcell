@@ -10,7 +10,7 @@ This repo contains **blockcell**, a self-evolving AI agent framework in Rust.
 ### Option A: Install script (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/blockcell/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/refs/heads/main/install.sh | sh
 ```
 
 By default, this installs `blockcell` to `~/.local/bin`.
