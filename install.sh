@@ -91,7 +91,22 @@ install_from_source() {
     fi
   fi
 
-  (cd "$TMP_DIR/blockcell" && cargo build --release)
+  # Limit parallel jobs to avoid OOM on low-memory servers (each rustc job can use 1-2 GB)
+  total_mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+  if [ "$total_mem_kb" -gt 0 ] 2>/dev/null; then
+    total_mem_gb=$(( total_mem_kb / 1024 / 1024 ))
+    if [ "$total_mem_gb" -le 2 ]; then
+      build_jobs=1
+    elif [ "$total_mem_gb" -le 4 ]; then
+      build_jobs=2
+    else
+      build_jobs=$(nproc 2>/dev/null || echo 4)
+    fi
+  else
+    build_jobs=$(nproc 2>/dev/null || echo 4)
+  fi
+  echo "Building with $build_jobs parallel job(s)..."
+  (cd "$TMP_DIR/blockcell" && cargo build --release -j "$build_jobs")
 
   mkdir -p "$INSTALL_DIR"
   cp "$TMP_DIR/blockcell/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
