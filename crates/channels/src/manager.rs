@@ -97,6 +97,24 @@ impl ChannelManager {
                     ).await?;
                 }
             }
+            "dingtalk" => {
+                #[cfg(feature = "dingtalk")]
+                {
+                    crate::dingtalk::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                }
+            }
+            "wecom" => {
+                #[cfg(feature = "wecom")]
+                {
+                    crate::wecom::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                }
+            }
+            "lark" => {
+                #[cfg(feature = "lark")]
+                {
+                    crate::lark::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                }
+            }
             "cli" | "cron" | "ws" => {
                 // Internal channels — handled directly, not through external channel dispatch
             }
@@ -167,6 +185,45 @@ impl ChannelManager {
                 "configured".to_string()
             } else {
                 "bot_token not set".to_string()
+            },
+        ));
+
+        // DingTalk
+        let dingtalk_enabled = self.config.channels.dingtalk.enabled;
+        let dingtalk_configured = !self.config.channels.dingtalk.app_key.is_empty();
+        status.push((
+            "dingtalk".to_string(),
+            dingtalk_enabled && dingtalk_configured,
+            if dingtalk_configured {
+                "configured".to_string()
+            } else {
+                "app_key not set".to_string()
+            },
+        ));
+
+        // WeCom
+        let wecom_enabled = self.config.channels.wecom.enabled;
+        let wecom_configured = !self.config.channels.wecom.corp_id.is_empty();
+        status.push((
+            "wecom".to_string(),
+            wecom_enabled && wecom_configured,
+            if wecom_configured {
+                format!("configured (agent_id: {})", self.config.channels.wecom.agent_id)
+            } else {
+                "corp_id not set".to_string()
+            },
+        ));
+
+        // Lark
+        let lark_enabled = self.config.channels.lark.enabled;
+        let lark_configured = !self.config.channels.lark.app_id.is_empty();
+        status.push((
+            "lark".to_string(),
+            lark_enabled && lark_configured,
+            if lark_configured {
+                "configured".to_string()
+            } else {
+                "app_id not set".to_string()
             },
         ));
 

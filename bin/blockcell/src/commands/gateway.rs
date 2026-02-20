@@ -14,6 +14,10 @@ use blockcell_channels::feishu::FeishuChannel;
 use blockcell_channels::slack::SlackChannel;
 #[cfg(feature = "discord")]
 use blockcell_channels::discord::DiscordChannel;
+#[cfg(feature = "dingtalk")]
+use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "wecom")]
+use blockcell_channels::wecom::WeComChannel;
 use blockcell_core::{Config, InboundMessage, Paths};
 use blockcell_scheduler::{CronService, CronJob, JobSchedule, JobPayload, JobState, ScheduleKind, HeartbeatService, GhostService, GhostServiceConfig};
 use blockcell_skills::{new_registry_handle, CoreEvolution};
@@ -1900,6 +1904,51 @@ async fn handle_channels_status(State(state): State<GatewayState>) -> impl IntoR
 }
 
 // ---------------------------------------------------------------------------
+// Lark webhook handler (public, no auth)
+// ---------------------------------------------------------------------------
+
+/// POST /webhook/lark — receives events from Lark (international) via HTTP callback.
+/// This endpoint must be publicly accessible. Configure the URL in the Lark Developer Console
+/// under "Event Subscriptions" → "Request URL": https://your-domain/webhook/lark
+#[cfg(feature = "lark")]
+async fn handle_lark_webhook(
+    State(state): State<GatewayState>,
+    body: String,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if !state.config.channels.lark.enabled {
+        return (StatusCode::OK, axum::Json(serde_json::json!({"code": 0}))).into_response();
+    }
+
+    match blockcell_channels::lark::process_webhook(
+        &state.config,
+        &body,
+        Some(&state.inbound_tx),
+    )
+    .await
+    {
+        Ok(resp_json) => {
+            let val: serde_json::Value = serde_json::from_str(&resp_json)
+                .unwrap_or(serde_json::json!({"code": 0}));
+            (StatusCode::OK, axum::Json(val)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Lark webhook processing error");
+            (StatusCode::OK, axum::Json(serde_json::json!({"code": 0}))).into_response()
+        }
+    }
+}
+
+#[cfg(not(feature = "lark"))]
+async fn handle_lark_webhook(
+    State(_state): State<GatewayState>,
+    _body: String,
+) -> impl IntoResponse {
+    axum::Json(serde_json::json!({"code": 0}))
+}
+
+// ---------------------------------------------------------------------------
 // P1: Cron management endpoints
 // ---------------------------------------------------------------------------
 
@@ -3053,6 +3102,18 @@ fn print_startup_banner(
             },
         },
         ChannelInfo {
+            name: "Lark",
+            enabled: ch.lark.enabled,
+            configured: !ch.lark.app_id.is_empty(),
+            detail: if ch.lark.enabled && !ch.lark.app_id.is_empty() {
+                "webhook: POST /webhook/lark".into()
+            } else if !ch.lark.app_id.is_empty() {
+                "app_id set but not enabled".into()
+            } else {
+                "no app_id configured".into()
+            },
+        },
+        ChannelInfo {
             name: "WhatsApp",
             enabled: ch.whatsapp.enabled,
             configured: true, // always has default bridge_url
@@ -3479,6 +3540,24 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         })
     };
 
+    #[cfg(feature = "dingtalk")]
+    let dingtalk_handle = {
+        let dingtalk = Arc::new(DingTalkChannel::new(config.clone(), inbound_tx.clone()));
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            dingtalk.run_loop(shutdown_rx).await;
+        })
+    };
+
+    #[cfg(feature = "wecom")]
+    let wecom_handle = {
+        let wecom = Arc::new(WeComChannel::new(config.clone(), inbound_tx.clone()));
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            wecom.run_loop(shutdown_rx).await;
+        })
+    };
+
     // ── Build HTTP/WebSocket server ──
     // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above
     // somehow produced None or empty (e.g. env var was whitespace-only).
@@ -3590,6 +3669,8 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/files/upload", post(handle_files_upload))
         .layer(middleware::from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(build_api_cors_layer(&config))
+        // Lark webhook — public endpoint (no auth), must be outside auth middleware
+        .route("/webhook/lark", post(handle_lark_webhook))
         .with_state(gateway_state);
 
     let bind_addr = format!("{}:{}", host, port);
@@ -3663,6 +3744,13 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     #[cfg(feature = "discord")]
     handles.push(("discord", discord_handle));
+
+    #[cfg(feature = "dingtalk")]
+    handles.push(("dingtalk", dingtalk_handle));
+
+    #[cfg(feature = "wecom")]
+    handles.push(("wecom", wecom_handle));
+
 
     let total = handles.len();
     let graceful_timeout = std::time::Duration::from_secs(30);

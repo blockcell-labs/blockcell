@@ -16,4 +16,13 @@ pub mod slack;
 #[cfg(feature = "discord")]
 pub mod discord;
 
+#[cfg(feature = "dingtalk")]
+pub mod dingtalk;
+
+#[cfg(feature = "wecom")]
+pub mod wecom;
+
+#[cfg(feature = "lark")]
+pub mod lark;
+
 pub use manager::ChannelManager;

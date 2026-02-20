@@ -276,15 +276,22 @@ impl SlackChannel {
                         let oldest = latest_ts.get(channel_id).cloned().unwrap_or_else(|| now.clone());
                         match self.poll_messages(channel_id, &oldest).await {
                             Ok(messages) => {
+                                // conversations.history returns messages newest-first.
+                                // Track the maximum ts seen so we don't re-fetch old messages.
+                                let mut max_ts: Option<String> = None;
                                 for msg in messages {
+                                    if let Some(ts) = &msg.ts {
+                                        match &max_ts {
+                                            None => max_ts = Some(ts.clone()),
+                                            Some(cur) if ts > cur => max_ts = Some(ts.clone()),
+                                            _ => {}
+                                        }
+                                    }
                                     if msg.bot_id.is_some() { continue; }
                                     let user = msg.user.as_deref().unwrap_or("");
                                     if user.is_empty() || !self.is_allowed(user) { continue; }
                                     let content = msg.text.clone().unwrap_or_default();
                                     if content.is_empty() { continue; }
-                                    if let Some(ts) = &msg.ts {
-                                        latest_ts.insert(channel_id.clone(), ts.clone());
-                                    }
                                     let inbound = InboundMessage {
                                         channel: "slack".to_string(),
                                         sender_id: user.to_string(),
@@ -301,6 +308,10 @@ impl SlackChannel {
                                     if let Err(e) = self.inbound_tx.send(inbound).await {
                                         error!(error = %e, "Failed to send Slack inbound message");
                                     }
+                                }
+                                // Update cursor to the newest message seen
+                                if let Some(ts) = max_ts {
+                                    latest_ts.insert(channel_id.clone(), ts);
                                 }
                             }
                             Err(e) => {
@@ -421,20 +432,26 @@ pub async fn send_message_threaded(
 
 /// Split text into chunks at newline boundaries, each at most `max_len` chars.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         return vec![text.to_string()];
     }
     let mut chunks = Vec::new();
     let mut remaining = text;
     while !remaining.is_empty() {
-        if remaining.len() <= max_len {
+        if remaining.chars().count() <= max_len {
             chunks.push(remaining.to_string());
             break;
         }
-        let split_at = remaining[..max_len]
+        // Find a safe byte boundary at max_len chars
+        let byte_limit = remaining
+            .char_indices()
+            .nth(max_len)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+        let split_at = remaining[..byte_limit]
             .rfind('\n')
             .map(|i| i + 1)
-            .unwrap_or(max_len);
+            .unwrap_or(byte_limit);
         chunks.push(remaining[..split_at].to_string());
         remaining = &remaining[split_at..];
     }
@@ -476,7 +493,18 @@ mod tests {
         let chunks = split_message(&text, 4000);
         assert!(chunks.len() > 1);
         for chunk in &chunks {
-            assert!(chunk.len() <= 4000);
+            assert!(chunk.chars().count() <= 4000);
+        }
+    }
+
+    #[test]
+    fn test_split_message_chinese() {
+        // Each Chinese char is 3 bytes; 5000 chars = 15000 bytes
+        let text = "Slack消息".repeat(1000);
+        let chunks = split_message(&text, 4000);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 4000, "chunk too long: {} chars", chunk.chars().count());
         }
     }
 

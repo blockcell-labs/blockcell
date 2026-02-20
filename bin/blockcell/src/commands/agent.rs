@@ -13,6 +13,10 @@ use blockcell_channels::feishu::FeishuChannel;
 use blockcell_channels::slack::SlackChannel;
 #[cfg(feature = "discord")]
 use blockcell_channels::discord::DiscordChannel;
+#[cfg(feature = "dingtalk")]
+use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "wecom")]
+use blockcell_channels::wecom::WeComChannel;
 use blockcell_core::{Config, InboundMessage, Paths};
 use blockcell_providers::Provider;
 use blockcell_scheduler::CronService;
@@ -294,6 +298,24 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
             let shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 discord.run_loop(shutdown_rx).await;
+            })
+        };
+
+        #[cfg(feature = "dingtalk")]
+        let dingtalk_handle = {
+            let dingtalk = Arc::new(DingTalkChannel::new(config.clone(), inbound_tx.clone()));
+            let shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                dingtalk.run_loop(shutdown_rx).await;
+            })
+        };
+
+        #[cfg(feature = "wecom")]
+        let wecom_handle = {
+            let wecom = Arc::new(WeComChannel::new(config.clone(), inbound_tx.clone()));
+            let shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                wecom.run_loop(shutdown_rx).await;
             })
         };
 
@@ -590,6 +612,13 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
 
         #[cfg(feature = "discord")]
         handles.push(discord_handle);
+
+        #[cfg(feature = "dingtalk")]
+        handles.push(dingtalk_handle);
+
+        #[cfg(feature = "wecom")]
+        handles.push(wecom_handle);
+
 
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),

@@ -152,7 +152,7 @@ impl DiscordChannel {
         body.get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("{}/?v=10&encoding=json", s))
-            .ok_or_else(|| Error::Channel("No gateway URL in response".to_string()))
+            .ok_or_else(|| Error::Channel(format!("No gateway URL in response: {}", body)))
     }
 
     pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
@@ -176,6 +176,12 @@ impl DiscordChannel {
                             info!("Discord connection closed normally");
                         }
                         Err(e) => {
+                            let msg = e.to_string();
+                            // Fatal errors — stop reconnecting
+                            if msg.contains("Discord fatal close") {
+                                error!("Discord channel stopped due to fatal error: {}", msg);
+                                break;
+                            }
                             error!(error = %e, "Discord connection error, reconnecting in 5s");
                             tokio::select! {
                                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -315,8 +321,21 @@ impl DiscordChannel {
                                 }
                             }
                         }
-                        Some(Ok(WsMessage::Close(_))) => {
-                            info!("Discord Gateway closed connection");
+                        Some(Ok(WsMessage::Close(frame))) => {
+                            let code = frame.as_ref().map(|f| f.code.into()).unwrap_or(0u16);
+                            let reason = frame.as_ref().map(|f| f.reason.as_ref()).unwrap_or("");
+                            info!(close_code = code, reason = %reason, "Discord Gateway closed connection");
+                            // Fatal close codes — do not reconnect
+                            if matches!(code, 4004 | 4010 | 4011 | 4012 | 4013 | 4014) {
+                                let hint = match code {
+                                    4004 => "Invalid bot token — check your Discord bot token",
+                                    4013 => "Invalid intents — check your intent flags",
+                                    4014 => "Disallowed intents — enable MESSAGE_CONTENT privileged intent in Discord Developer Portal (Bot → Privileged Gateway Intents)",
+                                    _ => "Fatal Discord error — will not reconnect",
+                                };
+                                error!(close_code = code, hint = %hint, "Discord fatal close — stopping reconnect");
+                                return Err(Error::Channel(format!("Discord fatal close {}: {}", code, hint)));
+                            }
                             break;
                         }
                         Some(Err(e)) => {
@@ -388,20 +407,39 @@ impl DiscordChannel {
         let msg: DiscordMessage = serde_json::from_value(data)
             .map_err(|e| Error::Channel(format!("Failed to parse Discord message: {}", e)))?;
 
+        info!(
+            user_id = %msg.author.id,
+            username = ?msg.author.username,
+            channel_id = %msg.channel_id,
+            content_len = msg.content.len(),
+            attachments = msg.attachments.len(),
+            is_bot = msg.author.bot.unwrap_or(false),
+            "Discord MESSAGE_CREATE received"
+        );
+
         if msg.author.bot.unwrap_or(false) {
+            debug!("Skipping bot message");
             return Ok(());
         }
 
         if !self.is_allowed(&msg.author.id) {
-            debug!(user_id = %msg.author.id, "Discord user not in allowlist, ignoring");
+            info!(user_id = %msg.author.id, "Discord user not in allowlist, ignoring");
             return Ok(());
         }
 
         if !self.is_monitored_channel(&msg.channel_id) {
+            info!(channel_id = %msg.channel_id, "Discord channel not monitored, ignoring");
             return Ok(());
         }
 
         if msg.content.is_empty() && msg.attachments.is_empty() {
+            warn!(
+                user_id = %msg.author.id,
+                channel_id = %msg.channel_id,
+                "Discord message has empty content and no attachments — \
+                 if you sent text, MESSAGE_CONTENT privileged intent may not be enabled \
+                 in Discord Developer Portal (Bot → Privileged Gateway Intents)"
+            );
             return Ok(());
         }
 
@@ -418,11 +456,25 @@ impl DiscordChannel {
             }
         }
 
+        // Strip leading @mention of the bot (e.g. "<@1234567890> hello" → "hello")
+        let content = msg.content.trim().to_string();
+        let content = if content.starts_with("<@") {
+            if let Some(end) = content.find('>') {
+                content[end + 1..].trim().to_string()
+            } else {
+                content
+            }
+        } else {
+            content
+        };
+
+        info!(content = %content, channel_id = %msg.channel_id, "Forwarding Discord message to agent");
+
         let inbound = InboundMessage {
             channel: "discord".to_string(),
             sender_id: msg.author.id.clone(),
             chat_id: msg.channel_id.clone(),
-            content: msg.content,
+            content,
             media: media_paths,
             metadata: serde_json::json!({
                 "message_id": msg.id,

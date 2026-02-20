@@ -525,6 +525,17 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
         TELEGRAM_API_BASE, config.channels.telegram.token
     );
 
+    let chunks = split_message(text, 4096);
+    for (i, chunk) in chunks.iter().enumerate() {
+        do_send_message(&client, &url, chat_id, chunk).await?;
+        if i + 1 < chunks.len() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn do_send_message(client: &Client, url: &str, chat_id: &str, text: &str) -> Result<()> {
     #[derive(Serialize)]
     struct SendMessageRequest {
         chat_id: String,
@@ -541,7 +552,7 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     };
 
     let response = client
-        .post(&url)
+        .post(url)
         .json(&request)
         .send()
         .await
@@ -568,7 +579,7 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
             "text": text,
         });
         let retry = client
-            .post(&url)
+            .post(url)
             .json(&plain_body)
             .send()
             .await
@@ -584,9 +595,49 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     Err(Error::Channel(format!("Telegram API error: {}", body)))
 }
 
+/// Split a message into chunks at newline boundaries, respecting a max length.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find the best split point within the limit.
+        let mut split_at = max_len;
+        
+        // Ensure split_at is a char boundary before we slice
+        while split_at > 0 && !remaining.is_char_boundary(split_at) {
+            split_at -= 1;
+        }
+        
+        // If we somehow couldn't find a boundary (e.g., max_len too small), fallback to first char
+        if split_at == 0 {
+            split_at = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(max_len);
+        }
+
+        // Try to split on a newline within the safe boundary
+        if let Some(last_newline) = remaining[..split_at].rfind('\n') {
+            split_at = last_newline + 1; // Include the newline in the chunk
+        }
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+
+    chunks
+}
+
 #[cfg(test)]
-mod markdown_tests {
-    use super::escape_markdown_v2;
+mod tests {
+    use super::*;
 
     #[test]
     fn test_escape_plain_text() {
@@ -607,5 +658,39 @@ mod markdown_tests {
         let result = escape_markdown_v2("**bold** _italic_");
         assert!(result.contains("\\*"));
         assert!(result.contains("\\_"));
+    }
+
+    #[test]
+    fn test_split_message_short() {
+        let chunks = split_message("hello world", 4096);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "hello world");
+    }
+
+    #[test]
+    fn test_split_message_long_with_newlines() {
+        let line = "a".repeat(100);
+        let text = (0..50).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        let chunks = split_message(&text, 4096);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 4096);
+            assert!(chunk.ends_with('\n') || chunk == chunks.last().unwrap());
+        }
+    }
+
+    #[test]
+    fn test_split_message_utf8_boundary() {
+        // "你好" is 6 bytes (3 bytes per char).
+        let text = "你好".repeat(1000); // 6000 bytes
+        let chunks = split_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= 4096);
+        assert!(chunks[1].len() <= 4096);
+        // Make sure it split at a valid char boundary (no panic, valid string)
+        assert!(String::from_utf8(chunks[0].as_bytes().to_vec()).is_ok());
+        assert!(String::from_utf8(chunks[1].as_bytes().to_vec()).is_ok());
+        // 4096 / 3 = 1365 with remainder 1. So 1365 * 3 = 4095 is the closest boundary.
+        assert_eq!(chunks[0].len(), 4095); 
     }
 }

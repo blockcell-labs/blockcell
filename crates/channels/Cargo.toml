@@ -16,11 +16,19 @@ chrono = { workspace = true }
 tokio-tungstenite = { workspace = true }
 url = { workspace = true }
 dirs = "5.0"
+prost = "0.13"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha2 = "0.10"
+base64 = "0.22"
 
 [features]
-default = ["telegram", "whatsapp", "feishu", "slack", "discord"]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark"]
 telegram = []
 whatsapp = []
 feishu = []
 slack = []
 discord = []
+dingtalk = []
+wecom = []
+lark = []

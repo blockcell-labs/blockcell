@@ -1,5 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use blockcell_core::{Config, Error, InboundMessage, Result};
+use prost::Message as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -9,7 +10,48 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tracing::{debug, error, info, warn};
 
+/// Feishu WebSocket Protobuf frame (matches pbbp2.proto)
+#[derive(Clone, prost::Message)]
+struct Frame {
+    #[prost(uint64, tag = "1")]
+    seq_id: u64,
+    #[prost(uint64, tag = "2")]
+    log_id: u64,
+    #[prost(uint32, tag = "3")]
+    service: u32,
+    #[prost(uint32, tag = "4")]
+    method: u32,
+    #[prost(message, repeated, tag = "5")]
+    headers: Vec<FrameHeader>,
+    #[prost(string, tag = "6")]
+    payload_encoding: String,
+    #[prost(string, tag = "7")]
+    payload_type: String,
+    #[prost(bytes = "vec", tag = "8")]
+    payload: Vec<u8>,
+    #[prost(string, tag = "9")]
+    log_id_new: String,
+}
+
+#[derive(Clone, prost::Message)]
+struct FrameHeader {
+    #[prost(string, tag = "1")]
+    key: String,
+    #[prost(string, tag = "2")]
+    value: String,
+}
+
+/// method=0 → Control frame, method=1 → Data frame
+const FRAME_METHOD_CONTROL: u32 = 0;
+const FRAME_METHOD_DATA: u32 = 1;
+/// type header values
+const MSG_TYPE_PING: &str = "ping";
+const MSG_TYPE_PONG: &str = "pong";
+#[allow(dead_code)]
+const MSG_TYPE_EVENT: &str = "event";
+
 const FEISHU_OPEN_API: &str = "https://open.feishu.cn/open-apis";
+const FEISHU_BASE: &str = "https://open.feishu.cn";
 /// Refresh token 5 minutes before expiry.
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
 
@@ -184,32 +226,46 @@ impl FeishuChannel {
         Ok(token)
     }
 
-    async fn get_ws_endpoint(&self, token: &str) -> Result<String> {
+    async fn get_ws_endpoint(&self) -> Result<String> {
         let response = self
             .client
-            .post(format!("{}/callback/ws/endpoint", FEISHU_OPEN_API))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&serde_json::json!({}))
+            .post(format!("{}/callback/ws/endpoint", FEISHU_BASE))
+            .header("locale", "zh")
+            .json(&serde_json::json!({
+                "AppID": self.config.channels.feishu.app_id,
+                "AppSecret": self.config.channels.feishu.app_secret,
+            }))
             .send()
             .await
             .map_err(|e| Error::Channel(format!("Failed to get WS endpoint: {}", e)))?;
 
-        let endpoint_resp: WsEndpointResponse = response
-            .json()
+        let status = response.status();
+        let body = response
+            .text()
             .await
-            .map_err(|e| Error::Channel(format!("Failed to parse endpoint response: {}", e)))?;
+            .map_err(|e| Error::Channel(format!("Failed to read endpoint response body: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(Error::Channel(format!(
+                "Feishu endpoint HTTP {}: {}",
+                status, body
+            )));
+        }
+
+        let endpoint_resp: WsEndpointResponse = serde_json::from_str(&body)
+            .map_err(|e| Error::Channel(format!("Failed to parse endpoint response: {} | body: {}", e, &body[..body.len().min(500)])))?;
 
         if endpoint_resp.code != 0 {
             return Err(Error::Channel(format!(
-                "Feishu endpoint error: {}",
-                endpoint_resp.msg
+                "Feishu endpoint error code={} msg={} | body: {}",
+                endpoint_resp.code, endpoint_resp.msg, &body[..body.len().min(500)]
             )));
         }
 
         endpoint_resp
             .data
             .map(|d| d.url)
-            .ok_or_else(|| Error::Channel("No endpoint URL in response".to_string()))
+            .ok_or_else(|| Error::Channel(format!("No endpoint URL in response | body: {}", &body[..body.len().min(500)])))
     }
 
     pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
@@ -253,8 +309,7 @@ impl FeishuChannel {
     }
 
     async fn connect_and_run(&self) -> Result<()> {
-        let token = self.get_tenant_access_token().await?;
-        let ws_url = self.get_ws_endpoint(&token).await?;
+        let ws_url = self.get_ws_endpoint().await?;
 
         info!(url = %ws_url, "Connecting to Feishu WebSocket");
 
@@ -271,9 +326,80 @@ impl FeishuChannel {
 
         while let Some(msg) = read.next().await {
             match msg {
+                Ok(WsMessage::Binary(data)) => {
+                    // Feishu uses Protobuf binary frames
+                    match Frame::decode(data.as_slice()) {
+                        Ok(frame) => {
+                            let msg_type = frame.headers.iter()
+                                .find(|h| h.key == "type")
+                                .map(|h| h.value.as_str())
+                                .unwrap_or("");
+
+                            if frame.method == FRAME_METHOD_CONTROL {
+                                if msg_type == MSG_TYPE_PING {
+                                    // Respond with pong
+                                    let pong = Frame {
+                                        seq_id: frame.seq_id,
+                                        log_id: frame.log_id,
+                                        service: frame.service,
+                                        method: FRAME_METHOD_CONTROL,
+                                        headers: vec![FrameHeader {
+                                            key: "type".to_string(),
+                                            value: MSG_TYPE_PONG.to_string(),
+                                        }],
+                                        payload: frame.payload.clone(),
+                                        ..Default::default()
+                                    };
+                                    let mut buf = Vec::new();
+                                    if prost::Message::encode(&pong, &mut buf).is_ok() {
+                                        if let Err(e) = write.send(WsMessage::Binary(buf.into())).await {
+                                            error!(error = %e, "Failed to send pong frame");
+                                        } else {
+                                            debug!("Sent pong to Feishu");
+                                        }
+                                    }
+                                }
+                            } else if frame.method == FRAME_METHOD_DATA {
+                                // Parse payload as JSON event
+                                debug!(method = frame.method, msg_type = %msg_type, payload_len = frame.payload.len(), "Feishu data frame");
+                                match std::str::from_utf8(&frame.payload) {
+                                    Ok(text) => {
+                                        info!(payload = %&text[..text.len().min(500)], "Feishu raw event payload");
+                                        // Send ACK frame
+                                        let ack = Frame {
+                                            seq_id: frame.seq_id,
+                                            log_id: frame.log_id,
+                                            service: frame.service,
+                                            method: FRAME_METHOD_DATA,
+                                            headers: frame.headers.clone(),
+                                            payload: b"{\"code\":200}".to_vec(),
+                                            ..Default::default()
+                                        };
+                                        let mut buf = Vec::new();
+                                        if prost::Message::encode(&ack, &mut buf).is_ok() {
+                                            if let Err(e) = write.send(WsMessage::Binary(buf.into())).await {
+                                                error!(error = %e, "Failed to send ACK");
+                                            }
+                                        }
+                                        if let Err(e) = self.handle_message(text).await {
+                                            error!(error = %e, "Failed to handle Feishu event");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "Feishu frame payload is not UTF-8");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Failed to decode Feishu Protobuf frame");
+                        }
+                    }
+                }
                 Ok(WsMessage::Text(text)) => {
+                    // Fallback: some frames may be text JSON
                     if let Err(e) = self.handle_message(&text).await {
-                        error!(error = %e, "Failed to handle Feishu message");
+                        error!(error = %e, "Failed to handle Feishu text message");
                     }
                 }
                 Ok(WsMessage::Close(_)) => {
@@ -282,7 +408,7 @@ impl FeishuChannel {
                 }
                 Ok(WsMessage::Ping(data)) => {
                     if let Err(e) = write.send(WsMessage::Pong(data)).await {
-                        error!(error = %e, "Failed to send pong");
+                        error!(error = %e, "Failed to send WS pong");
                     }
                 }
                 Err(e) => {
@@ -360,8 +486,10 @@ impl FeishuChannel {
     }
 
     async fn handle_message(&self, text: &str) -> Result<()> {
-        let event: FeishuEvent = serde_json::from_str(text)
-            .map_err(|e| Error::Channel(format!("Failed to parse Feishu event: {}", e)))?;
+        let event: FeishuEvent = serde_json::from_str(text).map_err(|e| {
+            warn!(error = %e, raw = %&text[..text.len().min(500)], "Failed to parse Feishu event");
+            Error::Channel(format!("Failed to parse Feishu event: {}", e))
+        })?;
 
         let header = match event.header {
             Some(h) => h,

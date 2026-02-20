@@ -231,6 +231,96 @@ pub struct DiscordConfig {
     pub allow_from: Vec<String>,
 }
 
+/// 钉钉 (DingTalk) channel configuration.
+/// Uses DingTalk Stream SDK for real-time message reception.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DingTalkConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// DingTalk app key (AppKey from the developer console)
+    #[serde(default)]
+    pub app_key: String,
+    /// DingTalk app secret (AppSecret from the developer console)
+    #[serde(default)]
+    pub app_secret: String,
+    /// Optional: robot code for sending messages to users
+    #[serde(default)]
+    pub robot_code: String,
+    /// Allowlist of sender user IDs. Empty = allow all.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+/// Lark (international Feishu) channel configuration.
+/// Uses the same WebSocket long-connection protocol as Feishu,
+/// but connects to open.larksuite.com instead of open.feishu.cn.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LarkConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub encrypt_key: String,
+    #[serde(default)]
+    pub verification_token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+/// 企业微信 (WeCom / WeChat Work) channel configuration.
+/// Supports both callback mode (webhook) and polling mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeComConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Enterprise corp ID (企业ID)
+    #[serde(default)]
+    pub corp_id: String,
+    /// Application secret (应用Secret)
+    #[serde(default)]
+    pub corp_secret: String,
+    /// Application agent ID (应用AgentId)
+    #[serde(default)]
+    pub agent_id: i64,
+    /// Callback token for message verification (企业微信回调Token)
+    #[serde(default)]
+    pub callback_token: String,
+    /// AES key for message decryption (EncodingAESKey)
+    #[serde(default)]
+    pub encoding_aes_key: String,
+    /// Allowlist of sender user IDs. Empty = allow all.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// Polling interval in seconds (used when callback is not configured). Default: 10.
+    #[serde(default = "default_wecom_poll_interval")]
+    pub poll_interval_secs: u32,
+}
+
+fn default_wecom_poll_interval() -> u32 {
+    10
+}
+
+impl Default for WeComConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            corp_id: String::new(),
+            corp_secret: String::new(),
+            agent_id: 0,
+            callback_token: String::new(),
+            encoding_aes_key: String::new(),
+            allow_from: Vec::new(),
+            poll_interval_secs: default_wecom_poll_interval(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelsConfig {
@@ -244,6 +334,12 @@ pub struct ChannelsConfig {
     pub slack: SlackConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default)]
+    pub dingtalk: DingTalkConfig,
+    #[serde(default)]
+    pub wecom: WeComConfig,
+    #[serde(default)]
+    pub lark: LarkConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

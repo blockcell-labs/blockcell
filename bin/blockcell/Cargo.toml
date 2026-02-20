@@ -41,9 +41,12 @@ zip = { workspace = true }
 urlencoding = { workspace = true }
 
 [features]
-default = ["telegram", "whatsapp", "feishu", "slack", "discord"]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark"]
 telegram = ["blockcell-channels/telegram"]
 whatsapp = ["blockcell-channels/whatsapp"]
 feishu = ["blockcell-channels/feishu"]
 slack = ["blockcell-channels/slack"]
 discord = ["blockcell-channels/discord"]
+dingtalk = ["blockcell-channels/dingtalk"]
+wecom = ["blockcell-channels/wecom"]
+lark = ["blockcell-channels/lark"]

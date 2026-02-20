@@ -84,6 +84,10 @@ impl ChannelRateLimiter {
 }
 
 /// Per-channel default rate limiters (process-global singletons).
+///
+/// Default limits (conservative, well within free-tier quotas):
+/// - DingTalk  : 20 msg/s  (企业内部应用 limit)
+/// - WeCom     : 20 msg/s  (企业微信 message API limit)
 use std::sync::OnceLock;
 
 static TELEGRAM_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
@@ -91,6 +95,9 @@ static SLACK_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
 static DISCORD_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
 static FEISHU_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
 static WHATSAPP_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
+static DINGTALK_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
+static WECOM_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
+static LARK_RL: OnceLock<ChannelRateLimiter> = OnceLock::new();
 
 pub fn telegram_limiter() -> &'static ChannelRateLimiter {
     TELEGRAM_RL.get_or_init(|| ChannelRateLimiter::new(30, 30.0))
@@ -110,6 +117,18 @@ pub fn feishu_limiter() -> &'static ChannelRateLimiter {
 
 pub fn whatsapp_limiter() -> &'static ChannelRateLimiter {
     WHATSAPP_RL.get_or_init(|| ChannelRateLimiter::new(2, 2.0))
+}
+
+pub fn dingtalk_limiter() -> &'static ChannelRateLimiter {
+    DINGTALK_RL.get_or_init(|| ChannelRateLimiter::new(20, 20.0))
+}
+
+pub fn wecom_limiter() -> &'static ChannelRateLimiter {
+    WECOM_RL.get_or_init(|| ChannelRateLimiter::new(20, 20.0))
+}
+
+pub fn lark_limiter() -> &'static ChannelRateLimiter {
+    LARK_RL.get_or_init(|| ChannelRateLimiter::new(5, 5.0))
 }
 
 #[cfg(test)]
