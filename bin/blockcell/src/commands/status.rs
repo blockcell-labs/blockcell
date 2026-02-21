@@ -121,6 +121,36 @@ pub async fn run() -> anyhow::Result<()> {
             "✗ not configured"
         }
     );
+    println!(
+        "  dingtalk:  {}",
+        if config.channels.dingtalk.enabled && !config.channels.dingtalk.app_key.is_empty() {
+            "✓ enabled"
+        } else if !config.channels.dingtalk.app_key.is_empty() {
+            "configured (disabled)"
+        } else {
+            "✗ not configured"
+        }
+    );
+    println!(
+        "  wecom:     {}",
+        if config.channels.wecom.enabled && !config.channels.wecom.corp_id.is_empty() {
+            format!("✓ enabled (agent_id: {})", config.channels.wecom.agent_id)
+        } else if !config.channels.wecom.corp_id.is_empty() {
+            "configured (disabled)".to_string()
+        } else {
+            "✗ not configured".to_string()
+        }
+    );
+    println!(
+        "  lark:      {}",
+        if config.channels.lark.enabled && !config.channels.lark.app_id.is_empty() {
+            "✓ enabled (webhook: POST /webhook/lark)"
+        } else if !config.channels.lark.app_id.is_empty() {
+            "configured (disabled)"
+        } else {
+            "✗ not configured"
+        }
+    );
 
     Ok(())
 }

@@ -108,6 +108,10 @@ impl ContextBuilder {
     /// Build system prompt filtered by intent categories.
     /// This is the core optimization: only inject relevant rules, tools, and domain knowledge.
     pub fn build_system_prompt_for_intents(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>) -> String {
+        self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, "")
+    }
+
+    pub fn build_system_prompt_for_intents_with_channel(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>, channel: &str) -> String {
         let mut prompt = String::new();
         let is_chat = intents.len() == 1 && intents[0] == IntentCategory::Chat;
 
@@ -139,7 +143,7 @@ impl ContextBuilder {
         if !is_chat {
             prompt.push_str("## Important Rules\n");
             prompt.push_str("- For normal conversation, respond directly with text.\n");
-            prompt.push_str("- Only use the `message` tool when you need to send to a specific channel/chat.\n");
+            prompt.push_str("- Use the `message` tool to send images/files/media to the user. Provide file paths in the `media` array parameter. You can also use it to send to a different channel/chat.\n");
             prompt.push_str("- Use tools when needed to accomplish tasks. Tool descriptions in the schema explain usage.\n");
             prompt.push_str("- To use a skill, first read its SKILL.md file using read_file tool.\n");
             prompt.push_str("- The `read_file` tool can directly read Office documents (.xlsx, .xls, .docx, .pptx).\n");
@@ -148,7 +152,19 @@ impl ContextBuilder {
             prompt.push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
             prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
             prompt.push_str("- **Web content**: `web_fetch` returns markdown by default — uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents). If server supports it, markdown is returned directly with ~80% token savings. Otherwise HTML is converted to markdown locally. Use `browse` for full browser automation (CDP) — `get_content` also returns markdown. Use `web_fetch` extractMode='raw' only when you need the original HTML.\n");
-            prompt.push_str("- **Media display**: The WebUI can render images and play audio inline. To show an image or audio file, include the full file path in your response text (e.g. `/Users/apple/.blockcell/workspace/photo.jpg`). The frontend will auto-detect media paths and render them. You can also use markdown image syntax: `![description](file_path)`. NEVER say you cannot display images — you CAN.\n");
+            // Media display rule depends on channel type:
+            // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
+            // - IM channels (wecom/feishu/lark/telegram/slack/discord/dingtalk/whatsapp):
+            //   markdown is NOT rendered; sending media MUST go through notification tool
+            let is_im_channel = matches!(channel, "wecom" | "feishu" | "lark" | "telegram" | "slack" | "discord" | "dingtalk" | "whatsapp");
+            if is_im_channel {
+                prompt.push_str("- **当前渠道为 IM 聊天（不渲染 Markdown）**: 不要在回复文字中使用 markdown 图片语法（如 `![](path)`），IM 端不会渲染。若需展示图片内容，用文字描述即可。\n");
+                prompt.push_str("- **发送图片/文件给用户（⚠️ 必须调用 message 工具，否则文件不会发出）**: 当用户要求发回图片/文件时，**必须**调用 `message` 工具，参数示例：`{\"media\": [\"/root/.blockcell/workspace/media/xxx.jpg\"], \"content\": \"这是你要的图片\"}`。**绝对禁止**在不调用工具的情况下直接回复\"发送成功\"——那是幻觉，图片根本没有发出去。\n");
+            } else {
+                prompt.push_str("- **Media display**: The WebUI can render images and play audio inline. To show an image or audio file, include the full file path in your response text (e.g. `/root/.blockcell/workspace/photo.jpg`). The frontend will auto-detect media paths and render them. You can also use markdown image syntax: `![description](file_path)`. NEVER say you cannot display images — you CAN.\n");
+                prompt.push_str("- **发送图片/文件给用户（通过聊天渠道）**: 调用 `message` 工具，参数 `media=[\"<本地文件路径>\"]`。仅在回复文字中写 markdown 图片语法无法真正发送文件，必须用工具调用。\n");
+            }
+            prompt.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。\n");
             prompt.push_str("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.\n");
             prompt.push_str("- **Community Hub**: Use the `community_hub` tool (NOT a skill directory) for social interactions. Actions: heartbeat, trending, search_skills, feed, post, like, reply, get_replies, node_search. Hub URL and API key are resolved automatically from config — just call the action directly. If not configured, the tool returns an error.\n");
             prompt.push_str("\n");
@@ -389,10 +405,27 @@ impl ContextBuilder {
         disabled_skills: &HashSet<String>,
         disabled_tools: &HashSet<String>,
     ) -> Vec<ChatMessage> {
+        self.build_messages_for_intents_with_channel(history, user_content, media, intents, disabled_skills, disabled_tools, "", false)
+    }
+
+    /// Build messages with intent-based filtering and channel context.
+    /// `pending_intent`: when true the channel already sent an ack; skip image base64 embedding
+    /// so the LLM only sees the path text and asks the user what to do instead of auto-analyzing.
+    pub fn build_messages_for_intents_with_channel(
+        &self,
+        history: &[ChatMessage],
+        user_content: &str,
+        media: &[String],
+        intents: &[IntentCategory],
+        disabled_skills: &HashSet<String>,
+        disabled_tools: &HashSet<String>,
+        channel: &str,
+        pending_intent: bool,
+    ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
 
-        // System prompt (intent-filtered)
-        messages.push(ChatMessage::system(&self.build_system_prompt_for_intents(intents, disabled_skills, disabled_tools)));
+        // System prompt (intent-filtered, channel-aware)
+        messages.push(ChatMessage::system(&self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, channel)));
 
         // History (Method E: smart compression)
         let compressed = Self::compress_history(history);
@@ -407,7 +440,27 @@ impl ContextBuilder {
             messages.push(ChatMessage::user(&trimmed));
         } else {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            messages.push(self.build_multimodal_message(&trimmed, media));
+            // Always append file paths as text so the LLM knows the real local path.
+            let all_paths: Vec<&str> = media.iter()
+                .filter(|p| !p.is_empty())
+                .map(|p| p.as_str())
+                .collect();
+            let text_with_paths = if all_paths.is_empty() {
+                trimmed
+            } else {
+                let paths_str = all_paths.iter()
+                    .map(|p| format!("- `{}`", p))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}", trimmed, paths_str)
+            };
+            if pending_intent {
+                // Channel already sent ack; do NOT embed image as base64.
+                // LLM only sees the path text and the question — it should ask what to do.
+                messages.push(ChatMessage::user(&text_with_paths));
+            } else {
+                messages.push(self.build_multimodal_message(&text_with_paths, media));
+            }
         }
 
         messages
@@ -444,6 +497,11 @@ impl ContextBuilder {
             tool_call_id: None,
             name: None,
         }
+    }
+
+    fn is_image_path(path: &str) -> bool {
+        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+        matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "tiff" | "ico")
     }
 
     fn encode_image_to_base64(&self, path: &str) -> Option<String> {

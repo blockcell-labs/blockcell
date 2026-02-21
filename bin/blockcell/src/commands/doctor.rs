@@ -176,6 +176,8 @@ pub async fn run() -> anyhow::Result<()> {
     check_channel("feishu", ch.feishu.enabled, !ch.feishu.app_id.is_empty());
     check_channel("slack", ch.slack.enabled, !ch.slack.bot_token.is_empty());
     check_channel("discord", ch.discord.enabled, !ch.discord.bot_token.is_empty());
+    check_channel("dingtalk", ch.dingtalk.enabled, !ch.dingtalk.app_key.is_empty());
+    check_channel("wecom", ch.wecom.enabled, !ch.wecom.corp_id.is_empty());
     println!();
 
     // --- 7. Gateway ---

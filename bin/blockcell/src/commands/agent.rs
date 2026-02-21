@@ -619,7 +619,6 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
         #[cfg(feature = "wecom")]
         handles.push(wecom_handle);
 
-
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             futures::future::join_all(handles),

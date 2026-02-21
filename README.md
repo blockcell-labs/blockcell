@@ -59,7 +59,7 @@ blockcell uses a "Rust host + skills" architecture:
 - `crates/skills` - Rhai engine, skill manager/evolution service, capability registry/core evolution
 - `crates/storage` - sessions, audit, memory (SQLite)
 - `crates/scheduler` - cron + heartbeat
-- `crates/channels` - Telegram/WhatsApp/Feishu adapters (feature-gated)
+- `crates/channels` - Messaging channel adapters: Telegram, WhatsApp, Feishu, Slack, Discord, DingTalk, WeCom, Lark (all feature-gated)
 - `crates/providers` - OpenAI-compatible provider client
 - `crates/updater` - self-upgrade utilities
 - `docs/` - design docs (architecture, memory, skill sharing)
@@ -136,6 +136,65 @@ Minimal example (key fields only):
 }
 ```
 
+## Channels
+
+All 8 messaging channels are enabled by default (Cargo features). Configure them in `~/.blockcell/config.json`:
+
+| Channel | Mode | Key fields |
+|---------|------|------------|
+| **Telegram** | Long polling | `token` (from BotFather) |
+| **WhatsApp** | WebSocket bridge | `bridgeUrl` (mautrix-whatsapp) |
+| **Feishu** (飞书) | WebSocket long-connection | `appId`, `appSecret`, `encryptKey` |
+| **Slack** | REST polling | `botToken`, `appToken`, `channels` |
+| **Discord** | Gateway WebSocket | `botToken`, `channels` |
+| **DingTalk** (钉钉) | Stream SDK WebSocket | `appKey`, `appSecret`, `robotCode` |
+| **WeCom** (企业微信) | Polling + webhook | `corpId`, `corpSecret`, `agentId` |
+| **Lark** (international) | HTTP webhook | `appId`, `appSecret`, `encryptKey` — webhook: `POST /webhook/lark` |
+
+See [`docs/channels/`](docs/channels/) for per-channel setup guides.
+
+### Channel config example
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "allowFrom": ["123456789"]
+    },
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_SECRET",
+      "encryptKey": "YOUR_ENCRYPT_KEY",
+      "allowFrom": []
+    },
+    "dingtalk": {
+      "enabled": true,
+      "appKey": "YOUR_APP_KEY",
+      "appSecret": "YOUR_APP_SECRET",
+      "robotCode": "YOUR_ROBOT_CODE",
+      "allowFrom": []
+    },
+    "wecom": {
+      "enabled": true,
+      "corpId": "YOUR_CORP_ID",
+      "corpSecret": "YOUR_SECRET",
+      "agentId": 1000001,
+      "allowFrom": []
+    },
+    "lark": {
+      "enabled": true,
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_SECRET",
+      "encryptKey": "YOUR_ENCRYPT_KEY",
+      "allowFrom": []
+    }
+  }
+}
+```
+
 ## Notes
 
 - In interactive mode, file/exec tools that touch paths outside `~/.blockcell/workspace` require explicit confirmation.
@@ -143,7 +202,7 @@ Minimal example (key fields only):
 - Gateway authentication:
   - If `gateway.apiToken` is set, call APIs with `Authorization: Bearer <token>` (or `?token=<token>`).
   - WebUI login uses the same token as password.
-- Channel modules are behind Cargo features (enabled by default in `bin/blockcell`): `telegram`, `whatsapp`, `feishu`, `slack`, `discord`.
+- Channel modules are behind Cargo features (all enabled by default in `bin/blockcell`): `telegram`, `whatsapp`, `feishu`, `slack`, `discord`, `dingtalk`, `wecom`, `lark`.
 
 ## License
 

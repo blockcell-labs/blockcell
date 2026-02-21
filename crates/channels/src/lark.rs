@@ -17,9 +17,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const LARK_OPEN_API: &str = "https://open.larksuite.com/open-apis";
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
@@ -106,6 +107,49 @@ pub struct SenderId {
 #[derive(Debug, Deserialize)]
 struct MessageContent {
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageContent {
+    image_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioContent {
+    file_key: Option<String>,
+    duration: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileContent {
+    file_key: Option<String>,
+    file_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StickerContent {
+    file_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostContent {
+    #[serde(rename = "zh_cn")]
+    zh_cn: Option<PostBody>,
+    #[serde(rename = "en_us")]
+    en_us: Option<PostBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostBody {
+    title: Option<String>,
+    content: Option<Vec<Vec<PostElement>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostElement {
+    tag: Option<String>,
+    text: Option<String>,
+    href: Option<String>,
 }
 
 /// Response for url_verification challenge.
@@ -268,12 +312,113 @@ pub async fn process_webhook(
         return Ok(serde_json::json!({ "code": 0 }).to_string());
     }
 
-    // Parse message content
-    let text = match message.message_type.as_str() {
+    // Parse message content and optional media
+    let (text, media_paths) = match message.message_type.as_str() {
         "text" => {
             let content: MessageContent = serde_json::from_str(&message.content)
                 .unwrap_or(MessageContent { text: None });
-            content.text.unwrap_or_default().trim().to_string()
+            let t = content.text.unwrap_or_default().trim().to_string();
+            if t.is_empty() {
+                return Ok(serde_json::json!({ "code": 0 }).to_string());
+            }
+            (t, vec![])
+        }
+        "image" => {
+            let content: ImageContent = serde_json::from_str(&message.content)
+                .unwrap_or(ImageContent { image_key: None });
+            let paths = if let Some(key) = content.image_key {
+                info!(image_key = %key, "Lark webhook: received image");
+                match download_lark_resource(config, &key, "image", "jpg").await {
+                    Ok(p) => vec![p],
+                    Err(e) => { warn!(error = %e, "Lark: failed to download image"); vec![] }
+                }
+            } else { vec![] };
+            ("[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(), paths)
+        }
+        "audio" => {
+            let content: AudioContent = serde_json::from_str(&message.content)
+                .unwrap_or(AudioContent { file_key: None, duration: None });
+            let duration_ms = content.duration.unwrap_or(0);
+            let paths = if let Some(key) = content.file_key {
+                info!(file_key = %key, "Lark webhook: received audio");
+                match download_lark_resource(config, &key, "file", "opus").await {
+                    Ok(p) => vec![p],
+                    Err(e) => { warn!(error = %e, "Lark: failed to download audio"); vec![] }
+                }
+            } else { vec![] };
+            let desc = format!("[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]", duration_ms);
+            (desc, paths)
+        }
+        "file" => {
+            let content: FileContent = serde_json::from_str(&message.content)
+                .unwrap_or(FileContent { file_key: None, file_name: None });
+            let file_name = content.file_name.clone().unwrap_or_default();
+            let ext = file_name.rsplit('.').next().unwrap_or("bin").to_string();
+            let paths = if let Some(key) = content.file_key {
+                info!(file_key = %key, file_name = %file_name, "Lark webhook: received file");
+                match download_lark_resource(config, &key, "file", &ext).await {
+                    Ok(p) => vec![p],
+                    Err(e) => { warn!(error = %e, "Lark: failed to download file"); vec![] }
+                }
+            } else { vec![] };
+            let desc = if file_name.is_empty() {
+                "[文件，已下载到本地，可用 read_file 读取]".to_string()
+            } else {
+                format!("[文件: {}，已下载到本地，可用 read_file 读取]", file_name)
+            };
+            (desc, paths)
+        }
+        "media" => {
+            let content: FileContent = serde_json::from_str(&message.content)
+                .unwrap_or(FileContent { file_key: None, file_name: None });
+            let file_name = content.file_name.clone().unwrap_or_default();
+            let paths = if let Some(key) = content.file_key {
+                info!(file_key = %key, "Lark webhook: received video");
+                match download_lark_resource(config, &key, "file", "mp4").await {
+                    Ok(p) => vec![p],
+                    Err(e) => { warn!(error = %e, "Lark: failed to download video"); vec![] }
+                }
+            } else { vec![] };
+            let desc = if file_name.is_empty() {
+                "[视频，已下载到本地]".to_string()
+            } else {
+                format!("[视频: {}，已下载到本地]", file_name)
+            };
+            (desc, paths)
+        }
+        "sticker" => {
+            let content: StickerContent = serde_json::from_str(&message.content)
+                .unwrap_or(StickerContent { file_key: None });
+            let paths = if let Some(key) = content.file_key {
+                match download_lark_resource(config, &key, "image", "png").await {
+                    Ok(p) => vec![p],
+                    Err(e) => { warn!(error = %e, "Lark: failed to download sticker"); vec![] }
+                }
+            } else { vec![] };
+            ("[表情包图片，已下载到本地，可直接查看]".to_string(), paths)
+        }
+        "post" => {
+            let post: PostContent = serde_json::from_str(&message.content)
+                .unwrap_or(PostContent { zh_cn: None, en_us: None });
+            let body = post.zh_cn.or(post.en_us);
+            let text = if let Some(b) = body {
+                let title = b.title.unwrap_or_default();
+                let body_text = b.content.unwrap_or_default().into_iter().flatten()
+                    .filter_map(|el| {
+                        match el.tag.as_deref() {
+                            Some("text") => el.text,
+                            Some("a") => Some(format!("{} ({})", el.text.unwrap_or_default(), el.href.unwrap_or_default())),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if title.is_empty() { body_text } else { format!("{}\n{}", title, body_text) }
+            } else { String::new() };
+            if text.is_empty() {
+                return Ok(serde_json::json!({ "code": 0 }).to_string());
+            }
+            (text, vec![])
         }
         other => {
             debug!(msg_type = %other, "Lark webhook: unsupported message type");
@@ -281,14 +426,10 @@ pub async fn process_webhook(
         }
     };
 
-    if text.is_empty() {
-        return Ok(serde_json::json!({ "code": 0 }).to_string());
-    }
-
     info!(
         chat_id = %message.chat_id,
         open_id = %open_id,
-        len = text.len(),
+        msg_type = %message.message_type,
         "Lark webhook: inbound message"
     );
 
@@ -298,8 +439,11 @@ pub async fn process_webhook(
             chat_id: message.chat_id.clone(),
             sender_id: open_id.to_string(),
             content: text,
-            media: vec![],
-            metadata: serde_json::Value::Null,
+            media: media_paths,
+            metadata: serde_json::json!({
+                "message_id": message.message_id,
+                "message_type": message.message_type,
+            }),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         tx.send(inbound)
@@ -308,6 +452,73 @@ pub async fn process_webhook(
     }
 
     Ok(serde_json::json!({ "code": 0 }).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Media download (inbound)
+// ---------------------------------------------------------------------------
+
+/// Download a Lark image or file resource by key.
+/// Images: GET /im/v1/messages/{msg_id}/resources/{image_key}?type=image
+/// Files:  GET /im/v1/messages/{msg_id}/resources/{file_key}?type=file
+/// Saves to `~/.blockcell/media/lark_{key}.{ext}` and returns the local path.
+async fn download_lark_resource(
+    config: &Config,
+    resource_key: &str,
+    resource_type: &str,
+    ext: &str,
+) -> Result<String> {
+    let token = get_cached_token(config).await?;
+
+    let url = format!(
+        "{}/im/v1/messages/resources?file_key={}&type={}",
+        LARK_OPEN_API, resource_key, resource_type
+    );
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Lark resource download failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!(
+            "Lark resource download HTTP {}: {}",
+            status, body
+        )));
+    }
+
+    let media_dir = dirs::home_dir()
+        .map(|h| h.join(".blockcell").join("workspace").join("media"))
+        .unwrap_or_else(|| PathBuf::from(".blockcell/workspace/media"));
+    tokio::fs::create_dir_all(&media_dir)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+    let safe_key = resource_key.replace(['/', '\\', ':'], "_");
+    let filename = format!("lark_{}_{}.{}", resource_type, &safe_key[..safe_key.len().min(24)], ext);
+    let file_path = media_dir.join(&filename);
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| Error::Channel(format!("Lark resource read body failed: {}", e)))?;
+
+    tokio::fs::write(&file_path, &bytes)
+        .await
+        .map_err(|e| Error::Channel(format!("Lark resource write failed: {}", e)))?;
+
+    let path_str = file_path.to_string_lossy().to_string();
+    info!(path = %path_str, bytes = bytes.len(), "Lark: resource downloaded");
+    Ok(path_str)
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +618,225 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     if !response.status().is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(Error::Channel(format!("Lark API send error: {}", body)));
+    }
+
+    Ok(())
+}
+
+/// Upload a local file to Lark and return the `file_key`.
+/// `file_type` must be one of: image / opus / mp4 / pdf / doc / xls / ppt / stream
+pub async fn upload_lark_file(
+    config: &Config,
+    file_path: &str,
+    file_type: &str,
+) -> Result<String> {
+    let token = get_cached_token(config).await?;
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+
+    let mime = lark_mime_for_path(file_path);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
+
+    // Images use /im/v1/images, other files use /im/v1/files
+    let is_image = matches!(file_type, "image");
+
+    if is_image {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+        let form = reqwest::multipart::Form::new()
+            .text("image_type", "message")
+            .part("image", part);
+
+        #[derive(Deserialize)]
+        struct ImageUploadResp {
+            code: i32,
+            msg: String,
+            data: Option<ImageUploadData>,
+        }
+        #[derive(Deserialize)]
+        struct ImageUploadData {
+            image_key: String,
+        }
+
+        let resp = client
+            .post(format!("{}/im/v1/images", LARK_OPEN_API))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Lark image upload failed: {}", e)))?;
+
+        let result: ImageUploadResp = resp
+            .json()
+            .await
+            .map_err(|e| Error::Channel(format!("Lark image upload parse failed: {}", e)))?;
+
+        if result.code != 0 {
+            return Err(Error::Channel(format!(
+                "Lark image upload error {}: {}",
+                result.code, result.msg
+            )));
+        }
+
+        return result
+            .data
+            .map(|d| d.image_key)
+            .ok_or_else(|| Error::Channel("Lark image upload: no image_key".to_string()));
+    }
+
+    // Non-image files
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name.clone())
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+    let form = reqwest::multipart::Form::new()
+        .text("file_type", file_type.to_string())
+        .text("file_name", file_name)
+        .part("file", part);
+
+    #[derive(Deserialize)]
+    struct FileUploadResp {
+        code: i32,
+        msg: String,
+        data: Option<FileUploadData>,
+    }
+    #[derive(Deserialize)]
+    struct FileUploadData {
+        file_key: String,
+    }
+
+    let resp = client
+        .post(format!("{}/im/v1/files", LARK_OPEN_API))
+        .header("Authorization", format!("Bearer {}", token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Lark file upload failed: {}", e)))?;
+
+    let result: FileUploadResp = resp
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("Lark file upload parse failed: {}", e)))?;
+
+    if result.code != 0 {
+        return Err(Error::Channel(format!(
+            "Lark file upload error {}: {}",
+            result.code, result.msg
+        )));
+    }
+
+    result
+        .data
+        .map(|d| d.file_key)
+        .ok_or_else(|| Error::Channel("Lark file upload: no file_key".to_string()))
+}
+
+fn lark_mime_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "amr" => "audio/amr",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+fn lark_file_type_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => "image",
+        "opus" | "amr" | "mp3" | "wav" | "m4a" => "opus",
+        "mp4" | "avi" | "mov" | "mkv" => "mp4",
+        "pdf" => "pdf",
+        "doc" | "docx" => "doc",
+        "xls" | "xlsx" => "xls",
+        "ppt" | "pptx" => "ppt",
+        _ => "stream",
+    }
+}
+
+/// Send a media message (image/audio/video/file) to a Lark chat.
+/// Automatically uploads the file first to get a key, then sends the appropriate message type.
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::lark_limiter().acquire().await;
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let file_type = lark_file_type_for_ext(&ext);
+    let is_image = file_type == "image";
+
+    info!(file_path = %file_path, file_type = %file_type, "Lark: uploading media");
+    let key = upload_lark_file(config, file_path, file_type).await?;
+    info!(key = %key, "Lark: media uploaded");
+
+    let token = get_cached_token(config).await?;
+
+    let (msg_type, content) = if is_image {
+        ("image", serde_json::json!({ "image_key": key }).to_string())
+    } else if matches!(ext.as_str(), "opus" | "amr" | "mp3" | "wav" | "m4a") {
+        ("audio", serde_json::json!({ "file_key": key }).to_string())
+    } else if matches!(ext.as_str(), "mp4" | "avi" | "mov" | "mkv") {
+        ("media", serde_json::json!({ "file_key": key }).to_string())
+    } else {
+        ("file", serde_json::json!({ "file_key": key }).to_string())
+    };
+
+    #[derive(Serialize)]
+    struct SendRequest<'a> {
+        receive_id: &'a str,
+        msg_type: &'a str,
+        content: String,
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
+
+    let response = client
+        .post(format!("{}/im/v1/messages?receive_id_type=chat_id", LARK_OPEN_API))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&SendRequest {
+            receive_id: chat_id,
+            msg_type,
+            content,
+        })
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Lark send_media_message request failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!("Lark API send media error: {}", body)));
     }
 
     Ok(())

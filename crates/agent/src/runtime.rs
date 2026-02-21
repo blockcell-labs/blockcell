@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
+use regex::Regex;
 
 use crate::context::ContextBuilder;
 use crate::task_manager::TaskManager;
@@ -123,6 +124,93 @@ fn summarize_result(result: &str) -> String {
         result.to_string()
     } else {
         format!("{}... (truncated)", truncate_str(result, max_chars))
+    }
+}
+
+fn is_im_channel(channel: &str) -> bool {
+    matches!(
+        channel,
+        "wecom" | "feishu" | "lark" | "telegram" | "slack" | "discord" | "dingtalk" | "whatsapp"
+    )
+}
+
+fn user_wants_send_image(text: &str) -> bool {
+    let t = text.to_lowercase();
+    let has_send = t.contains("发") || t.contains("发送") || t.contains("发给") || t.contains("send");
+    let has_image = t.contains("图片")
+        || t.contains("照片")
+        || t.contains("相片")
+        || t.contains("截图")
+        || t.contains("图像")
+        || t.contains("image")
+        || t.contains("photo");
+    has_send && has_image
+}
+
+fn chat_message_text(msg: &ChatMessage) -> String {
+    match &msg.content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+async fn pick_image_path(paths: &Paths, history: &[ChatMessage]) -> Option<String> {
+    let re_abs = Regex::new(r#"(/[^\s`"']+\.(?i:jpg|jpeg|png|gif|webp|bmp))"#).ok()?;
+    let re_name = Regex::new(r#"([A-Za-z0-9._-]+\.(?i:jpg|jpeg|png|gif|webp|bmp))"#).ok()?;
+
+    let media_dir = paths.media_dir();
+
+    for msg in history.iter().rev() {
+        let text = chat_message_text(msg);
+
+        for cap in re_abs.captures_iter(&text) {
+            let p = cap.get(1)?.as_str().to_string();
+            if tokio::fs::metadata(&p).await.is_ok() {
+                let ok_under_media_dir = std::fs::canonicalize(&p)
+                    .ok()
+                    .and_then(|cp| std::fs::canonicalize(&media_dir).ok().map(|md| (cp, md)))
+                    .map(|(cp, md)| cp.starts_with(md))
+                    .unwrap_or(false);
+                if ok_under_media_dir {
+                    return Some(p);
+                }
+            }
+        }
+
+        for cap in re_name.captures_iter(&text) {
+            let file_name = cap.get(1)?.as_str();
+            let p = media_dir.join(file_name);
+            if tokio::fs::metadata(&p).await.is_ok() {
+                return Some(p.display().to_string());
+            }
+        }
+    }
+
+    let mut rd = tokio::fs::read_dir(&media_dir).await.ok()?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp") {
+            return Some(p.display().to_string());
+        }
+    }
+
+    None
+}
+
+fn overwrite_last_assistant_message(history: &mut Vec<ChatMessage>, new_text: &str) {
+    if let Some(last) = history.last_mut() {
+        if last.role == "assistant" {
+            last.content = serde_json::Value::String(new_text.to_string());
+        }
     }
 }
 
@@ -537,8 +625,11 @@ impl AgentRuntime {
         // Build messages for LLM with intent-filtered system prompt (Methods A+B+C+D+E+F)
         // Note: build_messages_for_intents appends the current user message from user_content,
         // so we pass history WITHOUT the current user message to avoid duplication.
-        let messages = self.context_builder.build_messages_for_intents(
-            &history, &msg.content, &msg.media, &intents, &disabled_skills, &disabled_tools,
+        let pending_intent = msg.metadata.get("media_pending_intent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let messages = self.context_builder.build_messages_for_intents_with_channel(
+            &history, &msg.content, &msg.media, &intents, &disabled_skills, &disabled_tools, &msg.channel, pending_intent,
         );
 
         // Now add user message to history for session persistence
@@ -594,6 +685,7 @@ impl AgentRuntime {
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
         let mut current_messages = messages;
         let mut final_response = String::new();
+        let mut message_tool_sent_media = false;
 
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
@@ -632,6 +724,15 @@ impl AgentRuntime {
 
             // Handle tool calls
             if !response.tool_calls.is_empty() {
+                let short_circuit_after_tools = is_im_channel(&msg.channel)
+                    && response.tool_calls.iter().all(|c| c.name == "message")
+                    && response.tool_calls.iter().all(|c| {
+                        let ch = c.arguments.get("channel").and_then(|v| v.as_str());
+                        let to = c.arguments.get("chat_id").and_then(|v| v.as_str());
+                        ch.map(|s| s == msg.channel).unwrap_or(true)
+                            && to.map(|s| s == msg.chat_id).unwrap_or(true)
+                    });
+
                 // Add assistant message with tool calls
                 let mut assistant_msg = ChatMessage::assistant(response.content.as_deref().unwrap_or(""));
                 assistant_msg.reasoning_content = response.reasoning_content.clone();
@@ -643,6 +744,17 @@ impl AgentRuntime {
                 let mut supplemented_tools = false;
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 for tool_call in &response.tool_calls {
+                    if tool_call.name == "message" {
+                        let has_media = tool_call
+                            .arguments
+                            .get("media")
+                            .and_then(|v| v.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if has_media {
+                            message_tool_sent_media = true;
+                        }
+                    }
                     let result = self.execute_tool_call(tool_call, &msg).await;
 
                     // If tool was not found, try to supplement it dynamically
@@ -682,6 +794,11 @@ impl AgentRuntime {
                     current_messages.push(tool_msg.clone());
                     history.push(tool_msg);
                 }
+
+                if short_circuit_after_tools {
+                    final_response.clear();
+                    break;
+                }
             } else {
                 // No tool calls, we have the final response
                 final_response = response.content.unwrap_or_default();
@@ -696,6 +813,24 @@ impl AgentRuntime {
                 final_response = response.content.unwrap_or_else(|| {
                     "I've reached the maximum number of tool iterations.".to_string()
                 });
+            }
+        }
+
+        if is_im_channel(&msg.channel) && user_wants_send_image(&msg.content) && !message_tool_sent_media {
+            if let Some(image_path) = pick_image_path(&self.paths, &history).await {
+                info!(
+                    image_path = %image_path,
+                    channel = %msg.channel,
+                    "Auto-sending image fallback (LLM did not call message tool)"
+                );
+                if let Some(tx) = &self.outbound_tx {
+                    let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, "");
+                    outbound.media = vec![image_path.clone()];
+                    let _ = tx.send(outbound).await;
+                }
+
+                final_response.clear();
+                overwrite_last_assistant_message(&mut history, "");
             }
         }
 
@@ -767,6 +902,15 @@ impl AgentRuntime {
                     paths.push(o.to_string());
                 }
                 if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
+                    for p in arr {
+                        if let Some(s) = p.as_str() {
+                            paths.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            "message" => {
+                if let Some(arr) = args.get("media").and_then(|v| v.as_array()) {
                     for p in arr {
                         if let Some(s) = p.as_str() {
                             paths.push(s.to_string());

@@ -562,7 +562,7 @@ impl FeishuChannel {
                         Err(e) => error!(error = %e, "Failed to download Feishu image"),
                     }
                 }
-                ("[image]".to_string(), paths)
+                ("[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(), paths)
             }
             "file" => {
                 let mc: FileContent = serde_json::from_str(&message.content)
@@ -576,7 +576,8 @@ impl FeishuChannel {
                         Err(e) => error!(error = %e, "Failed to download Feishu file"),
                     }
                 }
-                (format!("[file: {}]", name.unwrap_or("unknown")), paths)
+                let desc = format!("[文件: {}，已下载到本地，可用 read_file 读取]", name.unwrap_or("unknown"));
+                (desc, paths)
             }
             "audio" => {
                 let mc: AudioContent = serde_json::from_str(&message.content)
@@ -589,7 +590,7 @@ impl FeishuChannel {
                         Err(e) => error!(error = %e, "Failed to download Feishu audio"),
                     }
                 }
-                ("[audio]".to_string(), paths)
+                ("[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string(), paths)
             }
             "video" | "media" => {
                 let mc: VideoContent = serde_json::from_str(&message.content)
@@ -603,7 +604,12 @@ impl FeishuChannel {
                         Err(e) => error!(error = %e, "Failed to download Feishu video"),
                     }
                 }
-                ("[video]".to_string(), paths)
+                let desc = if let Some(n) = name {
+                    format!("[视频: {}，已下载到本地]", n)
+                } else {
+                    "[视频，已下载到本地]".to_string()
+                };
+                (desc, paths)
             }
             other => {
                 debug!(message_type = %other, "Feishu: unsupported message type, skipping");
@@ -691,6 +697,186 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     let token = get_cached_token(config).await?;
 
     do_send_message(&client, &token, chat_id, text).await
+}
+
+/// Upload a local file to Feishu and return the resource key.
+/// Images → /im/v1/images (returns image_key)
+/// Other  → /im/v1/files  (returns file_key)
+async fn upload_feishu_media(
+    client: &Client,
+    token: &str,
+    file_path: &str,
+    file_type: &str,
+) -> Result<String> {
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+
+    let mime = feishu_mime_for_path(file_path);
+    let is_image = file_type == "image";
+
+    if is_image {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+        let form = reqwest::multipart::Form::new()
+            .text("image_type", "message")
+            .part("image", part);
+
+        #[derive(Deserialize)]
+        struct Resp { code: i32, msg: String, data: Option<ImgData> }
+        #[derive(Deserialize)]
+        struct ImgData { image_key: String }
+
+        let resp = client
+            .post(format!("{}/im/v1/images", FEISHU_OPEN_API))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Feishu image upload failed: {}", e)))?;
+
+        let r: Resp = resp.json().await
+            .map_err(|e| Error::Channel(format!("Feishu image upload parse failed: {}", e)))?;
+        if r.code != 0 {
+            return Err(Error::Channel(format!("Feishu image upload error {}: {}", r.code, r.msg)));
+        }
+        return r.data.map(|d| d.image_key)
+            .ok_or_else(|| Error::Channel("Feishu image upload: no image_key".to_string()));
+    }
+
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name.clone())
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+    let form = reqwest::multipart::Form::new()
+        .text("file_type", file_type.to_string())
+        .text("file_name", file_name)
+        .part("file", part);
+
+    #[derive(Deserialize)]
+    struct Resp { code: i32, msg: String, data: Option<FileData> }
+    #[derive(Deserialize)]
+    struct FileData { file_key: String }
+
+    let resp = client
+        .post(format!("{}/im/v1/files", FEISHU_OPEN_API))
+        .header("Authorization", format!("Bearer {}", token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Feishu file upload failed: {}", e)))?;
+
+    let r: Resp = resp.json().await
+        .map_err(|e| Error::Channel(format!("Feishu file upload parse failed: {}", e)))?;
+    if r.code != 0 {
+        return Err(Error::Channel(format!("Feishu file upload error {}: {}", r.code, r.msg)));
+    }
+    r.data.map(|d| d.file_key)
+        .ok_or_else(|| Error::Channel("Feishu file upload: no file_key".to_string()))
+}
+
+fn feishu_mime_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "amr" => "audio/amr",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+fn feishu_file_type_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => "image",
+        "opus" | "amr" | "mp3" | "wav" | "m4a" => "opus",
+        "mp4" | "avi" | "mov" | "mkv" => "mp4",
+        "pdf" => "pdf",
+        "doc" | "docx" => "doc",
+        "xls" | "xlsx" => "xls",
+        "ppt" | "pptx" => "ppt",
+        _ => "stream",
+    }
+}
+
+/// Send a media message (image/audio/video/file) to a Feishu chat.
+/// Uploads the file first, then sends the appropriate message type.
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::feishu_limiter().acquire().await;
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let file_type = feishu_file_type_for_ext(&ext);
+    let is_image = file_type == "image";
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
+    let token = get_cached_token(config).await?;
+
+    info!(file_path = %file_path, file_type = %file_type, "Feishu: uploading media");
+    let key = upload_feishu_media(&client, &token, file_path, file_type).await?;
+    info!(key = %key, "Feishu: media uploaded");
+
+    let (msg_type, content) = if is_image {
+        ("image", serde_json::json!({ "image_key": key }).to_string())
+    } else if matches!(ext.as_str(), "opus" | "amr" | "mp3" | "wav" | "m4a") {
+        ("audio", serde_json::json!({ "file_key": key }).to_string())
+    } else if matches!(ext.as_str(), "mp4" | "avi" | "mov" | "mkv") {
+        ("media", serde_json::json!({ "file_key": key }).to_string())
+    } else {
+        ("file", serde_json::json!({ "file_key": key }).to_string())
+    };
+
+    #[derive(Serialize)]
+    struct SendReq<'a> {
+        receive_id: &'a str,
+        msg_type: &'a str,
+        content: String,
+    }
+
+    let send_client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
+
+    let resp = send_client
+        .post(format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_OPEN_API))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&SendReq { receive_id: chat_id, msg_type, content })
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Feishu send_media_message failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!("Feishu API send media error: {}", body)));
+    }
+    Ok(())
 }
 
 async fn do_send_message(client: &Client, token: &str, chat_id: &str, text: &str) -> Result<()> {

@@ -3167,6 +3167,30 @@ fn print_startup_banner(
             },
         },
         ChannelInfo {
+            name: "DingTalk",
+            enabled: ch.dingtalk.enabled,
+            configured: !ch.dingtalk.app_key.is_empty(),
+            detail: if ch.dingtalk.enabled && !ch.dingtalk.app_key.is_empty() {
+                format!("robot_code: {}", ch.dingtalk.robot_code)
+            } else if !ch.dingtalk.app_key.is_empty() {
+                "app_key set but not enabled".into()
+            } else {
+                "no app_key configured".into()
+            },
+        },
+        ChannelInfo {
+            name: "WeCom",
+            enabled: ch.wecom.enabled,
+            configured: !ch.wecom.corp_id.is_empty(),
+            detail: if ch.wecom.enabled && !ch.wecom.corp_id.is_empty() {
+                format!("agent_id: {}", ch.wecom.agent_id)
+            } else if !ch.wecom.corp_id.is_empty() {
+                "corp_id set but not enabled".into()
+            } else {
+                "no corp_id configured".into()
+            },
+        },
+        ChannelInfo {
             name: "WhatsApp",
             enabled: ch.whatsapp.enabled,
             configured: true, // always has default bridge_url

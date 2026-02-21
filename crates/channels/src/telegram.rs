@@ -110,8 +110,8 @@ impl TelegramChannel {
         let client = builder.build().expect("Failed to create HTTP client");
 
         let media_dir = dirs::home_dir()
-            .map(|h| h.join(".blockcell/media"))
-            .unwrap_or_else(|| PathBuf::from(".blockcell/media"));
+            .map(|h| h.join(".blockcell").join("workspace").join("media"))
+            .unwrap_or_else(|| PathBuf::from(".blockcell/workspace/media"));
 
         // Ensure media directory exists
         let _ = std::fs::create_dir_all(&media_dir);
@@ -313,6 +313,11 @@ impl TelegramChannel {
                 match self.download_file(&largest.file_id, &filename).await {
                     Ok(path) => {
                         media_files.push(path);
+                        // Send immediate ack
+                        let _ = send_message(&self.config, &message.chat.id.to_string(), "📷 图片已收到，请问您需要我做什么？").await;
+                        if content.is_empty() {
+                            content = "用户发来了一张图片，请问您需要我做什么？（例如：描述图片内容、识别文字、发回给您等）".to_string();
+                        }
                         debug!("Downloaded photo: {}", filename);
                     }
                     Err(e) => {
@@ -335,14 +340,14 @@ impl TelegramChannel {
                             if content.is_empty() {
                                 content = text;
                             } else {
-                                content = format!("{}\n[Voice transcript: {}]", content, text);
+                                content = format!("{}\n[语音转写: {}]", content, text);
                             }
                         }
                         None => {
                             if content.is_empty() {
-                                content = format!("[Voice message: {}]", path);
+                                content = "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string();
                             } else {
-                                content = format!("{} [Voice: {}]", content, path);
+                                content = format!("{}\n[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]", content);
                             }
                         }
                     }
@@ -356,13 +361,19 @@ impl TelegramChannel {
 
         // Handle documents
         if let Some(doc) = &message.document {
-            let filename = doc.file_name.clone().unwrap_or_else(|| {
+            let doc_name = doc.file_name.clone().unwrap_or_else(|| {
                 format!("telegram_doc_{}_{}", message.message_id, doc.file_unique_id)
             });
-            match self.download_file(&doc.file_id, &filename).await {
+            match self.download_file(&doc.file_id, &doc_name).await {
                 Ok(path) => {
                     media_files.push(path);
-                    debug!("Downloaded document: {}", filename);
+                    // Send immediate ack
+                    let ack = format!("📎 文件「{}」已收到，请问您需要我做什么？", doc_name);
+                    let _ = send_message(&self.config, &message.chat.id.to_string(), &ack).await;
+                    if content.is_empty() {
+                        content = format!("用户发来了文件「{}」，请问您需要我做什么？（例如：读取内容、分析数据等）", doc_name);
+                    }
+                    debug!("Downloaded document: {}", doc_name);
                 }
                 Err(e) => {
                     error!(error = %e, "Failed to download document");
@@ -633,6 +644,87 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Send a media file (photo/audio/video/document) to a Telegram chat.
+/// Automatically selects the correct Telegram API method based on file extension.
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::telegram_limiter().acquire().await;
+
+    let mut builder = Client::builder().timeout(Duration::from_secs(120));
+    if let Some(proxy) = config.channels.telegram.proxy.as_deref() {
+        if let Ok(p) = Proxy::all(proxy) {
+            builder = builder.proxy(p);
+        }
+    }
+    let client = builder.build().unwrap_or_else(|_| Client::new());
+    let token = &config.channels.telegram.token;
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let (method, field) = telegram_method_for_ext(&ext);
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+
+    let mime = telegram_mime_for_ext(&ext);
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("chat_id", chat_id.to_string())
+        .part(field, part);
+
+    let url = format!("{}/bot{}/{}", TELEGRAM_API_BASE, token, method);
+    info!(file_path = %file_path, method = %method, "Telegram: sending media");
+
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Telegram send media failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!("Telegram send media error: {}", body)));
+    }
+    Ok(())
+}
+
+fn telegram_method_for_ext(ext: &str) -> (&'static str, &'static str) {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => ("sendPhoto", "photo"),
+        "ogg" | "opus" | "mp3" | "wav" | "m4a" | "amr" | "flac" => ("sendAudio", "audio"),
+        "mp4" | "mov" | "avi" | "mkv" => ("sendVideo", "video"),
+        _ => ("sendDocument", "document"),
+    }
+}
+
+fn telegram_mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ogg" | "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "amr" => "audio/amr",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }
 
 #[cfg(test)]

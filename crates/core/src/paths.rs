@@ -47,7 +47,7 @@ impl Paths {
     }
 
     pub fn media_dir(&self) -> PathBuf {
-        self.base.join("media")
+        self.workspace().join("media")
     }
 
     pub fn update_dir(&self) -> PathBuf {
@@ -139,7 +139,7 @@ impl Paths {
         std::fs::create_dir_all(self.sessions_dir())?;
         std::fs::create_dir_all(self.audit_dir())?;
         std::fs::create_dir_all(self.cron_dir())?;
-        std::fs::create_dir_all(self.media_dir())?;
+        std::fs::create_dir_all(self.workspace().join("media"))?;
         std::fs::create_dir_all(self.update_dir())?;
         std::fs::create_dir_all(self.bridge_dir())?;
         std::fs::create_dir_all(self.whatsapp_auth_dir())?;

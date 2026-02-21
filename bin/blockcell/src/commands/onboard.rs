@@ -1,4 +1,4 @@
-use blockcell_core::{Config, Paths};
+use blockcell_core::Paths;
 use std::io::{self, Write};
 
 const AGENTS_MD: &str = r#"# Agent Guidelines
@@ -126,6 +126,137 @@ Start a background task (subagent).
 **Note**: Subagents run in isolation and report back when complete.
 "#;
 
+const EXAMPLE_CONFIG: &str = r#"{
+  "providers": {
+    "openrouter": {
+      "apiKey": "",
+      "apiBase": "https://openrouter.ai/api/v1"
+    },
+    "anthropic": {
+      "apiKey": "",
+      "apiBase": "https://api.anthropic.com"
+    },
+    "openai": {
+      "apiKey": "",
+      "apiBase": "https://api.openai.com/v1"
+    },
+    "deepseek": {
+      "apiKey": "",
+      "apiBase": "https://api.deepseek.com/v1"
+    },
+    "gemini": {
+      "apiKey": "",
+      "apiBase": "https://generativelanguage.googleapis.com"
+    },
+    "kimi": {
+      "apiKey": "",
+      "apiBase": "https://api.moonshot.cn/v1"
+    },
+    "groq": {
+      "apiKey": "",
+      "apiBase": "https://api.groq.com/openai/v1"
+    },
+    "zhipu": {
+      "apiKey": "",
+      "apiBase": "https://open.bigmodel.cn/api/paas/v4"
+    },
+    "ollama": {
+      "apiKey": "",
+      "apiBase": "http://localhost:11434"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 20
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "webuiHost": "localhost",
+    "webuiPort": 18791,
+    "apiToken": "",
+    "webuiPass": ""
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": [],
+      "proxy": null
+    },
+    "whatsapp": {
+      "enabled": false,
+      "bridgeUrl": "ws://localhost:3001",
+      "allowFrom": []
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": []
+    },
+    "slack": {
+      "enabled": false,
+      "botToken": "",
+      "appToken": "",
+      "channels": [],
+      "allowFrom": [],
+      "pollIntervalSecs": 3
+    },
+    "discord": {
+      "enabled": false,
+      "botToken": "",
+      "channels": [],
+      "allowFrom": []
+    },
+    "dingtalk": {
+      "enabled": false,
+      "appKey": "",
+      "appSecret": "",
+      "robotCode": "",
+      "allowFrom": []
+    },
+    "wecom": {
+      "enabled": false,
+      "corpId": "",
+      "corpSecret": "",
+      "agentId": 0,
+      "callbackToken": "",
+      "encodingAesKey": "",
+      "allowFrom": [],
+      "pollIntervalSecs": 10
+    },
+    "lark": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": []
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 60,
+      "restrictToWorkspace": false
+    },
+    "tickIntervalSecs": 30
+  }
+}
+"#;
+
 pub async fn run(force: bool) -> anyhow::Result<()> {
     let paths = Paths::new();
 
@@ -146,9 +277,11 @@ pub async fn run(force: bool) -> anyhow::Result<()> {
     // Create directories
     paths.ensure_dirs()?;
 
-    // Create default config
-    let config = Config::default();
-    config.save(&paths.config_file())?;
+    // Write the annotated example config (includes all channels with placeholder values)
+    if let Some(parent) = paths.config_file().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&paths.config_file(), EXAMPLE_CONFIG)?;
     println!("✓ Created config: {}", paths.config_file().display());
 
     // Create workspace files

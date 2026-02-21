@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use blockcell_core::{Error, Result};
+use blockcell_core::{Error, OutboundMessage, Result};
 use serde_json::{json, Value};
 use tracing::info;
 
@@ -19,18 +19,23 @@ impl Tool for NotificationTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "notification",
-            description: "Send notifications via multiple channels. Channels: 'sms' (Twilio), 'push' (Pushover/Bark/ntfy), 'webhook' (generic POST), 'desktop' (macOS native notification), 'telegram' (Telegram Bot API).",
+            description: "Send notifications via multiple channels. Channels: 'reply' (send text+media back to the current conversation), 'sms' (Twilio), 'push' (Pushover/Bark/ntfy), 'webhook' (generic POST), 'desktop' (macOS native notification), 'telegram' (Telegram Bot API).",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "channel": {
                         "type": "string",
-                        "enum": ["sms", "push", "webhook", "desktop", "telegram"],
-                        "description": "Notification channel"
+                        "enum": ["reply", "sms", "push", "webhook", "desktop", "telegram"],
+                        "description": "Notification channel. Use 'reply' to send a message (with optional media files) back to the current conversation channel."
                     },
                     "message": {
                         "type": "string",
                         "description": "Notification message body"
+                    },
+                    "media_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "(reply) List of local file paths to send as media attachments (images, audio, video, documents). Use with channel='reply'."
                     },
                     "title": {
                         "type": "string",
@@ -87,18 +92,23 @@ impl Tool for NotificationTool {
                         "description": "(telegram) Message parse mode. Default: 'Markdown'."
                     }
                 },
-                "required": ["channel", "message"]
+                "required": ["channel"]
             }),
         }
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
         let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
-        if !["sms", "push", "webhook", "desktop", "telegram"].contains(&channel) {
-            return Err(Error::Tool("channel must be 'sms', 'push', 'webhook', 'desktop', or 'telegram'".into()));
+        if !["reply", "sms", "push", "webhook", "desktop", "telegram"].contains(&channel) {
+            return Err(Error::Tool("channel must be 'reply', 'sms', 'push', 'webhook', 'desktop', or 'telegram'".into()));
         }
-        if params.get("message").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let has_media = params.get("media_paths").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+        if channel != "reply" && message.is_empty() {
             return Err(Error::Tool("'message' is required".into()));
+        }
+        if channel == "reply" && message.is_empty() && !has_media {
+            return Err(Error::Tool("'reply' channel requires at least 'message' or 'media_paths'".into()));
         }
         if channel == "sms" {
             if params.get("to").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
@@ -117,6 +127,7 @@ impl Tool for NotificationTool {
         let channel = params.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
         let result = match channel {
+            "reply" => send_reply(&ctx, &params).await,
             "sms" => send_sms(&ctx, &params).await,
             "push" => send_push(&ctx, &params).await,
             "webhook" => send_webhook(&params).await,
@@ -133,6 +144,39 @@ impl Tool for NotificationTool {
             Err(e) => Err(e),
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Reply to current conversation (with optional media)
+// ═══════════════════════════════════════════════════════════
+
+async fn send_reply(ctx: &ToolContext, params: &Value) -> Result<Value> {
+    let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let media_paths: Vec<String> = params
+        .get("media_paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let tx = ctx.outbound_tx.as_ref()
+        .ok_or_else(|| Error::Tool("No outbound channel available for reply".into()))?;
+
+    let mut outbound = OutboundMessage::new(&ctx.channel, &ctx.chat_id, &message);
+    outbound.media = media_paths.clone();
+
+    tx.send(outbound).await
+        .map_err(|e| Error::Tool(format!("Failed to send reply: {}", e)))?;
+
+    info!(channel = %ctx.channel, chat_id = %ctx.chat_id, media_count = media_paths.len(), "Reply sent via notification tool");
+
+    Ok(json!({
+        "status": "sent",
+        "channel": "reply",
+        "to_channel": ctx.channel,
+        "chat_id": ctx.chat_id,
+        "message_len": message.len(),
+        "media_count": media_paths.len()
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════

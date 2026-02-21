@@ -59,7 +59,7 @@ blockcell 采用“Rust 宿主 + 可变技能”的架构：
 - `crates/skills` - Rhai 引擎、技能管理/进化服务、能力注册表/核心进化
 - `crates/storage` - sessions、audit、memory（SQLite）
 - `crates/scheduler` - cron + heartbeat
-- `crates/channels` - Telegram/WhatsApp/飞书适配（feature gate）
+- `crates/channels` - 消息渠道适配：Telegram、WhatsApp、飞书、Slack、Discord、钉钉、企业微信、Lark（均为 feature gate）
 - `crates/providers` - OpenAI-compatible Provider 客户端
 - `crates/updater` - 自升级能力
 - `docs/` - 设计文档（架构、记忆、技能分享）
@@ -136,6 +136,65 @@ blockcell gateway
 }
 ```
 
+## 渠道（Channels）
+
+共 8 个消息渠道，默认全部启用（Cargo features）。在 `~/.blockcell/config.json` 中配置：
+
+| 渠道 | 接入方式 | 关键字段 |
+|------|----------|----------|
+| **Telegram** | 长轮询 | `token`（BotFather 获取） |
+| **WhatsApp** | WebSocket 桥接 | `bridgeUrl`（mautrix-whatsapp） |
+| **飞书 Feishu** | WebSocket 长连接 | `appId`、`appSecret`、`encryptKey` |
+| **Slack** | REST 轮询 | `botToken`、`appToken`、`channels` |
+| **Discord** | Gateway WebSocket | `botToken`、`channels` |
+| **钉钉 DingTalk** | Stream SDK WebSocket | `appKey`、`appSecret`、`robotCode` |
+| **企业微信 WeCom** | 轮询 + Webhook | `corpId`、`corpSecret`、`agentId` ，Webhook 地址：`POST /webhook/wecom` |
+| **Lark**（国际版） | HTTP Webhook | `appId`、`appSecret`、`encryptKey`，Webhook 地址：`POST /webhook/lark` |
+
+各渠道详细配置指南见 [`docs/channels/`](docs/channels/)。
+
+### 渠道配置示例
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "allowFrom": ["123456789"]
+    },
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_SECRET",
+      "encryptKey": "YOUR_ENCRYPT_KEY",
+      "allowFrom": []
+    },
+    "dingtalk": {
+      "enabled": true,
+      "appKey": "YOUR_APP_KEY",
+      "appSecret": "YOUR_APP_SECRET",
+      "robotCode": "YOUR_ROBOT_CODE",
+      "allowFrom": []
+    },
+    "wecom": {
+      "enabled": true,
+      "corpId": "YOUR_CORP_ID",
+      "corpSecret": "YOUR_SECRET",
+      "agentId": 1000001,
+      "allowFrom": []
+    },
+    "lark": {
+      "enabled": true,
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_SECRET",
+      "encryptKey": "YOUR_ENCRYPT_KEY",
+      "allowFrom": []
+    }
+  }
+}
+```
+
 ## 备注
 
 - 交互模式下，文件/命令工具如果访问 `~/.blockcell/workspace` 以外路径，会要求你确认；单次消息模式默认拒绝外部路径。
@@ -143,7 +202,7 @@ blockcell gateway
 - Gateway 鉴权：
   - 如果配置了 `gateway.apiToken`，调用 API 需要 `Authorization: Bearer <token>`（或 `?token=<token>`）。
   - WebUI 登录密码与该 token 相同。
-- 渠道模块通过 Cargo features 控制（`bin/blockcell` 默认启用）：`telegram` / `whatsapp` / `feishu` / `slack` / `discord`。
+- 渠道模块通过 Cargo features 控制（`bin/blockcell` 默认全部启用）：`telegram` / `whatsapp` / `feishu` / `slack` / `discord` / `dingtalk` / `wecom` / `lark`。
 
 ## License
 

@@ -7,10 +7,20 @@ use base64::{
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Global msg_id dedup set — prevents the same WeCom message from being processed twice.
+/// WeCom sometimes delivers the same webhook twice (retry on timeout) or echoes bot-sent
+/// messages back as callbacks. We keep the last 512 msg_ids in a ring-buffer style set.
+static SEEN_MSG_IDS: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+const SEEN_MSG_IDS_MAX: usize = 512;
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
@@ -559,33 +569,163 @@ pub async fn process_webhook(
         "WeCom webhook: received message"
     );
 
-    if msg_type != "text" {
+    // Filter out messages sent by the bot itself — WeCom echoes bot-sent messages back
+    // as callbacks. Bot messages have FromUserName starting with '@' (e.g. @app, @all)
+    // or are event-type messages with no real user sender.
+    if from_user.starts_with('@') {
+        tracing::debug!(from_user = %from_user, "WeCom webhook: skipping bot/system message");
         return (200, "success".to_string());
     }
 
-    let content = content.trim().to_string();
-    if content.is_empty() {
-        return (200, "success".to_string());
+    // msg_id dedup — WeCom may retry the same webhook on timeout, or echo bot messages.
+    // Events (msg_type=event) have no MsgId; only deduplicate real messages.
+    if let Some(ref id) = msg_id {
+        if !id.is_empty() {
+            let mut seen = SEEN_MSG_IDS.lock().unwrap();
+            if seen.contains(id.as_str()) {
+                tracing::debug!(msg_id = %id, "WeCom webhook: duplicate msg_id, skipping");
+                return (200, "success".to_string());
+            }
+            // Evict oldest entries if set is too large
+            if seen.len() >= SEEN_MSG_IDS_MAX {
+                seen.clear();
+            }
+            seen.insert(id.clone());
+        }
     }
 
-    // Allowlist check
+    // Allowlist check (applies to all message types)
     let allow_from = &wecom_cfg.allow_from;
     if !allow_from.is_empty() && !allow_from.iter().any(|a| a == &from_user) {
         tracing::debug!(from_user = %from_user, "WeCom webhook: user not in allowlist");
         return (200, "success".to_string());
     }
 
+    // Determine text content, optional media paths, and whether to await user intent
+    // before processing (true = channel already sent ack, agent should ask what to do)
+    let (final_content, media_paths, media_pending_intent) = match msg_type.as_str() {
+        "text" => {
+            let c = content.trim().to_string();
+            if c.is_empty() {
+                return (200, "success".to_string());
+            }
+            (c, vec![], false)
+        }
+        "image" => {
+            let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
+            let pic_url = extract_xml_tag(&decrypted_body, "PicUrl").unwrap_or_default();
+            info!(media_id = %media_id, "WeCom webhook: received image");
+            let paths = if !media_id.is_empty() {
+                match download_wecom_media(config, &media_id, "image", None).await {
+                    Ok(p) => vec![p],
+                    Err(e) => {
+                        warn!(error = %e, "WeCom: failed to download image, using PicUrl");
+                        if !pic_url.is_empty() { vec![pic_url] } else { vec![] }
+                    }
+                }
+            } else if !pic_url.is_empty() {
+                vec![pic_url]
+            } else {
+                vec![]
+            };
+            ("用户发来了一张图片，请问您需要我做什么？（例如：描述图片内容、识别文字、发回给您等）".to_string(), paths, true)
+        }
+        "voice" => {
+            let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
+            let format = extract_xml_tag(&decrypted_body, "Format").unwrap_or_else(|| "amr".to_string());
+            info!(media_id = %media_id, format = %format, "WeCom webhook: received voice");
+            let paths = if !media_id.is_empty() {
+                match download_wecom_media(config, &media_id, "voice", Some(&format)).await {
+                    Ok(p) => vec![p],
+                    Err(e) => {
+                        warn!(error = %e, "WeCom: failed to download voice");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+            // Send immediate ack
+            if !from_user.is_empty() {
+                let _ = send_message(config, &from_user, "🎤 语音已收到，正在转写...").await;
+            }
+            // Voice: always transcribe immediately, no pending intent needed
+            ("用户发来了一条语音消息，请先用 audio_transcribe 工具转写，然后根据转写内容回复用户。".to_string(), paths, false)
+        }
+        "video" | "shortvideo" => {
+            let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
+            info!(media_id = %media_id, "WeCom webhook: received video");
+            let paths = if !media_id.is_empty() {
+                match download_wecom_media(config, &media_id, "video", Some("mp4")).await {
+                    Ok(p) => vec![p],
+                    Err(e) => {
+                        warn!(error = %e, "WeCom: failed to download video");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+            ("用户发来了一个视频，请问您需要我做什么？（例如：提取音频、截取片段等）".to_string(), paths, true)
+        }
+        "file" => {
+            let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
+            let file_name = extract_xml_tag(&decrypted_body, "FileName").unwrap_or_default();
+            let ext = file_name.rsplit('.').next().map(|s| s.to_string());
+            info!(media_id = %media_id, file_name = %file_name, "WeCom webhook: received file");
+            let paths = if !media_id.is_empty() {
+                match download_wecom_media(config, &media_id, "file", ext.as_deref()).await {
+                    Ok(p) => vec![p],
+                    Err(e) => {
+                        warn!(error = %e, "WeCom: failed to download file");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+            let desc = if file_name.is_empty() {
+                "用户发来了一个文件，请问您需要我做什么？（例如：读取内容、分析数据等）".to_string()
+            } else {
+                format!("用户发来了文件「{}」，请问您需要我做什么？（例如：读取内容、分析数据等）", file_name)
+            };
+            (desc, paths, true)
+        }
+        "location" => {
+            let lat = extract_xml_tag(&decrypted_body, "Location_X").unwrap_or_default();
+            let lon = extract_xml_tag(&decrypted_body, "Location_Y").unwrap_or_default();
+            let label = extract_xml_tag(&decrypted_body, "Label").unwrap_or_default();
+            let c = if label.is_empty() {
+                format!("[位置] 纬度:{} 经度:{}", lat, lon)
+            } else {
+                format!("[位置] {} (纬度:{} 经度:{})", label, lat, lon)
+            };
+            (c, vec![], false)
+        }
+        "link" => {
+            let title = extract_xml_tag(&decrypted_body, "Title").unwrap_or_default();
+            let url = extract_xml_tag(&decrypted_body, "Url").unwrap_or_default();
+            let c = format!("[链接] {} {}", title, url);
+            (c, vec![], false)
+        }
+        other => {
+            info!(msg_type = %other, "WeCom webhook: unsupported message type, skipping");
+            return (200, "success".to_string());
+        }
+    };
+
     if let Some(tx) = inbound_tx {
         let inbound = blockcell_core::InboundMessage {
             channel: "wecom".to_string(),
             sender_id: from_user.clone(),
             chat_id: from_user.clone(),
-            content,
-            media: vec![],
+            content: final_content,
+            media: media_paths,
             metadata: serde_json::json!({
                 "msg_id": msg_id,
                 "msg_type": msg_type,
                 "mode": "webhook",
+                "media_pending_intent": media_pending_intent,
             }),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
@@ -595,6 +735,101 @@ pub async fn process_webhook(
     }
 
     (200, "success".to_string())
+}
+
+/// Download a WeCom media file (image/voice/video/file) by media_id.
+/// Saves to `~/.blockcell/media/wecom_{media_id}.{ext}` and returns the local path.
+async fn download_wecom_media(
+    config: &Config,
+    media_id: &str,
+    media_type: &str,
+    ext_hint: Option<&str>,
+) -> Result<String> {
+    let token = {
+        let client = shared_client();
+        fetch_access_token_static(&client, config).await?
+    };
+
+    let url = format!(
+        "{}/media/get?access_token={}&media_id={}",
+        WECOM_API_BASE, token, media_id
+    );
+
+    let client = shared_client();
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom media/get request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err(Error::Channel(format!(
+            "WeCom media/get HTTP {}",
+            resp.status()
+        )));
+    }
+
+    // Determine file extension from Content-Type or hint
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let ext = ext_hint
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ext_from_content_type(&content_type, media_type).to_string());
+
+    let media_dir = dirs::home_dir()
+        .map(|h| h.join(".blockcell").join("workspace").join("media"))
+        .unwrap_or_else(|| PathBuf::from(".blockcell/workspace/media"));
+    tokio::fs::create_dir_all(&media_dir)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+    let filename = format!("wecom_{}_{}.{}", media_type, &media_id[..media_id.len().min(16)], ext);
+    let file_path = media_dir.join(&filename);
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom media/get read body failed: {}", e)))?;
+
+    tokio::fs::write(&file_path, &bytes)
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom media/get write failed: {}", e)))?;
+
+    let path_str = file_path.to_string_lossy().to_string();
+    info!(path = %path_str, bytes = bytes.len(), "WeCom: media downloaded");
+    Ok(path_str)
+}
+
+fn ext_from_content_type(content_type: &str, media_type: &str) -> &'static str {
+    if content_type.contains("jpeg") || content_type.contains("jpg") {
+        return "jpg";
+    }
+    if content_type.contains("png") {
+        return "png";
+    }
+    if content_type.contains("gif") {
+        return "gif";
+    }
+    if content_type.contains("mp4") {
+        return "mp4";
+    }
+    if content_type.contains("amr") {
+        return "amr";
+    }
+    if content_type.contains("speex") {
+        return "speex";
+    }
+    match media_type {
+        "image" => "jpg",
+        "voice" => "amr",
+        "video" => "mp4",
+        _ => "bin",
+    }
 }
 
 /// Extract the text content of an XML tag (simple, no namespace support needed for WeCom).
@@ -748,6 +983,235 @@ fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::
         .map_err(|e| format!("UTF-8 decode failed: {}", e))?;
 
     Ok(msg.to_string())
+}
+
+/// Upload a local file to WeCom as a temporary media asset.
+/// Returns the `media_id` (valid for 3 days).
+/// `media_type` must be one of: image / voice / video / file
+pub async fn upload_media(
+    config: &Config,
+    file_path: &str,
+    media_type: &str,
+) -> Result<String> {
+    let client = shared_client();
+    let token = fetch_access_token_static(&client, config).await?;
+
+    let url = format!(
+        "{}/media/upload?access_token={}&type={}",
+        WECOM_API_BASE, token, media_type
+    );
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read media file {}: {}", file_path, e)))?;
+
+    let mime = mime_for_path(file_path);
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME type: {}", e)))?;
+    let form = reqwest::multipart::Form::new().part("media", part);
+
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom media/upload failed: {}", e)))?;
+
+    #[derive(Deserialize)]
+    struct UploadResp {
+        errcode: i32,
+        errmsg: String,
+        #[serde(default)]
+        media_id: Option<String>,
+    }
+
+    let result: UploadResp = resp
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom media/upload parse failed: {}", e)))?;
+
+    if result.errcode != 0 {
+        return Err(Error::Channel(format!(
+            "WeCom media/upload error {}: {}",
+            result.errcode, result.errmsg
+        )));
+    }
+
+    result
+        .media_id
+        .ok_or_else(|| Error::Channel("WeCom media/upload: no media_id in response".to_string()))
+}
+
+fn mime_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "amr" => "audio/amr",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Send a media message (image/voice/video/file) to a WeCom user or group.
+/// `file_path` is a local file path; it will be uploaded first to get a media_id.
+pub async fn send_media_message(
+    config: &Config,
+    chat_id: &str,
+    file_path: &str,
+) -> Result<()> {
+    crate::rate_limit::wecom_limiter().acquire().await;
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let (media_type, msg_type) = media_type_for_ext(&ext);
+
+    info!(file_path = %file_path, media_type = %media_type, "WeCom: uploading media");
+    let media_id = upload_media(config, file_path, media_type).await?;
+    info!(media_id = %media_id, "WeCom: media uploaded");
+
+    let client = shared_client();
+    let token = fetch_access_token_static(&client, config).await?;
+    let agent_id = config.channels.wecom.agent_id;
+
+    let is_group = chat_id.starts_with("wr") || chat_id.starts_with("WR");
+
+    let body = if is_group {
+        build_media_body_group(chat_id, msg_type, &media_id)
+    } else {
+        build_media_body_user(chat_id, agent_id, msg_type, &media_id)
+    };
+
+    let endpoint = if is_group {
+        format!("{}/appchat/send", WECOM_API_BASE)
+    } else {
+        format!("{}/message/send", WECOM_API_BASE)
+    };
+
+    let resp = client
+        .post(&endpoint)
+        .query(&[("access_token", token.as_str())])
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom send media failed: {}", e)))?;
+
+    let result: WeComResponse = resp
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom send media parse failed: {}", e)))?;
+
+    if result.errcode != 0 {
+        return Err(Error::Channel(format!(
+            "WeCom send media error {}: {}",
+            result.errcode, result.errmsg
+        )));
+    }
+
+    Ok(())
+}
+
+fn media_type_for_ext(ext: &str) -> (&'static str, &'static str) {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => ("image", "image"),
+        "amr" | "mp3" | "wav" | "m4a" | "speex" => ("voice", "voice"),
+        "mp4" | "avi" | "mov" | "mkv" => ("video", "video"),
+        _ => ("file", "file"),
+    }
+}
+
+fn build_media_body_user(
+    to_user: &str,
+    agent_id: i64,
+    msg_type: &str,
+    media_id: &str,
+) -> serde_json::Value {
+    match msg_type {
+        "image" => serde_json::json!({
+            "touser": to_user,
+            "msgtype": "image",
+            "agentid": agent_id,
+            "image": { "media_id": media_id },
+            "safe": 0
+        }),
+        "voice" => serde_json::json!({
+            "touser": to_user,
+            "msgtype": "voice",
+            "agentid": agent_id,
+            "voice": { "media_id": media_id },
+            "safe": 0
+        }),
+        "video" => serde_json::json!({
+            "touser": to_user,
+            "msgtype": "video",
+            "agentid": agent_id,
+            "video": { "media_id": media_id, "title": "", "description": "" },
+            "safe": 0
+        }),
+        _ => serde_json::json!({
+            "touser": to_user,
+            "msgtype": "file",
+            "agentid": agent_id,
+            "file": { "media_id": media_id },
+            "safe": 0
+        }),
+    }
+}
+
+fn build_media_body_group(
+    chat_id: &str,
+    msg_type: &str,
+    media_id: &str,
+) -> serde_json::Value {
+    match msg_type {
+        "image" => serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": "image",
+            "image": { "media_id": media_id },
+            "safe": 0
+        }),
+        "voice" => serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": "voice",
+            "voice": { "media_id": media_id },
+            "safe": 0
+        }),
+        "video" => serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": "video",
+            "video": { "media_id": media_id, "title": "", "description": "" },
+            "safe": 0
+        }),
+        _ => serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": "file",
+            "file": { "media_id": media_id },
+            "safe": 0
+        }),
+    }
 }
 
 /// Send a text message to a WeCom user or group.

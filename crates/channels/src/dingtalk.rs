@@ -329,23 +329,6 @@ impl DingTalkChannel {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        if msg_type != "text" {
-            debug!(msg_type = %msg_type, "DingTalk: skipping non-text message");
-            return Ok(());
-        }
-
-        let text = data
-            .get("text")
-            .and_then(|v| v.get("content"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        if text.is_empty() {
-            return Ok(());
-        }
-
         let sender_id = data
             .get("senderId")
             .and_then(|v| v.as_str())
@@ -379,12 +362,98 @@ impl DingTalkChannel {
             .unwrap_or("1")
             .to_string();
 
+        // Parse content and optional media by msgtype
+        let (content, media_paths) = match msg_type {
+            "text" => {
+                let text = data
+                    .get("text")
+                    .and_then(|v| v.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if text.is_empty() { return Ok(()); }
+                (text, vec![])
+            }
+            "picture" | "image" => {
+                let download_code = data
+                    .get("content")
+                    .and_then(|v| v.get("downloadCode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let paths = if !download_code.is_empty() {
+                    match self.download_dingtalk_media(download_code, "image", "jpg").await {
+                        Ok(p) => vec![p],
+                        Err(e) => { warn!(error = %e, "DingTalk: failed to download image"); vec![] }
+                    }
+                } else { vec![] };
+                ("[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(), paths)
+            }
+            "audio" | "voice" => {
+                let download_code = data
+                    .get("content")
+                    .and_then(|v| v.get("downloadCode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let duration = data
+                    .get("content")
+                    .and_then(|v| v.get("duration"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let paths = if !download_code.is_empty() {
+                    match self.download_dingtalk_media(download_code, "voice", "amr").await {
+                        Ok(p) => vec![p],
+                        Err(e) => { warn!(error = %e, "DingTalk: failed to download audio"); vec![] }
+                    }
+                } else { vec![] };
+                let desc = format!("[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]", duration);
+                (desc, paths)
+            }
+            "file" => {
+                let download_code = data
+                    .get("content")
+                    .and_then(|v| v.get("downloadCode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let file_name = data
+                    .get("content")
+                    .and_then(|v| v.get("fileName"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("file");
+                let ext = file_name.rsplit('.').next().unwrap_or("bin");
+                let paths = if !download_code.is_empty() {
+                    match self.download_dingtalk_media(download_code, "file", ext).await {
+                        Ok(p) => vec![p],
+                        Err(e) => { warn!(error = %e, "DingTalk: failed to download file"); vec![] }
+                    }
+                } else { vec![] };
+                (format!("[文件: {}，已下载到本地，可用 read_file 读取]", file_name), paths)
+            }
+            "richText" => {
+                let items = data
+                    .get("content")
+                    .and_then(|v| v.get("richText"))
+                    .and_then(|v| v.as_array());
+                let text = items.map(|arr| {
+                    arr.iter().filter_map(|item| {
+                        item.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    }).collect::<Vec<_>>().join("")
+                }).unwrap_or_default();
+                if text.is_empty() { return Ok(()); }
+                (text, vec![])
+            }
+            other => {
+                debug!(msg_type = %other, "DingTalk: unsupported message type");
+                return Ok(());
+            }
+        };
+
         let inbound = InboundMessage {
             channel: "dingtalk".to_string(),
             sender_id: sender_id.clone(),
             chat_id: conversation_id,
-            content: text,
-            media: vec![],
+            content,
+            media: media_paths,
             metadata: serde_json::json!({
                 "sender_nick": sender_nick,
                 "msg_id": msg_id,
@@ -448,6 +517,231 @@ impl DingTalkChannel {
             }
             backoff = Duration::from_secs(2);
         }
+    }
+
+    /// Download a DingTalk media file using downloadCode.
+    async fn download_dingtalk_media(
+        &self,
+        download_code: &str,
+        media_type: &str,
+        ext: &str,
+    ) -> Result<String> {
+        let app_key = &self.config.channels.dingtalk.app_key;
+        let app_secret = &self.config.channels.dingtalk.app_secret;
+        let token = fetch_access_token(&self.client, app_key, app_secret).await?;
+
+        let resp_body: serde_json::Value = self.client
+            .post(format!("{}/media/downloadFile", DINGTALK_API_BASE))
+            .query(&[("access_token", token.as_str())])
+            .json(&serde_json::json!({ "downloadCode": download_code, "robotCode": app_key }))
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk downloadFile failed: {}", e)))?
+            .json()
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk downloadFile parse failed: {}", e)))?;
+
+        let download_url = resp_body
+            .get("result")
+            .and_then(|r| r.get("downloadUrl"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Channel("DingTalk: no downloadUrl in response".to_string()))?
+            .to_string();
+
+        let file_resp = self.client
+            .get(&download_url)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk media fetch failed: {}", e)))?;
+
+        if !file_resp.status().is_success() {
+            return Err(Error::Channel(format!("DingTalk media HTTP {}", file_resp.status())));
+        }
+
+        let media_dir = dirs::home_dir()
+            .map(|h| h.join(".blockcell").join("workspace").join("media"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".blockcell/workspace/media"));
+        tokio::fs::create_dir_all(&media_dir)
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+        let safe_code = &download_code[..download_code.len().min(16)];
+        let filename = format!("dingtalk_{}_{}.{}", media_type, safe_code, ext);
+        let file_path = media_dir.join(&filename);
+
+        let bytes = file_resp.bytes().await
+            .map_err(|e| Error::Channel(format!("DingTalk media read failed: {}", e)))?;
+        tokio::fs::write(&file_path, &bytes)
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk media write failed: {}", e)))?;
+
+        let path_str = file_path.to_string_lossy().to_string();
+        info!(path = %path_str, bytes = bytes.len(), "DingTalk: media downloaded");
+        Ok(path_str)
+    }
+}
+
+// ── send_media_message ────────────────────────────────────────────────────────
+
+/// Send a media file (image/voice/file) to a DingTalk conversation.
+/// DingTalk requires uploading the file first via /media/upload to get a media_id,
+/// then sending it as an image/voice/file message.
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::dingtalk_limiter().acquire().await;
+
+    let client = shared_client();
+    let app_key = &config.channels.dingtalk.app_key;
+    let app_secret = &config.channels.dingtalk.app_secret;
+    let token = fetch_access_token(&client, app_key, app_secret).await?;
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let media_type = dingtalk_media_type_for_ext(&ext);
+    let mime = dingtalk_mime_for_ext(&ext);
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+    let form = reqwest::multipart::Form::new()
+        .text("type", media_type.to_string())
+        .part("media", part);
+
+    #[derive(Deserialize)]
+    struct UploadResp {
+        errcode: i32,
+        errmsg: String,
+        #[serde(default)]
+        media_id: Option<String>,
+    }
+
+    let upload_client = Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let upload_resp: UploadResp = upload_client
+        .post(format!("{}/media/upload", DINGTALK_API_BASE))
+        .query(&[("access_token", token.as_str())])
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("DingTalk media upload failed: {}", e)))?
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("DingTalk media upload parse failed: {}", e)))?;
+
+    if upload_resp.errcode != 0 {
+        return Err(Error::Channel(format!(
+            "DingTalk media upload error {}: {}",
+            upload_resp.errcode, upload_resp.errmsg
+        )));
+    }
+
+    let media_id = upload_resp.media_id
+        .ok_or_else(|| Error::Channel("DingTalk media upload: no media_id".to_string()))?;
+
+    info!(media_id = %media_id, media_type = %media_type, "DingTalk: media uploaded");
+
+    // Build message body based on media type
+    let msg_body = match media_type {
+        "image" => serde_json::json!({
+            "msgtype": "image",
+            "image": { "media_id": media_id }
+        }),
+        "voice" => serde_json::json!({
+            "msgtype": "voice",
+            "voice": { "media_id": media_id, "duration": 0 }
+        }),
+        _ => serde_json::json!({
+            "msgtype": "file",
+            "file": { "media_id": media_id }
+        }),
+    };
+
+    if is_group_chat_id(chat_id) {
+        // Build a clean body with only the relevant media field (no null fields)
+        let mut body = serde_json::json!({
+            "chatid": chat_id,
+            "msgtype": msg_body["msgtype"],
+        });
+        let obj = body.as_object_mut().unwrap();
+        match media_type {
+            "image" => { obj.insert("image".to_string(), msg_body["image"].clone()); }
+            "voice" => { obj.insert("voice".to_string(), msg_body["voice"].clone()); }
+            _       => { obj.insert("file".to_string(),  msg_body["file"].clone());  }
+        }
+        let resp = client
+            .post(format!("{}/chat/send", DINGTALK_API_BASE))
+            .query(&[("access_token", token.as_str())])
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk chat/send media failed: {}", e)))?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!("DingTalk chat/send media error: {}", body)));
+        }
+    } else {
+        // 1:1 robot message — msgKey must match the media type
+        let msg_key = match media_type {
+            "image" => "sampleImageMsg",
+            "voice" => "sampleAudio",
+            _       => "sampleFile",
+        };
+        let body = serde_json::json!({
+            "robotCode": app_key,
+            "userIds": [chat_id],
+            "msgKey": msg_key,
+            "msgParam": msg_body.to_string(),
+        });
+        let resp = client
+            .post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+            .header("x-acs-dingtalk-access-token", &token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("DingTalk user media send failed: {}", e)))?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!("DingTalk user media send error: {}", body)));
+        }
+    }
+    Ok(())
+}
+
+fn dingtalk_media_type_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => "image",
+        "amr" | "mp3" | "wav" | "opus" | "m4a" => "voice",
+        _ => "file",
+    }
+}
+
+fn dingtalk_mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "amr" => "audio/amr",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "opus" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
     }
 }
 

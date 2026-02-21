@@ -468,6 +468,25 @@ impl DiscordChannel {
             content
         };
 
+        // When content is empty but attachments exist, generate a descriptive fallback
+        let content = if content.is_empty() && !media_paths.is_empty() {
+            let descs: Vec<String> = msg.attachments.iter().map(|a| {
+                let ct = a.content_type.as_deref().unwrap_or("");
+                if ct.starts_with("image/") {
+                    "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string()
+                } else if ct.starts_with("audio/") || ct.starts_with("video/ogg") {
+                    "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string()
+                } else if ct.starts_with("video/") {
+                    "[视频，已下载到本地]".to_string()
+                } else {
+                    format!("[文件: {}，已下载到本地，可用 read_file 读取]", a.filename)
+                }
+            }).collect();
+            descs.join("\n")
+        } else {
+            content
+        };
+
         info!(content = %content, channel_id = %msg.channel_id, "Forwarding Discord message to agent");
 
         let inbound = InboundMessage {
@@ -573,6 +592,70 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Send a media file as an attachment to a Discord channel.
+/// Discord supports any file type as an attachment via multipart form upload.
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::discord_limiter().acquire().await;
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let mime = discord_mime_for_ext(&ext);
+
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(mime)
+        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
+
+    let form = reqwest::multipart::Form::new().part("files[0]", part);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let token = &config.channels.discord.bot_token;
+
+    info!(file_path = %file_path, "Discord: sending media attachment");
+
+    let resp = client
+        .post(&format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
+        .header("Authorization", format!("Bot {}", token))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Discord send media failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!("Discord send media error: {}", body)));
+    }
+    Ok(())
+}
+
+fn discord_mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ogg" | "opus" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }
 
 #[cfg(test)]

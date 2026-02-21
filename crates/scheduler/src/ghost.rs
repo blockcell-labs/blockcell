@@ -126,7 +126,7 @@ impl GhostService {
             "System: 执行Ghost Agent例行维护任务。请按顺序执行以下步骤：".to_string(),
             "⚠️ 重要规则：本次维护的所有日志和总结只需作为最终文本回复输出，绝对不要调用 memory_upsert 保存维护日志到记忆中。记忆系统只用于保存用户相关的重要事实。".to_string(),
             "1. 【记忆整理】调用 memory_maintenance(action=\"garden\") 整理最近的记忆。根据返回的 instruction 处理记忆条目（提取重要事实到长期记忆、删除琐碎条目），但不要把维护日志本身写入记忆。".to_string(),
-            "2. 【文件清理】检查 workspace/media 和 workspace/downloads，删除超过7天的临时文件。".to_string(),
+            "2. 【文件清理】检查 workspace/media 和 workspace/downloads 目录，用 list_dir 列出文件，只删除**修改时间超过7天**的文件（file_ops delete）。今天的文件、近期文件一律不删。如果无法判断文件时间，跳过不删。".to_string(),
         ];
 
         if config.auto_social {

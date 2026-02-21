@@ -220,10 +220,11 @@ impl IntentClassifier {
                 category: IntentCategory::Media,
                 keywords: vec![
                     "语音", "音频", "视频", "转录", "字幕", "朗读", "播放",
+                    "图片", "照片", "图像",
                     "OCR", "ocr", "文字识别", "图片识别", "图片分析", "看图",
                     "剪辑", "合并视频", "水印", "缩略图", "转码",
                     "TTS", "tts", "语音合成", "whisper",
-                    "transcribe", "speech", "audio", "video",
+                    "transcribe", "speech", "audio", "video", "image", "photo",
                 ],
                 patterns: vec![
                     Regex::new(r"(?i)\.(mp3|wav|m4a|flac|ogg|mp4|mkv|webm|avi|mov)\b").unwrap(),
@@ -347,7 +348,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
         "read_file", "write_file", "list_dir", "exec",
         "web_search", "web_fetch",
         "memory_query", "memory_upsert",
-        "toggle_manage",
+        "toggle_manage", "message",
     ];
 
     match intent {
@@ -423,7 +424,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             let mut t = core.clone();
             t.extend([
                 "audio_transcribe", "tts", "ocr", "image_understand",
-                "video_process", "file_ops",
+                "video_process", "file_ops", "notification",
             ]);
             t
         }

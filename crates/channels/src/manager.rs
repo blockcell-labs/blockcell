@@ -56,7 +56,18 @@ impl ChannelManager {
             "telegram" => {
                 #[cfg(feature = "telegram")]
                 {
-                    crate::telegram::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::telegram::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "Telegram: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::telegram::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "whatsapp" => {
@@ -72,47 +83,113 @@ impl ChannelManager {
             "feishu" => {
                 #[cfg(feature = "feishu")]
                 {
-                    crate::feishu::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::feishu::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "Feishu: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::feishu::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "slack" => {
                 #[cfg(feature = "slack")]
                 {
-                    let thread_ts = msg.metadata
-                        .get("thread_ts")
-                        .and_then(|v| v.as_str());
-                    crate::slack::send_message_threaded(
-                        &self.config, &msg.chat_id, &msg.content, thread_ts,
-                    ).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::slack::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "Slack: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        let thread_ts = msg.metadata
+                            .get("thread_ts")
+                            .and_then(|v| v.as_str());
+                        crate::slack::send_message_threaded(
+                            &self.config, &msg.chat_id, &msg.content, thread_ts,
+                        ).await?;
+                    }
                 }
             }
             "discord" => {
                 #[cfg(feature = "discord")]
                 {
-                    let reply_to = msg.metadata
-                        .get("reply_to_message_id")
-                        .and_then(|v| v.as_str());
-                    crate::discord::send_message_reply(
-                        &self.config, &msg.chat_id, &msg.content, reply_to,
-                    ).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::discord::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "Discord: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        let reply_to = msg.metadata
+                            .get("reply_to_message_id")
+                            .and_then(|v| v.as_str());
+                        crate::discord::send_message_reply(
+                            &self.config, &msg.chat_id, &msg.content, reply_to,
+                        ).await?;
+                    }
                 }
             }
             "dingtalk" => {
                 #[cfg(feature = "dingtalk")]
                 {
-                    crate::dingtalk::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::dingtalk::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "DingTalk: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::dingtalk::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "wecom" => {
                 #[cfg(feature = "wecom")]
                 {
-                    crate::wecom::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::wecom::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "WeCom: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::wecom::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "lark" => {
                 #[cfg(feature = "lark")]
                 {
-                    crate::lark::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::lark::send_media_message(
+                                &self.config, &msg.chat_id, file_path,
+                            ).await {
+                                error!(error = %e, file = %file_path, "Lark: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::lark::send_message(&self.config, &msg.chat_id, &msg.content).await?;
+                    }
                 }
             }
             "cli" | "cron" | "ws" => {

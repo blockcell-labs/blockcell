@@ -241,11 +241,11 @@ impl WhatsAppChannel {
 
                 let content_text = if content_raw.is_empty() {
                     match msg.media_type.as_deref().unwrap_or("media") {
-                        "image" => "[image]".to_string(),
-                        "audio" | "ptt" => "[audio]".to_string(),
-                        "video" => "[video]".to_string(),
-                        "document" => format!("[file: {}]", msg.media_filename.as_deref().unwrap_or("unknown")),
-                        other => format!("[{}]", other),
+                        "image" => "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(),
+                        "audio" | "ptt" => "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string(),
+                        "video" => "[视频，已下载到本地]".to_string(),
+                        "document" => format!("[文件: {}，已下载到本地，可用 read_file 读取]", msg.media_filename.as_deref().unwrap_or("unknown")),
+                        other => format!("[{}，已下载到本地]", other),
                     }
                 } else {
                     content_raw.to_string()

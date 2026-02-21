@@ -189,19 +189,16 @@ impl SlackChannel {
             return Ok(());
         }
         if event.get("bot_id").is_some() { return Ok(()); }
-        if let Some(sub) = event.get("subtype").and_then(|v| v.as_str()) {
-            if sub != "file_share" {
-                debug!(subtype = %sub, "Slack: skipping message subtype");
-                return Ok(());
-            }
+        let subtype = event.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+        if !subtype.is_empty() && subtype != "file_share" {
+            debug!(subtype = %subtype, "Slack: skipping message subtype");
+            return Ok(());
         }
         let user = event.get("user").and_then(|v| v.as_str()).unwrap_or("");
         if user.is_empty() || !self.is_allowed(user) {
             debug!(user = %user, "Slack: user empty or not in allowlist");
             return Ok(());
         }
-        let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if text.is_empty() { return Ok(()); }
         let channel_id = event.get("channel").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let monitored = &self.config.channels.slack.channels;
         if !monitored.is_empty() && !monitored.iter().any(|c| c == &channel_id) {
@@ -209,17 +206,79 @@ impl SlackChannel {
         }
         let ts = event.get("ts").and_then(|v| v.as_str()).map(|s| s.to_string());
         let thread_ts = event.get("thread_ts").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        // Download any shared files
+        let mut media_paths = vec![];
+        if let Some(files) = event.get("files").and_then(|v| v.as_array()) {
+            for file in files {
+                let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let file_name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
+                let url_private = file.get("url_private").and_then(|v| v.as_str()).unwrap_or("");
+                if !url_private.is_empty() && !file_id.is_empty() {
+                    match self.download_slack_file(url_private, file_name).await {
+                        Ok(p) => media_paths.push(p),
+                        Err(e) => warn!(error = %e, file_id = %file_id, "Slack: failed to download file"),
+                    }
+                }
+            }
+        }
+
+        let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let content = if text.is_empty() && !media_paths.is_empty() {
+            "[文件，已下载到本地，可用 read_file 读取]".to_string()
+        } else {
+            text
+        };
+        if content.is_empty() && media_paths.is_empty() { return Ok(()); }
+
         let inbound = InboundMessage {
             channel: "slack".to_string(),
             sender_id: user.to_string(),
             chat_id: channel_id,
-            content: text,
-            media: vec![],
+            content,
+            media: media_paths,
             metadata: serde_json::json!({ "ts": ts, "thread_ts": thread_ts, "mode": "socket" }),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         self.inbound_tx.send(inbound).await
             .map_err(|e| Error::Channel(e.to_string()))
+    }
+
+    /// Download a Slack file using the private URL (requires bot token auth).
+    async fn download_slack_file(&self, url: &str, file_name: &str) -> Result<String> {
+        let token = &self.config.channels.slack.bot_token;
+        let resp = self.client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Slack file download failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Err(Error::Channel(format!("Slack file download HTTP {}", resp.status())));
+        }
+
+        let media_dir = dirs::home_dir()
+            .map(|h| h.join(".blockcell").join("workspace").join("media"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".blockcell/workspace/media"));
+        tokio::fs::create_dir_all(&media_dir)
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+        let safe_name = file_name.replace(['/', '\\', ':'], "_");
+        let ts = chrono::Utc::now().timestamp_millis();
+        let filename = format!("slack_{}_{}", ts, safe_name);
+        let file_path = media_dir.join(&filename);
+
+        let bytes = resp.bytes().await
+            .map_err(|e| Error::Channel(format!("Slack file read body failed: {}", e)))?;
+        tokio::fs::write(&file_path, &bytes)
+            .await
+            .map_err(|e| Error::Channel(format!("Slack file write failed: {}", e)))?;
+
+        let path_str = file_path.to_string_lossy().to_string();
+        info!(path = %path_str, bytes = bytes.len(), "Slack: file downloaded");
+        Ok(path_str)
     }
 
     // ── Polling fallback ──────────────────────────────────────────────────────
@@ -456,6 +515,127 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
         remaining = &remaining[split_at..];
     }
     chunks
+}
+
+/// Upload a file to Slack using the v2 upload API and share it to a channel.
+/// Flow: getUploadURLExternal → PUT bytes → completeUploadExternal
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
+    crate::rate_limit::slack_limiter().acquire().await;
+
+    let token = &config.channels.slack.bot_token;
+    let client = shared_client();
+
+    let path = std::path::Path::new(file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to read file {}: {}", file_path, e)))?;
+    let file_size = bytes.len();
+
+    // Step 1: Get upload URL
+    #[derive(serde::Deserialize)]
+    struct UploadUrlResp {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        upload_url: Option<String>,
+        #[serde(default)]
+        file_id: Option<String>,
+    }
+
+    let url_resp: UploadUrlResp = client
+        .get(&format!("{}/files.getUploadURLExternal", SLACK_API_BASE))
+        .header("Authorization", format!("Bearer {}", token))
+        .query(&[
+            ("filename", file_name.as_str()),
+            ("length", &file_size.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Slack getUploadURL failed: {}", e)))?
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("Slack getUploadURL parse failed: {}", e)))?;
+
+    if !url_resp.ok {
+        return Err(Error::Channel(format!(
+            "Slack getUploadURL error: {}",
+            url_resp.error.unwrap_or_else(|| "unknown".to_string())
+        )));
+    }
+
+    let upload_url = url_resp.upload_url
+        .ok_or_else(|| Error::Channel("Slack: no upload_url in response".to_string()))?;
+    let file_id = url_resp.file_id
+        .ok_or_else(|| Error::Channel("Slack: no file_id in response".to_string()))?;
+
+    // Step 2: PUT file bytes to upload URL
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    let mime = slack_mime_for_ext(&ext);
+    let put_resp = client
+        .put(&upload_url)
+        .header("Content-Type", mime)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Slack file PUT failed: {}", e)))?;
+
+    if !put_resp.status().is_success() {
+        let body = put_resp.text().await.unwrap_or_default();
+        return Err(Error::Channel(format!("Slack file PUT error: {}", body)));
+    }
+
+    // Step 3: Complete upload and share to channel
+    #[derive(serde::Deserialize)]
+    struct CompleteResp { ok: bool, #[serde(default)] error: Option<String> }
+
+    let complete_body = serde_json::json!({
+        "files": [{ "id": file_id }],
+        "channel_id": chat_id,
+    });
+
+    let complete_resp: CompleteResp = client
+        .post(&format!("{}/files.completeUploadExternal", SLACK_API_BASE))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&complete_body)
+        .send()
+        .await
+        .map_err(|e| Error::Channel(format!("Slack completeUpload failed: {}", e)))?
+        .json()
+        .await
+        .map_err(|e| Error::Channel(format!("Slack completeUpload parse failed: {}", e)))?;
+
+    if !complete_resp.ok {
+        return Err(Error::Channel(format!(
+            "Slack completeUpload error: {}",
+            complete_resp.error.unwrap_or_else(|| "unknown".to_string())
+        )));
+    }
+
+    info!(file_path = %file_path, channel = %chat_id, "Slack: media uploaded and shared");
+    Ok(())
+}
+
+fn slack_mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "opus" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
 }
 
 #[cfg(test)]
