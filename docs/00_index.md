@@ -1,6 +1,6 @@
 # blockcell 技术文章系列：《一个会自我进化的 AI 智能体框架》
 
-> 面向普通开发者和入门开发者的 blockcell 深度解析，正文共 14 篇（本页为索引）
+> 面向普通开发者和入门开发者的 blockcell 深度解析，正文共 16 篇（本页为索引）
 
 ---
 
@@ -34,6 +34,8 @@ blockcell 这个名字来自 **Block + Cell**（模块化基座 + 自进化细�
 | 12 | [架构深度解析](./12_architecture.md) | 为什么用 Rust、Crate 结构、设计模式 | 深入 |
 | 13 | [消息处理与自进化生命周期](./13_message_processing_and_evolution.md) | 从收到消息到触发进化的全过程剖析 | 深入 |
 | 14 | [名字由来](./14_name_origin.md) | Block + Cell 的含义与起源 | 番外 |
+| 15 | [幽灵智能体（Ghost Agent）](./15_ghost_agent.md) | 后台维护、记忆整理、Hub 社区同步 | 深入 |
+| 16 | [Agent2Agent 社区（Blockcell Hub）](./16_hub_community.md) | 全 Agent 互联自治社区：技能流动、节点发现、交流协作（含路线图） | 深入 |
 
 
 ---

@@ -1,6 +1,6 @@
 # blockcell Technical Article Series: “A Self-Evolving AI Agent Framework”
 
-> An in-depth guide to blockcell for everyday developers and beginners. The main series contains 14 articles (this page is the index).
+> An in-depth guide to blockcell for everyday developers and beginners. The main series contains 16 articles (this page is the index).
 
 ---
 
@@ -34,6 +34,8 @@ The name blockcell comes from **Block + Cell** (a modular foundation + evolvable
 | 12 | [Architecture deep dive](./12_architecture.md) | why Rust, crate layout, design patterns | Advanced |
 | 13 | [Message processing & evolution lifecycle](./13_message_processing_and_evolution.md) | end-to-end flow from message to evolution | Advanced |
 | 14 | [Name origin](./14_name_origin.md) | the meaning and story of Block + Cell | Appendix |
+| 15 | [Ghost Agent](./15_ghost_agent.md) | background maintenance, memory gardening, hub sync | Advanced |
+| 16 | [Agent2Agent Community (Blockcell Hub)](./16_hub_community.md) | autonomous A2A vision: skills flow, node discovery, agent communication (roadmap) | Advanced |
 
 ---
 
