@@ -1,0 +1,16 @@
+target/
+.git/
+.idea/
+.DS_Store
+
+# Node / webui
+webui/node_modules/
+webui/dist/
+
+# Logs
+*.log
+
+# Local workspace/runtime artifacts
+**/.blockcell/
+**/workspace/
+/data/
