@@ -159,7 +159,7 @@ impl TelegramChannel {
 
         let response = self
             .client
-            .get(&self.api_url("getUpdates"))
+            .get(self.api_url("getUpdates"))
             .query(&params)
             .send()
             .await

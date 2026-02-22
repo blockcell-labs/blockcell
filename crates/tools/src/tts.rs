@@ -69,11 +69,10 @@ impl Tool for TtsTool {
         if !["speak", "list_voices", "info"].contains(&action) {
             return Err(Error::Tool("action must be 'speak', 'list_voices', or 'info'".into()));
         }
-        if action == "speak" {
-            if params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if action == "speak"
+            && params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'text' is required for speak".into()));
             }
-        }
         Ok(())
     }
 
@@ -354,7 +353,7 @@ async fn speak_edge(
 ) -> Result<String> {
     let mut cmd = tokio::process::Command::new("edge-tts");
 
-    let default_voice = if text.chars().any(|c| c >= '\u{4e00}' && c <= '\u{9fff}') {
+    let default_voice = if text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
         "zh-CN-XiaoxiaoNeural"
     } else {
         "en-US-JennyNeural"

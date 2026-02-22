@@ -160,8 +160,8 @@ async fn action_decrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
     let output_path = params.get("output_path").and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
-            if path.ends_with(".enc") {
-                path[..path.len() - 4].to_string()
+            if let Some(stripped) = path.strip_suffix(".enc") {
+                stripped.to_string()
             } else {
                 format!("{}.dec", path)
             }
@@ -420,7 +420,7 @@ async fn action_hash_file(params: &Value) -> Result<Value> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let hash = stdout.trim().split_whitespace().next().unwrap_or("").to_string();
+    let hash = stdout.split_whitespace().next().unwrap_or("").to_string();
 
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 

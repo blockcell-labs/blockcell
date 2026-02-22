@@ -81,7 +81,7 @@ async fn action_ping(params: &Value) -> Result<Value> {
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
 
     let output = tokio::process::Command::new("ping")
-        .args(&["-c", &count.to_string(), "-W", &(timeout * 1000).to_string(), host])
+        .args(["-c", &count.to_string(), "-W", &(timeout * 1000).to_string(), host])
         .output()
         .await
         .map_err(|e| Error::Tool(format!("ping failed: {}", e)))?;
@@ -134,7 +134,7 @@ async fn action_traceroute(params: &Value) -> Result<Value> {
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(5);
 
     let output = tokio::process::Command::new("traceroute")
-        .args(&["-m", &max_hops.to_string(), "-w", &timeout.to_string(), host])
+        .args(["-m", &max_hops.to_string(), "-w", &timeout.to_string(), host])
         .output()
         .await
         .map_err(|e| Error::Tool(format!("traceroute failed: {}", e)))?;
@@ -378,9 +378,9 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
         for line in tls_stdout.lines() {
             let line = line.trim();
             if line.contains("Protocol") {
-                result["tls_version"] = json!(line.split(':').last().unwrap_or("").trim());
+                result["tls_version"] = json!(line.split(':').next_back().unwrap_or("").trim());
             } else if line.contains("Cipher") && !line.contains("Server") {
-                result["cipher"] = json!(line.split(':').last().unwrap_or("").trim());
+                result["cipher"] = json!(line.split(':').next_back().unwrap_or("").trim());
             }
         }
     }
@@ -484,27 +484,27 @@ async fn action_whois(params: &Value) -> Result<Value> {
 
         let lower = line.to_lowercase();
         if lower.starts_with("registrar:") || lower.starts_with("registrar name:") {
-            result["registrar"] = json!(line.splitn(2, ':').nth(1).unwrap_or("").trim());
+            result["registrar"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("creation date:") || lower.starts_with("registered on:") {
-            result["creation_date"] = json!(line.splitn(2, ':').nth(1).unwrap_or("").trim());
+            result["creation_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("expiry date:") || lower.starts_with("registry expiry date:") || lower.starts_with("expiration date:") {
-            result["expiry_date"] = json!(line.splitn(2, ':').nth(1).unwrap_or("").trim());
+            result["expiry_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("updated date:") || lower.starts_with("last updated:") {
-            result["updated_date"] = json!(line.splitn(2, ':').nth(1).unwrap_or("").trim());
+            result["updated_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("name server:") || lower.starts_with("nserver:") {
-            let ns = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+            let ns = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
             let existing = result.get("name_servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let mut servers = existing;
             servers.push(json!(ns));
             result["name_servers"] = json!(servers);
         } else if lower.starts_with("domain status:") || lower.starts_with("status:") {
-            let status = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+            let status = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
             let existing = result.get("status").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let mut statuses = existing;
             statuses.push(json!(status));
             result["status"] = json!(statuses);
         } else if lower.starts_with("registrant organization:") || lower.starts_with("registrant:") {
-            result["registrant"] = json!(line.splitn(2, ':').nth(1).unwrap_or("").trim());
+            result["registrant"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         }
     }
 

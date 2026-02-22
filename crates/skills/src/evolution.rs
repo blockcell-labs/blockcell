@@ -778,7 +778,7 @@ impl SkillEvolution {
             for tool in &context.tool_schemas {
                 prompt.push_str(&format!("- {}\n", tool));
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
 
         // Output format
@@ -1041,9 +1041,8 @@ or\n\
             } else if line.starts_with('+') {
                 // 新增行：输出到结果
                 output.push(line[1..].to_string());
-            } else if line.starts_with(' ') {
+            } else if let Some(ctx) = line.strip_prefix(' ') {
                 // 上下文行：验证内容匹配，然后输出原始行
-                let ctx = &line[1..];
                 if orig_idx < result_lines.len() {
                     if result_lines[orig_idx].trim() != ctx.trim() {
                         // 内容不匹配，记录但继续（宽松模式）

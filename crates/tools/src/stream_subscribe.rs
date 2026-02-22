@@ -249,11 +249,10 @@ impl Tool for StreamSubscribeTool {
             "list" => {}
             _ => return Err(Error::Validation(format!("Unknown action: {}", action))),
         }
-        if action == "send" {
-            if params.get("message").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if action == "send"
+            && params.get("message").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Validation("'message' is required for send".into()));
             }
-        }
         Ok(())
     }
 
@@ -969,7 +968,7 @@ async fn action_read(params: &Value) -> Result<Value> {
 
     // Collect filtered messages, then take last N
     let filtered: Vec<&StreamMessage> = sub.buffer.iter()
-        .filter(|m| since.map_or(true, |ts| m.timestamp > ts))
+        .filter(|m| since.is_none_or(|ts| m.timestamp > ts))
         .collect();
     let skip = filtered.len().saturating_sub(limit);
     let messages: Vec<Value> = filtered.into_iter()

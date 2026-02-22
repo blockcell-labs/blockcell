@@ -281,7 +281,7 @@ pub async fn run(force: bool) -> anyhow::Result<()> {
     if let Some(parent) = paths.config_file().parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&paths.config_file(), EXAMPLE_CONFIG)?;
+    std::fs::write(paths.config_file(), EXAMPLE_CONFIG)?;
     println!("✓ Created config: {}", paths.config_file().display());
 
     // Create workspace files

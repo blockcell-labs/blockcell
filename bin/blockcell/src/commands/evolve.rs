@@ -236,7 +236,7 @@ pub async fn list(all: bool, verbose: bool) -> anyhow::Result<()> {
     for r in &records {
         let icon = status_icon(&r.status);
         let desc = status_desc_cn(&r.status);
-        let trigger_desc = trigger_desc(&r);
+        let trigger_desc = trigger_desc(r);
 
         println!("  {} {} [{}]", icon, r.skill_name, desc);
         println!("    ID: {}", r.id);
@@ -460,7 +460,7 @@ async fn watch_evolution(paths: &Paths, evolution_id: &str) -> anyhow::Result<()
                     last_status = current_status;
                 } else {
                     // No change — show a spinner dot every 5 seconds
-                    if tick % 5 == 0 {
+                    if tick.is_multiple_of(5) {
                         print!(".");
                         let _ = std::io::stdout().flush();
                     }
@@ -536,9 +536,9 @@ fn print_record_detail(record: &EvolutionRecord) {
     println!("  📋 Pipeline:");
     print_pipeline_stage("Triggered", true, record.status != EvolutionStatus::Triggered);
     print_pipeline_stage("Generate Patch", record.patch.is_some(), matches!(record.status, EvolutionStatus::Generated | EvolutionStatus::Auditing | EvolutionStatus::AuditPassed | EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed));
-    print_pipeline_stage("Audit", record.audit.is_some(), record.audit.as_ref().map_or(false, |a| a.passed));
+    print_pipeline_stage("Audit", record.audit.is_some(), record.audit.as_ref().is_some_and(|a| a.passed));
     print_pipeline_stage("Dry Run", matches!(record.status, EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed), matches!(record.status, EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed));
-    print_pipeline_stage("Shadow Test", record.shadow_test.is_some(), record.shadow_test.as_ref().map_or(false, |t| t.passed));
+    print_pipeline_stage("Shadow Test", record.shadow_test.is_some(), record.shadow_test.as_ref().is_some_and(|t| t.passed));
     print_pipeline_stage("Canary Rollout", record.rollout.is_some(), record.status == EvolutionStatus::Completed);
     println!();
 
@@ -625,7 +625,7 @@ fn print_all_status(paths: &Paths) -> anyhow::Result<()> {
         for r in &records[..show_count] {
             let icon = status_icon(&r.status);
             let desc = status_desc_cn(&r.status);
-            let trigger = trigger_short(&r);
+            let trigger = trigger_short(r);
             println!("  {} {:<30} [{}] {} ({})",
                 icon,
                 truncate_str(&r.skill_name, 30),
@@ -653,7 +653,7 @@ fn load_all_records(records_dir: &std::path::Path) -> Vec<EvolutionRecord> {
     if let Ok(entries) = std::fs::read_dir(records_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                         records.push(record);

@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Tool, ToolContext, ToolSchema};
 
-fn expand_path(path: &str, workspace: &PathBuf) -> PathBuf {
+fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
     if path.starts_with("~/") {
         dirs::home_dir()
             .map(|h| h.join(&path[2..]))
@@ -138,7 +138,7 @@ impl Tool for FileOpsTool {
     }
 }
 
-async fn action_delete(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_delete(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
     let recursive = params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -164,7 +164,7 @@ async fn action_delete(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-async fn action_move(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_move(workspace: &Path, params: &Value) -> Result<Value> {
     let src = expand_path(params["path"].as_str().unwrap(), workspace);
     let dst = expand_path(params["destination"].as_str().unwrap(), workspace);
 
@@ -198,7 +198,7 @@ async fn action_move(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-async fn action_copy(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_copy(workspace: &Path, params: &Value) -> Result<Value> {
     let src = expand_path(params["path"].as_str().unwrap(), workspace);
     let dst = expand_path(params["destination"].as_str().unwrap(), workspace);
 
@@ -263,7 +263,7 @@ fn count_files_recursive(path: &PathBuf) -> usize {
     count
 }
 
-fn action_compress(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
     let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("zip");
     let dst_str = params["destination"].as_str().unwrap();
     let dst = expand_path(dst_str, workspace);
@@ -367,7 +367,7 @@ fn zip_add_dir(
         let archive_name = format!("{}/{}", base_name, relative.display());
 
         if path.is_dir() {
-            zip.add_directory(&format!("{}/", archive_name), options)
+            zip.add_directory(format!("{}/", archive_name), options)
                 .map_err(|e| Error::Tool(format!("Zip dir error: {}", e)))?;
             count += zip_add_dir(zip, base, &path, options)?;
         } else {
@@ -381,7 +381,7 @@ fn zip_add_dir(
     Ok(count)
 }
 
-fn action_decompress(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
     let src_str = params["path"].as_str().unwrap();
     let src = expand_path(src_str, workspace);
 
@@ -461,7 +461,7 @@ fn action_decompress(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-fn action_read_pdf(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_read_pdf(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
 
     if !path.exists() {
@@ -496,7 +496,7 @@ fn action_read_pdf(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-async fn action_file_info(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_file_info(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
 
     if !path.exists() {

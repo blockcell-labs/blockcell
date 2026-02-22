@@ -254,15 +254,14 @@ fn render_node(
     }
 
     // In compact mode, skip empty structural elements
-    if compact && STRUCTURAL_ROLES.iter().any(|r| r.eq_ignore_ascii_case(&node.role)) {
-        if node.name.is_empty() && node.ref_id.is_none() {
+    if compact && STRUCTURAL_ROLES.iter().any(|r| r.eq_ignore_ascii_case(&node.role))
+        && node.name.is_empty() && node.ref_id.is_none() {
             // Skip this node but still render children
             for child in &node.children {
                 render_node(output, child, indent, compact, max_depth);
             }
             return;
         }
-    }
 
     // Skip nodes with no useful content in compact mode
     if compact && node.role == "StaticText" && node.name.is_empty() {

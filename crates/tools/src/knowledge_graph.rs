@@ -431,8 +431,7 @@ fn action_get_relations(db: &rusqlite::Connection, params: &Value) -> Result<Val
     };
 
     // Filter by relation_type if both entity_id and relation_type are specified
-    let filtered = if entity_id.is_some() && relation_type.is_some() {
-        let rt = relation_type.unwrap();
+    let filtered = if let (Some(_), Some(rt)) = (entity_id, relation_type) {
         relations.into_iter().filter(|r| r.get("relation_type").and_then(|v| v.as_str()) == Some(rt)).collect()
     } else {
         relations
@@ -730,7 +729,7 @@ fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
 
     // Simple pattern matching: "entity_type:person" or "tag:important" or free text
     if query.starts_with("type:") || query.starts_with("entity_type:") {
-        let et = query.splitn(2, ':').nth(1).unwrap_or("");
+        let et = query.split_once(':').map(|x| x.1).unwrap_or("");
         let sql = format!(
             "SELECT id, entity_type, name, properties, tags, created_at FROM entities WHERE entity_type = '{}' LIMIT {}",
             et, max_results
@@ -738,7 +737,7 @@ fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
         let entities = query_entities(db, &sql)?;
         Ok(json!({"entities": entities, "count": entities.len()}))
     } else if query.starts_with("tag:") {
-        let tag = query.splitn(2, ':').nth(1).unwrap_or("");
+        let tag = query.split_once(':').map(|x| x.1).unwrap_or("");
         let sql = format!(
             "SELECT id, entity_type, name, properties, tags, created_at FROM entities WHERE tags LIKE '%\"{}%' LIMIT {}",
             tag, max_results
@@ -746,7 +745,7 @@ fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
         let entities = query_entities(db, &sql)?;
         Ok(json!({"entities": entities, "count": entities.len()}))
     } else if query.starts_with("relation:") {
-        let rt = query.splitn(2, ':').nth(1).unwrap_or("");
+        let rt = query.split_once(':').map(|x| x.1).unwrap_or("");
         let sql = format!(
             "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
              s.name as source_name, t.name as target_name \
@@ -869,12 +868,12 @@ fn export_mermaid(entities: &[Value], relations: &[Value]) -> String {
         let id = e["id"].as_str().unwrap_or("");
         let name = e["name"].as_str().unwrap_or(id);
         // Sanitize for mermaid (replace special chars)
-        let safe_id = id.replace('-', "_").replace(' ', "_");
+        let safe_id = id.replace(['-', ' '], "_");
         md.push_str(&format!("  {}[\"{}\"]\n", safe_id, name));
     }
     for r in relations {
-        let src = r["source_id"].as_str().unwrap_or("").replace('-', "_").replace(' ', "_");
-        let tgt = r["target_id"].as_str().unwrap_or("").replace('-', "_").replace(' ', "_");
+        let src = r["source_id"].as_str().unwrap_or("").replace(['-', ' '], "_");
+        let tgt = r["target_id"].as_str().unwrap_or("").replace(['-', ' '], "_");
         let rtype = r["relation_type"].as_str().unwrap_or("");
         if rtype.is_empty() {
             md.push_str(&format!("  {} --> {}\n", src, tgt));

@@ -104,7 +104,7 @@ impl SlackChannel {
         let app_token = &self.config.channels.slack.app_token;
         let response = self
             .client
-            .post(&format!("{}/apps.connections.open", SLACK_API_BASE))
+            .post(format!("{}/apps.connections.open", SLACK_API_BASE))
             .header("Authorization", format!("Bearer {}", app_token))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body("")
@@ -289,7 +289,7 @@ impl SlackChannel {
 
         let response = self
             .client
-            .get(&format!("{}/conversations.history", SLACK_API_BASE))
+            .get(format!("{}/conversations.history", SLACK_API_BASE))
             .header("Authorization", format!("Bearer {}", token))
             .query(&[
                 ("channel", channel_id),
@@ -464,7 +464,7 @@ pub async fn send_message_threaded(
         }
 
         let response = client
-            .post(&format!("{}/chat.postMessage", SLACK_API_BASE))
+            .post(format!("{}/chat.postMessage", SLACK_API_BASE))
             .header("Authorization", format!("Bearer {}", token))
             .json(&body)
             .send()
@@ -550,7 +550,7 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     }
 
     let url_resp: UploadUrlResp = client
-        .get(&format!("{}/files.getUploadURLExternal", SLACK_API_BASE))
+        .get(format!("{}/files.getUploadURLExternal", SLACK_API_BASE))
         .header("Authorization", format!("Bearer {}", token))
         .query(&[
             ("filename", file_name.as_str()),
@@ -601,7 +601,7 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     });
 
     let complete_resp: CompleteResp = client
-        .post(&format!("{}/files.completeUploadExternal", SLACK_API_BASE))
+        .post(format!("{}/files.completeUploadExternal", SLACK_API_BASE))
         .header("Authorization", format!("Bearer {}", token))
         .json(&complete_body)
         .send()

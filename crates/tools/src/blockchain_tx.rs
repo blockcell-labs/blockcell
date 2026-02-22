@@ -635,7 +635,7 @@ impl BlockchainTxTool {
         let amount_raw = Self::token_to_raw(amount_in, decimals)?;
 
         // Build getAmountsOut call to estimate output
-        let path_encoded: Vec<String> = path.iter().map(|p| p.clone()).collect();
+        let path_encoded: Vec<String> = path.to_vec();
 
         debug!(
             router = router, token_in = token_in, token_out = token_out,

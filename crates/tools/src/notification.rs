@@ -110,16 +110,14 @@ impl Tool for NotificationTool {
         if channel == "reply" && message.is_empty() && !has_media {
             return Err(Error::Tool("'reply' channel requires at least 'message' or 'media_paths'".into()));
         }
-        if channel == "sms" {
-            if params.get("to").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if channel == "sms"
+            && params.get("to").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'to' phone number is required for SMS".into()));
             }
-        }
-        if channel == "webhook" {
-            if params.get("url").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if channel == "webhook"
+            && params.get("url").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'url' is required for webhook".into()));
             }
-        }
         Ok(())
     }
 

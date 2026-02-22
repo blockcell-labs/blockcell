@@ -837,7 +837,7 @@ mod tests {
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: AlertAction = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.tool, "notification");
-        assert_eq!(deserialized.require_confirm, false);
+        assert!(!deserialized.require_confirm);
         assert_eq!(deserialized.label, Some("test".to_string()));
     }
 

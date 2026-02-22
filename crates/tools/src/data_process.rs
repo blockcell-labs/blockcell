@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Tool, ToolContext, ToolSchema};
 
-fn expand_path(path: &str, workspace: &PathBuf) -> PathBuf {
+fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
     if path.starts_with("~/") {
         dirs::home_dir()
             .map(|h| h.join(&path[2..]))
@@ -191,7 +191,7 @@ impl Tool for DataProcessTool {
 }
 
 /// Load data from either inline 'data' param or from a CSV file at 'path'.
-fn load_data(workspace: &PathBuf, params: &Value) -> Result<Vec<Value>> {
+fn load_data(workspace: &Path, params: &Value) -> Result<Vec<Value>> {
     if let Some(data) = params.get("data").and_then(|v| v.as_array()) {
         return Ok(data.clone());
     }
@@ -289,7 +289,7 @@ fn try_parse_value(s: &str) -> Value {
     json!(s)
 }
 
-fn action_read_csv(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_read_csv(workspace: &Path, params: &Value) -> Result<Value> {
     let path_str = params["path"].as_str().unwrap();
     let path = expand_path(path_str, workspace);
     let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
@@ -318,7 +318,7 @@ fn action_read_csv(workspace: &PathBuf, params: &Value) -> Result<Value> {
     }))
 }
 
-fn action_write_csv(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_write_csv(workspace: &Path, params: &Value) -> Result<Value> {
     let path_str = params["path"].as_str().unwrap();
     let path = expand_path(path_str, workspace);
     let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
@@ -385,18 +385,18 @@ fn write_json_to_csv(path: &PathBuf, data: &[Value], delimiter: &str) -> Result<
     Ok(())
 }
 
-fn action_query(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_query(workspace: &Path, params: &Value) -> Result<Value> {
     let mut data = load_data(workspace, params)?;
     let total = data.len();
 
     // Filter
     if let Some(filter) = params.get("filter").and_then(|v| v.as_object()) {
-        data = data.into_iter().filter(|row| {
+        data.retain(|row| {
             filter.iter().all(|(col, condition)| {
                 let val = row.get(col);
                 match_filter(val, condition)
             })
-        }).collect();
+        });
     }
 
     // Sort
@@ -560,7 +560,7 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     }
 }
 
-fn action_stats(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
     let data = load_data(workspace, params)?;
 
     if data.is_empty() {
@@ -697,7 +697,7 @@ fn action_stats(workspace: &PathBuf, params: &Value) -> Result<Value> {
                 // Median
                 let mut sorted = values.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = if count % 2 == 0 {
+                let median = if count.is_multiple_of(2) {
                     (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
                 } else {
                     sorted[count / 2]
@@ -868,7 +868,7 @@ fn compute_correlation(data: &[Value], col_a: &str, col_b: &str) -> Option<f64> 
     Some((r * 10000.0).round() / 10000.0)
 }
 
-fn action_transform(workspace: &PathBuf, params: &Value) -> Result<Value> {
+fn action_transform(workspace: &Path, params: &Value) -> Result<Value> {
     let mut data = load_data(workspace, params)?;
 
     let ops = params.get("transform_ops")
@@ -923,7 +923,7 @@ fn action_transform(workspace: &PathBuf, params: &Value) -> Result<Value> {
             "dedup" => {
                 let cols = op_def.get("columns").and_then(|v| v.as_array());
                 let mut seen = std::collections::HashSet::new();
-                data = data.into_iter().filter(|row| {
+                data.retain(|row| {
                     let key = if let Some(cols) = cols {
                         let parts: Vec<String> = cols.iter()
                             .filter_map(|c| c.as_str())
@@ -934,7 +934,7 @@ fn action_transform(workspace: &PathBuf, params: &Value) -> Result<Value> {
                         row.to_string()
                     };
                     seen.insert(key)
-                }).collect();
+                });
             }
             "add_column" => {
                 let name = op_def.get("name").and_then(|v| v.as_str()).unwrap_or("");

@@ -344,7 +344,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 
 pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(Error::Tool("Hex string must have even length".into()));
     }
     (0..s.len())

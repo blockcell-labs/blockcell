@@ -214,7 +214,7 @@ impl ListSkillsTool {
         if let Ok(entries) = std::fs::read_dir(records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<Value>(&content) {
                             records.push(record);

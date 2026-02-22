@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use blockcell_core::{Error, OutboundMessage, Result};
 use serde_json::{json, Value};
 use tracing::debug;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
@@ -111,7 +111,7 @@ impl Tool for MessageTool {
     }
 }
 
-fn resolve_media_path(workspace: &PathBuf, input: &str) -> Result<String> {
+fn resolve_media_path(workspace: &std::path::Path, input: &str) -> Result<String> {
     let p = Path::new(input);
     if p.exists() {
         return Ok(input.to_string());

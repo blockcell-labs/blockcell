@@ -557,10 +557,10 @@ fn parse_vcards_from_xml(xml: &str) -> Vec<Value> {
             for line in vcard.lines() {
                 let line = line.trim();
                 if line.starts_with("FN:") || line.starts_with("FN;") {
-                    let val = line.splitn(2, ':').nth(1).unwrap_or("");
+                    let val = line.split_once(':').map(|x| x.1).unwrap_or("");
                     contact["name"] = json!(val);
                 } else if line.starts_with("EMAIL") {
-                    let val = line.splitn(2, ':').nth(1).unwrap_or("");
+                    let val = line.split_once(':').map(|x| x.1).unwrap_or("");
                     if !val.is_empty() {
                         let emails = contact.get("emails").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                         let mut emails = emails;
@@ -568,7 +568,7 @@ fn parse_vcards_from_xml(xml: &str) -> Vec<Value> {
                         contact["emails"] = json!(emails);
                     }
                 } else if line.starts_with("TEL") {
-                    let val = line.splitn(2, ':').nth(1).unwrap_or("");
+                    let val = line.split_once(':').map(|x| x.1).unwrap_or("");
                     if !val.is_empty() {
                         let phones = contact.get("phones").and_then(|v| v.as_array()).cloned().unwrap_or_default();
                         let mut phones = phones;
@@ -576,10 +576,10 @@ fn parse_vcards_from_xml(xml: &str) -> Vec<Value> {
                         contact["phones"] = json!(phones);
                     }
                 } else if line.starts_with("ORG:") || line.starts_with("ORG;") {
-                    let val = line.splitn(2, ':').nth(1).unwrap_or("");
+                    let val = line.split_once(':').map(|x| x.1).unwrap_or("");
                     contact["organization"] = json!(val.replace(';', " ").trim());
                 } else if line.starts_with("TITLE:") {
-                    let val = line.splitn(2, ':').nth(1).unwrap_or("");
+                    let val = line.split_once(':').map(|x| x.1).unwrap_or("");
                     contact["title"] = json!(val);
                 }
             }

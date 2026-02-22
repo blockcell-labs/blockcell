@@ -55,6 +55,10 @@ pub struct AgentDefaults {
     pub temperature: f32,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    #[serde(default = "default_llm_max_retries")]
+    pub llm_max_retries: u32,
+    #[serde(default = "default_llm_retry_delay_ms")]
+    pub llm_retry_delay_ms: u64,
 }
 
 fn default_workspace() -> String {
@@ -77,6 +81,14 @@ fn default_max_tool_iterations() -> u32 {
     20
 }
 
+fn default_llm_max_retries() -> u32 {
+    3
+}
+
+fn default_llm_retry_delay_ms() -> u64 {
+    2000
+}
+
 impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
@@ -85,6 +97,8 @@ impl Default for AgentDefaults {
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             max_tool_iterations: default_max_tool_iterations(),
+            llm_max_retries: default_llm_max_retries(),
+            llm_retry_delay_ms: default_llm_retry_delay_ms(),
         }
     }
 }

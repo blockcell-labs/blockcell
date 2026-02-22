@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -210,7 +211,7 @@ impl WeComChannel {
                     // In polling mode, we can check for pending messages
                     // via the WeCom message API if configured
                     if let Err(e) = self.poll_messages().await {
-                        error!(error = %e, "WeCom poll error");
+                        error!(error = %e.to_string(), "WeCom poll error");
                     }
                 }
                 _ = shutdown.recv() => {
@@ -297,7 +298,7 @@ impl WeComChannel {
     /// Verify a WeCom callback request signature.
     /// WeCom uses SHA1(sort(token, timestamp, nonce)) for verification.
     pub fn verify_signature(token: &str, timestamp: &str, nonce: &str, signature: &str) -> bool {
-        let mut parts = vec![token, timestamp, nonce];
+        let mut parts = [token, timestamp, nonce];
         parts.sort_unstable();
         let combined = parts.join("");
 
@@ -325,7 +326,7 @@ impl WeComChannel {
         match self.get_access_token().await {
             Ok(_) => info!("WeCom access token obtained successfully"),
             Err(e) => {
-                error!(error = %e, "WeCom: failed to get access token, channel will not start");
+                error!(error = %e.to_string(), "WeCom: failed to get access token, channel will not start");
                 return;
             }
         }
@@ -482,12 +483,10 @@ pub async fn process_webhook(
 
         if !wecom_cfg.callback_token.is_empty() {
             // 计算签名并打印，方便对比
-            let mut parts = vec![
-                wecom_cfg.callback_token.as_str(),
+            let mut parts = [wecom_cfg.callback_token.as_str(),
                 timestamp,
                 nonce,
-                echostr_enc,
-            ];
+                echostr_enc];
             parts.sort_unstable();
             let combined = parts.join("");
             let computed = sha1_hex(combined.as_bytes());
@@ -534,12 +533,11 @@ pub async fn process_webhook(
     let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
     let msg_signature = query.get("msg_signature").or_else(|| query.get("signature")).map(|s| s.as_str()).unwrap_or("");
 
-    if !wecom_cfg.callback_token.is_empty() && !msg_encrypt.is_empty() {
-        if !verify_signature_4(&wecom_cfg.callback_token, timestamp, nonce, &msg_encrypt, msg_signature) {
+    if !wecom_cfg.callback_token.is_empty() && !msg_encrypt.is_empty()
+        && !verify_signature_4(&wecom_cfg.callback_token, timestamp, nonce, &msg_encrypt, msg_signature) {
             tracing::warn!("WeCom webhook: POST signature verification failed");
             return (403, "Forbidden: invalid signature".to_string());
         }
-    }
 
     // Decrypt the message body
     let decrypted_body = if !msg_encrypt.is_empty() && !wecom_cfg.encoding_aes_key.is_empty() {
@@ -619,7 +617,7 @@ pub async fn process_webhook(
                 match download_wecom_media(config, &media_id, "image", None).await {
                     Ok(p) => vec![p],
                     Err(e) => {
-                        warn!(error = %e, "WeCom: failed to download image, using PicUrl");
+                        warn!(error = %e.to_string(), "WeCom: failed to download image, using PicUrl");
                         if !pic_url.is_empty() { vec![pic_url] } else { vec![] }
                     }
                 }
@@ -638,7 +636,7 @@ pub async fn process_webhook(
                 match download_wecom_media(config, &media_id, "voice", Some(&format)).await {
                     Ok(p) => vec![p],
                     Err(e) => {
-                        warn!(error = %e, "WeCom: failed to download voice");
+                        warn!(error = %e.to_string(), "WeCom: failed to download voice");
                         vec![]
                     }
                 }
@@ -659,7 +657,7 @@ pub async fn process_webhook(
                 match download_wecom_media(config, &media_id, "video", Some("mp4")).await {
                     Ok(p) => vec![p],
                     Err(e) => {
-                        warn!(error = %e, "WeCom: failed to download video");
+                        warn!(error = %e.to_string(), "WeCom: failed to download video");
                         vec![]
                     }
                 }
@@ -677,7 +675,7 @@ pub async fn process_webhook(
                 match download_wecom_media(config, &media_id, "file", ext.as_deref()).await {
                     Ok(p) => vec![p],
                     Err(e) => {
-                        warn!(error = %e, "WeCom: failed to download file");
+                        warn!(error = %e.to_string(), "WeCom: failed to download file");
                         vec![]
                     }
                 }
@@ -851,7 +849,7 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 /// Verify WeCom 4-param signature: SHA1(sort(token, timestamp, nonce, msg_encrypt))
 /// This is the correct signature for both GET (echostr) and POST (Encrypt) callbacks.
 fn verify_signature_4(token: &str, timestamp: &str, nonce: &str, msg_encrypt: &str, expected: &str) -> bool {
-    let mut parts = vec![token, timestamp, nonce, msg_encrypt];
+    let mut parts = [token, timestamp, nonce, msg_encrypt];
     parts.sort_unstable();
     let combined = parts.join("");
     let hash = sha1_hex(combined.as_bytes());
@@ -1089,8 +1087,14 @@ pub async fn send_media_message(
     let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
     let (media_type, msg_type) = media_type_for_ext(&ext);
 
-    info!(file_path = %file_path, media_type = %media_type, "WeCom: uploading media");
-    let media_id = upload_media(config, file_path, media_type).await?;
+    let upload_path = if media_type == "voice" {
+        ensure_wecom_voice_amr(file_path).await?
+    } else {
+        file_path.to_string()
+    };
+
+    info!(file_path = %upload_path, media_type = %media_type, "WeCom: uploading media");
+    let media_id = upload_media(config, &upload_path, media_type).await?;
     info!(media_id = %media_id, "WeCom: media uploaded");
 
     let client = shared_client();
@@ -1132,6 +1136,69 @@ pub async fn send_media_message(
     }
 
     Ok(())
+}
+
+async fn ensure_wecom_voice_amr(file_path: &str) -> Result<String> {
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    if ext == "amr" {
+        return Ok(file_path.to_string());
+    }
+
+    let input = std::path::Path::new(file_path);
+    if !input.exists() {
+        return Err(Error::Channel(format!(
+            "WeCom voice: input file not found: {}",
+            file_path
+        )));
+    }
+
+    let media_dir = dirs::home_dir()
+        .map(|h| h.join(".blockcell").join("workspace").join("media"))
+        .unwrap_or_else(|| PathBuf::from(".blockcell/workspace/media"));
+    tokio::fs::create_dir_all(&media_dir)
+        .await
+        .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
+
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("voice");
+    let ts = chrono::Utc::now().timestamp_millis();
+    let output = media_dir.join(format!("{}_{}.amr", stem, ts));
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-i")
+        .arg(input)
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("8000")
+        .arg("-c:a")
+        .arg("amr_nb")
+        .arg(&output);
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| Error::Channel(format!("WeCom voice: ffmpeg not available or failed to start: {}", e)))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(Error::Channel(format!(
+            "WeCom voice: failed to convert to amr (WeCom voice only supports .amr). ffmpeg stderr: {}",
+            stderr
+        )));
+    }
+
+    let output_str = output.to_string_lossy().to_string();
+    if !std::path::Path::new(&output_str).exists() {
+        return Err(Error::Channel(
+            "WeCom voice: conversion succeeded but output file missing".to_string(),
+        ));
+    }
+
+    Ok(output_str)
 }
 
 fn media_type_for_ext(ext: &str) -> (&'static str, &'static str) {
@@ -1412,7 +1479,7 @@ mod tests {
         let token = "test";
         let timestamp = "1409735669";
         let nonce = "xxxxxx";
-        let mut parts = vec![token, timestamp, nonce];
+        let mut parts = [token, timestamp, nonce];
         parts.sort_unstable();
         let combined = parts.join("");
         let expected = sha1_hex(combined.as_bytes());

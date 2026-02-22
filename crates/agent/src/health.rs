@@ -13,8 +13,10 @@ pub struct HealthChecker;
 impl HealthChecker {
     /// 执行完整的生存不变量检查
     pub async fn check_all() -> SurvivalInvariants {
-        let mut invariants = SurvivalInvariants::default();
-        invariants.last_checked = chrono::Utc::now().timestamp();
+        let mut invariants = SurvivalInvariants {
+            last_checked: chrono::Utc::now().timestamp(),
+            ..Default::default()
+        };
 
         // 1. 是否还能编译新代码？
         invariants.can_compile = Self::check_compile().await;

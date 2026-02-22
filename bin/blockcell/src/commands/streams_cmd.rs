@@ -22,7 +22,7 @@ pub async fn list() -> anyhow::Result<()> {
     println!();
     println!("📡 Stream subscriptions ({} total)", rules.len());
     println!();
-    println!("  {:<10} {:<12} {:<40} {}", "ID", "Protocol", "URL", "Auto-restore");
+    println!("  {:<10} {:<12} {:<40} Auto-restore", "ID", "Protocol", "URL");
     println!("  {}", "-".repeat(80));
 
     for rule in &rules {
@@ -63,7 +63,7 @@ pub async fn status(sub_id: &str) -> anyhow::Result<()> {
     let rules: Vec<Value> = serde_json::from_str(&content).unwrap_or_default();
 
     let found = rules.iter().find(|r| {
-        r["id"].as_str().map_or(false, |id| id.starts_with(sub_id))
+        r["id"].as_str().is_some_and(|id| id.starts_with(sub_id))
     });
 
     match found {

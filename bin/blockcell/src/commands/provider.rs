@@ -65,7 +65,7 @@ pub fn create_provider(config: &Config) -> anyhow::Result<Box<dyn Provider>> {
         }
         _ => {
             // OpenAI-compatible: openrouter, openai, deepseek, groq, zhipu, vllm, etc.
-            let api_base = resolved_config.api_base.as_deref().unwrap_or_else(|| {
+            let api_base = resolved_config.api_base.as_deref().unwrap_or({
                 match effective_provider {
                     "openrouter" => "https://openrouter.ai/api/v1",
                     "openai" => "https://api.openai.com/v1",

@@ -87,14 +87,13 @@ impl Tool for VideoProcessTool {
             _ => {
                 if action != "info" || params.get("input").is_some() {
                     // Most actions need input
-                    if params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty() && action != "merge" {
-                        if action != "thumbnail" || params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                    if params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty() && action != "merge"
+                        && (action != "thumbnail" || params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty()) {
                             // Allow info without input (returns ffmpeg version)
                             if action != "info" {
                                 return Err(Error::Tool("'input' file path is required".into()));
                             }
                         }
-                    }
                 }
             }
         }
@@ -168,7 +167,7 @@ impl VideoProcessTool {
 
     async fn run_ffprobe(input: &str) -> Result<Value> {
         let output = tokio::process::Command::new("ffprobe")
-            .args(&[
+            .args([
                 "-v", "quiet",
                 "-print_format", "json",
                 "-show_format",

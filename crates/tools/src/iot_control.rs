@@ -135,11 +135,7 @@ impl IotControlTool {
         }
 
         // 2. Config providers section
-        let config_key = match platform {
-            "home_assistant" => "home_assistant",
-            "mqtt" => "mqtt",
-            _ => platform,
-        };
+        let config_key = platform;
 
         if let Some(provider_config) = ctx.config.providers.get(config_key) {
             if !provider_config.api_key.is_empty() {
@@ -182,11 +178,7 @@ impl IotControlTool {
         }
 
         // 2. Config providers section
-        let config_key = match platform {
-            "home_assistant" => "home_assistant",
-            "mqtt" => "mqtt",
-            _ => platform,
-        };
+        let config_key = platform;
 
         if let Some(provider_config) = ctx.config.providers.get(config_key) {
             if let Some(ref base) = provider_config.api_base {

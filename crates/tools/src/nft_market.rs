@@ -143,11 +143,10 @@ impl NftMarketTool {
 
     // ─── Collection Info ───
 
-    async fn collection_info(&self, provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
+    async fn collection_info(&self, _provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let collection = params["collection"].as_str().unwrap_or("");
 
-        match provider {
-            "opensea" | _ => {
+        {
                 let api_key = Self::resolve_opensea_key(ctx);
                 let url = format!("https://api.opensea.io/api/v2/collections/{}", collection);
                 debug!(url = %url, "OpenSea collection info");
@@ -184,17 +183,15 @@ impl NftMarketTool {
                     "total_supply": body.get("total_supply"),
                     "created_date": body.get("created_date"),
                 }))
-            }
         }
     }
 
     // ─── Floor Price ───
 
-    async fn floor_price(&self, provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
+    async fn floor_price(&self, _provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let collection = params["collection"].as_str().unwrap_or("");
 
-        match provider {
-            "opensea" | _ => {
+        {
                 let api_key = Self::resolve_opensea_key(ctx);
                 // Use collection stats endpoint for floor price
                 let url = format!("https://api.opensea.io/api/v2/collections/{}/stats", collection);
@@ -220,19 +217,17 @@ impl NftMarketTool {
                     "market_cap": body.get("total").and_then(|t| t.get("market_cap")),
                     "intervals": body.get("intervals"),
                 }))
-            }
         }
     }
 
     // ─── Listings ───
 
-    async fn listings(&self, provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
+    async fn listings(&self, _provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let collection = params["collection"].as_str().unwrap_or("");
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(50);
         let cursor = params.get("cursor").and_then(|v| v.as_str()).unwrap_or("");
 
-        match provider {
-            "opensea" | _ => {
+        {
                 let api_key = Self::resolve_opensea_key(ctx);
                 let mut url = format!(
                     "https://api.opensea.io/api/v2/listings/collection/{}/all?limit={}",
@@ -273,18 +268,16 @@ impl NftMarketTool {
                     "listings": results,
                     "next_cursor": body.get("next"),
                 }))
-            }
         }
     }
 
     // ─── Sales ───
 
-    async fn sales(&self, provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
+    async fn sales(&self, _provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let collection = params["collection"].as_str().unwrap_or("");
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(50);
 
-        match provider {
-            "opensea" | _ => {
+        {
                 let api_key = Self::resolve_opensea_key(ctx);
                 let url = format!(
                     "https://api.opensea.io/api/v2/events/collection/{}?event_type=sale&limit={}",
@@ -321,7 +314,6 @@ impl NftMarketTool {
                     "sales": sales,
                     "next_cursor": body.get("next"),
                 }))
-            }
         }
     }
 

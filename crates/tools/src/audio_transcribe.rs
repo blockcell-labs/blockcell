@@ -65,11 +65,10 @@ impl Tool for AudioTranscribeTool {
         if !["transcribe", "info", "extract_audio"].contains(&action) {
             return Err(Error::Tool("action must be 'transcribe', 'info', or 'extract_audio'".into()));
         }
-        if action == "transcribe" || action == "extract_audio" {
-            if params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if (action == "transcribe" || action == "extract_audio")
+            && params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'path' is required for transcribe/extract_audio".into()));
             }
-        }
         Ok(())
     }
 
@@ -197,7 +196,7 @@ async fn action_transcribe(
         "whisper" => try_whisper(path, language, model, format, output_path, ctx).await,
         "whisper_cpp" => try_whisper_cpp(path, language, model, format, output_path, ctx).await,
         "api" => try_api_transcribe(path, language, ctx).await,
-        "auto" | _ => {
+        _ => {
             // Try local backends first, then API
             if which::which("whisper").is_ok() {
                 let r = try_whisper(path, language, model, format, output_path, ctx).await;
@@ -329,11 +328,9 @@ async fn try_whisper_cpp(
 
     // Model path — whisper.cpp expects model files in specific location
     let model_name = format!("ggml-{}.bin", model);
-    let model_paths = vec![
-        format!("/usr/local/share/whisper-cpp/models/{}", model_name),
+    let model_paths = [format!("/usr/local/share/whisper-cpp/models/{}", model_name),
         format!("{}/.local/share/whisper-cpp/models/{}", dirs::home_dir().unwrap_or_default().display(), model_name),
-        format!("/opt/homebrew/share/whisper-cpp/models/{}", model_name),
-    ];
+        format!("/opt/homebrew/share/whisper-cpp/models/{}", model_name)];
 
     let model_path = model_paths.iter()
         .find(|p| std::path::Path::new(p).exists())

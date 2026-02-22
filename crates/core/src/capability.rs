@@ -180,6 +180,7 @@ pub enum CapabilityLifecycle {
 
 /// 生存不变量 — 对应文档第 7 节 Meta-Evolution 的关键不变量
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct SurvivalInvariants {
     /// 是否还能编译新代码？
     pub can_compile: bool,
@@ -195,18 +196,6 @@ pub struct SurvivalInvariants {
     pub diagnostics: HashMap<String, String>,
 }
 
-impl Default for SurvivalInvariants {
-    fn default() -> Self {
-        Self {
-            can_compile: false,
-            can_load_capabilities: false,
-            can_communicate: false,
-            can_evolve: false,
-            last_checked: 0,
-            diagnostics: HashMap::new(),
-        }
-    }
-}
 
 impl SurvivalInvariants {
     /// 所有不变量是否都满足？

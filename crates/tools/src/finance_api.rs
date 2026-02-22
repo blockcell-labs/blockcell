@@ -495,7 +495,7 @@ impl FinanceApiTool {
                 .map_err(|e| Error::Tool(format!("Alpha Vantage request failed: {}", e)))?;
             let body: Value = resp.json().await
                 .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
-            if !body.get("Error Message").is_some() && !body.get("Note").is_some() {
+            if body.get("Error Message").is_none() && body.get("Note").is_none() {
                 return Ok(body);
             }
             if source == "alpha_vantage" {

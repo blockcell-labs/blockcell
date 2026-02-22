@@ -791,7 +791,7 @@ fn print_skills_status(paths: &Paths) {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                             records.push(record);
@@ -881,11 +881,10 @@ fn clear_all_skill_records(paths: &Paths) {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
-                    if std::fs::remove_file(&path).is_ok() {
+                if path.extension().is_some_and(|e| e == "json")
+                    && std::fs::remove_file(&path).is_ok() {
                         count += 1;
                     }
-                }
             }
         }
     }
@@ -910,14 +909,13 @@ fn delete_skill_records(paths: &Paths, skill_name: &str) {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
-                            if record.skill_name == skill_name {
-                                if std::fs::remove_file(&path).is_ok() {
+                            if record.skill_name == skill_name
+                                && std::fs::remove_file(&path).is_ok() {
                                     count += 1;
                                 }
-                            }
                         }
                     }
                 }
@@ -982,7 +980,7 @@ fn print_tools_status(paths: &Paths) {
         let mut active_count = 0;
         if let Ok(entries) = std::fs::read_dir(&evo_dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().map_or(false, |e| e == "json") {
+                if entry.path().extension().is_some_and(|e| e == "json") {
                     evo_count += 1;
                     if let Ok(content) = std::fs::read_to_string(entry.path()) {
                         if content.contains("\"Active\"") {

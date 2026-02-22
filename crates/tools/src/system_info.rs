@@ -178,10 +178,8 @@ async fn probe_network() -> Value {
         if let Ok(output) = run_command("ifconfig", &["-l"]).await {
             net["interfaces"] = json!(output.trim());
         }
-    } else {
-        if let Ok(output) = run_command("ip", &["-brief", "addr"]).await {
-            net["interfaces"] = json!(truncate_output(&output, 500));
-        }
+    } else if let Ok(output) = run_command("ip", &["-brief", "addr"]).await {
+        net["interfaces"] = json!(truncate_output(&output, 500));
     }
 
     net
@@ -192,18 +190,13 @@ async fn probe_tools(ctx: &ToolContext) -> Value {
     let mut caps = json!({});
 
     // Check what the agent can currently do
-    let mut abilities: Vec<String> = Vec::new();
-
-    // File system
-    abilities.push("fs.read — Read files".to_string());
-    abilities.push("fs.write — Write files".to_string());
-    abilities.push("fs.list — List directories".to_string());
-
-    // Execution
-    abilities.push("exec.shell — Execute shell commands".to_string());
-
-    // Web
-    abilities.push("web.search — Web search".to_string());
+    let mut abilities: Vec<String> = vec![
+        "fs.read — Read files".to_string(),
+        "fs.write — Write files".to_string(),
+        "fs.list — List directories".to_string(),
+        "exec.shell — Execute shell commands".to_string(),
+        "web.search — Web search".to_string(),
+    ];
     abilities.push("web.fetch — Fetch web pages".to_string());
     abilities.push("web.browse — Headless browser".to_string());
 
@@ -386,13 +379,13 @@ async fn detect_chrome() -> Value {
 
 async fn check_internet() -> bool {
     // Quick DNS check
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        tokio::net::TcpStream::connect("1.1.1.1:53"),
-    ).await {
-        Ok(Ok(_)) => true,
-        _ => false,
-    }
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect("1.1.1.1:53"),
+        ).await,
+        Ok(Ok(_))
+    )
 }
 
 fn truncate_output(s: &str, max_chars: usize) -> String {

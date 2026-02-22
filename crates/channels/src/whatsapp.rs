@@ -365,7 +365,7 @@ fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> {
     for (i, c) in alphabet.bytes().enumerate() {
         table.insert(c, i as u8);
     }
-    let data = data.trim().replace('\n', "").replace('\r', "");
+    let data = data.trim().replace(['\n', '\r'], "");
     let mut out = Vec::with_capacity(data.len() * 3 / 4);
     let bytes = data.as_bytes();
     let mut i = 0;

@@ -53,7 +53,7 @@ pub fn read_excel(path: &Path) -> Result<String> {
                 output.push_str(" |\n");
 
                 // Separator
-                output.push_str("|");
+                output.push('|');
                 for _ in 0..col_count {
                     output.push_str(" --- |");
                 }

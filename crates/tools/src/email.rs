@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Tool, ToolContext, ToolSchema};
 
@@ -152,7 +152,7 @@ impl Tool for EmailTool {
     }
 }
 
-fn expand_path(path: &str, workspace: &PathBuf) -> PathBuf {
+fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
     if path.starts_with("~/") {
         dirs::home_dir()
             .map(|h| h.join(&path[2..]))
@@ -164,7 +164,7 @@ fn expand_path(path: &str, workspace: &PathBuf) -> PathBuf {
     }
 }
 
-async fn action_send(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
     let smtp_host = params.get("smtp_host").and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("send requires 'smtp_host'".to_string()))?;
     let smtp_port = params.get("smtp_port").and_then(|v| v.as_u64()).unwrap_or(587) as u16;
@@ -419,7 +419,7 @@ async fn action_list_emails(_workspace: &PathBuf, params: &Value) -> Result<Valu
     }))
 }
 
-async fn action_read_email(workspace: &PathBuf, params: &Value) -> Result<Value> {
+async fn action_read_email(workspace: &Path, params: &Value) -> Result<Value> {
     let folder = params.get("folder").and_then(|v| v.as_str()).unwrap_or("INBOX");
     let uid = params["uid"].as_u64().unwrap() as u32;
     let save_dir = params.get("save_attachments_to").and_then(|v| v.as_str());
@@ -610,7 +610,7 @@ fn decode_mime_header(s: &str) -> String {
 
 fn parse_email_body(
     raw: &str,
-    workspace: &PathBuf,
+    workspace: &Path,
     save_dir: Option<&str>,
 ) -> Result<(String, Vec<Value>)> {
     // Simple MIME body extraction
@@ -634,7 +634,7 @@ fn parse_email_body(
 
                 if disposition.contains("attachment") || content_type.starts_with("application/") {
                     // Attachment
-                    let filename = extract_filename(&disposition)
+                    let filename = extract_filename(disposition)
                         .or_else(|| extract_param(&content_type, "name"))
                         .unwrap_or_else(|| "attachment".to_string());
 
@@ -650,7 +650,7 @@ fn parse_email_body(
                         }
                         // Decode and save
                         let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
-                        let decoded = decode_body(body.trim(), &encoding);
+                        let decoded = decode_body(body.trim(), encoding);
                         let _ = std::fs::write(&save_path, &decoded);
                         att_info["saved_to"] = json!(save_path.display().to_string());
                         att_info["size"] = json!(decoded.len());
@@ -659,11 +659,11 @@ fn parse_email_body(
                     attachments.push(att_info);
                 } else if content_type.contains("text/plain") {
                     let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
-                    let decoded = decode_body(body.trim(), &encoding);
+                    let decoded = decode_body(body.trim(), encoding);
                     text_content = String::from_utf8_lossy(&decoded).to_string();
                 } else if content_type.contains("text/html") && text_content.is_empty() {
                     let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
-                    let decoded = decode_body(body.trim(), &encoding);
+                    let decoded = decode_body(body.trim(), encoding);
                     let html = String::from_utf8_lossy(&decoded).to_string();
                     // Strip HTML tags for plain text
                     text_content = strip_html_tags(&html);

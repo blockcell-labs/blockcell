@@ -55,6 +55,7 @@ use crate::multisig::MultisigTool;
 use crate::community_hub::CommunityHubTool;
 use crate::memory_maintenance::MemoryMaintenanceTool;
 use crate::toggle_manage::ToggleManageTool;
+use crate::termux_api::TermuxApiTool;
 
 #[derive(Clone)]
 pub struct ToolRegistry {
@@ -225,6 +226,9 @@ impl ToolRegistry {
         
         // Toggle management (enable/disable skills and capabilities)
         registry.register(Arc::new(ToggleManageTool));
+        
+        // Termux API (Android device control via Termux)
+        registry.register(Arc::new(TermuxApiTool));
         
         registry
     }

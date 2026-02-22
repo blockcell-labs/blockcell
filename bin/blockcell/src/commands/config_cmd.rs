@@ -164,7 +164,7 @@ pub async fn reset(force: bool) -> anyhow::Result<()> {
 }
 
 /// Navigate a JSON value by dot-separated path.
-fn resolve_json_path<'a>(json: &'a Value, path: &str) -> Option<Value> {
+fn resolve_json_path(json: &Value, path: &str) -> Option<Value> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = json;
     for part in &parts {

@@ -167,7 +167,8 @@ impl ContextBuilder {
             prompt.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。\n");
             prompt.push_str("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.\n");
             prompt.push_str("- **Community Hub**: Use the `community_hub` tool (NOT a skill directory) for social interactions. Actions: heartbeat, trending, search_skills, feed, post, like, reply, get_replies, node_search. Hub URL and API key are resolved automatically from config — just call the action directly. If not configured, the tool returns an error.\n");
-            prompt.push_str("\n");
+            prompt.push_str("- **Termux API (Android)**: Use `termux_api` tool to control Android devices via Termux. Requires `termux-api` package + Termux:API app. Use action='info' to check availability. Covers: battery, camera, clipboard, contacts, SMS, calls, location, sensors, notifications, TTS, speech-to-text, media player, microphone, torch, brightness, volume, WiFi, vibrate, share, dialog, wallpaper, fingerprint, infrared, keystore, job scheduler, wake lock. Only available when running on Android/Termux.\n");
+            prompt.push('\n');
         }
 
         // ===== Dynamic suffix (changes per call) =====
@@ -216,7 +217,7 @@ impl ContextBuilder {
                 names.sort();
                 prompt.push_str(&format!("Disabled tools: {}\n", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
 
         // Dynamic evolved tools brief (tools the agent has learned via evolution)
@@ -283,7 +284,7 @@ impl ContextBuilder {
                             .join(" | ");
                         prompt.push_str(&format!("- {} — {}\n", skill.name, triggers));
                     }
-                    prompt.push_str("\n");
+                    prompt.push('\n');
                 }
             }
         }
@@ -499,7 +500,7 @@ impl ContextBuilder {
         }
     }
 
-    fn is_image_path(path: &str) -> bool {
+    fn _is_image_path(path: &str) -> bool {
         let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
         matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "tiff" | "ico")
     }

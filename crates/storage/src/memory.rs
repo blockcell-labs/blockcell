@@ -337,7 +337,7 @@ impl MemoryStore {
             blockcell_core::Error::Storage(format!("Lock error: {}", e))
         })?;
 
-        let has_fts_query = params.query.as_ref().map_or(false, |q| !q.is_empty());
+        let has_fts_query = params.query.as_ref().is_some_and(|q| !q.is_empty());
 
         // Build the query dynamically
         let mut sql = String::new();
@@ -701,28 +701,26 @@ impl MemoryStore {
         })?;
 
         let mut lt_items = Vec::new();
-        for row in lt_rows {
-            if let Ok((title, summary, content, item_type)) = row {
-                let display = if let Some(s) = summary {
-                    s
-                } else if let Some(t) = title {
-                    let first_line = content.lines().next().unwrap_or("").to_string();
-                    let fl_truncated: String = first_line.chars().take(100).collect();
-                    if first_line.chars().count() > 100 {
-                        format!("{}: {}...", t, fl_truncated)
-                    } else {
-                        format!("{}: {}", t, first_line)
-                    }
+        for (title, summary, content, item_type) in lt_rows.flatten() {
+            let display = if let Some(s) = summary {
+                s
+            } else if let Some(t) = title {
+                let first_line = content.lines().next().unwrap_or("").to_string();
+                let fl_truncated: String = first_line.chars().take(100).collect();
+                if first_line.chars().count() > 100 {
+                    format!("{}: {}...", t, fl_truncated)
                 } else {
-                    let truncated: String = content.chars().take(120).collect();
-                    if content.chars().count() > 120 {
-                        format!("{}...", truncated)
-                    } else {
-                        truncated
-                    }
-                };
-                lt_items.push(format!("- [{}] {}", item_type, display));
-            }
+                    format!("{}: {}", t, first_line)
+                }
+            } else {
+                let truncated: String = content.chars().take(120).collect();
+                if content.chars().count() > 120 {
+                    format!("{}...", truncated)
+                } else {
+                    truncated
+                }
+            };
+            lt_items.push(format!("- [{}] {}", item_type, display));
         }
 
         if !lt_items.is_empty() {
@@ -757,28 +755,26 @@ impl MemoryStore {
         })?;
 
         let mut st_items = Vec::new();
-        for row in st_rows {
-            if let Ok((title, summary, content, item_type)) = row {
-                let display = if let Some(s) = summary {
-                    s
-                } else if let Some(t) = title {
-                    let first_line = content.lines().next().unwrap_or("").to_string();
-                    let fl_truncated: String = first_line.chars().take(100).collect();
-                    if first_line.chars().count() > 100 {
-                        format!("{}: {}...", t, fl_truncated)
-                    } else {
-                        format!("{}: {}", t, first_line)
-                    }
+        for (title, summary, content, item_type) in st_rows.flatten() {
+            let display = if let Some(s) = summary {
+                s
+            } else if let Some(t) = title {
+                let first_line = content.lines().next().unwrap_or("").to_string();
+                let fl_truncated: String = first_line.chars().take(100).collect();
+                if first_line.chars().count() > 100 {
+                    format!("{}: {}...", t, fl_truncated)
                 } else {
-                    let truncated: String = content.chars().take(120).collect();
-                    if content.chars().count() > 120 {
-                        format!("{}...", truncated)
-                    } else {
-                        truncated
-                    }
-                };
-                st_items.push(format!("- [{}] {}", item_type, display));
-            }
+                    format!("{}: {}", t, first_line)
+                }
+            } else {
+                let truncated: String = content.chars().take(120).collect();
+                if content.chars().count() > 120 {
+                    format!("{}...", truncated)
+                } else {
+                    truncated
+                }
+            };
+            st_items.push(format!("- [{}] {}", item_type, display));
         }
 
         if !st_items.is_empty() {

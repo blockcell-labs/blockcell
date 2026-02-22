@@ -105,7 +105,7 @@ impl Skill {
         if let Ok(entries) = std::fs::read_dir(&tests_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(fixture) = serde_json::from_str::<SkillTestFixture>(&content) {
                             fixtures.push(fixture);
@@ -260,7 +260,7 @@ impl SkillManager {
         Ok(())
     }
 
-    fn load_skill(&self, skill_dir: &PathBuf) -> Result<Option<Skill>> {
+    fn load_skill(&self, skill_dir: &std::path::Path) -> Result<Option<Skill>> {
         let name = skill_dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -282,7 +282,7 @@ impl SkillManager {
 
         Ok(Some(Skill {
             name: if meta.name.is_empty() { name } else { meta.name.clone() },
-            path: skill_dir.clone(),
+            path: skill_dir.to_path_buf(),
             meta,
             available,
             unavailable_reason: reason,
@@ -290,7 +290,7 @@ impl SkillManager {
         }))
     }
 
-    fn load_meta(&self, skill_dir: &PathBuf) -> Result<SkillMeta> {
+    fn load_meta(&self, skill_dir: &std::path::Path) -> Result<SkillMeta> {
         // Try meta.yaml first
         let yaml_path = skill_dir.join("meta.yaml");
         if yaml_path.exists() {

@@ -22,7 +22,7 @@ pub async fn list() -> anyhow::Result<()> {
     println!();
     println!("🔔 Alert rules ({} total)", rules.len());
     println!();
-    println!("  {:<10} {:<20} {:<10} {:<12} {}", "ID", "Name", "Enabled", "Operator", "Condition");
+    println!("  {:<10} {:<20} {:<10} {:<12} Condition", "ID", "Name", "Enabled", "Operator");
     println!("  {}", "-".repeat(70));
 
     for rule in &rules {

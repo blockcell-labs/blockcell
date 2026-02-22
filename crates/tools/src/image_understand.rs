@@ -76,10 +76,8 @@ impl Tool for ImageUnderstandTool {
             if paths.map(|a| a.len()).unwrap_or(0) < 2 {
                 return Err(Error::Tool("'paths' array with at least 2 images is required for compare".into()));
             }
-        } else {
-            if params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                return Err(Error::Tool("'path' is required".into()));
-            }
+        } else if params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+            return Err(Error::Tool("'path' is required".into()));
         }
         Ok(())
     }
@@ -135,7 +133,7 @@ impl Tool for ImageUnderstandTool {
             "openai" => call_openai(&ctx, &system_prompt, &encoded_images, &params, max_tokens).await?,
             "anthropic" => call_anthropic(&ctx, &system_prompt, &encoded_images, max_tokens).await?,
             "gemini" => call_gemini(&ctx, &system_prompt, &encoded_images, max_tokens).await?,
-            "auto" | _ => {
+            _ => {
                 // Try providers in order: openai → anthropic → gemini
                 if has_provider_key(&ctx, "openai") {
                     call_openai(&ctx, &system_prompt, &encoded_images, &params, max_tokens).await?

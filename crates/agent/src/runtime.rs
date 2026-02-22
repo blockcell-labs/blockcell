@@ -206,7 +206,7 @@ async fn pick_image_path(paths: &Paths, history: &[ChatMessage]) -> Option<Strin
     None
 }
 
-fn overwrite_last_assistant_message(history: &mut Vec<ChatMessage>, new_text: &str) {
+fn overwrite_last_assistant_message(history: &mut [ChatMessage], new_text: &str) {
     if let Some(last) = history.last_mut() {
         if last.role == "assistant" {
             last.content = serde_json::Value::String(new_text.to_string());
@@ -395,6 +395,7 @@ impl AgentRuntime {
         use blockcell_tools::community_hub::CommunityHubTool;
         use blockcell_tools::memory_maintenance::MemoryMaintenanceTool;
         use blockcell_tools::toggle_manage::ToggleManageTool;
+        use blockcell_tools::termux_api::TermuxApiTool;
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(ReadFileTool));
@@ -451,6 +452,7 @@ impl AgentRuntime {
         registry.register(Arc::new(CommunityHubTool));
         registry.register(Arc::new(MemoryMaintenanceTool));
         registry.register(Arc::new(ToggleManageTool));
+        registry.register(Arc::new(TermuxApiTool));
         // No SpawnTool, MessageTool, CronTool — subagents can't spawn or send messages
         registry
     }
@@ -514,7 +516,7 @@ impl AgentRuntime {
             }
             _ => {
                 // OpenAI-compatible providers
-                let api_base = resolved_config.api_base.as_deref().unwrap_or_else(|| {
+                let api_base = resolved_config.api_base.as_deref().unwrap_or({
                     match effective_provider {
                         "openrouter" => "https://openrouter.ai/api/v1",
                         "openai" => "https://api.openai.com/v1",
@@ -690,16 +692,43 @@ impl AgentRuntime {
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
 
-            // Call LLM (catch provider errors gracefully)
-            let response = match self.provider.chat(&current_messages, &tools).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(error = %e, iteration, "LLM call failed");
+            // Call LLM with retry on transient errors
+            let max_retries = self.config.agents.defaults.llm_max_retries;
+            let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
+            let mut last_error = None;
+            let mut response_opt = None;
+
+            for attempt in 0..=max_retries {
+                if attempt > 0 {
+                    let delay_ms = base_delay_ms * (1u64 << (attempt - 1).min(4));
+                    warn!(attempt, max_retries, delay_ms, iteration, "Retrying LLM call after transient error");
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                match self.provider.chat(&current_messages, &tools).await {
+                    Ok(r) => {
+                        if attempt > 0 {
+                            info!(attempt, iteration, "LLM call succeeded after retry");
+                        }
+                        response_opt = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, attempt, max_retries, iteration, "LLM call failed");
+                        last_error = Some(e);
+                    }
+                }
+            }
+
+            let response = match response_opt {
+                Some(r) => r,
+                None => {
+                    let e = last_error.unwrap();
+                    warn!(error = %e, iteration, retries = max_retries, "LLM call failed after all retries");
                     final_response = format!(
-                        "抱歉，我在处理你的请求时遇到了问题。\n\n\
+                        "抱歉，我在处理你的请求时遇到了问题（已重试 {} 次）。\n\n\
                         错误信息：{}\n\n\
                         这可能是临时的网络或服务问题，请稍后再试。如果问题持续，我会自动学习并改进。",
-                        e
+                        max_retries, e
                     );
                     // 报告错误给进化服务
                     if let Some(evo_service) = self.context_builder.evolution_service() {
@@ -947,31 +976,31 @@ impl AgentRuntime {
     }
 
     /// Check if a resolved path is inside the safe workspace directory.
-    fn is_path_safe(&self, resolved: &PathBuf) -> bool {
+    fn is_path_safe(&self, resolved: &std::path::Path) -> bool {
         let workspace = self.paths.workspace();
         // Canonicalize both if possible, otherwise use starts_with on the raw paths
         let ws = workspace.canonicalize().unwrap_or(workspace);
-        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf());
         rp.starts_with(&ws)
     }
 
     /// Check whether a resolved path falls within an already-authorized directory.
-    fn is_path_authorized(&self, resolved: &PathBuf) -> bool {
-        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+    fn is_path_authorized(&self, resolved: &std::path::Path) -> bool {
+        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf());
         self.authorized_dirs.iter().any(|dir| rp.starts_with(dir))
     }
 
     /// Record a directory as authorized so future accesses within it are auto-approved.
-    fn authorize_directory(&mut self, resolved: &PathBuf) {
+    fn authorize_directory(&mut self, resolved: &std::path::Path) {
         // If the path is a directory, authorize it directly.
         // If it's a file, authorize its parent directory.
         let dir = if resolved.is_dir() {
-            resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
+            resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf())
         } else {
             resolved
                 .parent()
                 .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
-                .unwrap_or_else(|| resolved.clone())
+                .unwrap_or_else(|| resolved.to_path_buf())
         };
         if self.authorized_dirs.insert(dir.clone()) {
             info!(dir = %dir.display(), "Directory authorized for future access");
@@ -1107,8 +1136,8 @@ impl AgentRuntime {
                 let resolved = self.resolve_path(path_str);
                 let skills_dir = self.paths.skills_dir();
                 let in_skills = resolved.starts_with(&skills_dir)
-                    || resolved.canonicalize().ok().map_or(false, |c| {
-                        skills_dir.canonicalize().ok().map_or(false, |sd| c.starts_with(&sd))
+                    || resolved.canonicalize().ok().is_some_and(|c| {
+                        skills_dir.canonicalize().ok().is_some_and(|sd| c.starts_with(&sd))
                     });
                 if in_skills {
                     info!(path = %path_str, "🔄 Detected write to skills directory, reloading...");
@@ -1334,7 +1363,7 @@ impl AgentRuntime {
             info!("Evolution rollout scheduler enabled");
         }
 
-        let tick_secs = self.config.tools.tick_interval_secs.max(10).min(300) as u64;
+        let tick_secs = self.config.tools.tick_interval_secs.clamp(10, 300) as u64;
         info!(tick_secs = tick_secs, "Tick interval configured");
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
         tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

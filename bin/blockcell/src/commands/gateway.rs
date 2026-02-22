@@ -143,9 +143,9 @@ fn url_decode(input: &str) -> Option<String> {
 fn token_from_query(req: &Request<axum::body::Body>) -> Option<String> {
     let q = req.uri().query()?;
     for pair in q.split('&') {
-        let mut kv = pair.splitn(2, '=');
-        let k = kv.next()?;
-        let v = kv.next()?;
+        let (k, v) = pair.split_once('=')?;
+        
+        
         if k == "token" {
             return url_decode(v);
         }
@@ -623,7 +623,7 @@ async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
     // Task: forward broadcast events to this WS client
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = broadcast_rx.recv().await {
-            if ws_sender.send(WsMessage::Text(msg.into())).await.is_err() {
+            if ws_sender.send(WsMessage::Text(msg)).await.is_err() {
                 break;
             }
         }

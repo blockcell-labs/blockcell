@@ -190,7 +190,7 @@ impl TaskManager {
         tasks.retain(|_, t| {
             match t.status {
                 TaskStatus::Completed | TaskStatus::Failed => {
-                    t.completed_at.map_or(true, |c| c > cutoff)
+                    t.completed_at.is_none_or(|c| c > cutoff)
                 }
                 _ => true,
             }

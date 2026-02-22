@@ -74,9 +74,11 @@ pub async fn fetch_as_markdown(url: &str, max_chars: usize) -> Result<(String, M
 
 /// Process an HTTP response, extracting markdown content.
 pub async fn process_response(response: Response, max_chars: usize) -> Result<(String, MarkdownMeta)> {
-    let mut meta = MarkdownMeta::default();
-    meta.final_url = response.url().to_string();
-    meta.status = response.status().as_u16();
+    let mut meta = MarkdownMeta {
+        final_url: response.url().to_string(),
+        status: response.status().as_u16(),
+        ..Default::default()
+    };
 
     meta.content_type = response
         .headers()

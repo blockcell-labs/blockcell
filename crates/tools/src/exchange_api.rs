@@ -165,7 +165,7 @@ impl ExchangeApiTool {
         const HASH_SIZE: usize = 32;
 
         // Pad or hash the key
-        let mut k = vec![0u8; BLOCK_SIZE];
+        let mut k = [0u8; BLOCK_SIZE];
         if key.len() > BLOCK_SIZE {
             let hashed = Self::sha256(key);
             k[..HASH_SIZE].copy_from_slice(&hashed);

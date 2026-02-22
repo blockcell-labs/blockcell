@@ -15,7 +15,7 @@ pub async fn show(lines: usize, session: Option<String>) -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir(&logs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "log" || e == "jsonl") {
+            if path.extension().is_some_and(|e| e == "log" || e == "jsonl") {
                 log_files.push(path);
             }
         }
@@ -83,7 +83,7 @@ pub async fn follow(session: Option<String>) -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir(&logs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "log" || e == "jsonl") {
+            if path.extension().is_some_and(|e| e == "log" || e == "jsonl") {
                 log_files.push(path);
             }
         }

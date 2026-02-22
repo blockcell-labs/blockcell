@@ -63,6 +63,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "community_hub",
     "memory_maintenance",
     "toggle_manage",
+    "termux_api",
 ];
 
 /// Check if a skill name is a built-in tool (should not trigger evolution).
@@ -1086,7 +1087,7 @@ impl EvolutionService {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                             records.push(record);
@@ -1110,11 +1111,10 @@ impl EvolutionService {
             if let Ok(entries) = std::fs::read_dir(&records_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "json") {
-                        if std::fs::remove_file(&path).is_ok() {
+                    if path.extension().is_some_and(|e| e == "json")
+                        && std::fs::remove_file(&path).is_ok() {
                             count += 1;
                         }
-                    }
                 }
             }
         }
@@ -1146,14 +1146,13 @@ impl EvolutionService {
             if let Ok(entries) = std::fs::read_dir(&records_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "json") {
+                    if path.extension().is_some_and(|e| e == "json") {
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
-                                if record.skill_name == skill_name {
-                                    if std::fs::remove_file(&path).is_ok() {
+                                if record.skill_name == skill_name
+                                    && std::fs::remove_file(&path).is_ok() {
                                         count += 1;
                                     }
-                                }
                             }
                         }
                     }
@@ -1287,7 +1286,7 @@ impl ShadowTestExecutor for RhaiSyntaxTestExecutor {
                     if let Ok(entries) = std::fs::read_dir(&tests_dir) {
                         for entry in entries.flatten() {
                             let path = entry.path();
-                            if path.extension().map_or(false, |e| e == "json") {
+                            if path.extension().is_some_and(|e| e == "json") {
                                 cases_run += 1;
                                 // For now just verify the fixture JSON is valid
                                 match std::fs::read_to_string(&path) {

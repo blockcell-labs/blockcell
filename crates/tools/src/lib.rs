@@ -50,6 +50,7 @@ pub mod multisig;
 pub mod community_hub;
 pub mod memory_maintenance;
 pub mod toggle_manage;
+pub mod termux_api;
 pub mod registry;
 
 use async_trait::async_trait;

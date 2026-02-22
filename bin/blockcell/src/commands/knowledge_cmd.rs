@@ -203,7 +203,7 @@ pub async fn list_graphs() -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir(&kg_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "db") {
+            if path.extension().is_some_and(|e| e == "db") {
                 let name = path.file_stem().unwrap().to_string_lossy().to_string();
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 graphs.push((name, size));

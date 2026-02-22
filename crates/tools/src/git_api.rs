@@ -284,8 +284,7 @@ impl Tool for GitApiTool {
             "create_webhook" => {
                 let url = params.get("webhook_url").and_then(|v| v.as_str())
                     .ok_or_else(|| Error::Tool("'webhook_url' is required".into()))?;
-                let events = params.get("webhook_events").and_then(|v| v.as_array())
-                    .map(|a| a.clone())
+                let events = params.get("webhook_events").and_then(|v| v.as_array()).cloned()
                     .unwrap_or_else(|| vec![json!("push")]);
                 let payload = json!({
                     "config": {

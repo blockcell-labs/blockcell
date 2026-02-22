@@ -275,7 +275,7 @@ impl BridgeApiTool {
 
     // ─── Routes ───
 
-    async fn routes(&self, provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
+    async fn routes(&self, _provider: &str, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let from_chain_id = Self::chain_id(params["from_chain"].as_str().unwrap_or(""));
         let to_chain_id = Self::chain_id(params["to_chain"].as_str().unwrap_or(""));
         let from_token = Self::resolve_token(params["from_token"].as_str().unwrap_or(""), from_chain_id);
@@ -289,180 +289,164 @@ impl BridgeApiTool {
         let amount_f: f64 = amount.parse().unwrap_or(0.0);
         let amount_raw = format!("{:.0}", amount_f * 10f64.powi(decimals));
 
-        match provider {
-            "lifi" | _ => {
-                let api_key = Self::resolve_lifi_key(ctx);
-                let body = json!({
-                    "fromChainId": from_chain_id,
-                    "toChainId": to_chain_id,
-                    "fromTokenAddress": from_token,
-                    "toTokenAddress": to_token,
-                    "fromAmount": amount_raw,
-                    "fromAddress": from_address,
-                    "options": {
-                        "slippage": slippage / 100.0,
-                        "order": "RECOMMENDED"
-                    }
-                });
-
-                let url = "https://li.quest/v1/advanced/routes";
-                debug!(url = %url, "LI.FI routes");
-                let mut req = client.post(url)
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", "blockcell-agent")
-                    .json(&body);
-                if !api_key.is_empty() {
-                    req = req.header("x-lifi-api-key", &api_key);
-                }
-                let resp = req.send().await
-                    .map_err(|e| Error::Tool(format!("LI.FI routes request failed: {}", e)))?;
-                let result: Value = resp.json().await
-                    .map_err(|e| Error::Tool(format!("Failed to parse LI.FI routes response: {}", e)))?;
-
-                let routes = result.get("routes").and_then(|r| r.as_array()).cloned().unwrap_or_default();
-                let mut simplified = Vec::new();
-                for route in &routes {
-                    simplified.push(json!({
-                        "id": route.get("id"),
-                        "from_amount": route.pointer("/fromAmount"),
-                        "to_amount": route.pointer("/toAmount"),
-                        "to_amount_min": route.pointer("/toAmountMin"),
-                        "gas_cost_usd": route.pointer("/gasCostUSD"),
-                        "steps": route.get("steps").and_then(|s| s.as_array()).map(|steps| {
-                            steps.iter().map(|step| json!({
-                                "tool": step.get("tool"),
-                                "type": step.get("type"),
-                                "estimate": step.get("estimate"),
-                            })).collect::<Vec<_>>()
-                        }),
-                        "tags": route.get("tags"),
-                    }));
-                }
-
-                Ok(json!({
-                    "action": "routes",
-                    "provider": "lifi",
-                    "route_count": simplified.len(),
-                    "routes": simplified,
-                    "from": { "chain_id": from_chain_id, "token": from_token, "amount": amount },
-                    "to": { "chain_id": to_chain_id, "token": to_token },
-                }))
+        let api_key = Self::resolve_lifi_key(ctx);
+        let body = json!({
+            "fromChainId": from_chain_id,
+            "toChainId": to_chain_id,
+            "fromTokenAddress": from_token,
+            "toTokenAddress": to_token,
+            "fromAmount": amount_raw,
+            "fromAddress": from_address,
+            "options": {
+                "slippage": slippage / 100.0,
+                "order": "RECOMMENDED"
             }
+        });
+
+        let url = "https://li.quest/v1/advanced/routes";
+        debug!(url = %url, "LI.FI routes");
+        let mut req = client.post(url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "blockcell-agent")
+            .json(&body);
+        if !api_key.is_empty() {
+            req = req.header("x-lifi-api-key", &api_key);
         }
+        let resp = req.send().await
+            .map_err(|e| Error::Tool(format!("LI.FI routes request failed: {}", e)))?;
+        let result: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse LI.FI routes response: {}", e)))?;
+
+        let routes = result.get("routes").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let mut simplified = Vec::new();
+        for route in &routes {
+            simplified.push(json!({
+                "id": route.get("id"),
+                "from_amount": route.pointer("/fromAmount"),
+                "to_amount": route.pointer("/toAmount"),
+                "to_amount_min": route.pointer("/toAmountMin"),
+                "gas_cost_usd": route.pointer("/gasCostUSD"),
+                "steps": route.get("steps").and_then(|s| s.as_array()).map(|steps| {
+                    steps.iter().map(|step| json!({
+                        "tool": step.get("tool"),
+                        "type": step.get("type"),
+                        "estimate": step.get("estimate"),
+                    })).collect::<Vec<_>>()
+                }),
+                "tags": route.get("tags"),
+            }));
+        }
+
+        Ok(json!({
+            "action": "routes",
+            "provider": "lifi",
+            "route_count": simplified.len(),
+            "routes": simplified,
+            "from": { "chain_id": from_chain_id, "token": from_token, "amount": amount },
+            "to": { "chain_id": to_chain_id, "token": to_token },
+        }))
     }
 
     // ─── Status ───
 
-    async fn status(&self, provider: &str, params: &Value, client: &Client) -> Result<Value> {
+    async fn status(&self, _provider: &str, params: &Value, client: &Client) -> Result<Value> {
         let tx_hash = params["tx_hash"].as_str().unwrap_or("");
         let bridge = params.get("bridge").and_then(|v| v.as_str()).unwrap_or("");
         let from_chain = params.get("from_chain").and_then(|v| v.as_str()).unwrap_or("");
         let to_chain = params.get("to_chain").and_then(|v| v.as_str()).unwrap_or("");
 
-        match provider {
-            "lifi" | _ => {
-                let mut url = format!("https://li.quest/v1/status?txHash={}", tx_hash);
-                if !bridge.is_empty() {
-                    url.push_str(&format!("&bridge={}", bridge));
-                }
-                if !from_chain.is_empty() {
-                    url.push_str(&format!("&fromChain={}", Self::chain_id(from_chain)));
-                }
-                if !to_chain.is_empty() {
-                    url.push_str(&format!("&toChain={}", Self::chain_id(to_chain)));
-                }
-
-                debug!(url = %url, "LI.FI status");
-                let resp = client.get(&url)
-                    .header("User-Agent", "blockcell-agent")
-                    .send().await
-                    .map_err(|e| Error::Tool(format!("LI.FI status request failed: {}", e)))?;
-                let body: Value = resp.json().await
-                    .map_err(|e| Error::Tool(format!("Failed to parse LI.FI status response: {}", e)))?;
-
-                Ok(json!({
-                    "action": "status",
-                    "provider": "lifi",
-                    "tx_hash": tx_hash,
-                    "status": body.get("status"),
-                    "substatus": body.get("substatus"),
-                    "sending": body.get("sending"),
-                    "receiving": body.get("receiving"),
-                    "tool": body.get("tool"),
-                    "bridge_exploration_url": body.get("bridgeExplorationUrl"),
-                }))
-            }
+        let mut url = format!("https://li.quest/v1/status?txHash={}", tx_hash);
+        if !bridge.is_empty() {
+            url.push_str(&format!("&bridge={}", bridge));
         }
+        if !from_chain.is_empty() {
+            url.push_str(&format!("&fromChain={}", Self::chain_id(from_chain)));
+        }
+        if !to_chain.is_empty() {
+            url.push_str(&format!("&toChain={}", Self::chain_id(to_chain)));
+        }
+
+        debug!(url = %url, "LI.FI status");
+        let resp = client.get(&url)
+            .header("User-Agent", "blockcell-agent")
+            .send().await
+            .map_err(|e| Error::Tool(format!("LI.FI status request failed: {}", e)))?;
+        let body: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse LI.FI status response: {}", e)))?;
+
+        Ok(json!({
+            "action": "status",
+            "provider": "lifi",
+            "tx_hash": tx_hash,
+            "status": body.get("status"),
+            "substatus": body.get("substatus"),
+            "sending": body.get("sending"),
+            "receiving": body.get("receiving"),
+            "tool": body.get("tool"),
+            "bridge_exploration_url": body.get("bridgeExplorationUrl"),
+        }))
     }
 
     // ─── Supported Chains ───
 
-    async fn supported_chains(&self, provider: &str, client: &Client) -> Result<Value> {
-        match provider {
-            "lifi" | _ => {
-                let url = "https://li.quest/v1/chains";
-                let resp = client.get(url)
-                    .header("User-Agent", "blockcell-agent")
-                    .send().await
-                    .map_err(|e| Error::Tool(format!("LI.FI chains request failed: {}", e)))?;
-                let body: Value = resp.json().await
-                    .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
+    async fn supported_chains(&self, _provider: &str, client: &Client) -> Result<Value> {
+        let url = "https://li.quest/v1/chains";
+        let resp = client.get(url)
+            .header("User-Agent", "blockcell-agent")
+            .send().await
+            .map_err(|e| Error::Tool(format!("LI.FI chains request failed: {}", e)))?;
+        let body: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
-                let chains = body.get("chains").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-                let simplified: Vec<Value> = chains.iter().map(|c| json!({
-                    "id": c.get("id"),
-                    "name": c.get("name"),
-                    "key": c.get("key"),
-                    "native_token": c.get("nativeToken"),
-                })).collect();
+        let chains = body.get("chains").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        let simplified: Vec<Value> = chains.iter().map(|c| json!({
+            "id": c.get("id"),
+            "name": c.get("name"),
+            "key": c.get("key"),
+            "native_token": c.get("nativeToken"),
+        })).collect();
 
-                Ok(json!({
-                    "action": "supported_chains",
-                    "provider": "lifi",
-                    "count": simplified.len(),
-                    "chains": simplified
-                }))
-            }
-        }
+        Ok(json!({
+            "action": "supported_chains",
+            "provider": "lifi",
+            "count": simplified.len(),
+            "chains": simplified
+        }))
     }
 
     // ─── Supported Tokens ───
 
-    async fn supported_tokens(&self, provider: &str, params: &Value, client: &Client) -> Result<Value> {
+    async fn supported_tokens(&self, _provider: &str, params: &Value, client: &Client) -> Result<Value> {
         let chain = params.get("from_chain").and_then(|v| v.as_str()).unwrap_or("ethereum");
         let chain_id = Self::chain_id(chain);
 
-        match provider {
-            "lifi" | _ => {
-                let url = format!("https://li.quest/v1/tokens?chains={}", chain_id);
-                let resp = client.get(&url)
-                    .header("User-Agent", "blockcell-agent")
-                    .send().await
-                    .map_err(|e| Error::Tool(format!("LI.FI tokens request failed: {}", e)))?;
-                let body: Value = resp.json().await
-                    .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
+        let url = format!("https://li.quest/v1/tokens?chains={}", chain_id);
+        let resp = client.get(&url)
+            .header("User-Agent", "blockcell-agent")
+            .send().await
+            .map_err(|e| Error::Tool(format!("LI.FI tokens request failed: {}", e)))?;
+        let body: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
-                let tokens = body.get("tokens").and_then(|t| t.get(&chain_id.to_string()))
-                    .and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        let tokens = body.get("tokens").and_then(|t| t.get(chain_id.to_string()))
+            .and_then(|t| t.as_array()).cloned().unwrap_or_default();
 
-                let limited: Vec<Value> = tokens.into_iter().take(50).map(|t| json!({
-                    "symbol": t.get("symbol"),
-                    "name": t.get("name"),
-                    "address": t.get("address"),
-                    "decimals": t.get("decimals"),
-                    "logo": t.get("logoURI"),
-                })).collect();
+        let limited: Vec<Value> = tokens.into_iter().take(50).map(|t| json!({
+            "symbol": t.get("symbol"),
+            "name": t.get("name"),
+            "address": t.get("address"),
+            "decimals": t.get("decimals"),
+            "logo": t.get("logoURI"),
+        })).collect();
 
-                Ok(json!({
-                    "action": "supported_tokens",
-                    "provider": "lifi",
-                    "chain": chain,
-                    "chain_id": chain_id,
-                    "count": limited.len(),
-                    "tokens": limited
-                }))
-            }
-        }
+        Ok(json!({
+            "action": "supported_tokens",
+            "provider": "lifi",
+            "chain": chain,
+            "chain_id": chain_id,
+            "count": limited.len(),
+            "tokens": limited
+        }))
     }
 
     // ─── Gas Estimate ───

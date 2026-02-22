@@ -337,11 +337,10 @@ pub fn find_browser_binary(engine: BrowserEngine) -> Option<String> {
         if std::path::Path::new(candidate).exists() {
             return Some(candidate.to_string());
         }
-        if !candidate.contains('/') && !candidate.contains('\\') {
-            if which::which(candidate).is_ok() {
+        if !candidate.contains('/') && !candidate.contains('\\')
+            && which::which(candidate).is_ok() {
                 return Some(candidate.to_string());
             }
-        }
     }
     None
 }
@@ -385,16 +384,13 @@ async fn wait_for_cdp_ready(port: u16, timeout_secs: u64) -> Result<String, Stri
             ));
         }
 
-        match reqwest::get(&url).await {
-            Ok(resp) => {
-                if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(ws_url) = body.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
-                    {
-                        return Ok(ws_url.to_string());
-                    }
+        if let Ok(resp) = reqwest::get(&url).await {
+            if let Ok(body) = resp.json::<Value>().await {
+                if let Some(ws_url) = body.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
+                {
+                    return Ok(ws_url.to_string());
                 }
             }
-            Err(_) => {}
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

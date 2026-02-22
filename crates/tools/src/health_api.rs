@@ -60,11 +60,10 @@ impl Tool for HealthApiTool {
         if !valid.contains(&action) {
             return Err(Error::Tool(format!("Invalid action '{}'. Valid: {}", action, valid.join(", "))));
         }
-        if source == "apple_health" && action != "list_types" {
-            if params.get("export_path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if source == "apple_health" && action != "list_types"
+            && params.get("export_path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'export_path' to Apple Health export.xml is required".into()));
             }
-        }
         Ok(())
     }
 
@@ -412,9 +411,7 @@ print(json.dumps({{"output": output, "records_exported": count}}))
                 let types = ["com.google.step_count.delta", "com.google.calories.expended", "com.google.distance.delta", "com.google.heart_rate.bpm"];
                 let mut summary = json!({"date": date});
                 for dt in &types {
-                    let url = format!(
-                        "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
-                    );
+                    let url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate".to_string();
                     let body = json!({
                         "aggregateBy": [{"dataTypeName": dt}],
                         "startTimeMillis": start_ns / 1_000_000,

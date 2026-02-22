@@ -556,7 +556,7 @@ impl CoreEvolution {
         prompt.push_str("You are a capability evolution engine for the blockcell self-augmenting agent.\n");
         prompt.push_str("Your task is to generate executable code that implements a new capability.\n\n");
 
-        prompt.push_str(&format!("## Capability Request\n"));
+        prompt.push_str("## Capability Request\n");
         prompt.push_str(&format!("- **ID**: {}\n", record.capability_id));
         prompt.push_str(&format!("- **Description**: {}\n", record.description));
         prompt.push_str(&format!("- **Provider Type**: {:?}\n\n", record.provider_kind));
@@ -1003,7 +1003,7 @@ impl CoreEvolution {
         let mut records = Vec::new();
         for entry in std::fs::read_dir(&self.records_dir)?.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(record) = serde_json::from_str::<CoreEvolutionRecord>(&content) {
                         records.push(record);

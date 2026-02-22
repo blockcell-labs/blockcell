@@ -47,6 +47,12 @@ pub struct IntentClassifier {
     rules: Vec<IntentRule>,
 }
 
+impl Default for IntentClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntentClassifier {
     pub fn new() -> Self {
         let rules = vec![
@@ -527,7 +533,7 @@ mod tests {
         let classifier = IntentClassifier::new();
         // "查一下茅台股价然后生成图表" should match Finance + DataAnalysis
         let intents = classifier.classify("查一下茅台股价然后生成图表");
-        assert!(intents.len() >= 1);
+        assert!(!intents.is_empty());
         assert!(intents.contains(&IntentCategory::Finance));
     }
 

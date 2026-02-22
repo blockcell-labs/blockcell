@@ -280,7 +280,7 @@ pub fn dynamic_to_json(val: &Dynamic) -> Value {
     } else if val.is::<i64>() {
         Value::Number(serde_json::Number::from(val.as_int().unwrap_or(0)))
     } else if val.is::<f64>() {
-        if let Some(f) = val.as_float().ok() {
+        if let Ok(f) = val.as_float() {
             serde_json::Number::from_f64(f)
                 .map(Value::Number)
                 .unwrap_or(Value::Null)

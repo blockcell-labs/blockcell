@@ -81,6 +81,8 @@ struct TokenResponse {
     code: i32,
     msg: String,
     tenant_access_token: Option<String>,
+    #[serde(default)]
+    expire: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,15 +216,15 @@ impl FeishuChannel {
         if cache.is_valid() {
             return Ok(cache.token.clone());
         }
-        let token = fetch_tenant_access_token(
+        let (token, expires_in) = fetch_tenant_access_token(
             &self.client,
             &self.config.channels.feishu.app_id,
             &self.config.channels.feishu.app_secret,
         )
         .await?;
         cache.token = token.clone();
-        cache.expires_at = chrono::Utc::now().timestamp() + 7200; // 2h validity
-        info!("Feishu tenant_access_token refreshed (cached 2h)");
+        cache.expires_at = chrono::Utc::now().timestamp() + expires_in;
+        info!(expires_in = expires_in, "Feishu tenant_access_token refreshed");
         Ok(token)
     }
 
@@ -352,7 +354,7 @@ impl FeishuChannel {
                                     };
                                     let mut buf = Vec::new();
                                     if prost::Message::encode(&pong, &mut buf).is_ok() {
-                                        if let Err(e) = write.send(WsMessage::Binary(buf.into())).await {
+                                        if let Err(e) = write.send(WsMessage::Binary(buf)).await {
                                             error!(error = %e, "Failed to send pong frame");
                                         } else {
                                             debug!("Sent pong to Feishu");
@@ -377,7 +379,7 @@ impl FeishuChannel {
                                         };
                                         let mut buf = Vec::new();
                                         if prost::Message::encode(&ack, &mut buf).is_ok() {
-                                            if let Err(e) = write.send(WsMessage::Binary(buf.into())).await {
+                                            if let Err(e) = write.send(WsMessage::Binary(buf)).await {
                                                 error!(error = %e, "Failed to send ACK");
                                             }
                                         }
@@ -641,7 +643,11 @@ impl FeishuChannel {
 }
 
 /// Fetch a fresh tenant_access_token from Feishu API.
-async fn fetch_tenant_access_token(client: &Client, app_id: &str, app_secret: &str) -> Result<String> {
+async fn fetch_tenant_access_token(
+    client: &Client,
+    app_id: &str,
+    app_secret: &str,
+) -> Result<(String, i64)> {
     #[derive(Serialize)]
     struct TokenRequest<'a> { app_id: &'a str, app_secret: &'a str }
 
@@ -660,8 +666,12 @@ async fn fetch_tenant_access_token(client: &Client, app_id: &str, app_secret: &s
     if body.code != 0 {
         return Err(Error::Channel(format!("Feishu token error: {}", body.msg)));
     }
-    body.tenant_access_token
-        .ok_or_else(|| Error::Channel("No access token in Feishu response".to_string()))
+
+    let token = body
+        .tenant_access_token
+        .ok_or_else(|| Error::Channel("No access token in Feishu response".to_string()))?;
+    let expires_in = body.expire.unwrap_or(7200).max(60);
+    Ok((token, expires_in))
 }
 
 /// Get a cached tenant_access_token for the free send_message function.
@@ -675,16 +685,32 @@ async fn get_cached_token(config: &Config) -> Result<String> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
-    let token = fetch_tenant_access_token(
+    let (token, expires_in) = fetch_tenant_access_token(
         &client,
         &config.channels.feishu.app_id,
         &config.channels.feishu.app_secret,
     )
     .await?;
     guard.token = token.clone();
-    guard.expires_at = chrono::Utc::now().timestamp() + 7200;
-    info!("Feishu tenant_access_token refreshed via global cache");
+    guard.expires_at = chrono::Utc::now().timestamp() + expires_in;
+    info!(expires_in = expires_in, "Feishu tenant_access_token refreshed via global cache");
     Ok(token)
+}
+
+fn is_feishu_token_invalid_error(s: &str) -> bool {
+    // Feishu OpenAPI: 99991663 Invalid access token for authorization
+    // Be defensive: match code and message substrings.
+    s.contains("99991663")
+        || s.contains("Invalid access token")
+        || s.contains("invalid access token")
+        || s.contains("token attached")
+}
+
+async fn invalidate_global_token_cache() {
+    let cache = global_token_cache();
+    let mut guard = cache.lock().await;
+    guard.token.clear();
+    guard.expires_at = 0;
 }
 
 pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<()> {
@@ -695,8 +721,19 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
         .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
 
     let token = get_cached_token(config).await?;
-
-    do_send_message(&client, &token, chat_id, text).await
+    match do_send_message(&client, &token, chat_id, text).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if is_feishu_token_invalid_error(&msg) {
+                warn!("Feishu send_message got invalid token error, refreshing token and retrying once");
+                invalidate_global_token_cache().await;
+                let token2 = get_cached_token(config).await?;
+                return do_send_message(&client, &token2, chat_id, text).await;
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Upload a local file to Feishu and return the resource key.
@@ -839,7 +876,20 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     let token = get_cached_token(config).await?;
 
     info!(file_path = %file_path, file_type = %file_type, "Feishu: uploading media");
-    let key = upload_feishu_media(&client, &token, file_path, file_type).await?;
+    let key = match upload_feishu_media(&client, &token, file_path, file_type).await {
+        Ok(k) => k,
+        Err(e) => {
+            let msg = e.to_string();
+            if is_feishu_token_invalid_error(&msg) {
+                warn!("Feishu send_media_message upload got invalid token error, refreshing token and retrying once");
+                invalidate_global_token_cache().await;
+                let token2 = get_cached_token(config).await?;
+                upload_feishu_media(&client, &token2, file_path, file_type).await?
+            } else {
+                return Err(e);
+            }
+        }
+    };
     info!(key = %key, "Feishu: media uploaded");
 
     let (msg_type, content) = if is_image {
@@ -864,19 +914,45 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
         .build()
         .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
 
-    let resp = send_client
-        .post(format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_OPEN_API))
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&SendReq { receive_id: chat_id, msg_type, content })
-        .send()
-        .await
-        .map_err(|e| Error::Channel(format!("Feishu send_media_message failed: {}", e)))?;
+    async fn send_once(
+        send_client: &Client,
+        token: &str,
+        chat_id: &str,
+        msg_type: &str,
+        content: &str,
+    ) -> Result<()> {
+        let resp = send_client
+            .post(format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_OPEN_API))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&SendReq {
+                receive_id: chat_id,
+                msg_type,
+                content: content.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Feishu send_media_message failed: {}", e)))?;
 
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!("Feishu API send media error: {}", body)));
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!("Feishu API send media error: {}", body)));
+        }
+        Ok(())
     }
-    Ok(())
+
+    match send_once(&send_client, &token, chat_id, msg_type, &content).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if is_feishu_token_invalid_error(&msg) {
+                warn!("Feishu send_media_message got invalid token error, refreshing token and retrying once");
+                invalidate_global_token_cache().await;
+                let token2 = get_cached_token(config).await?;
+                return send_once(&send_client, &token2, chat_id, msg_type, &content).await;
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn do_send_message(client: &Client, token: &str, chat_id: &str, text: &str) -> Result<()> {

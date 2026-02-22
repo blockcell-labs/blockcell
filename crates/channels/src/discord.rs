@@ -138,7 +138,7 @@ impl DiscordChannel {
 
         let response = self
             .client
-            .get(&format!("{}/gateway/bot", DISCORD_API_BASE))
+            .get(format!("{}/gateway/bot", DISCORD_API_BASE))
             .header("Authorization", format!("Bot {}", token))
             .send()
             .await
@@ -240,7 +240,7 @@ impl DiscordChannel {
         // Intents: GUILDS (1<<0) | GUILD_MESSAGES (1<<9) | MESSAGE_CONTENT (1<<15) | DIRECT_MESSAGES (1<<12)
         let intents: u64 = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
         let identify = GatewayIdentify {
-            op: GATEWAY_IDENTIFY as u8,
+            op: GATEWAY_IDENTIFY,
             d: IdentifyData {
                 token: self.config.channels.discord.bot_token.clone(),
                 intents,
@@ -278,7 +278,7 @@ impl DiscordChannel {
                     };
 
                     let hb = GatewayHeartbeat {
-                        op: GATEWAY_HEARTBEAT as u8,
+                        op: GATEWAY_HEARTBEAT,
                         d: seq,
                     };
                     if let Ok(json) = serde_json::to_string(&hb) {
@@ -546,7 +546,7 @@ pub async fn send_message_reply(
         }
 
         let response = client
-            .post(&format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
+            .post(format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
             .header("Authorization", format!("Bot {}", token))
             .json(&body)
             .send()
@@ -629,7 +629,7 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     info!(file_path = %file_path, "Discord: sending media attachment");
 
     let resp = client
-        .post(&format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
+        .post(format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
         .header("Authorization", format!("Bot {}", token))
         .multipart(form)
         .send()

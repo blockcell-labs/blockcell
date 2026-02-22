@@ -17,7 +17,7 @@ pub async fn list(show_all: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<8} {:<20} {:<10} {:<20} {}", "ID", "Name", "Enabled", "Next Run", "Schedule");
+    println!("{:<8} {:<20} {:<10} {:<20} Schedule", "ID", "Name", "Enabled", "Next Run");
     println!("{}", "-".repeat(80));
 
     for job in jobs {

@@ -64,11 +64,10 @@ impl Tool for OcrTool {
         if !["recognize", "info"].contains(&action) {
             return Err(Error::Tool("action must be 'recognize' or 'info'".into()));
         }
-        if action == "recognize" {
-            if params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if action == "recognize"
+            && params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
                 return Err(Error::Tool("'path' is required for recognize".into()));
             }
-        }
         Ok(())
     }
 

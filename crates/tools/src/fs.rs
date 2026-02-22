@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
-fn expand_path(path: &str, workspace: &PathBuf) -> PathBuf {
+fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
     if path.starts_with("~/") {
         dirs::home_dir()
             .map(|h| h.join(&path[2..]))

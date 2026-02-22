@@ -17,7 +17,7 @@ pub async fn list(all: bool) -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                             records.push(record);
@@ -41,9 +41,8 @@ pub async fn list(all: bool) -> anyhow::Result<()> {
             builtin_count += 1;
             if !all { continue; }
         }
-        if !seen.insert(r.skill_name.clone()) {
-            if !all { continue; }
-        }
+        if !seen.insert(r.skill_name.clone())
+            && !all { continue; }
 
         let status_str = format!("{:?}", r.status);
         match status_str.as_str() {
@@ -118,11 +117,10 @@ pub async fn clear() -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
-                    if std::fs::remove_file(&path).is_ok() {
+                if path.extension().is_some_and(|e| e == "json")
+                    && std::fs::remove_file(&path).is_ok() {
                         count += 1;
                     }
-                }
             }
         }
     }
@@ -145,14 +143,13 @@ pub async fn forget(skill_name: &str) -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "json") {
+                if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
-                            if record.skill_name == skill_name {
-                                if std::fs::remove_file(&path).is_ok() {
+                            if record.skill_name == skill_name
+                                && std::fs::remove_file(&path).is_ok() {
                                     count += 1;
                                 }
-                            }
                         }
                     }
                 }
