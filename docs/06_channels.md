@@ -1,6 +1,6 @@
-# 第06篇：多渠道接入 —— Telegram/Slack/Discord/飞书都能用
+# 第06篇：多渠道接入 —— Telegram/Slack/Discord/飞书/钉钉/企业微信等都能用
 
-> 系列文章：《blockcell 开源项目深度解析》第 6/14 篇
+> 系列文章：《blockcell 开源项目深度解析》第 6/16 篇
 
 ---
 
@@ -18,15 +18,18 @@
 
 ## 支持的渠道
 
-blockcell 目前支持 5 个消息渠道：
+blockcell 目前支持 8 个消息渠道：
 
 | 渠道 | 协议 | 适用场景 |
 |------|------|---------|
 | Telegram | Bot API 轮询 | 个人使用，手机端 |
-| WhatsApp | Meta Cloud API | 个人/商业 |
-| 飞书（Feishu） | 事件订阅 | 企业内部 |
+| WhatsApp | Bridge WebSocket | 个人/商业 |
+| 飞书（Feishu） | 长连接 WebSocket | 企业内部 |
+| Lark（国际版飞书） | Webhook 回调 | 海外团队 |
 | Slack | Web API 轮询 | 团队协作 |
 | Discord | Gateway WebSocket | 社区/开发者 |
+| 钉钉（DingTalk） | Stream SDK（WebSocket） | 国内企业 |
+| 企业微信（WeCom） | Webhook 回调 / 轮询 | 国内企业 |
 
 ---
 
@@ -176,13 +179,91 @@ Discord 使用 **WebSocket Gateway** 连接，实时性更好（不需要轮询�
       "appId": "cli_xxx",
       "appSecret": "你的AppSecret",
       "verificationToken": "验证Token",
-      "encryptKey": "加密Key（可选）"
+      "encryptKey": "加密Key（可选）",
+      "allowFrom": ["user_open_id_1"]
     }
   }
 }
 ```
 
-飞书使用**事件订阅**模式，需要你的 blockcell 有公网地址（或内网穿透）。
+飞书这里使用的是 **开放平台长连接（WebSocket）** 来接收消息（不需要你暴露公网回调地址）。
+
+`allowFrom` 建议务必配置为白名单（飞书的用户 OpenID）。
+
+---
+
+## 配置 Lark（国际版飞书）
+
+Lark（海外版）这里使用 **Webhook 回调** 的方式接收消息，通常需要：
+
+- 你有一个可公网访问的地址（或内网穿透）
+- 在 Lark 开放平台里配置回调 URL
+
+配置示例：
+
+```json
+{
+  "channels": {
+    "lark": {
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_APP_SECRET",
+      "verificationToken": "验证Token",
+      "encryptKey": "加密Key（可选）",
+      "allowFrom": ["user_open_id_1"]
+    }
+  }
+}
+```
+
+如果开启了 `encryptKey`，Lark 会把回调 body 加密后再发送，blockcell 会自动解密。
+
+---
+
+## 配置钉钉（DingTalk）
+
+钉钉这里使用 **Stream SDK（WebSocket 推送）** 来收消息，实时性好。
+
+配置示例：
+
+```json
+{
+  "channels": {
+    "dingtalk": {
+      "appKey": "你的AppKey",
+      "appSecret": "你的AppSecret",
+      "robotCode": "可选：用于给用户发消息",
+      "allowFrom": ["用户ID"]
+    }
+  }
+}
+```
+
+---
+
+## 配置企业微信（WeCom）
+
+企业微信支持两种方式：
+
+- **Webhook 回调（推荐）**：企业微信把消息推到你的回调 URL（需要公网地址/内网穿透）
+- **轮询（降级）**：没有配置回调时，只做 token 心跳检查，基本拿不到真正的收消息能力
+
+配置示例：
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "corpId": "你的CorpId",
+      "corpSecret": "你的Secret",
+      "agentId": 1000002,
+      "callbackToken": "回调Token（用于签名校验）",
+      "encodingAesKey": "EncodingAESKey（用于消息解密）",
+      "allowFrom": ["成员UserId"],
+      "pollIntervalSecs": 10
+    }
+  }
+}
+```
 
 ---
 

@@ -1,6 +1,6 @@
-# Article 06: Multi-Channel Access — Telegram/Slack/Discord/Feishu All Supported
+# Article 06: Multi-Channel Access — Telegram/Slack/Discord/Feishu/DingTalk/WeCom and more
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 6/14
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 6/16
 
 ---
 
@@ -18,15 +18,18 @@ That’s what blockcell’s multi-channel system is for: **make the AI work insi
 
 ## Supported channels
 
-blockcell currently supports 5 messaging channels:
+blockcell currently supports 8 messaging channels:
 
 | Channel | Protocol | Typical usage |
 |------|------|---------|
 | Telegram | Bot API polling | personal use, mobile |
-| WhatsApp | Meta Cloud API | personal/business |
-| Feishu (Lark) | event subscription | enterprise/internal |
+| WhatsApp | bridge WebSocket | personal/business |
+| Feishu (Feishu CN) | long-connection WebSocket | enterprise/internal |
+| Lark (international) | webhook callback | global teams |
 | Slack | Web API polling | team collaboration |
 | Discord | Gateway WebSocket | community/developers |
+| DingTalk | Stream SDK (WebSocket) | CN enterprises |
+| WeCom (WeChat Work) | webhook callback / polling | CN enterprises |
 
 ---
 
@@ -165,7 +168,7 @@ Discord uses a **WebSocket Gateway**, providing better real-time performance (no
 
 ---
 
-## Configure Feishu (Lark)
+## Configure Feishu (Feishu CN)
 
 Feishu configuration is slightly more complex and typically requires enterprise admin privileges:
 
@@ -176,13 +179,91 @@ Feishu configuration is slightly more complex and typically requires enterprise 
       "appId": "cli_xxx",
       "appSecret": "YOUR_APP_SECRET",
       "verificationToken": "VERIFICATION_TOKEN",
-      "encryptKey": "ENCRYPTION_KEY (optional)"
+      "encryptKey": "ENCRYPTION_KEY (optional)",
+      "allowFrom": ["user_open_id_1"]
     }
   }
 }
 ```
 
-Feishu uses **event subscriptions** and usually requires your blockcell instance to have a public address (or an internal tunnel).
+In this implementation, Feishu receives messages via the **Open Platform long-connection WebSocket** (so you typically do not need a public callback URL).
+
+It is strongly recommended to configure `allowFrom` (Feishu OpenID allowlist).
+
+---
+
+## Configure Lark (international)
+
+For international Lark, inbound messages are received via **webhook callbacks**. Typically you need:
+
+- A publicly reachable callback URL (or a tunnel)
+- Configure the webhook URL in Lark developer console
+
+Example configuration:
+
+```json
+{
+  "channels": {
+    "lark": {
+      "appId": "cli_xxx",
+      "appSecret": "YOUR_APP_SECRET",
+      "verificationToken": "VERIFICATION_TOKEN",
+      "encryptKey": "ENCRYPTION_KEY (optional)",
+      "allowFrom": ["user_open_id_1"]
+    }
+  }
+}
+```
+
+When `encryptKey` is set, Lark will encrypt webhook payloads and blockcell will decrypt them automatically.
+
+---
+
+## Configure DingTalk
+
+DingTalk uses **Stream SDK (WebSocket push)** for inbound messages.
+
+Example configuration:
+
+```json
+{
+  "channels": {
+    "dingtalk": {
+      "appKey": "YOUR_APP_KEY",
+      "appSecret": "YOUR_APP_SECRET",
+      "robotCode": "optional: used for sending messages to users",
+      "allowFrom": ["USER_ID"]
+    }
+  }
+}
+```
+
+---
+
+## Configure WeCom (WeChat Work)
+
+WeCom supports two modes:
+
+- **Webhook callback (recommended)**: WeCom pushes messages to your callback URL (requires public address / tunnel)
+- **Polling (degraded)**: without callback, it mainly performs token heartbeat and cannot reliably receive app messages
+
+Example configuration:
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "corpId": "YOUR_CORP_ID",
+      "corpSecret": "YOUR_SECRET",
+      "agentId": 1000002,
+      "callbackToken": "CALLBACK_TOKEN (signature verification)",
+      "encodingAesKey": "ENCODING_AES_KEY (message decryption)",
+      "allowFrom": ["USER_ID"],
+      "pollIntervalSecs": 10
+    }
+  }
+}
+```
 
 ---
 
