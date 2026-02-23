@@ -725,7 +725,7 @@ mod tests {
         ).with_status(CapabilityStatus::Available);
 
         registry.register_with_executor(cap, Arc::new(MockExecutor));
-        assert_eq!(registry.get_descriptor("test.replace").unwrap().version, "0.1.0");
+        assert_eq!(registry.get_descriptor("test.replace").unwrap().version, env!("CARGO_PKG_VERSION"));
 
         // Replace with new version
         registry.replace_executor("test.replace", Arc::new(MockExecutor), "0.2.0").unwrap();

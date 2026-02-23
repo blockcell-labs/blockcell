@@ -157,7 +157,8 @@ impl Tool for HttpRequestTool {
         };
 
         // User-Agent
-        request = request.header("User-Agent", "blockcell/0.1");
+        let user_agent = format!("blockcell/{}", env!("CARGO_PKG_VERSION"));
+        request = request.header("User-Agent", user_agent);
 
         // Custom headers
         if let Some(headers) = params.get("headers").and_then(|v| v.as_object()) {

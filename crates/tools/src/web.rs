@@ -295,9 +295,11 @@ async fn fetch_text(url: &str, max_chars: usize) -> Result<Value> {
         .build()
         .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
 
+    let user_agent = format!("blockcell/{} (AI Agent)", env!("CARGO_PKG_VERSION"));
+
     let response = client
         .get(url)
-        .header("User-Agent", "blockcell/0.1 (AI Agent)")
+        .header("User-Agent", user_agent)
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Fetch failed: {}", e)))?;
@@ -352,9 +354,11 @@ async fn fetch_raw(url: &str, max_chars: usize) -> Result<Value> {
         .build()
         .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
 
+    let user_agent = format!("blockcell/{} (AI Agent)", env!("CARGO_PKG_VERSION"));
+
     let response = client
         .get(url)
-        .header("User-Agent", "blockcell/0.1 (AI Agent)")
+        .header("User-Agent", user_agent)
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Fetch failed: {}", e)))?;

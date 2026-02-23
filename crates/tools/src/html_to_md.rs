@@ -61,9 +61,11 @@ pub async fn fetch_as_markdown(url: &str, max_chars: usize) -> Result<(String, M
         .build()
         .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
 
+    let user_agent = format!("blockcell/{} (AI Agent)", env!("CARGO_PKG_VERSION"));
+
     let response = client
         .get(url)
-        .header("User-Agent", "blockcell/0.1 (AI Agent)")
+        .header("User-Agent", user_agent)
         .header("Accept", "text/markdown, text/html;q=0.9, */*;q=0.8")
         .send()
         .await

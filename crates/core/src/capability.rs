@@ -133,7 +133,7 @@ impl CapabilityDescriptor {
             input_schema: None,
             output_schema: None,
             cost: CapabilityCost::default(),
-            version: "0.1.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             provider_path: None,
             dependencies: Vec::new(),
             metadata: HashMap::new(),
