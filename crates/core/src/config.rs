@@ -59,6 +59,8 @@ pub struct AgentDefaults {
     pub llm_max_retries: u32,
     #[serde(default = "default_llm_retry_delay_ms")]
     pub llm_retry_delay_ms: u64,
+    #[serde(default = "default_max_context_tokens")]
+    pub max_context_tokens: u32,
 }
 
 fn default_workspace() -> String {
@@ -89,6 +91,10 @@ fn default_llm_retry_delay_ms() -> u64 {
     2000
 }
 
+fn default_max_context_tokens() -> u32 {
+    32000
+}
+
 impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
@@ -99,6 +105,7 @@ impl Default for AgentDefaults {
             max_tool_iterations: default_max_tool_iterations(),
             llm_max_retries: default_llm_max_retries(),
             llm_retry_delay_ms: default_llm_retry_delay_ms(),
+            max_context_tokens: default_max_context_tokens(),
         }
     }
 }

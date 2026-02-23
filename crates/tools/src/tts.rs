@@ -208,15 +208,40 @@ async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
         "edge" => speak_edge(text, voice, speed, &output_path).await,
         "api" => speak_api(ctx, text, voice, speed, format, &output_path).await,
         "auto" => {
-            // Try local backends first, then cloud
-            if check_command("say").await {
-                speak_say(text, voice, speed, &output_path).await
-            } else if check_command("edge-tts").await {
-                speak_edge(text, voice, speed, &output_path).await
-            } else if check_command("piper").await {
-                speak_piper(text, voice, &output_path).await
-            } else {
-                speak_api(ctx, text, voice, speed, format, &output_path).await
+            // Try local backends first, then cloud.
+            // On failure, fall back to the next backend (ignoring voice param
+            // since voice names are backend-specific).
+            let mut last_err = None;
+            let backends: Vec<(&str, bool)> = vec![
+                ("say", check_command("say").await),
+                ("edge", check_command("edge-tts").await),
+                ("piper", check_command("piper").await),
+                ("api", true),
+            ];
+            let mut success: Option<String> = None;
+            for (name, available) in &backends {
+                if !available { continue; }
+                let is_first_try = last_err.is_none();
+                // On first try, use the user-specified voice; on fallback, use default (None)
+                let try_voice = if is_first_try { voice } else { None };
+                let res = match *name {
+                    "say" => speak_say(text, try_voice, speed, &output_path).await,
+                    "edge" => speak_edge(text, try_voice, speed, &output_path).await,
+                    "piper" => speak_piper(text, try_voice, &output_path).await,
+                    "api" => speak_api(ctx, text, try_voice, speed, format, &output_path).await,
+                    _ => unreachable!(),
+                };
+                match res {
+                    Ok(backend) => { success = Some(backend); break; }
+                    Err(e) => {
+                        info!(backend = *name, err = %format!("{}", e), "TTS backend failed, trying next");
+                        last_err = Some(e);
+                    }
+                }
+            }
+            match success {
+                Some(backend) => Ok(backend),
+                None => Err(last_err.unwrap_or_else(|| Error::Tool("No TTS backend available".into()))),
             }
         }
         _ => Err(Error::Tool(format!("Unknown backend: {}", backend))),

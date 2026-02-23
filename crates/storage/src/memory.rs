@@ -667,6 +667,46 @@ impl MemoryStore {
         Ok((expired, purged))
     }
 
+    /// Upsert a session summary for prompt injection.
+    /// Uses dedup_key = "session_summary:{session_key}" so each session has exactly one summary.
+    pub fn upsert_session_summary(&self, session_key: &str, summary: &str) -> Result<()> {
+        let dedup_key = format!("session_summary:{}", session_key);
+        let params = UpsertParams {
+            scope: "short_term".to_string(),
+            item_type: "session_summary".to_string(),
+            title: Some(format!("Session: {}", session_key)),
+            content: summary.to_string(),
+            summary: None,
+            tags: vec!["session_summary".to_string()],
+            source: "ghost".to_string(),
+            channel: None,
+            session_key: Some(session_key.to_string()),
+            importance: 0.8,
+            dedup_key: Some(dedup_key),
+            expires_at: None,
+        };
+        self.upsert(params)?;
+        Ok(())
+    }
+
+    /// Get the session summary for a given session key, if one exists.
+    pub fn get_session_summary(&self, session_key: &str) -> Result<Option<String>> {
+        let conn = self.inner.lock().map_err(|e| {
+            blockcell_core::Error::Storage(format!("Lock error: {}", e))
+        })?;
+
+        let dedup_key = format!("session_summary:{}", session_key);
+        let result: Option<String> = conn.query_row(
+            "SELECT content FROM memory_items WHERE dedup_key = ?1 AND deleted_at IS NULL",
+            params![dedup_key],
+            |row| row.get(0),
+        ).optional().map_err(|e| {
+            blockcell_core::Error::Storage(format!("Query error: {}", e))
+        })?;
+
+        Ok(result)
+    }
+
     /// Generate a brief summary for prompt injection.
     /// Returns up to `long_term_max` long-term summaries and `short_term_max` short-term summaries.
     pub fn generate_brief(&self, long_term_max: usize, short_term_max: usize) -> Result<String> {
@@ -785,6 +825,102 @@ impl MemoryStore {
             }
         }
 
+        Ok(brief)
+    }
+
+    /// Generate a brief summary for prompt injection, filtered by relevance to a query.
+    /// Uses FTS5 to find memories related to the current user input.
+    /// Falls back to generate_brief() when query is empty.
+    pub fn generate_brief_for_query(&self, query: &str, max_items: usize) -> Result<String> {
+        let query = query.trim();
+        if query.is_empty() || max_items == 0 {
+            // Fallback: return a small general brief
+            return self.generate_brief(5, 3);
+        }
+
+        let fts_query = sanitize_fts_query(query);
+        if fts_query.is_empty() {
+            return self.generate_brief(5, 3);
+        }
+
+        // Scope the Mutex lock so it is released before any fallback call to
+        // self.generate_brief(). std::sync::Mutex is NOT reentrant — calling
+        // generate_brief() while holding the lock would deadlock.
+        let items = {
+            let conn = self.inner.lock().map_err(|e| {
+                blockcell_core::Error::Storage(format!("Lock error: {}", e))
+            })?;
+
+            let now = Utc::now().to_rfc3339();
+            let max = max_items as i64;
+
+            // FTS5 search across all non-deleted, non-expired memories, ranked by relevance + importance
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.title, m.summary, m.content, m.type, m.scope, m.importance,
+                        bm25(memory_fts) AS fts_score
+                 FROM memory_items m
+                 JOIN memory_fts ON memory_fts.rowid = m.rowid
+                 WHERE memory_fts MATCH ?1
+                   AND m.deleted_at IS NULL
+                   AND (m.expires_at IS NULL OR m.expires_at > ?2)
+                 ORDER BY (-bm25(memory_fts) * 10.0 + m.importance * 5.0 +
+                           CASE WHEN m.scope = 'long_term' THEN 3.0 ELSE 0.0 END) DESC
+                 LIMIT ?3"
+            ).map_err(|e| {
+                blockcell_core::Error::Storage(format!("Brief query error: {}", e))
+            })?;
+
+            let rows = stmt.query_map(params![fts_query, now, max], |row| {
+                let title: Option<String> = row.get("title")?;
+                let summary: Option<String> = row.get("summary")?;
+                let content: String = row.get("content")?;
+                let item_type: String = row.get("type")?;
+                let scope: String = row.get("scope")?;
+                Ok((title, summary, content, item_type, scope))
+            }).map_err(|e| {
+                blockcell_core::Error::Storage(format!("Brief query error: {}", e))
+            })?;
+
+            let mut items = Vec::new();
+            for row in rows.flatten() {
+                let (title, summary, content, item_type, scope) = row;
+                let display = if let Some(s) = summary {
+                    s
+                } else if let Some(t) = title {
+                    let first_line = content.lines().next().unwrap_or("").to_string();
+                    let fl_truncated: String = first_line.chars().take(100).collect();
+                    if first_line.chars().count() > 100 {
+                        format!("{}: {}...", t, fl_truncated)
+                    } else {
+                        format!("{}: {}", t, first_line)
+                    }
+                } else {
+                    let truncated: String = content.chars().take(120).collect();
+                    if content.chars().count() > 120 {
+                        format!("{}...", truncated)
+                    } else {
+                        truncated
+                    }
+                };
+                let scope_tag = if scope == "long_term" { "LT" } else { "ST" };
+                items.push(format!("- [{}|{}] {}", item_type, scope_tag, display));
+            }
+
+            items
+            // conn lock is dropped here at end of block
+        };
+
+        if items.is_empty() {
+            // No FTS matches — return a minimal general brief (lock is already released)
+            return self.generate_brief(3, 2);
+        }
+
+        let mut brief = String::new();
+        brief.push_str("### Relevant Memory\n");
+        for item in &items {
+            brief.push_str(item);
+            brief.push('\n');
+        }
         Ok(brief)
     }
 

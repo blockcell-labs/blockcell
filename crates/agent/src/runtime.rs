@@ -206,6 +206,161 @@ async fn pick_image_path(paths: &Paths, history: &[ChatMessage]) -> Option<Strin
     None
 }
 
+/// Strip fake tool call blocks from LLM responses.
+/// Some LLMs output pseudo-tool-call syntax in plain text instead of using the
+/// real function calling mechanism. Remove these before sending to user.
+fn strip_fake_tool_calls(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // Remove [TOOL_CALL]...[/TOOL_CALL] blocks (case-insensitive)
+    while let Some(start) = result.to_lowercase().find("[tool_call]") {
+        if let Some(end_tag) = result.to_lowercase()[start..].find("[/tool_call]") {
+            let end = start + end_tag + "[/tool_call]".len();
+            result = format!("{}{}", &result[..start], &result[end..]);
+        } else {
+            // No closing tag — remove from [TOOL_CALL] to end
+            result = result[..start].to_string();
+            break;
+        }
+    }
+
+    // Remove ```tool_call...``` blocks
+    while let Some(start) = result.find("```tool_call") {
+        if let Some(end_tag) = result[start + 3..].find("```") {
+            let end = start + 3 + end_tag + 3;
+            result = format!("{}{}", &result[..start], &result[end..]);
+        } else {
+            result = result[..start].to_string();
+            break;
+        }
+    }
+
+    result.trim().to_string()
+}
+
+fn is_tool_trace_content(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    t.contains("[Called:")
+        || t.contains("<tool_call")
+        || t.contains("[TOOL_CALL]")
+        || t.contains("[/TOOL_CALL]")
+}
+
+fn condense_web_search_result(raw: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let results = val.get("results")?.as_array()?;
+
+    let mut out = String::new();
+    let mut idx = 1usize;
+    for r in results.iter().take(8) {
+        let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let snippet = r
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .or_else(|| r.get("description").and_then(|v| v.as_str()))
+            .unwrap_or("");
+
+        if title.is_empty() && url.is_empty() && snippet.is_empty() {
+            continue;
+        }
+
+        out.push_str(&format!(
+            "{}. {}\n{}\n{}\n\n",
+            idx,
+            title,
+            url,
+            {
+                let s: String = snippet.chars().take(240).collect();
+                if snippet.chars().count() > 240 { format!("{}...", s) } else { s }
+            }
+        ));
+        idx += 1;
+    }
+
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out.trim().to_string())
+    }
+}
+
+fn condense_web_fetch_result(raw: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let content = val
+        .get("content")
+        .and_then(|v| v.as_str())
+        .or_else(|| val.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    if content.trim().is_empty() {
+        return None;
+    }
+
+    let char_count = content.chars().count();
+    if char_count <= 1600 {
+        return Some(content.trim().to_string());
+    }
+
+    let head: String = content.chars().take(1100).collect();
+    let tail: String = content.chars().rev().take(400).collect::<String>().chars().rev().collect();
+    Some(format!(
+        "{}\n...<trimmed {} chars>...\n{}",
+        head.trim(),
+        char_count.saturating_sub(1500),
+        tail.trim()
+    ))
+}
+
+fn is_dangerous_exec_command(command: &str) -> bool {
+    let c = command.to_lowercase();
+    let c = c.trim();
+    if c.is_empty() {
+        return false;
+    }
+
+    // Commands that can terminate the agent itself or disrupt system services.
+    // ExecTool already blocks some destructive patterns (rm -rf /, shutdown, reboot...),
+    // but it does NOT block kill/pkill/killall.
+    let dangerous = [
+        "kill ",
+        "pkill",
+        "killall",
+        "taskkill",
+        "systemctl stop",
+        "service stop",
+        "launchctl bootout",
+        "launchctl kill",
+    ];
+
+    dangerous.iter().any(|p| c.contains(p))
+}
+
+fn is_sensitive_filename(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let name = p.rsplit('/').next().unwrap_or("").to_lowercase();
+    matches!(name.as_str(), "config.json" | "config.toml" | "config.yaml" | "config.yml")
+}
+
+fn user_explicitly_confirms_dangerous_op(user_text: &str) -> bool {
+    let t = user_text.trim();
+    if t.is_empty() {
+        return false;
+    }
+
+    // For channels without an interactive confirm prompt (confirm_tx=None),
+    // require the user to explicitly confirm in text.
+    // Keep this simple and language-friendly.
+    t.contains("确认")
+        && (t.contains("执行")
+            || t.contains("重启")
+            || t.contains("继续")
+            || t.contains("允许"))
+}
+
 fn overwrite_last_assistant_message(history: &mut [ChatMessage], new_text: &str) {
     if let Some(last) = history.last_mut() {
         if last.role == "assistant" {
@@ -538,6 +693,201 @@ impl AgentRuntime {
         }
     }
 
+    /// Build an extractive summary from session history (no LLM call).
+    /// Extracts user questions and final assistant answers, truncated to fit.
+    fn build_extractive_summary(history: &[ChatMessage]) -> String {
+        let mut summary_parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < history.len() {
+            let msg = &history[i];
+            if msg.role == "user" {
+                let user_text = match &msg.content {
+                    serde_json::Value::String(s) => {
+                        let chars: String = s.chars().take(100).collect();
+                        if s.chars().count() > 100 { format!("{}...", chars) } else { chars }
+                    }
+                    _ => "(media)".to_string(),
+                };
+                // Find the last assistant text reply in this round
+                let mut assistant_text = String::new();
+                let mut j = i + 1;
+                while j < history.len() && history[j].role != "user" {
+                    if history[j].role == "assistant" && history[j].tool_calls.is_none() {
+                        assistant_text = match &history[j].content {
+                            serde_json::Value::String(s) => {
+                                let chars: String = s.chars().take(150).collect();
+                                if s.chars().count() > 150 { format!("{}...", chars) } else { chars }
+                            }
+                            _ => String::new(),
+                        };
+                    }
+                    j += 1;
+                }
+                if !assistant_text.is_empty() {
+                    summary_parts.push(format!("Q: {} → A: {}", user_text, assistant_text));
+                } else {
+                    summary_parts.push(format!("Q: {} → (tool interaction)", user_text));
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+
+        // Cap total summary length
+        let mut summary = summary_parts.join("\n");
+        if summary.chars().count() > 800 {
+            // Keep only the most recent entries
+            while summary.chars().count() > 800 && summary_parts.len() > 1 {
+                summary_parts.remove(0);
+                summary = summary_parts.join("\n");
+            }
+        }
+        summary
+    }
+
+    /// Compress older tool interaction rounds in current_messages during the tool call loop.
+    /// Keeps: system message (index 0) + last 10 messages intact.
+    /// Middle messages: assistant tool_call messages are summarized, tool results are condensed.
+    fn compress_mid_loop(messages: &mut Vec<ChatMessage>) {
+        if messages.len() <= 12 {
+            return;
+        }
+
+        let keep_tail = 10;
+        let mut split_point = messages.len().saturating_sub(keep_tail);
+        if split_point <= 1 {
+            return; // Only system message before the tail
+        }
+
+        // Adjust split_point backward so the tail doesn't start with orphaned tool messages
+        // or an assistant-with-tool_calls whose tool responses are in the tail.
+        // Walk split_point back until the tail starts cleanly.
+        while split_point > 1 {
+            let tail_start_role = messages[split_point].role.as_str();
+            if tail_start_role == "tool" {
+                // Orphaned tool message — include its assistant message too
+                split_point -= 1;
+                continue;
+            }
+            if tail_start_role == "assistant" {
+                if let Some(ref tcs) = messages[split_point].tool_calls {
+                    if !tcs.is_empty() {
+                        // Assistant with tool_calls at the boundary — include it in tail
+                        // (it's fine as-is; the tool responses follow in the tail)
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+
+        // Keep system message (index 0) and tail messages
+        let system_msg = messages[0].clone();
+        let tail: Vec<ChatMessage> = messages[split_point..].to_vec();
+
+        // Compress middle section (indices 1..split_point)
+        let mut compressed_middle: Vec<ChatMessage> = Vec::new();
+        let mut i = 1;
+        while i < split_point {
+            let msg = &messages[i];
+            if msg.role == "user" {
+                // Keep user messages but trim them
+                let text = match &msg.content {
+                    serde_json::Value::String(s) => {
+                        let chars: String = s.chars().take(150).collect();
+                        if s.chars().count() > 150 { format!("{}...", chars) } else { chars }
+                    }
+                    _ => "(media)".to_string(),
+                };
+                compressed_middle.push(ChatMessage::user(&text));
+            } else if msg.role == "assistant" {
+                // For assistant messages with tool_calls, summarize to just the tool names
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                    let summary = format!("[Called: {}]", tool_names.join(", "));
+                    let mut compressed_assistant = ChatMessage::assistant(&summary);
+                    compressed_assistant.tool_calls = Some(tool_calls.clone());
+                    compressed_middle.push(compressed_assistant);
+                    // Skip subsequent tool result messages for these calls
+                    let expected_ids: std::collections::HashSet<&str> = tool_calls.iter()
+                        .map(|tc| tc.id.as_str())
+                        .collect();
+                    let mut j = i + 1;
+                    while j < split_point {
+                        if messages[j].role == "tool" {
+                            if let Some(ref id) = messages[j].tool_call_id {
+                                if expected_ids.contains(id.as_str()) {
+                                    // Condense tool result to a short summary
+                                    let tool_name = messages[j].name.as_deref().unwrap_or("tool");
+                                    let result_text = match &messages[j].content {
+                                        serde_json::Value::String(s) => {
+                                            let chars: String = s.chars().take(80).collect();
+                                            if s.chars().count() > 80 { format!("{}...", chars) } else { chars }
+                                        }
+                                        _ => "ok".to_string(),
+                                    };
+                                    let mut tool_msg = ChatMessage::tool_result(id, &format!("[{}: {}]", tool_name, result_text));
+                                    tool_msg.name = Some(tool_name.to_string());
+                                    compressed_middle.push(tool_msg);
+                                    j += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    i = j;
+                    continue;
+                } else {
+                    // Regular assistant text — trim it
+                    let text = match &msg.content {
+                        serde_json::Value::String(s) => {
+                            let chars: String = s.chars().take(200).collect();
+                            if s.chars().count() > 200 { format!("{}...", chars) } else { chars }
+                        }
+                        _ => String::new(),
+                    };
+                    compressed_middle.push(ChatMessage::assistant(&text));
+                }
+            } else if msg.role == "tool" {
+                // Orphaned tool message (not consumed by assistant handler above) — keep condensed
+                let tool_name = msg.name.as_deref().unwrap_or("tool");
+                let id = msg.tool_call_id.as_deref().unwrap_or("");
+                let result_text = match &msg.content {
+                    serde_json::Value::String(s) => {
+                        if tool_name == "web_search" {
+                            condense_web_search_result(s).unwrap_or_else(|| {
+                                let chars: String = s.chars().take(800).collect();
+                                if s.chars().count() > 800 { format!("{}...", chars) } else { chars }
+                            })
+                        } else if tool_name == "web_fetch" {
+                            condense_web_fetch_result(s).unwrap_or_else(|| {
+                                let chars: String = s.chars().take(1000).collect();
+                                if s.chars().count() > 1000 { format!("{}...", chars) } else { chars }
+                            })
+                        } else {
+                            let chars: String = s.chars().take(160).collect();
+                            if s.chars().count() > 160 { format!("{}...", chars) } else { chars }
+                        }
+                    }
+                    _ => "ok".to_string(),
+                };
+                let mut tool_msg = ChatMessage::tool_result(id, &format!("[{}: {}]", tool_name, result_text));
+                tool_msg.name = Some(tool_name.to_string());
+                compressed_middle.push(tool_msg);
+            }
+            // else: skip unknown roles
+            i += 1;
+        }
+
+        // Rebuild messages: system + compressed middle + tail
+        *messages = Vec::with_capacity(1 + compressed_middle.len() + tail.len());
+        messages.push(system_msg);
+        messages.extend(compressed_middle);
+        messages.extend(tail);
+    }
+
     pub async fn process_message(&mut self, msg: InboundMessage) -> Result<String> {
         let session_key = msg.session_key();
         info!(session_key = %session_key, "Processing message");
@@ -665,11 +1015,20 @@ impl AgentRuntime {
 
         tool_names.sort();
         tool_names.dedup();
+        // Core tools always get full schemas; others get lightweight (name+description only).
+        // When the LLM tries to call a lightweight tool, the dynamic supplement mechanism
+        // (below in the tool call loop) will inject the full schema and retry.
+        const CORE_TOOLS: &[&str] = &[
+            "read_file", "write_file", "edit_file", "list_dir", "exec",
+            "web_search", "web_fetch", "message", "memory_query", "memory_upsert",
+            "spawn", "list_tasks", "cron",
+        ];
+
         let mut tools = if tool_names.is_empty() {
             // Chat intent: no tools
             vec![]
         } else {
-            let mut schemas = self.tool_registry.get_filtered_schemas(&tool_names);
+            let mut schemas = self.tool_registry.get_tiered_schemas(&tool_names, CORE_TOOLS);
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
                     let name = schema.get("function")
@@ -691,6 +1050,7 @@ impl AgentRuntime {
 
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
+            debug!(iteration, current_messages_len = current_messages.len(), tool_schema_count = tools.len(), "LLM loop state");
 
             // Call LLM with retry on transient errors
             let max_retries = self.config.agents.defaults.llm_max_retries;
@@ -763,7 +1123,16 @@ impl AgentRuntime {
                     });
 
                 // Add assistant message with tool calls
-                let mut assistant_msg = ChatMessage::assistant(response.content.as_deref().unwrap_or(""));
+                let assistant_content = response
+                    .content
+                    .as_deref()
+                    .unwrap_or("");
+                let assistant_content = if is_tool_trace_content(assistant_content) {
+                    ""
+                } else {
+                    assistant_content
+                };
+                let mut assistant_msg = ChatMessage::assistant(assistant_content);
                 assistant_msg.reasoning_content = response.reasoning_content.clone();
                 assistant_msg.tool_calls = Some(response.tool_calls.clone());
                 current_messages.push(assistant_msg.clone());
@@ -772,7 +1141,11 @@ impl AgentRuntime {
                 // Execute each tool call, with dynamic tool supplement for intent misclassification
                 let mut supplemented_tools = false;
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
+                let mut wants_forced_answer = false;
                 for tool_call in &response.tool_calls {
+                    if tool_call.name == "web_search" || tool_call.name == "web_fetch" {
+                        wants_forced_answer = true;
+                    }
                     if tool_call.name == "message" {
                         let has_media = tool_call
                             .arguments
@@ -786,20 +1159,43 @@ impl AgentRuntime {
                     }
                     let result = self.execute_tool_call(tool_call, &msg).await;
 
-                    // If tool was not found, try to supplement it dynamically
-                    if result.contains("Unknown tool:") {
+                    // Dynamic tool supplement: if tool was not found or validation failed
+                    // (e.g. lightweight schema had no params), inject full schema and retry.
+                    let needs_supplement = result.contains("Unknown tool:")
+                        || result.contains("Permission denied:")
+                        || result.contains("validation failed");
+                    if needs_supplement {
                         if let Some(schema) = self.tool_registry.get(&tool_call.name) {
-                            let schema_val = serde_json::json!({
-                                "type": "function",
-                                "function": {
-                                    "name": schema.schema().name,
-                                    "description": schema.schema().description,
-                                    "parameters": schema.schema().parameters
-                                }
+                            // Check if we need to upgrade from lightweight to full schema
+                            let already_full = tools.iter().any(|t| {
+                                t.get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|n| n.as_str()) == Some(&tool_call.name)
+                                    && t.get("function")
+                                        .and_then(|f| f.get("parameters"))
+                                        .and_then(|p| p.get("properties"))
+                                        .map(|props| props.as_object().map_or(false, |o| !o.is_empty()))
+                                        .unwrap_or(false)
                             });
-                            tools.push(schema_val);
-                            supplemented_tools = true;
-                            info!(tool = %tool_call.name, "Dynamically supplemented missing tool");
+                            if !already_full {
+                                let schema_val = serde_json::json!({
+                                    "type": "function",
+                                    "function": {
+                                        "name": schema.schema().name,
+                                        "description": schema.schema().description,
+                                        "parameters": schema.schema().parameters
+                                    }
+                                });
+                                // Replace lightweight schema with full schema
+                                tools.retain(|t| {
+                                    t.get("function")
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str()) != Some(&tool_call.name)
+                                });
+                                tools.push(schema_val);
+                                supplemented_tools = true;
+                                info!(tool = %tool_call.name, "Dynamically supplemented tool with full schema");
+                            }
                         }
                     }
 
@@ -818,14 +1214,61 @@ impl AgentRuntime {
                     continue;
                 }
 
-                // Normal path: commit tool results to messages and history
-                for tool_msg in tool_results {
+                // Normal path: commit tool results to messages and history,
+                // trimming each tool result to prevent unbounded growth.
+                for mut tool_msg in tool_results {
+                    // Trim tool result content (tool results can be very large,
+                    // e.g. web_fetch markdown, finance_api JSON arrays)
+                    if let serde_json::Value::String(ref s) = tool_msg.content {
+                        let char_count = s.chars().count();
+                        if char_count > 2400 {
+                            let head: String = s.chars().take(1600).collect();
+                            let tail: String = s.chars().rev().take(800).collect::<String>().chars().rev().collect();
+                            tool_msg.content = serde_json::Value::String(
+                                format!("{}\n...<trimmed {} chars>...\n{}", head, char_count - 2400, tail)
+                            );
+                        }
+                    }
                     current_messages.push(tool_msg.clone());
                     history.push(tool_msg);
                 }
 
+                if wants_forced_answer && iteration + 1 < max_iterations {
+                    current_messages.push(ChatMessage::user(
+                        "请基于刚才工具返回的结果直接给出最终答案（例如：整理成要点/列表/摘要）。除非结果明显不足，否则不要继续调用 web_search/web_fetch。",
+                    ));
+                }
+
+                // Mid-loop compression: if accumulated messages are getting large,
+                // compress older tool interaction rounds (keep system + recent 2 rounds).
+                // This prevents multi-round tool calling from blowing up context.
+                if current_messages.len() > 20 {
+                    Self::compress_mid_loop(&mut current_messages);
+                }
+
                 if short_circuit_after_tools {
                     final_response.clear();
+                    break;
+                }
+
+                if iteration == max_iterations - 1 {
+                    warn!(iteration, max_iterations, "Reached max iterations; forcing a final no-tools answer");
+                    let mut final_messages = current_messages.clone();
+                    final_messages.push(ChatMessage::user(
+                        "请基于以上工具调用的结果，直接给出最终答案。不要再调用任何工具，也不要输出类似[Called: ...]的过程信息。",
+                    ));
+
+                    match self.provider.chat(&final_messages, &[]).await {
+                        Ok(r) => {
+                            final_response = r.content.unwrap_or_default();
+                            history.push(ChatMessage::assistant(&final_response));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Final no-tools LLM call failed");
+                            final_response = "I've reached the maximum number of tool iterations.".to_string();
+                            history.push(ChatMessage::assistant(&final_response));
+                        }
+                    }
                     break;
                 }
             } else {
@@ -835,13 +1278,6 @@ impl AgentRuntime {
                 // Add to history
                 history.push(ChatMessage::assistant(&final_response));
                 break;
-            }
-
-            if iteration == max_iterations - 1 {
-                warn!("Reached max iterations");
-                final_response = response.content.unwrap_or_else(|| {
-                    "I've reached the maximum number of tool iterations.".to_string()
-                });
             }
         }
 
@@ -863,8 +1299,30 @@ impl AgentRuntime {
             }
         }
 
+        // Trim leading/trailing whitespace — LLMs often return "\n\nContent..."
+        let final_response = final_response.trim().to_string();
+
+        // Strip fake tool call blocks — some LLMs output pseudo-tool-call syntax
+        // in plain text (e.g. [TOOL_CALL]...[/TOOL_CALL]) instead of using the
+        // real function calling mechanism. Remove these before sending to user.
+        let final_response = strip_fake_tool_calls(&final_response);
+
         // Save session
         self.session_store.save(&session_key, &history)?;
+
+        // L2 incremental session summary (P2-1):
+        // When history is long enough, build an extractive summary and store it.
+        // This is picked up by generate_brief_for_query for future context injection.
+        if history.len() >= 6 {
+            if let Some(ref store) = self.memory_store {
+                let summary = Self::build_extractive_summary(&history);
+                if !summary.is_empty() {
+                    if let Err(e) = store.upsert_session_summary(&session_key, &summary) {
+                        debug!(error = %e, "Failed to upsert session summary");
+                    }
+                }
+            }
+        }
 
         // Emit message_done event to WebSocket clients
         if let Some(ref event_tx) = self.event_tx {
@@ -1067,7 +1525,95 @@ impl AgentRuntime {
         }
     }
 
+    async fn confirm_dangerous_operation(&mut self, tool_name: &str, items: Vec<String>) -> bool {
+        if items.is_empty() {
+            return true;
+        }
+        if let Some(confirm_tx) = &self.confirm_tx {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let request = ConfirmRequest {
+                tool_name: tool_name.to_string(),
+                paths: items,
+                response_tx,
+            };
+            if confirm_tx.send(request).await.is_err() {
+                warn!(tool = tool_name, "Failed to send dangerous-operation confirmation request, denying");
+                return false;
+            }
+            match response_rx.await {
+                Ok(allowed) => allowed,
+                Err(_) => {
+                    warn!(tool = tool_name, "Dangerous-operation confirmation channel closed, denying");
+                    false
+                }
+            }
+        } else {
+            warn!(tool = tool_name, "No confirmation channel, denying dangerous operation");
+            false
+        }
+    }
+
     async fn execute_tool_call(&mut self, tool_call: &ToolCallRequest, msg: &InboundMessage) -> String {
+        // Dangerous-operation gate: require explicit user confirmation before executing
+        // self-destructive commands or destructive file operations.
+        if tool_call.name == "exec" {
+            if let Some(cmd) = tool_call.arguments.get("command").and_then(|v| v.as_str()) {
+                if is_dangerous_exec_command(cmd) {
+                    let items = vec![format!("command: {}", cmd)];
+                    if self.confirm_tx.is_none() {
+                        if !user_explicitly_confirms_dangerous_op(&msg.content) {
+                            return serde_json::json!({
+                                "error": "Permission denied: dangerous exec command requires explicit user confirmation.",
+                                "tool": "exec",
+                                "hint": "This channel cannot show an interactive confirm prompt. Reply with '确认执行' (or '确认重启') to proceed, otherwise I will not run kill/pkill/killall/service-stop commands."
+                            }).to_string();
+                        }
+                    } else if !self.confirm_dangerous_operation("exec", items).await {
+                        return serde_json::json!({
+                            "error": "Permission denied: dangerous exec command requires explicit user confirmation.",
+                            "tool": "exec",
+                            "hint": "The command looks dangerous (e.g. kill/pkill/killall/service stop). Ask the user to confirm explicitly before running it."
+                        }).to_string();
+                    }
+                }
+            }
+        }
+
+        if tool_call.name == "file_ops" {
+            let action = tool_call.arguments.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let path = tool_call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let destination = tool_call.arguments.get("destination").and_then(|v| v.as_str()).unwrap_or("");
+            let recursive = tool_call.arguments.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let mut items = Vec::new();
+            if action == "delete" && recursive {
+                items.push(format!("file_ops delete recursive=true path={}", path));
+            }
+            if (action == "delete" || action == "rename" || action == "move")
+                && (is_sensitive_filename(path) || is_sensitive_filename(destination))
+            {
+                items.push(format!("file_ops {} sensitive file (config*) path={} destination={}", action, path, destination));
+            }
+
+            if !items.is_empty() {
+                if self.confirm_tx.is_none() {
+                    if !user_explicitly_confirms_dangerous_op(&msg.content) {
+                        return serde_json::json!({
+                            "error": "Permission denied: destructive file operation requires explicit user confirmation.",
+                            "tool": "file_ops",
+                            "hint": "This channel cannot show an interactive confirm prompt. Reply with '确认执行' to proceed with recursive delete / config file modifications."
+                        }).to_string();
+                    }
+                } else if !self.confirm_dangerous_operation("file_ops", items).await {
+                    return serde_json::json!({
+                        "error": "Permission denied: destructive file operation requires explicit user confirmation.",
+                        "tool": "file_ops",
+                        "hint": "Deleting recursively or modifying config files is considered dangerous. Ask the user to confirm before proceeding."
+                    }).to_string();
+                }
+            }
+        }
+
         // Check path safety before executing filesystem/exec tools
         if !self.check_path_permission(&tool_call.name, &tool_call.arguments).await {
             return serde_json::json!({

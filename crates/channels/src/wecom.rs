@@ -1085,10 +1085,21 @@ pub async fn send_media_message(
     crate::rate_limit::wecom_limiter().acquire().await;
 
     let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
-    let (media_type, msg_type) = media_type_for_ext(&ext);
+    let (mut media_type, mut msg_type) = media_type_for_ext(&ext);
 
     let upload_path = if media_type == "voice" {
-        ensure_wecom_voice_amr(file_path).await?
+        let amr_path = ensure_wecom_voice_amr(file_path).await?;
+        // WeCom voice messages have a 60-second limit. If the audio is longer,
+        // fall back to sending as a file so the user still gets the full audio.
+        let duration = probe_audio_duration(&amr_path).await.unwrap_or(0.0);
+        if duration > 60.0 {
+            info!(duration = %duration, "WeCom: voice too long (>60s), sending as file instead");
+            media_type = "file";
+            msg_type = "file";
+            file_path.to_string() // send original file (mp3), not the AMR
+        } else {
+            amr_path
+        }
     } else {
         file_path.to_string()
     };
@@ -1199,6 +1210,27 @@ async fn ensure_wecom_voice_amr(file_path: &str) -> Result<String> {
     }
 
     Ok(output_str)
+}
+
+/// Probe audio duration in seconds using ffprobe. Returns None on failure.
+async fn probe_audio_duration(file_path: &str) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(file_path)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<f64>().ok()
 }
 
 fn media_type_for_ext(ext: &str) -> (&'static str, &'static str) {

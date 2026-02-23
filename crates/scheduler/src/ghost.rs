@@ -4,28 +4,13 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Ghost Agent system prompt — a background maintenance persona.
+/// Optimized for minimal token usage (P2-2).
 #[allow(dead_code)]
-const GHOST_SYSTEM_PROMPT: &str = r#"You are the Ghost Agent of Blockcell, a background maintenance system.
-Your goal is to keep the agent healthy, organized, and socially connected.
-
-CONSTRAINTS:
-1. You run in the background. DO NOT interact with the user unless strictly necessary (use 'notification' tool for critical issues only).
-2. You have RESTRICTED permissions. You cannot run shell commands or browse the web randomly.
-3. Be efficient and concise — minimize token usage.
-
-YOUR ROUTINE (execute in order):
-1. Memory Gardening: Query recent daily memories. Extract important facts into long-term memory. Delete expired or trivial entries. Compress duplicates.
-2. System Check: Check workspace disk usage. Look for old temporary files in workspace/media and workspace/downloads.
-3. Community Sync: Call community_hub tool directly to send heartbeat and browse feed. The tool reads config automatically — if not configured, it returns an error.
-4. Cleanup: Remove temporary files older than 7 days from workspace/media and workspace/downloads.
-
-RULES:
-- Use memory_maintenance tool for memory operations.
-- Use community_hub tool for social interactions. Hub URL and API key are resolved by the tool internally — never try to check or guess URLs yourself.
-- Use list_dir + file_ops for cleanup.
-- Use notification tool ONLY for critical findings (e.g., disk full, API key expired).
-- NEVER save maintenance routine logs/summaries to memory (memory_upsert). Maintenance results are ephemeral — just output them as your final text response. Only save genuinely important discoveries (e.g., user preference found during gardening) to long-term memory.
-- After each routine, output a brief text summary of what you did. This summary goes to the chat log, NOT to memory.
+const GHOST_SYSTEM_PROMPT: &str = r#"You are Ghost, Blockcell's background maintenance agent.
+Constraints: background-only, restricted permissions, minimize tokens.
+Tools: memory_maintenance, community_hub, list_dir, file_ops, notification (critical only).
+Rules: NEVER save routine logs to memory. Only save genuine user-relevant discoveries to long-term memory.
+Output: respond with a brief JSON summary at the end (see routine prompt for format).
 "#;
 
 /// Configuration for the Ghost Agent, read from config.json agents.ghost.
@@ -120,23 +105,31 @@ impl GhostService {
         }
     }
 
-    /// Build the routine prompt based on config
+    /// Build the routine prompt based on config.
+    /// Optimized for minimal token usage (P2-2): concise instructions + JSON output format.
     pub fn build_routine_prompt(config: &GhostServiceConfig) -> String {
-        let mut prompt_parts = vec![
-            "System: 执行Ghost Agent例行维护任务。请按顺序执行以下步骤：".to_string(),
-            "⚠️ 重要规则：本次维护的所有日志和总结只需作为最终文本回复输出，绝对不要调用 memory_upsert 保存维护日志到记忆中。记忆系统只用于保存用户相关的重要事实。".to_string(),
-            "1. 【记忆整理】调用 memory_maintenance(action=\"garden\") 整理最近的记忆。根据返回的 instruction 处理记忆条目（提取重要事实到长期记忆、删除琐碎条目），但不要把维护日志本身写入记忆。".to_string(),
-            "2. 【文件清理】检查 workspace/media 和 workspace/downloads 目录，用 list_dir 列出文件，只删除**修改时间超过7天**的文件（file_ops delete）。今天的文件、近期文件一律不删。如果无法判断文件时间，跳过不删。".to_string(),
+        let mut steps = vec![
+            "1. memory_maintenance(action=\"garden\") → follow returned instructions. Extract important facts to long-term, delete trivial entries.".to_string(),
+            "2. list_dir workspace/media + workspace/downloads → file_ops delete files >7 days old. Skip if age unknown.".to_string(),
         ];
 
         if config.auto_social {
-            prompt_parts.push(
-                "3. 【社区互动】直接调用 community_hub 工具执行以下操作（连接信息由工具在系统侧内部读取，你不需要关心）：\n   3.1 调用 community_hub，参数 {\"action\": \"heartbeat\"} 上报状态。\n   3.2 调用 community_hub，参数 {\"action\": \"feed\"} 拉取社区动态。\n   3.3 互动策略（上限：like≤2，reply≤1，post≤1；宁缺毋滥）：\n       - 优先：挑 1 条有价值的帖子 reply。\n       - 次优：对最多 2 条帖子点赞。\n       - 发帖：只在 feed 没有合适回复对象时才发 1 条短帖。\n       - 禁止：广告、刷屏、泄露隐私。\n   如果工具返回错误，直接报告错误信息即可，不要自行尝试任何网络连接或猜测配置。".to_string()
+            steps.push(
+                "3. community_hub: heartbeat → feed → interact (limits: like≤2, reply≤1, post≤1). Report errors as-is.".to_string()
             );
         }
 
-        prompt_parts.push("完成后简要总结你做了什么（直接输出文本，不要保存到记忆）。".to_string());
-        prompt_parts.join("\n")
+        let steps_str = steps.join("\n");
+        format!(
+            "Ghost routine. Execute steps in order:\n{}\n\n\
+             Rules: NEVER memory_upsert routine logs. Only save genuine user-relevant discoveries.\n\n\
+             After all steps, output ONLY this JSON (no other text):\n\
+             {{\"memory\":{{\"gardened\":N,\"promoted\":N,\"deleted\":N}},\
+             \"cleanup\":{{\"files_deleted\":N}},\
+             \"social\":{{\"heartbeat\":bool,\"likes\":N,\"replies\":N,\"posts\":N}},\
+             \"issues\":[]}}",
+            steps_str
+        )
     }
 
     /// Run a single ghost routine cycle.

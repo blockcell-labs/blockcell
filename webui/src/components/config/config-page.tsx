@@ -15,6 +15,38 @@ function ConfigEditor({ onBack, t }: { onBack: () => void; t: (k: string, p?: Re
   const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [editJson, setEditJson] = useState('');
+  const [restartNoticeOpen, setRestartNoticeOpen] = useState(false);
+
+  function RestartNoticeDialog({
+    open,
+    onClose,
+  }: {
+    open: boolean;
+    onClose: () => void;
+  }) {
+    if (!open) return null;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+        <div className="relative bg-card border border-border rounded-xl shadow-xl p-6 w-full max-w-sm mx-4">
+          <h3 className="text-base font-semibold mb-1">配置已保存</h3>
+          <p className="text-sm text-muted-foreground mb-5">
+            配置文件已更新，但当前运行中的 gateway 不会自动热重载配置。
+            <br />
+            请重启 blockcell gateway 后再验证是否生效。
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 text-sm rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              我知道了
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   useEffect(() => {
     fetchConfig();
@@ -39,6 +71,7 @@ function ConfigEditor({ onBack, t }: { onBack: () => void; t: (k: string, p?: Re
       const parsed = JSON.parse(editJson);
       await updateConfig(parsed);
       setMessage({ type: 'success', text: t('settings.configSaved') });
+      setRestartNoticeOpen(true);
     } catch (e: any) {
       setMessage({ type: 'error', text: e.message });
     } finally {
@@ -69,6 +102,7 @@ function ConfigEditor({ onBack, t }: { onBack: () => void; t: (k: string, p?: Re
 
   return (
     <div className="flex flex-col h-full">
+      <RestartNoticeDialog open={restartNoticeOpen} onClose={() => setRestartNoticeOpen(false)} />
       <div className="border-b border-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground">

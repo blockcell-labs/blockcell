@@ -8,9 +8,75 @@ use std::path::Path;
 
 use crate::intent::{IntentCategory, needs_finance_guidelines, needs_skills_list};
 
+/// Lightweight token estimator.
+/// Chinese characters ≈ 1 token each, English words ≈ 1.3 tokens each.
+/// This is intentionally conservative (over-estimates) to avoid context overflow.
+fn estimate_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut tokens: usize = 0;
+    let mut ascii_word_chars: usize = 0;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            if ch.is_ascii_whitespace() || ch.is_ascii_punctuation() {
+                if ascii_word_chars > 0 {
+                    // ~1.3 tokens per English word, round up
+                    tokens += 1 + ascii_word_chars / 4;
+                    ascii_word_chars = 0;
+                }
+                // whitespace/punctuation: ~0.25 tokens each, batch them
+                tokens += 1;
+            } else {
+                ascii_word_chars += 1;
+            }
+        } else {
+            // Flush pending ASCII word
+            if ascii_word_chars > 0 {
+                tokens += 1 + ascii_word_chars / 4;
+                ascii_word_chars = 0;
+            }
+            // CJK and other multi-byte: ~1 token per character
+            tokens += 1;
+        }
+    }
+    // Flush trailing ASCII word
+    if ascii_word_chars > 0 {
+        tokens += 1 + ascii_word_chars / 4;
+    }
+    // Add per-message overhead (role markers, formatting)
+    tokens + 4
+}
+
+/// Estimate tokens for a ChatMessage (content + tool_calls overhead).
+fn estimate_message_tokens(msg: &ChatMessage) -> usize {
+    let content_tokens = match &msg.content {
+        serde_json::Value::String(s) => estimate_tokens(s),
+        serde_json::Value::Array(parts) => {
+            parts.iter().map(|p| {
+                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
+                    estimate_tokens(text)
+                } else if p.get("image_url").is_some() {
+                    // Base64 images: ~85 tokens for low-detail, ~765 for high-detail
+                    // Use conservative estimate
+                    200
+                } else {
+                    10
+                }
+            }).sum()
+        }
+        _ => 0,
+    };
+    let tool_call_tokens = msg.tool_calls.as_ref().map_or(0, |calls| {
+        calls.iter().map(|tc| {
+            estimate_tokens(&tc.name) + estimate_tokens(&tc.arguments.to_string()) + 10
+        }).sum()
+    });
+    content_tokens + tool_call_tokens + 4 // role overhead
+}
+
 pub struct ContextBuilder {
     paths: Paths,
-    #[allow(dead_code)]
     config: Config,
     skill_manager: Option<SkillManager>,
     memory_store: Option<MemoryStoreHandle>,
@@ -91,7 +157,7 @@ impl ContextBuilder {
             match manager.reload_skills(&self.paths) {
                 Ok(new_skills) => new_skills,
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to reload skills");
+                    tracing::warn!(error = ?e, "Failed to reload skills");
                     vec![]
                 }
             }
@@ -108,10 +174,10 @@ impl ContextBuilder {
     /// Build system prompt filtered by intent categories.
     /// This is the core optimization: only inject relevant rules, tools, and domain knowledge.
     pub fn build_system_prompt_for_intents(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>) -> String {
-        self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, "")
+        self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, "", "")
     }
 
-    pub fn build_system_prompt_for_intents_with_channel(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>, channel: &str) -> String {
+    pub fn build_system_prompt_for_intents_with_channel(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>, channel: &str, user_query: &str) -> String {
         let mut prompt = String::new();
         let is_chat = intents.len() == 1 && intents[0] == IntentCategory::Chat;
 
@@ -141,16 +207,14 @@ impl ContextBuilder {
 
         // Core behavior rules (Method B: ~10 concise rules instead of ~54 verbose tool descriptions)
         if !is_chat {
-            prompt.push_str("## Important Rules\n");
-            prompt.push_str("- For normal conversation, respond directly with text.\n");
-            prompt.push_str("- Use the `message` tool to send images/files/media to the user. Provide file paths in the `media` array parameter. You can also use it to send to a different channel/chat.\n");
-            prompt.push_str("- Use tools when needed to accomplish tasks. Tool descriptions in the schema explain usage.\n");
-            prompt.push_str("- To use a skill, first read its SKILL.md file using read_file tool.\n");
-            prompt.push_str("- The `read_file` tool can directly read Office documents (.xlsx, .xls, .docx, .pptx).\n");
-            prompt.push_str("- Use `spawn` for long-running tasks. Use `list_tasks` to check progress.\n");
+            prompt.push_str("\n## Tools\n");
+            prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
+            prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
+            prompt.push_str("- Validate tool parameters against schema.\n");
             prompt.push_str("- Search `memory_query` before asking the user for information you might already know.\n");
             prompt.push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
             prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
+            prompt.push_str("- **Web search**: Use `web_search` for discovery. For 'latest/最近/24小时/今天' news queries, set `freshness=day` when possible and use multiple targeted queries (Chinese + English) before concluding there's no news.\n");
             prompt.push_str("- **Web content**: `web_fetch` returns markdown by default — uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents). If server supports it, markdown is returned directly with ~80% token savings. Otherwise HTML is converted to markdown locally. Use `browse` for full browser automation (CDP) — `get_content` also returns markdown. Use `web_fetch` extractMode='raw' only when you need the original HTML.\n");
             // Media display rule depends on channel type:
             // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
@@ -166,6 +230,7 @@ impl ContextBuilder {
             }
             prompt.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。\n");
             prompt.push_str("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.\n");
+            prompt.push_str("- **定时任务 (cron)**: 用户要求定时执行某项任务时，**优先**检查是否有对应技能：先调用 `list_skills` 查看可用技能列表，若有名称匹配的技能（如用户说 AI新闻 -> 技能名 `ai_news`），则在 `cron` 工具中设置 `skill_name='ai_news'`，触发时直接执行技能脚本，无需 LLM 介入，最可靠。若无匹配技能，则用 `message` 参数描述任务指令。 [TIMEZONE] `cron_expr` 使用 UTC 时间，中国用户（UTC+8）说每天 9 点应填 `cron_expr='0 0 1 * * *'`（UTC 1:00 = 北京时间 9:00）。一次性任务设 `delete_after_run=true`；周期任务用 `cron_expr` 或 `every_seconds`。\n");
             prompt.push_str("- **Community Hub**: Use the `community_hub` tool (NOT a skill directory) for social interactions. Actions: heartbeat, trending, search_skills, feed, post, like, reply, get_replies, node_search. Hub URL and API key are resolved automatically from config — just call the action directly. If not configured, the tool returns an error.\n");
             prompt.push_str("- **Termux API (Android)**: Use `termux_api` tool to control Android devices via Termux. Requires `termux-api` package + Termux:API app. Use action='info' to check availability. Covers: battery, camera, clipboard, contacts, SMS, calls, location, sensors, notifications, TTS, speech-to-text, media player, microphone, torch, brightness, volume, WiFi, vibrate, share, dialog, wallpaper, fingerprint, infrared, keystore, job scheduler, wake lock. Only available when running on Android/Termux.\n");
             prompt.push('\n');
@@ -178,27 +243,38 @@ impl ContextBuilder {
         prompt.push_str(&format!("Current time: {}\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
         prompt.push_str(&format!("Workspace: {}\n\n", self.paths.workspace().display()));
 
-        // Memory brief
-        if let Some(ref store) = self.memory_store {
-            match store.generate_brief(20, 10) {
-                Ok(brief) if !brief.is_empty() => {
-                    prompt.push_str("## Memory Brief\n");
-                    prompt.push_str(&brief);
+        // Memory brief — query-based retrieval when possible (P1-1 optimization)
+        // For Chat intent: skip memory injection to save tokens
+        // For other intents: use FTS5 search to find relevant memories
+        if !is_chat {
+            if let Some(ref store) = self.memory_store {
+                let brief_result = if !user_query.is_empty() {
+                    // Query-based: only inject memories relevant to current question
+                    store.generate_brief_for_query(user_query, 8)
+                } else {
+                    // Fallback: small general brief
+                    store.generate_brief(5, 3)
+                };
+                match brief_result {
+                    Ok(brief) if !brief.is_empty() => {
+                        prompt.push_str("## Memory Brief\n");
+                        prompt.push_str(&brief);
+                        prompt.push_str("\n\n");
+                    }
+                    _ => {}
+                }
+            } else {
+                if let Some(content) = self.load_file_if_exists(self.paths.memory_md()) {
+                    prompt.push_str("## Long-term Memory\n");
+                    prompt.push_str(&content);
                     prompt.push_str("\n\n");
                 }
-                _ => {}
-            }
-        } else {
-            if let Some(content) = self.load_file_if_exists(self.paths.memory_md()) {
-                prompt.push_str("## Long-term Memory\n");
-                prompt.push_str(&content);
-                prompt.push_str("\n\n");
-            }
-            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-            if let Some(content) = self.load_file_if_exists(self.paths.daily_memory(&today)) {
-                prompt.push_str("## Today's Notes\n");
-                prompt.push_str(&content);
-                prompt.push_str("\n\n");
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                if let Some(content) = self.load_file_if_exists(self.paths.daily_memory(&today)) {
+                    prompt.push_str("## Today's Notes\n");
+                    prompt.push_str(&content);
+                    prompt.push_str("\n\n");
+                }
             }
         }
 
@@ -226,6 +302,18 @@ impl ContextBuilder {
                 prompt.push_str("## Dynamic Evolved Tools\n");
                 prompt.push_str("The following tools have been dynamically evolved and are available. Use `capability_evolve` tool with action='execute' to invoke them.\n");
                 prompt.push_str(brief);
+                prompt.push_str("\n\n");
+            }
+        }
+
+        // Skill trigger match — inject SKILL.md when user input matches a skill's triggers.
+        // This is the primary mechanism for user-created skills to be activated.
+        // Must run BEFORE the generic skills list so the LLM sees the specific skill first.
+        if !is_chat && !user_query.is_empty() {
+            if let Some((skill_name, skill_md)) = self.match_skill(user_query) {
+                prompt.push_str(&format!("## Active Skill: {}\n", skill_name));
+                prompt.push_str("The user's input matches this skill. Follow the skill's instructions below:\n\n");
+                prompt.push_str(&skill_md);
                 prompt.push_str("\n\n");
             }
         }
@@ -263,7 +351,7 @@ impl ContextBuilder {
                 let count = skills.len();
                 prompt.push_str("## Skills Available\n");
                 prompt.push_str(&format!(
-                    "{} skills loaded across domains. Use `list_skills query='available'` to see all, or describe your task.\n\n",
+                    "{} skills loaded. Use `list_skills query='available'` to see all.\n\n",
                     count
                 ));
             } else {
@@ -424,24 +512,19 @@ impl ContextBuilder {
         pending_intent: bool,
     ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
+        let is_im_channel = matches!(channel, "wecom" | "feishu" | "lark" | "telegram" | "slack" | "discord" | "dingtalk" | "whatsapp");
 
         // System prompt (intent-filtered, channel-aware)
-        messages.push(ChatMessage::system(&self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, channel)));
+        let system_prompt = self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, channel, user_content);
+        let system_tokens = estimate_tokens(&system_prompt);
+        messages.push(ChatMessage::system(&system_prompt));
 
-        // History (Method E: smart compression)
-        let compressed = Self::compress_history(history);
-        let safe_start = Self::find_safe_history_start(&compressed);
-        for msg in &compressed[safe_start..] {
-            messages.push(Self::trim_chat_message(msg));
-        }
-
-        // Current user message with optional media
-        if media.is_empty() {
+        // Build current user message first (to measure its token cost)
+        let user_msg = if media.is_empty() {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            messages.push(ChatMessage::user(&trimmed));
+            ChatMessage::user(&trimmed)
         } else {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            // Always append file paths as text so the LLM knows the real local path.
             let all_paths: Vec<&str> = media.iter()
                 .filter(|p| !p.is_empty())
                 .map(|p| p.as_str())
@@ -456,11 +539,53 @@ impl ContextBuilder {
                 format!("{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}", trimmed, paths_str)
             };
             if pending_intent {
-                // Channel already sent ack; do NOT embed image as base64.
-                // LLM only sees the path text and the question — it should ask what to do.
-                messages.push(ChatMessage::user(&text_with_paths));
+                ChatMessage::user(&text_with_paths)
             } else {
-                messages.push(self.build_multimodal_message(&text_with_paths, media));
+                self.build_multimodal_message(&text_with_paths, media)
+            }
+        };
+        let user_msg_tokens = estimate_message_tokens(&user_msg);
+
+        // Dynamic token budget for history:
+        // BUDGET = max_context - system_prompt - current_user_msg - reserved_output - safety_margin
+        let max_context = self.config.agents.defaults.max_context_tokens as usize;
+        let reserved_output = self.config.agents.defaults.max_tokens as usize;
+        let safety_margin = 500;
+        let history_budget = max_context
+            .saturating_sub(system_tokens)
+            .saturating_sub(user_msg_tokens)
+            .saturating_sub(reserved_output)
+            .saturating_sub(safety_margin);
+
+        // History (Method E: smart compression with dynamic token budget)
+        let compressed = Self::compress_history(history, history_budget);
+        let safe_start = Self::find_safe_history_start(&compressed);
+        for msg in &compressed[safe_start..] {
+            messages.push(msg.clone());
+        }
+
+        // Append current user message
+        messages.push(user_msg);
+
+        // IM channels: cap message count to keep requests small and reduce latency.
+        // Keep the system prompt (index 0) and the most recent messages.
+        if is_im_channel {
+            const MAX_IM_MESSAGES: usize = 14;
+            if messages.len() > MAX_IM_MESSAGES {
+                let system = messages.first().cloned();
+                // Naive tail slice — may start mid tool-call sequence; fix below
+                let tail_start = messages.len().saturating_sub(MAX_IM_MESSAGES - 1);
+                let mut tail = messages[tail_start..].to_vec();
+                // Re-apply safety check: skip any leading orphaned tool/assistant-tool_calls messages
+                let safe = Self::find_safe_history_start(&tail);
+                if safe > 0 {
+                    tail = tail[safe..].to_vec();
+                }
+                messages = Vec::with_capacity(1 + tail.len());
+                if let Some(s) = system {
+                    messages.push(s);
+                }
+                messages.extend(tail);
             }
         }
 
@@ -530,12 +655,13 @@ impl ContextBuilder {
         Some(format!("data:{};base64,{}", mime_type, base64_str))
     }
 
-    /// Method E: Smart history compression.
-    /// - Recent 2 rounds: kept in full
-    /// - Older rounds: only user question + final assistant answer (tool calls stripped)
-    /// - Max 15 messages total
-    fn compress_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
-        if history.is_empty() {
+    /// Method E: Smart history compression with dynamic token budget.
+    /// - Recent 2 rounds: kept in full (trimmed per-message)
+    /// - Older rounds: compressed to user question + final assistant answer (tool calls stripped)
+    /// - Fills from newest to oldest, stopping when token budget is exhausted
+    /// - Falls back to hard cap of 30 messages as safety net
+    fn compress_history(history: &[ChatMessage], token_budget: usize) -> Vec<ChatMessage> {
+        if history.is_empty() || token_budget == 0 {
             return Vec::new();
         }
 
@@ -555,41 +681,88 @@ impl ContextBuilder {
         }
 
         let total_rounds = rounds.len();
-        let mut result = Vec::new();
 
-        for (i, round) in rounds.iter().enumerate() {
-            let is_recent = i >= total_rounds.saturating_sub(2);
-
-            if is_recent {
-                // Keep recent 2 rounds in full
-                for msg in round {
-                    result.push((*msg).clone());
-                }
-            } else {
-                // Older rounds: keep user question + final assistant text reply only.
-                // IMPORTANT: always push both a user AND an assistant message to maintain
-                // the alternating-role invariant required by Anthropic/Gemini providers.
-                let user_msg = round.iter().find(|m| m.role == "user");
-                let final_assistant = round.iter().rev().find(|m| {
-                    m.role == "assistant" && m.tool_calls.is_none()
-                });
-
-                if let Some(user) = user_msg {
-                    let user_text = Self::content_text(user);
-                    let assistant_text = final_assistant
-                        .map(|m| Self::content_text(m))
-                        .unwrap_or_else(|| "(completed with tool calls)".to_string());
-
-                    result.push(ChatMessage::user(&Self::trim_text_head_tail(&user_text, 200)));
-                    result.push(ChatMessage::assistant(&Self::trim_text_head_tail(&assistant_text, 400)));
-                }
+        // Phase 1: Build recent rounds (last 2) in full, with per-message trim
+        let mut recent_msgs: Vec<ChatMessage> = Vec::new();
+        let recent_start = total_rounds.saturating_sub(2);
+        for round in &rounds[recent_start..] {
+            for msg in round {
+                recent_msgs.push(Self::trim_chat_message(msg));
             }
         }
+        let recent_tokens: usize = recent_msgs.iter().map(|m| estimate_message_tokens(m)).sum();
 
-        // Cap at 15 messages from the end
-        let max_messages = 15;
+        // If recent rounds alone exceed budget, just return them (trimmed harder)
+        if recent_tokens >= token_budget {
+            // Hard-trim recent messages to fit
+            let mut result = Vec::new();
+            let mut used = 0usize;
+            for msg in recent_msgs.into_iter().rev() {
+                let t = estimate_message_tokens(&msg);
+                if used + t > token_budget && !result.is_empty() {
+                    break;
+                }
+                used += t;
+                result.push(msg);
+            }
+            result.reverse();
+            // Safety: skip any leading orphaned tool messages caused by the trim above
+            let safe = Self::find_safe_history_start(&result);
+            if safe > 0 {
+                result = result.split_off(safe);
+            }
+            return result;
+        }
+
+        // Phase 2: Fill older rounds (compressed) from newest to oldest within remaining budget
+        let remaining_budget = token_budget.saturating_sub(recent_tokens);
+        let mut older_msgs: Vec<ChatMessage> = Vec::new();
+        let mut older_tokens = 0usize;
+
+        // Iterate older rounds in reverse (newest-old first) so we keep the most relevant
+        for i in (0..recent_start).rev() {
+            let round = &rounds[i];
+            // Compress: keep user question + final assistant text only
+            let user_msg = round.iter().find(|m| m.role == "user");
+            let final_assistant = round.iter().rev().find(|m| {
+                m.role == "assistant" && m.tool_calls.is_none()
+            });
+
+            if let Some(user) = user_msg {
+                let user_text = Self::content_text(user);
+                let assistant_text = final_assistant
+                    .map(|m| Self::content_text(m))
+                    .unwrap_or_else(|| "(completed with tool calls)".to_string());
+
+                let u = ChatMessage::user(&Self::trim_text_head_tail(&user_text, 200));
+                let a = ChatMessage::assistant(&Self::trim_text_head_tail(&assistant_text, 400));
+                let pair_tokens = estimate_message_tokens(&u) + estimate_message_tokens(&a);
+
+                if older_tokens + pair_tokens > remaining_budget {
+                    break; // Budget exhausted
+                }
+                older_tokens += pair_tokens;
+                // Prepend (we're iterating in reverse)
+                older_msgs.push(u);
+                older_msgs.push(a);
+            }
+        }
+        // Reverse because we built it newest-first
+        older_msgs.reverse();
+
+        // Combine: older compressed + recent full
+        let mut result = older_msgs;
+        result.extend(recent_msgs);
+
+        // Safety cap: never exceed 30 messages regardless of budget
+        let max_messages = 30;
         if result.len() > max_messages {
             result = result.split_off(result.len() - max_messages);
+            // After split_off, the new head may be an orphaned tool message
+            let safe = Self::find_safe_history_start(&result);
+            if safe > 0 {
+                result = result.split_off(safe);
+            }
         }
 
         result

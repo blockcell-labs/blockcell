@@ -88,7 +88,10 @@ impl OpenAIProvider {
         s
     }
 
-    /// Parse `<tool_call>...</tool_call>` blocks from the response content.
+    /// Parse text-based tool call blocks from the response content.
+    /// Handles multiple formats:
+    /// - `<tool_call>{"name":"...","arguments":{...}}</tool_call>`
+    /// - `[TOOL_CALL]{tool => "...", args => {...}}[/TOOL_CALL]`
     /// Returns (remaining_text, parsed_tool_calls).
     fn parse_text_tool_calls(content: &str) -> (String, Vec<ToolCallRequest>) {
         let mut tool_calls = Vec::new();
@@ -96,14 +99,13 @@ impl OpenAIProvider {
         let mut rest = content;
         let mut call_index = 0u64;
 
+        // Pass 1: extract <tool_call>...</tool_call> blocks
         loop {
             if let Some(start) = rest.find("<tool_call>") {
-                // Text before the tag
                 remaining.push_str(&rest[..start]);
                 let after_tag = &rest[start + "<tool_call>".len()..];
                 if let Some(end) = after_tag.find("</tool_call>") {
                     let json_str = after_tag[..end].trim();
-                    // Try to parse the JSON
                     if let Ok(val) = serde_json::from_str::<Value>(json_str) {
                         let name = val.get("name")
                             .and_then(|v| v.as_str())
@@ -120,12 +122,10 @@ impl OpenAIProvider {
                         call_index += 1;
                     } else {
                         warn!(json = %json_str, "Failed to parse tool_call JSON");
-                        // Keep the raw text if parsing fails
                         remaining.push_str(&rest[start..start + "<tool_call>".len() + end + "</tool_call>".len()]);
                     }
                     rest = &after_tag[end + "</tool_call>".len()..];
                 } else {
-                    // No closing tag, keep everything
                     remaining.push_str(&rest[start..]);
                     break;
                 }
@@ -135,9 +135,298 @@ impl OpenAIProvider {
             }
         }
 
-        // Clean up remaining text
+        // Pass 2: extract [TOOL_CALL]...[/TOOL_CALL] blocks from remaining
+        // Some models (e.g. xminimaxm25) use this format with non-JSON arrow syntax.
+        if tool_calls.is_empty() {
+            let mut pass2_remaining = String::new();
+            let mut rest2 = remaining.as_str();
+            loop {
+                let lower = rest2.to_lowercase();
+                if let Some(start) = lower.find("[tool_call]") {
+                    pass2_remaining.push_str(&rest2[..start]);
+                    let after_tag = &rest2[start + "[tool_call]".len()..];
+                    let after_lower = after_tag.to_lowercase();
+                    if let Some(end) = after_lower.find("[/tool_call]") {
+                        let block = after_tag[..end].trim();
+                        if let Some(tc) = Self::parse_nonstandard_tool_block(block, call_index) {
+                            tool_calls.push(tc);
+                            call_index += 1;
+                        } else {
+                            warn!(block = %block, "Failed to parse [TOOL_CALL] block");
+                        }
+                        rest2 = &after_tag[end + "[/tool_call]".len()..];
+                    } else {
+                        // No closing tag — try to parse what's left
+                        let block = after_tag.trim();
+                        if let Some(tc) = Self::parse_nonstandard_tool_block(block, call_index) {
+                            tool_calls.push(tc);
+                        }
+                        break;
+                    }
+                } else {
+                    pass2_remaining.push_str(rest2);
+                    break;
+                }
+            }
+            remaining = pass2_remaining;
+        }
+
+        // Pass 3: extract <minimax:tool_call> / [Called: name] ... </minimax:tool_call> blocks.
+        // Format observed from xminimaxm25:
+        //   [Called: exec]\n<parameter name="command">...</parameter>\n</invoke>\n</minimax:tool_call>
+        // Also handles bare [Called: name] with following <parameter> tags (no closing tag).
+        if tool_calls.is_empty() {
+            let mut pass3_remaining = String::new();
+            let mut rest3 = remaining.as_str();
+            loop {
+                // Look for [Called: <name>] prefix
+                let lower3 = rest3.to_lowercase();
+                if let Some(called_start) = lower3.find("[called:") {
+                    pass3_remaining.push_str(&rest3[..called_start]);
+                    let after_called = &rest3[called_start + "[called:".len()..];
+                    // Extract tool name up to ']'
+                    if let Some(bracket_end) = after_called.find(']') {
+                        let tool_name = after_called[..bracket_end].trim().to_string();
+                        let after_bracket = &after_called[bracket_end + 1..];
+                        // Find end of this block: </minimax:tool_call> or </invoke>
+                        let lower_after = after_bracket.to_lowercase();
+                        let block_end = lower_after.find("</minimax:tool_call>")
+                            .or_else(|| lower_after.find("</invoke>"));
+                        let (params_str, consumed) = if let Some(end) = block_end {
+                            let tag_len = if lower_after[end..].starts_with("</minimax:tool_call>") {
+                                "</minimax:tool_call>".len()
+                            } else {
+                                "</invoke>".len()
+                            };
+                            (&after_bracket[..end], end + tag_len)
+                        } else {
+                            (after_bracket, after_bracket.len())
+                        };
+                        // Parse <parameter name="key">value</parameter> pairs
+                        let mut args = serde_json::Map::new();
+                        let mut scan = params_str;
+                        loop {
+                            let sl = scan.to_lowercase();
+                            if let Some(p_start) = sl.find("<parameter") {
+                                let after_p = &scan[p_start + "<parameter".len()..];
+                                // Extract name="..."
+                                if let Some(name_start) = after_p.find("name=\"") {
+                                    let after_name = &after_p[name_start + "name=\"".len()..];
+                                    if let Some(name_end) = after_name.find('"') {
+                                        let param_name = after_name[..name_end].to_string();
+                                        // Find > then value then </parameter>
+                                        if let Some(gt) = after_p.find('>') {
+                                            let value_str = &after_p[gt + 1..];
+                                            let vl = value_str.to_lowercase();
+                                            if let Some(close) = vl.find("</parameter>") {
+                                                let value = value_str[..close].to_string();
+                                                args.insert(param_name, serde_json::Value::String(value));
+                                                scan = &value_str[close + "</parameter>".len()..];
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Couldn't parse this parameter, skip past it
+                                scan = &scan[p_start + "<parameter".len()..];
+                            } else {
+                                break;
+                            }
+                        }
+                        if !tool_name.is_empty() {
+                            tool_calls.push(ToolCallRequest {
+                                id: format!("text_call_{}", call_index),
+                                name: tool_name,
+                                arguments: serde_json::Value::Object(args),
+                            });
+                            call_index += 1;
+                        }
+                        rest3 = &after_called[bracket_end + 1 + consumed..];
+                    } else {
+                        pass3_remaining.push_str(&rest3[called_start..]);
+                        break;
+                    }
+                } else {
+                    pass3_remaining.push_str(rest3);
+                    break;
+                }
+            }
+            remaining = pass3_remaining;
+        }
+
         let remaining = remaining.trim().to_string();
         (remaining, tool_calls)
+    }
+
+    /// Parse a non-standard tool call block content.
+    /// Handles formats like:
+    ///   {tool => "memory_query", args => { --top_k 20 }}
+    ///   {"name": "memory_query", "arguments": {"top_k": 20}}
+    fn parse_nonstandard_tool_block(block: &str, index: u64) -> Option<ToolCallRequest> {
+        // Try standard JSON first
+        if let Ok(val) = serde_json::from_str::<Value>(block) {
+            let name = val.get("name")
+                .or_else(|| val.get("tool"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let arguments = val.get("arguments")
+                .or_else(|| val.get("args"))
+                .cloned()
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            return Some(ToolCallRequest {
+                id: format!("text_call_{}", index),
+                name,
+                arguments,
+            });
+        }
+
+        // Parse arrow-style: {tool => "name", args => { --key value }}
+        // Only strip the outermost brace pair (trim_end_matches is greedy and would strip all)
+        let trimmed = block.trim();
+        let inner = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            &trimmed[1..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        let inner = inner.trim();
+
+        // Extract tool name: tool => "name" or tool => name
+        let tool_name = Self::extract_arrow_value(inner, "tool")
+            .or_else(|| Self::extract_arrow_value(inner, "name"));
+        let tool_name = tool_name?;
+
+        // Extract args block
+        let args = Self::extract_arrow_args(inner);
+
+        Some(ToolCallRequest {
+            id: format!("text_call_{}", index),
+            name: tool_name,
+            arguments: args,
+        })
+    }
+
+    /// Extract a string value from arrow syntax: `key => "value"` or `key => value`
+    fn extract_arrow_value(text: &str, key: &str) -> Option<String> {
+        // Match: key => "value" or key =\u003e "value" (escaped >)
+        let patterns = [
+            format!("{} =>", key),
+            format!("{} =\\u003e", key),  // JSON-escaped >
+        ];
+        for pat in &patterns {
+            if let Some(pos) = text.find(pat.as_str()) {
+                let after = text[pos + pat.len()..].trim();
+                // Quoted value
+                if after.starts_with('"') {
+                    if let Some(end_quote) = after[1..].find('"') {
+                        return Some(after[1..1 + end_quote].to_string());
+                    }
+                }
+                // Unquoted value — take until comma or whitespace
+                let val: String = after.chars()
+                    .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '}')
+                    .collect();
+                if !val.is_empty() {
+                    return Some(val.trim_matches('"').to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract args from arrow syntax: `args => { --key1 val1\n --key2 val2 }`
+    /// or `args => {"key": "value"}` (JSON inside)
+    fn extract_arrow_args(text: &str) -> Value {
+        let args_markers = ["args =>", "arguments =>"];
+        for marker in &args_markers {
+            if let Some(pos) = text.find(marker) {
+                let after = text[pos + marker.len()..].trim();
+                // Find the args block between { }
+                if after.starts_with('{') {
+                    // Find matching closing brace
+                    let mut depth = 0;
+                    let mut end_pos = 0;
+                    for (i, ch) in after.char_indices() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end_pos = i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if end_pos > 0 {
+                        let args_block = &after[1..end_pos].trim();
+                        // Try JSON first
+                        let json_attempt = format!("{{{}}}", args_block);
+                        if let Ok(val) = serde_json::from_str::<Value>(&json_attempt) {
+                            return val;
+                        }
+                        // Parse --key value pairs
+                        return Self::parse_dash_args(args_block);
+                    }
+                }
+                // Bare value after =>
+                let val: String = after.chars()
+                    .take_while(|c| *c != ',' && *c != '}')
+                    .collect();
+                let val = val.trim();
+                if !val.is_empty() {
+                    let mut map = serde_json::Map::new();
+                    map.insert("value".to_string(), Value::String(val.to_string()));
+                    return Value::Object(map);
+                }
+            }
+        }
+        Value::Object(serde_json::Map::new())
+    }
+
+    /// Parse `--key value` or `--key` pairs into a JSON object.
+    fn parse_dash_args(text: &str) -> Value {
+        let mut map = serde_json::Map::new();
+        let mut current_key: Option<String> = None;
+        let mut current_val_parts: Vec<String> = Vec::new();
+
+        let flush = |key: &mut Option<String>, parts: &mut Vec<String>, map: &mut serde_json::Map<String, Value>| {
+            if let Some(k) = key.take() {
+                let val_str = parts.join(" ");
+                let val_str = val_str.trim().trim_matches('"').trim();
+                if val_str.is_empty() {
+                    map.insert(k, Value::Bool(true));
+                } else if let Ok(n) = val_str.parse::<i64>() {
+                    map.insert(k, Value::Number(n.into()));
+                } else if let Ok(f) = val_str.parse::<f64>() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        map.insert(k, Value::Number(n));
+                    } else {
+                        map.insert(k, Value::String(val_str.to_string()));
+                    }
+                } else if val_str == "true" {
+                    map.insert(k, Value::Bool(true));
+                } else if val_str == "false" {
+                    map.insert(k, Value::Bool(false));
+                } else {
+                    map.insert(k, Value::String(val_str.to_string()));
+                }
+                parts.clear();
+            }
+        };
+
+        for token in text.split_whitespace() {
+            if let Some(key_name) = token.strip_prefix("--") {
+                flush(&mut current_key, &mut current_val_parts, &mut map);
+                current_key = Some(key_name.to_string());
+            } else if current_key.is_some() {
+                current_val_parts.push(token.to_string());
+            }
+        }
+        flush(&mut current_key, &mut current_val_parts, &mut map);
+
+        Value::Object(map)
     }
 
     /// Inject tool descriptions into the system message of the messages list.
@@ -311,11 +600,36 @@ impl Provider for OpenAIProvider {
                 warn!("Native tool call returned empty content and no tool_calls. Switching to text-based tool mode.");
                 self.text_tool_mode.store(true, Ordering::Relaxed);
                 // Fall through to text mode below
-            } else {
+            } else if !native_tool_calls.is_empty() || tools.is_empty() {
+                // Native tool calls present, or no tools were requested — return as-is
                 return Ok(LLMResponse {
                     content: if content.is_empty() { None } else { Some(content) },
                     reasoning_content,
                     tool_calls: native_tool_calls,
+                    finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
+                    usage: chat_response.usage.unwrap_or(Value::Null),
+                });
+            } else {
+                // No native tool_calls but content is non-empty and tools were requested.
+                // Some models (e.g. xminimaxm25) return tool calls as text in content
+                // instead of using the native function calling mechanism.
+                // Try to parse text-based tool calls from the content.
+                let (remaining_text, parsed_calls) = Self::parse_text_tool_calls(&content);
+                if !parsed_calls.is_empty() {
+                    info!(count = parsed_calls.len(), "Parsed text-based tool calls from native mode response");
+                    return Ok(LLMResponse {
+                        content: if remaining_text.is_empty() { None } else { Some(remaining_text) },
+                        reasoning_content,
+                        tool_calls: parsed_calls,
+                        finish_reason: "tool_calls".to_string(),
+                        usage: chat_response.usage.unwrap_or(Value::Null),
+                    });
+                }
+                // No text-based tool calls found either — return as normal text
+                return Ok(LLMResponse {
+                    content: Some(content),
+                    reasoning_content,
+                    tool_calls: vec![],
                     finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
                     usage: chat_response.usage.unwrap_or(Value::Null),
                 });
@@ -351,5 +665,84 @@ impl Provider for OpenAIProvider {
             finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
             usage: chat_response.usage.unwrap_or(Value::Null),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_xml_tool_call() {
+        let content = r#"I'll search for that.
+<tool_call>
+{"name": "web_search", "arguments": {"query": "rust async"}}
+</tool_call>
+Done."#;
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[0].arguments["query"], "rust async");
+        assert!(remaining.contains("I'll search"));
+        assert!(remaining.contains("Done."));
+    }
+
+    #[test]
+    fn test_parse_bracket_tool_call_json() {
+        let content = r#"
+[TOOL_CALL]
+{"name": "memory_query", "arguments": {"top_k": 20}}
+[/TOOL_CALL]
+"#;
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_query");
+        assert_eq!(calls[0].arguments["top_k"], 20);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bracket_tool_call_arrow_syntax() {
+        // This is the exact format xminimaxm25 produces
+        let content = "\n\n\n[TOOL_CALL]\n{tool => \"memory_query\", args => {\n  --top_k 20\n}}\n[/TOOL_CALL]";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse 1 tool call, got: {:?}", calls);
+        assert_eq!(calls[0].name, "memory_query");
+        assert_eq!(calls[0].arguments["top_k"], 20);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_parse_arrow_syntax_string_args() {
+        let content = "[TOOL_CALL]\n{tool => \"web_search\", args => {\n  --query \"rust programming\"\n}}\n[/TOOL_CALL]";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[0].arguments["query"], "rust programming");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dash_args() {
+        let args = OpenAIProvider::parse_dash_args("--top_k 20 --query hello --verbose");
+        assert_eq!(args["top_k"], 20);
+        assert_eq!(args["query"], "hello");
+        assert_eq!(args["verbose"], true);
+    }
+
+    #[test]
+    fn test_no_tool_calls_returns_empty() {
+        let content = "This is just a normal response with no tool calls.";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert!(calls.is_empty());
+        assert_eq!(remaining, content);
+    }
+
+    #[test]
+    fn test_parse_nonstandard_block_with_tool_key() {
+        let block = r#"{tool => "read_file", args => {"path": "/tmp/test.txt"}}"#;
+        let tc = OpenAIProvider::parse_nonstandard_tool_block(block, 0).unwrap();
+        assert_eq!(tc.name, "read_file");
+        assert_eq!(tc.arguments["path"], "/tmp/test.txt");
     }
 }

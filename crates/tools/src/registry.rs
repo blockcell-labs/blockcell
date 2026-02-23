@@ -280,6 +280,49 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Get tiered schemas: full schemas for core tools, lightweight (name+description only) for others.
+    /// Core tools get complete parameter schemas; non-core tools get just name+description
+    /// so the LLM knows they exist but we save ~500 tokens per non-core tool.
+    /// When the LLM tries to call a lightweight tool, the runtime dynamically supplements
+    /// the full schema and retries.
+    pub fn get_tiered_schemas(&self, names: &[&str], core_tools: &[&str]) -> Vec<Value> {
+        self.tools
+            .iter()
+            .filter(|(name, _)| names.contains(&name.as_str()))
+            .map(|(name, tool)| {
+                let schema = tool.schema();
+                if core_tools.contains(&name.as_str()) {
+                    // Full schema for core tools
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": schema.name,
+                            "description": schema.description,
+                            "parameters": schema.parameters
+                        }
+                    })
+                } else {
+                    // Lightweight schema: name + first sentence of description, no parameters
+                    let desc = schema.description;
+                    let short_desc = desc.split_once(". ")
+                        .map(|(first, _)| format!("{}.", first))
+                        .unwrap_or_else(|| {
+                            let chars: String = desc.chars().take(120).collect();
+                            if desc.chars().count() > 120 { format!("{}...", chars) } else { chars }
+                        });
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": schema.name,
+                            "description": short_desc,
+                            "parameters": { "type": "object", "properties": {} }
+                        }
+                    })
+                }
+            })
+            .collect()
+    }
+
     /// Get all registered tool names.
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()

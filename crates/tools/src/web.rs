@@ -14,7 +14,7 @@ impl Tool for WebSearchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_search",
-            description: "Search the web. Uses Brave Search API if configured, otherwise falls back to Bing (free, no API key needed, works in China).",
+            description: "Search the web. Uses Brave Search API if configured, otherwise falls back to Bing (free, no API key needed, works in China). Tip: set freshness=day for 'last 24 hours' news.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -25,6 +25,11 @@ impl Tool for WebSearchTool {
                     "count": {
                         "type": "integer",
                         "description": "Number of results (1-10, default 5)"
+                    },
+                    "freshness": {
+                        "type": "string",
+                        "description": "Recency filter. Only applied when using Brave Search API.",
+                        "enum": ["day", "week", "month", "year"]
                     }
                 },
                 "required": ["query"]
@@ -47,10 +52,15 @@ impl Tool for WebSearchTool {
             .unwrap_or(5)
             .min(10) as usize;
 
+        let freshness = params
+            .get("freshness")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         let api_key = &ctx.config.tools.web.search.api_key;
         if !api_key.is_empty() {
             // Brave Search API (preferred when configured)
-            match brave_search(api_key, query, count).await {
+            match brave_search(api_key, query, count, freshness.as_deref()).await {
                 Ok(results) => return Ok(json!({ "query": query, "results": results, "source": "brave" })),
                 Err(e) => {
                     tracing::warn!(error = %e, "Brave search failed, falling back to Bing");
@@ -69,12 +79,19 @@ impl Tool for WebSearchTool {
     }
 }
 
-async fn brave_search(api_key: &str, query: &str, count: usize) -> Result<Vec<Value>> {
+async fn brave_search(api_key: &str, query: &str, count: usize, freshness: Option<&str>) -> Result<Vec<Value>> {
     let client = Client::new();
-    let response = client
+    let mut req = client
         .get("https://api.search.brave.com/res/v1/web/search")
         .header("X-Subscription-Token", api_key)
-        .query(&[("q", query), ("count", &count.to_string())])
+        .query(&[("q", query), ("count", &count.to_string())]);
+
+    if let Some(f) = freshness {
+        // Brave Search API supports freshness: day|week|month|year
+        req = req.query(&[("freshness", f)]);
+    }
+
+    let response = req
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Search request failed: {}", e)))?;

@@ -133,3 +133,21 @@ blockcell-channels = { path = "crates/channels" }
 blockcell-providers = { path = "crates/providers" }
 blockcell-updater = { path = "crates/updater" }
 blockcell-storage = { path = "crates/storage" }
+
+# Release profile optimizations for smaller binary size
+[profile.release]
+opt-level = "z"          # Optimize for size (z = smallest, s = small, 3 = fast)
+lto = true               # Enable Link Time Optimization
+codegen-units = 1        # Better optimization (slower compile, smaller binary)
+strip = true             # Strip symbols from binary
+panic = "abort"          # Reduce panic handling overhead
+
+# Optional: even more aggressive size optimization profile
+# Use with: cargo build --profile release-min
+[profile.release-min]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -105,6 +105,18 @@ impl MemoryStoreOps for MemoryStoreAdapter {
         self.store.generate_brief(long_term_max, short_term_max)
     }
 
+    fn generate_brief_for_query(&self, query: &str, max_items: usize) -> Result<String> {
+        self.store.generate_brief_for_query(query, max_items)
+    }
+
+    fn upsert_session_summary(&self, session_key: &str, summary: &str) -> Result<()> {
+        self.store.upsert_session_summary(session_key, summary)
+    }
+
+    fn get_session_summary(&self, session_key: &str) -> Result<Option<String>> {
+        self.store.get_session_summary(session_key)
+    }
+
     fn maintenance(&self, recycle_days: i64) -> Result<(usize, usize)> {
         self.store.maintenance(recycle_days)
     }

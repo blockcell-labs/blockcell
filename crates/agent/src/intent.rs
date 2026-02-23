@@ -19,7 +19,7 @@ pub enum IntentCategory {
     DataAnalysis,
     /// 通信/邮件/社交 — email, social_media, notification, message
     Communication,
-    /// 系统/硬件/应用控制 — system_info, app_control, chrome_control, camera_capture
+    /// 系统/硬件/应用控制/Android — system_info, app_control, chrome_control, camera_capture, termux_api
     SystemControl,
     /// 日程/任务/记忆 — calendar_api, cron, memory_*, knowledge_graph, list_tasks
     Organization,
@@ -81,6 +81,7 @@ impl IntentClassifier {
                     "市值", "PE", "PB", "ROE", "分红", "股息", "财报", "年报",
                     "资金流", "北向资金", "龙虎榜", "大盘", "指数",
                     "债券", "国债", "可转债", "收益率曲线",
+                    "ETF", "etf", "基金净值", "上证", "深证", "沪深300", "沪深", "恒生",
                     "stock", "crypto", "bitcoin", "ethereum", "forex", "trading",
                     "portfolio", "dividend", "earnings",
                 ],
@@ -103,6 +104,7 @@ impl IntentClassifier {
                     "Uniswap", "uniswap", "Aave", "aave", "OpenSea", "opensea",
                     "跨链", "bridge", "多签", "Safe", "Gnosis",
                     "代币安全", "合约审计", "rug pull", "honeypot",
+                    "Solana", "solana", "Tron", "tron", "TRC20", "trc20", "SPL",
                     "blockchain", "smart contract", "token", "mint", "swap",
                     "approve", "revoke", "multicall",
                 ],
@@ -182,6 +184,8 @@ impl IntentClassifier {
                     "Chrome", "chrome", "Safari", "safari", "Windsurf", "windsurf", "VSCode", "vscode",
                     "系统信息", "硬件", "CPU", "cpu", "GPU", "gpu", "内存",
                     "screenshot", "camera", "app control",
+                    "Android", "android", "手机", "Termux", "termux",
+                    "短信", "通话", "传感器", "GPS", "gps", "手电筒", "亮度", "音量",
                     "打开技能", "关闭技能", "启用技能", "禁用技能",
                     "打开能力", "关闭能力", "启用能力", "禁用能力",
                     "enable skill", "disable skill", "enable capability", "disable capability",
@@ -246,6 +250,7 @@ impl IntentClassifier {
                     "部署", "服务器", "云", "AWS", "aws", "GCP", "gcp", "Azure", "azure",
                     "Docker", "docker", "容器", "K8s", "k8s",
                     "网络", "ping", "端口", "SSL", "ssl", "证书", "DNS", "dns",
+                    "whois", "traceroute", "域名", "带宽", "网速",
                     "加密", "解密", "密码", "哈希", "hash",
                     "deploy", "server", "cloud", "container", "encrypt", "decrypt",
                 ],
@@ -361,7 +366,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
         IntentCategory::Chat => vec![], // No tools at all
         IntentCategory::FileOps => {
             let mut t = core.clone();
-            t.extend(["edit_file", "file_ops", "data_process"]);
+            t.extend(["edit_file", "file_ops", "data_process", "office_write"]);
             t
         }
         IntentCategory::WebSearch => {
@@ -374,7 +379,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             t.extend([
                 "finance_api", "exchange_api", "http_request", "data_process",
                 "chart_generate", "alert_rule", "stream_subscribe", "notification",
-                "knowledge_graph", "cron", "office_write",
+                "knowledge_graph", "cron", "office_write", "spawn",
             ]);
             t
         }
@@ -383,7 +388,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             t.extend([
                 "blockchain_rpc", "blockchain_tx", "contract_security",
                 "bridge_api", "nft_market", "multisig", "exchange_api",
-                "http_request", "knowledge_graph",
+                "stream_subscribe", "http_request", "knowledge_graph",
             ]);
             t
         }
@@ -408,7 +413,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             t.extend([
                 "system_info", "capability_evolve", "app_control",
                 "chrome_control", "camera_capture", "browse",
-                "image_understand",
+                "image_understand", "termux_api",
             ]);
             t
         }
@@ -453,7 +458,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             // Core + high-frequency tools (~15)
             let mut t = core.clone();
             t.extend([
-                "edit_file", "file_ops", "http_request", "browse",
+                "edit_file", "file_ops", "office_write", "http_request", "browse",
                 "spawn", "list_tasks", "cron", "notification",
                 "memory_forget", "list_skills",
                 "community_hub", "memory_maintenance",

@@ -193,6 +193,219 @@ impl SkillDispatcher {
             chrono::Utc::now().timestamp()
         });
 
+        // Register shorthand tool functions so SKILL.rhai can call exec(cmd) instead of
+        // call_tool("exec", #{command: cmd}).  These are thin wrappers around call_tool.
+
+        // exec(command) -> Dynamic
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("exec", move |command: String| -> Dynamic {
+                let params = serde_json::json!({"command": command});
+                match exec("exec", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "exec".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "exec".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // web_search(query) -> Dynamic
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("web_search", move |query: String| -> Dynamic {
+                let params = serde_json::json!({"query": query});
+                match exec("web_search", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "web_search".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "web_search".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // web_fetch(url) -> Dynamic
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("web_fetch", move |url: String| -> Dynamic {
+                let params = serde_json::json!({"url": url});
+                match exec("web_fetch", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "web_fetch".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "web_fetch".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // read_file(path) -> Dynamic
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("read_file", move |path: String| -> Dynamic {
+                let params = serde_json::json!({"path": path});
+                match exec("read_file", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "read_file".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "read_file".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // write_file(path, content) -> Dynamic
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("write_file", move |path: String, content: String| -> Dynamic {
+                let params = serde_json::json!({"path": path, "content": content});
+                match exec("write_file", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "write_file".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "write_file".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // http_request(url) -> Dynamic  (simple GET)
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("http_request", move |url: String| -> Dynamic {
+                let params = serde_json::json!({"url": url, "method": "GET"});
+                match exec("http_request", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "http_request".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "http_request".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
+        // message(content) -> Dynamic  (send outbound message)
+        {
+            let tc = tool_calls.clone();
+            let exec = executor.clone();
+            engine.register_fn("message", move |content: String| -> Dynamic {
+                let params = serde_json::json!({"content": content});
+                match exec("message", params.clone()) {
+                    Ok(result) => {
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "message".to_string(),
+                            params,
+                            result: result.clone(),
+                            success: true,
+                        });
+                        json_to_dynamic(&result)
+                    }
+                    Err(e) => {
+                        let err_val = serde_json::json!({"error": format!("{}", e)});
+                        tc.lock().unwrap().push(ToolCallRecord {
+                            tool_name: "message".to_string(),
+                            params,
+                            result: err_val.clone(),
+                            success: false,
+                        });
+                        json_to_dynamic(&err_val)
+                    }
+                }
+            });
+        }
+
         // Compile
         let ast = engine.compile(script).map_err(|e| {
             Error::Skill(format!("SKILL.rhai compilation error: {}", e))

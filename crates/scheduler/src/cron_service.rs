@@ -242,16 +242,16 @@ impl CronService {
             });
             (content, metadata)
         } else {
-            // Standard agent_turn — wrap as a reminder for the LLM
+            // Standard agent_turn — let the LLM handle it (search, execute skill, etc.)
+            // Do NOT set reminder:true here — that bypasses the LLM entirely.
             let content = format!(
-                "[系统定时提醒] 你之前为用户设置的提醒「{}」现在到时间了。请立即将这条提醒内容转达给用户。",
+                "[系统定时任务] 你之前为用户设置的任务「{}」现在到时间了。请立即执行该任务并将结果发送给用户。",
                 job.payload.message
             );
             let metadata = serde_json::json!({
                 "job_id": job.id,
                 "job_name": job.name,
-                "reminder": true,
-                "reminder_message": job.payload.message,
+                "agent_task": true,
                 "deliver": job.payload.deliver,
                 "deliver_channel": job.payload.channel,
                 "deliver_to": job.payload.to,
@@ -259,11 +259,22 @@ impl CronService {
             (content, metadata)
         };
 
-        // Session key format: cron:<job_id> (对齐 nanobot)
+        // For agent_turn jobs, use the deliver target as channel/chat_id so that
+        // ToolContext gets the real user channel — the message tool can then send
+        // to the correct target without the LLM needing to specify channel/chat_id.
+        // For skill_rhai and simple reminder jobs, keep "cron" as the channel.
+        let (msg_channel, msg_chat_id) = if job.payload.kind == "agent_turn" && job.payload.deliver {
+            let ch = job.payload.channel.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "cron".to_string());
+            let to = job.payload.to.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| job.id.clone());
+            (ch, to)
+        } else {
+            ("cron".to_string(), job.id.clone())
+        };
+
         let msg = InboundMessage {
-            channel: "cron".to_string(),
+            channel: msg_channel,
             sender_id: "cron".to_string(),
-            chat_id: job.id.clone(),
+            chat_id: msg_chat_id,
             content,
             media: vec![],
             metadata,

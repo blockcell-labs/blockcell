@@ -150,6 +150,12 @@ pub trait MemoryStoreOps: Send + Sync {
     fn stats_json(&self) -> Result<Value>;
     /// Generate brief for prompt injection.
     fn generate_brief(&self, long_term_max: usize, short_term_max: usize) -> Result<String>;
+    /// Generate brief filtered by relevance to a query (FTS5 search).
+    fn generate_brief_for_query(&self, query: &str, max_items: usize) -> Result<String>;
+    /// Upsert a session summary (L2 incremental summary).
+    fn upsert_session_summary(&self, session_key: &str, summary: &str) -> Result<()>;
+    /// Get session summary for a given session key.
+    fn get_session_summary(&self, session_key: &str) -> Result<Option<String>>;
     /// Run maintenance (TTL cleanup, recycle bin purge).
     fn maintenance(&self, recycle_days: i64) -> Result<(usize, usize)>;
 }
