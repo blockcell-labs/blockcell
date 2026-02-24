@@ -81,12 +81,34 @@ BlockCell: ✓ 设置监控 → ✓ 每小时检查价格 → ✓ 发送 Telegra
 将 BlockCell 作为守护进程运行，连接到：
 
 - **Telegram**（长轮询）
-- **WhatsApp**（通过 mautrix 桥接）
-- **飞书/Lark**（WebSocket）
-- **Slack**（REST 轮询）
+- **WhatsApp**（Webhook）
+- **飞书/Lark**（WebSocket / Webhook）
+- **Slack**（Socket Mode）
 - **Discord**（Gateway WebSocket）
 - **钉钉**（Stream SDK）
-- **企业微信**（WeCom）
+- **企业微信**（WeCom，轮询/Webhook）
+
+#### 📖 渠道接入指南
+
+每个渠道都有详细的配置文档（中英双语）：
+
+**中文文档** | **English Docs**
+--- | ---
+[Telegram 配置](docs/channels/zh/01_telegram.md) | [Telegram Setup](docs/channels/en/01_telegram.md)
+[Discord 配置](docs/channels/zh/02_discord.md) | [Discord Setup](docs/channels/en/02_discord.md)
+[Slack 配置](docs/channels/zh/03_slack.md) | [Slack Setup](docs/channels/en/03_slack.md)
+[飞书配置](docs/channels/zh/04_feishu.md) | [Feishu Setup](docs/channels/en/04_feishu.md)
+[钉钉配置](docs/channels/zh/05_dingtalk.md) | [DingTalk Setup](docs/channels/en/05_dingtalk.md)
+[企业微信配置](docs/channels/zh/06_wecom.md) | [WeCom Setup](docs/channels/en/06_wecom.md)
+[WhatsApp 配置](docs/channels/zh/07_whatsapp.md) | [WhatsApp Setup](docs/channels/en/07_whatsapp.md)
+[Lark 配置](docs/channels/zh/08_lark.md) | [Lark Setup](docs/channels/en/08_lark.md)
+
+每份指南包含：
+- 📝 应用创建步骤
+- 🔑 权限配置说明
+- ⚙️ Blockcell 配置示例
+- 💬 交互方式说明
+- ⚠️ 常见问题排查
 
 ### 🏗️ Rust 宿主 + Rhai 技能架构
 
@@ -307,7 +329,7 @@ blockcell/
 
 - **GitHub**：[blockcell-labs/blockcell](https://github.com/blockcell-labs/blockcell)
 - **官网**：[blockcell.dev](https://blockcell.dev)
-- **Discord**：[加入我们的社区](https://discord.gg/blockcell)
+- **Discord**：[加入我们的社区](https://discord.gg/E8TXuHk9QZ)
 - **Twitter**：[@blockcell_dev](https://twitter.com/@blockcell_ai)
 
 ---
@@ -335,6 +357,6 @@ BlockCell 站在巨人的肩膀上：
 
 **如果你觉得 BlockCell 有用，请在 GitHub 上给我们一个 ⭐️！**
 
-[⭐ 在 GitHub 上 Star](https://github.com/blockcell-labs/blockcell) • [📖 阅读文档](https://blockcell.dev/docs) • [💬 加入 Discord](https://discord.gg/blockcell)
+[⭐ 在 GitHub 上 Star](https://github.com/blockcell-labs/blockcell) • [📖 阅读文档](https://blockcell.dev/docs) • [💬 加入 Discord](https://discord.gg/E8TXuHk9QZ)
 
 </div>

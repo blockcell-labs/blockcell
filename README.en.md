@@ -81,12 +81,34 @@ Error detected → LLM generates fix → Audit → Test → Canary deploy → Fu
 Run BlockCell as a daemon and connect it to:
 
 - **Telegram** (long polling)
-- **WhatsApp** (via mautrix bridge)
-- **Feishu/Lark** (WebSocket)
-- **Slack** (REST polling)
+- **WhatsApp** (Webhook)
+- **Feishu/Lark** (WebSocket / Webhook)
+- **Slack** (Socket Mode)
 - **Discord** (Gateway WebSocket)
 - **DingTalk** (Stream SDK)
-- **WeCom** (企业微信)
+- **WeCom** (Polling / Webhook)
+
+#### 📖 Channel Integration Guides
+
+Each channel has detailed configuration documentation (bilingual):
+
+**中文文档** | **English Docs**
+--- | ---
+[Telegram 配置](docs/channels/zh/01_telegram.md) | [Telegram Setup](docs/channels/en/01_telegram.md)
+[Discord 配置](docs/channels/zh/02_discord.md) | [Discord Setup](docs/channels/en/02_discord.md)
+[Slack 配置](docs/channels/zh/03_slack.md) | [Slack Setup](docs/channels/en/03_slack.md)
+[飞书配置](docs/channels/zh/04_feishu.md) | [Feishu Setup](docs/channels/en/04_feishu.md)
+[钉钉配置](docs/channels/zh/05_dingtalk.md) | [DingTalk Setup](docs/channels/en/05_dingtalk.md)
+[企业微信配置](docs/channels/zh/06_wecom.md) | [WeCom Setup](docs/channels/en/06_wecom.md)
+[WhatsApp 配置](docs/channels/zh/07_whatsapp.md) | [WhatsApp Setup](docs/channels/en/07_whatsapp.md)
+[Lark 配置](docs/channels/zh/08_lark.md) | [Lark Setup](docs/channels/en/08_lark.md)
+
+Each guide includes:
+- 📝 Application creation steps
+- 🔑 Permission configuration
+- ⚙️ Blockcell configuration examples
+- 💬 Interaction methods
+- ⚠️ Troubleshooting common issues
 
 ### 🏗️ Rust Host + Rhai Skills Architecture
 
@@ -307,7 +329,7 @@ In interactive mode, operations outside `~/.blockcell/workspace` require explici
 
 - **GitHub**: [blockcell-labs/blockcell](https://github.com/blockcell-labs/blockcell)
 - **Website**: [blockcell.dev](https://blockcell.dev)
-- **Discord**: [Join our community](https://discord.gg/blockcell)
+- **Discord**: [Join our community](https://discord.gg/E8TXuHk9QZ)
 - **Twitter**: [@blockcell_dev](https://twitter.com/@blockcell_ai)
 
 ---
@@ -335,6 +357,6 @@ BlockCell stands on the shoulders of giants:
 
 **If you find BlockCell useful, please consider giving it a ⭐️ on GitHub!**
 
-[⭐ Star on GitHub](https://github.com/blockcell-labs/blockcell) • [📖 Read the Docs](https://blockcell.dev/docs) • [💬 Join Discord](https://discord.gg/blockcell)
+[⭐ Star on GitHub](https://github.com/blockcell-labs/blockcell) • [📖 Read the Docs](https://blockcell.dev/docs) • [💬 Join Discord](https://discord.gg/E8TXuHk9QZ)
 
 </div>
