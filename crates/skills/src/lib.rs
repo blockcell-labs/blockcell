@@ -17,7 +17,7 @@ pub use core_evolution::CoreEvolution;
 pub use dispatcher::{SkillDispatcher, SkillDispatchResult, ToolCallRecord};
 pub use engine::{EngineConfig, RhaiEngine, SkillExecutor, ExecutionResult};
 pub use manager::{SkillManager, Skill, SkillMeta, SkillTestFixture};
-pub use evolution::{SkillEvolution, EvolutionContext, TriggerReason, LLMProvider, ShadowTestExecutor};
+pub use evolution::{SkillEvolution, EvolutionContext, TriggerReason, LLMProvider};
 pub use versioning::{VersionManager, SkillVersion, VersionSource, VersionHistory};
 pub use service::{EvolutionService, EvolutionServiceConfig, ErrorReport, CapabilityErrorReport, SkillRecordSummary, is_builtin_tool};
 pub use capability_versioning::{CapabilityVersionManager, CapabilityVersion, CapabilityVersionSource, CapabilityVersionHistory};

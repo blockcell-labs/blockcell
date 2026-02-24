@@ -95,6 +95,9 @@ pub struct ValidationCheck {
 /// Maximum consecutive failures before a capability is blocked from auto-triggering.
 const MAX_AUTO_FAILURES: u32 = 3;
 
+/// Blocked records auto-expire after this many seconds (7 days).
+const BLOCK_EXPIRY_SECS: i64 = 7 * 24 * 3600;
+
 /// Core-level evolution engine
 ///
 /// Unlike the Rhai skill evolution which generates scripts, this generates
@@ -115,10 +118,12 @@ pub struct CoreEvolution {
     max_retries: u32,
     /// Optional LLM provider for autonomous evolution
     llm_provider: Option<Arc<dyn LLMProvider>>,
+    /// LLM call timeout in seconds
+    llm_timeout_secs: u64,
 }
 
 impl CoreEvolution {
-    pub fn new(base_dir: PathBuf, registry: CapabilityRegistryHandle) -> Self {
+    pub fn new(base_dir: PathBuf, registry: CapabilityRegistryHandle, llm_timeout_secs: u64) -> Self {
         let artifacts_dir = base_dir.join("tool_artifacts");
         let records_dir = base_dir.join("tool_evolution_records");
         let version_manager = CapabilityVersionManager::new(base_dir);
@@ -129,6 +134,7 @@ impl CoreEvolution {
             version_manager,
             max_retries: 3,
             llm_provider: None,
+            llm_timeout_secs,
         }
     }
 
@@ -213,14 +219,57 @@ impl CoreEvolution {
     }
 
     /// Check if a capability has been blocked (too many consecutive failures).
+    /// Blocked records auto-expire after 7 days (time decay).
     pub fn is_blocked(&self, capability_id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
         let records = self.list_records()?;
         for r in &records {
             if r.capability_id == capability_id && r.status == CoreEvolutionStatus::Blocked {
+                // 时间衰减：超过 BLOCK_EXPIRY_SECS 后自动解除阻塞
+                if now - r.updated_at > BLOCK_EXPIRY_SECS {
+                    info!(
+                        capability_id = %capability_id,
+                        blocked_days = (now - r.updated_at) / 86400,
+                        "🧬 [核心进化] 能力 '{}' 阻塞已过期（超过7天），自动解除",
+                        capability_id
+                    );
+                    // 将过期的 Blocked 记录标记为 Failed（不再阻塞）
+                    let mut expired = r.clone();
+                    expired.status = CoreEvolutionStatus::Failed;
+                    expired.updated_at = now;
+                    let _ = self.save_record(&expired);
+                    continue;
+                }
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// 手动解除能力阻塞（人工干预接口）
+    ///
+    /// 将所有 Blocked 状态的记录标记为 Failed，允许重新触发进化。
+    /// 返回解除阻塞的记录数量。
+    pub fn unblock_capability(&self, capability_id: &str) -> Result<u32> {
+        let now = chrono::Utc::now().timestamp();
+        let records = self.list_records()?;
+        let mut unblocked = 0u32;
+        for r in &records {
+            if r.capability_id == capability_id && r.status == CoreEvolutionStatus::Blocked {
+                let mut updated = r.clone();
+                updated.status = CoreEvolutionStatus::Failed;
+                updated.updated_at = now;
+                self.save_record(&updated)?;
+                unblocked += 1;
+                info!(
+                    capability_id = %capability_id,
+                    record_id = %r.id,
+                    "🧬 [核心进化] 手动解除能力 '{}' 的阻塞",
+                    capability_id
+                );
+            }
+        }
+        Ok(unblocked)
     }
 
     /// Count consecutive failures for a capability (most recent first).
@@ -344,26 +393,7 @@ impl CoreEvolution {
         Ok(evolution_id)
     }
 
-    /// Unblock a previously blocked capability, allowing auto-triggering again.
-    pub fn unblock_capability(&self, capability_id: &str) -> Result<bool> {
-        let records = self.list_records()?;
-        for r in &records {
-            if r.capability_id == capability_id && r.status == CoreEvolutionStatus::Blocked {
-                let mut updated = r.clone();
-                updated.status = CoreEvolutionStatus::Failed;
-                updated.description = format!("UNBLOCKED (was: {})", r.description);
-                updated.updated_at = chrono::Utc::now().timestamp();
-                self.save_record(&updated)?;
-                info!(
-                    capability_id = %capability_id,
-                    "🧬 [核心进化] ✅ 能力 '{}' 已解除阻止",
-                    capability_id
-                );
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
+    // unblock_capability is defined above with time-decay support
 
     /// Run the full evolution pipeline for a capability
     pub async fn run_evolution(
@@ -537,7 +567,13 @@ impl CoreEvolution {
             prompt.len()
         );
 
-        let response = llm_provider.generate(&prompt).await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(self.llm_timeout_secs),
+            llm_provider.generate(&prompt)
+        )
+        .await
+        .map_err(|_| Error::Evolution(format!("LLM call timed out after {} seconds", self.llm_timeout_secs)))?
+        .map_err(|e| Error::Evolution(format!("LLM generation failed: {}", e)))?;
         let code = self.extract_code_from_response(&response, &record.provider_kind)?;
 
         info!(
@@ -1108,7 +1144,7 @@ mod tests {
     fn test_extract_code_bash() {
         let dir = std::env::temp_dir().join("test_core_evo");
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
-        let evo = CoreEvolution::new(dir, registry);
+        let evo = CoreEvolution::new(dir, registry, 300);
 
         let response = "Here's the script:\n```bash\n#!/bin/bash\necho '{\"ok\": true}'\n```\nDone.";
         let code = evo.extract_code_from_response(response, &ProviderKind::Process).unwrap();
@@ -1120,7 +1156,7 @@ mod tests {
     fn test_extract_code_python() {
         let dir = std::env::temp_dir().join("test_core_evo_py");
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
-        let evo = CoreEvolution::new(dir, registry);
+        let evo = CoreEvolution::new(dir, registry, 300);
 
         let response = "```python\nimport json\nprint(json.dumps({\"ok\": True}))\n```";
         let code = evo.extract_code_from_response(response, &ProviderKind::ExternalApi).unwrap();
@@ -1132,7 +1168,7 @@ mod tests {
         let dir = std::env::temp_dir().join("test_core_evo_idempotent");
         let _ = std::fs::remove_dir_all(&dir);
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
-        let evo = CoreEvolution::new(dir.clone(), registry);
+        let evo = CoreEvolution::new(dir.clone(), registry, 300);
 
         // First request creates a new record
         let id1 = evo.request_capability("test.cap", "test", ProviderKind::Process).await.unwrap();
@@ -1152,7 +1188,7 @@ mod tests {
         let dir = std::env::temp_dir().join("test_core_evo_blocked");
         let _ = std::fs::remove_dir_all(&dir);
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
-        let evo = CoreEvolution::new(dir.clone(), registry);
+        let evo = CoreEvolution::new(dir.clone(), registry, 300);
 
         // Simulate MAX_AUTO_FAILURES consecutive failures
         for i in 0..MAX_AUTO_FAILURES {
@@ -1182,7 +1218,7 @@ mod tests {
         assert!(evo.is_blocked("test.fail").unwrap());
 
         // Unblock should work
-        assert!(evo.unblock_capability("test.fail").unwrap());
+        assert_eq!(evo.unblock_capability("test.fail").unwrap(), 1);
         assert!(!evo.is_blocked("test.fail").unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);

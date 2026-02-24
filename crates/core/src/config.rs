@@ -61,6 +61,18 @@ pub struct AgentDefaults {
     pub llm_retry_delay_ms: u64,
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: u32,
+    /// 显式指定 LLM provider（可选）
+    /// 如果不指定，将从 model 字符串前缀推断（如 "anthropic/claude-..."）
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 自进化专用模型（如果为 None，则使用主模型）
+    /// 建议使用更便宜/更快的模型，避免与对话抢占并发
+    #[serde(default)]
+    pub evolution_model: Option<String>,
+    /// 自进化专用 provider（可选）
+    /// 如果不指定，将从 evolution_model 推断，或使用主 provider
+    #[serde(default)]
+    pub evolution_provider: Option<String>,
 }
 
 fn default_workspace() -> String {
@@ -106,6 +118,9 @@ impl Default for AgentDefaults {
             llm_max_retries: default_llm_max_retries(),
             llm_retry_delay_ms: default_llm_retry_delay_ms(),
             max_context_tokens: default_max_context_tokens(),
+            provider: None,
+            evolution_model: None,
+            evolution_provider: None,
         }
     }
 }

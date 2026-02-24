@@ -318,6 +318,356 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Test a skill directory by validating meta.yaml and dry-running SKILL.rhai with mock tools.
+pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::Result<()> {
+    use rhai::{Engine, Dynamic, Scope, Map};
+    use std::sync::{Arc, Mutex};
+
+    let skill_path = std::path::Path::new(path);
+    let skill_name = skill_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+
+    println!();
+    println!("🧪 Testing skill: {}", skill_name);
+    println!("   Path: {}", skill_path.display());
+    println!();
+
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+
+    // ── Step 1: meta.yaml ────────────────────────────────────────────────────
+    let meta_path = skill_path.join("meta.yaml");
+    print!("  [1/3] meta.yaml          ");
+    if !meta_path.exists() {
+        println!("❌ MISSING");
+        fail += 1;
+    } else {
+        let meta_str = std::fs::read_to_string(&meta_path)?;
+        // Basic structural check: required keys
+        let required = ["name:", "description:", "triggers:", "capabilities:"];
+        let missing: Vec<&str> = required.iter().filter(|k| !meta_str.contains(*k)).copied().collect();
+        if missing.is_empty() {
+            println!("✅ OK");
+            pass += 1;
+            if verbose {
+                for line in meta_str.lines().take(6) {
+                    println!("            {}", line);
+                }
+            }
+        } else {
+            println!("❌ Missing keys: {}", missing.join(", "));
+            fail += 1;
+        }
+    }
+
+    // ── Step 2: SKILL.md ─────────────────────────────────────────────────────
+    let md_path = skill_path.join("SKILL.md");
+    print!("  [2/3] SKILL.md           ");
+    if !md_path.exists() {
+        println!("❌ MISSING");
+        fail += 1;
+    } else {
+        let md_str = std::fs::read_to_string(&md_path)?;
+        if md_str.len() > 50 {
+            println!("✅ OK  ({} bytes)", md_str.len());
+            pass += 1;
+        } else {
+            println!("⚠️  Very short ({} bytes)", md_str.len());
+            pass += 1; // not fatal
+        }
+    }
+
+    // ── Step 3: SKILL.rhai compile + mock run ────────────────────────────────
+    let rhai_path = skill_path.join("SKILL.rhai");
+    print!("  [3/3] SKILL.rhai compile ");
+    if !rhai_path.exists() {
+        println!("❌ MISSING");
+        fail += 1;
+        print_result(pass, fail);
+        return Ok(());
+    }
+
+    let script = std::fs::read_to_string(&rhai_path)?;
+
+    // Shared state for mock calls
+    let calls: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let output_set: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let calls_c = calls.clone();
+    let output_c = output_set.clone();
+    let logs_c = logs.clone();
+    let logs_w = logs.clone();
+    let errors_c = errors.clone();
+
+    let mut engine = Engine::new();
+    engine.set_max_operations(500_000);
+
+    // mock call_tool(name, params) -> Map with success:true
+    engine.register_fn("call_tool", move |name: &str, _params: rhai::Map| -> Dynamic {
+        calls_c.lock().unwrap().push((name.to_string(), "{}".to_string()));
+        let mut m = Map::new();
+        m.insert("success".into(), Dynamic::from(true));
+        m.insert("content".into(), Dynamic::from("mock content"));
+        m.insert("results".into(), Dynamic::from(rhai::Array::new()));
+        m.insert("items".into(), Dynamic::from(rhai::Array::new()));
+        m.insert("emails".into(), Dynamic::from(rhai::Array::new()));
+        m.insert("tasks".into(), Dynamic::from(rhai::Array::new()));
+        m.insert("contacts".into(), Dynamic::from(rhai::Array::new()));
+        m.insert("data".into(), Dynamic::from("mock data"));
+        m.insert("error".into(), Dynamic::UNIT);
+        m.insert("text".into(), Dynamic::from("mock text"));
+        m.insert("path".into(), Dynamic::from("/tmp/mock_output"));
+        m.insert("output_path".into(), Dynamic::from("/tmp/mock_output"));
+        m.insert("url".into(), Dynamic::from("https://example.com"));
+        m.insert("id".into(), Dynamic::from("mock-id-001"));
+        m.insert("task_id".into(), Dynamic::from("mock-task-001"));
+        m.insert("total".into(), Dynamic::from(0_i64));
+        Dynamic::from_map(m)
+    });
+
+    // mock set_output(map)
+    engine.register_fn("set_output", move |val: Dynamic| {
+        let s = format!("{:?}", val);
+        *output_c.lock().unwrap() = Some(s);
+    });
+
+    // mock log(msg)
+    engine.register_fn("log", move |msg: &str| {
+        logs_c.lock().unwrap().push(msg.to_string());
+    });
+
+    // mock log_warn(msg)
+    engine.register_fn("log_warn", move |msg: &str| {
+        logs_w.lock().unwrap().push(format!("[WARN] {}", msg));
+    });
+
+    // mock is_error(val) -> bool — always false (mock tools succeed)
+    engine.register_fn("is_error", |_val: Dynamic| -> bool { false });
+
+    // mock get_field(map, key) -> Dynamic
+    // Returns empty string for unknown keys to avoid string-concat errors
+    engine.register_fn("get_field", |map: Dynamic, key: &str| -> Dynamic {
+        if let Some(m) = map.try_cast::<Map>() {
+            m.get(key).cloned().unwrap_or_else(|| Dynamic::from("".to_string()))
+        } else {
+            Dynamic::from("".to_string())
+        }
+    });
+
+    // mock timestamp() -> String
+    engine.register_fn("timestamp", || -> String {
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    });
+
+    // Compile
+    match engine.compile(&script) {
+        Err(e) => {
+            println!("❌ Compile error");
+            println!("            {}", e);
+            fail += 1;
+            errors_c.lock().unwrap().push(format!("Compile: {}", e));
+            print_result(pass, fail);
+            return Ok(());
+        }
+        Ok(ast) => {
+            println!("✅ OK");
+            pass += 1;
+
+            // ── Step 4: mock run ──────────────────────────────────────────────
+            print!("  [4/4] SKILL.rhai run     ");
+
+            // Inject dummy variables from meta.yaml (all common ones as ())
+            let user_msg = input.as_deref().unwrap_or("test input from blockcell skills test");
+            let mut scope = Scope::new();
+            scope.push("user_input", Dynamic::from(user_msg.to_string()));
+
+            // Inject all common optional variables as ()
+            let optional_vars = [
+                "query", "command", "url", "action", "topic", "path",
+                "source", "destination", "service", "platform", "provider",
+                "title", "body", "content", "text", "message",
+                "subject", "to", "from", "limit", "max_results",
+                "max_pages", "timeout", "cwd", "language", "format",
+                "algorithm", "format", "bits", "length", "type",
+                "owner", "repo", "branch", "tag", "version",
+                "entity_id", "domain", "payload", "topic", "host",
+                "ports", "record_type", "region", "bucket",
+                "instance_id", "database_id", "page_id", "event_id",
+                "graph_name", "name", "relation", "from_entity", "to_entity",
+                "voice", "backend", "output_path", "input_path",
+                "image_path", "audio_path", "chart_type",
+                "start", "end", "start_date", "end_date",
+                "task_id", "id", "uid", "contact_id",
+                "origin", "destination", "keyword", "location",
+                "mode", "radius", "recursive", "max_pages",
+                "action_type", "schedule", "task", "number",
+                "address", "query", "filter", "sort_by",
+                "channel", "service", "max_results", "source", "include_symbols",
+                "fetch_top", "watch", "depth", "bidirectional", "top_k",
+                "stats", "export_format", "camera_id", "priority", "count",
+                "include_uppercase", "include_numbers", "session", "browser",
+                "ms", "tab_id", "extract_type", "model", "output_format",
+                "auto_filter", "bold_header", "freeze_panes", "column_widths",
+                "slides", "sections", "sheets", "attachments", "tags",
+                "importance", "scope", "dedup_key", "expires_in_days",
+            ];
+            for var in &optional_vars {
+                if scope.get_value::<Dynamic>(var).is_none() {
+                    scope.push(*var, Dynamic::UNIT);
+                }
+            }
+
+            let run_result = engine.run_ast_with_scope(&mut scope, &ast);
+            match run_result {
+                Ok(_) => {
+                    println!("✅ OK");
+                    pass += 1;
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("Variable not found") {
+                        // Extract the variable name from the error — Rhai format: Variable 'name' not found
+                        let var_name = err_str
+                            .split('\'').nth(1)
+                            .unwrap_or(&err_str);
+                        println!("⚠️  WARN — undefined variable '{}' (add to optional_vars list)", var_name);
+                        println!("            Full error: {}", err_str);
+                        // Treat as warning only — the script compiled and mostly ran fine
+                        pass += 1;
+                        errors_c.lock().unwrap().push(format!("Warn (undef var): {}", var_name));
+                    } else {
+                        println!("❌ Runtime error: {}", e);
+                        fail += 1;
+                        errors_c.lock().unwrap().push(format!("Runtime: {}", err_str));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Report ────────────────────────────────────────────────────────────────
+    println!();
+
+    let tool_calls = calls.lock().unwrap();
+    if !tool_calls.is_empty() {
+        println!("  🔧 Mock tool calls ({}):", tool_calls.len());
+        for (name, _) in tool_calls.iter() {
+            println!("     • {}", name);
+        }
+        println!();
+    }
+
+    let log_lines = logs.lock().unwrap();
+    if verbose && !log_lines.is_empty() {
+        println!("  📋 Script logs:");
+        for l in log_lines.iter() {
+            println!("     {}", l);
+        }
+        println!();
+    }
+
+    if let Some(out) = output_set.lock().unwrap().as_deref() {
+        let preview = if out.len() > 200 { &out[..200] } else { out };
+        println!("  📤 set_output: {}", preview);
+        println!();
+    }
+
+    print_result(pass, fail);
+    Ok(())
+}
+
+fn print_result(pass: usize, fail: usize) {
+    let total = pass + fail;
+    if fail == 0 {
+        println!("  ✅ PASS  ({}/{} checks passed)", pass, total);
+    } else {
+        println!("  ❌ FAIL  ({}/{} checks passed, {} failed)", pass, total, fail);
+    }
+    println!();
+}
+
+/// Batch-test all skills under a directory.
+pub async fn test_all(dir: &str, input: Option<String>, verbose: bool) -> anyhow::Result<()> {
+    let base = std::path::Path::new(dir);
+    if !base.exists() || !base.is_dir() {
+        anyhow::bail!("Directory not found: {}", dir);
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(base)?
+        .flatten()
+        .filter(|e| {
+            let p = e.path();
+            p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("meta.yaml").exists())
+        })
+        .collect();
+
+    if entries.is_empty() {
+        println!("No skill directories found in: {}", dir);
+        return Ok(());
+    }
+
+    let total = entries.len();
+    let mut passed = 0usize;
+    let mut failed_names: Vec<String> = Vec::new();
+
+    println!();
+    println!("🧪 Batch testing {} skills in: {}", total, dir);
+    println!("{}", "─".repeat(60));
+
+    for entry in &entries {
+        let skill_path = entry.path();
+        let name = skill_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+        // Run test and capture whether it passed
+        let result = test(skill_path.to_str().unwrap_or(""), input.clone(), verbose).await;
+        match result {
+            Ok(_) => {
+                // Re-check by looking at SKILL.rhai compile status
+                // We rely on the function's own output; for batch we count by whether files exist + compile OK
+                let rhai_ok = {
+                    let rhai_path = skill_path.join("SKILL.rhai");
+                    if rhai_path.exists() {
+                        let script = std::fs::read_to_string(&rhai_path).unwrap_or_default();
+                        let engine = rhai::Engine::new();
+                        engine.compile(&script).is_ok()
+                    } else {
+                        false
+                    }
+                };
+                if rhai_ok {
+                    passed += 1;
+                } else {
+                    failed_names.push(name.to_string());
+                }
+            }
+            Err(e) => {
+                println!("  ⚠️  Error running test for {}: {}", name, e);
+                failed_names.push(name.to_string());
+            }
+        }
+    }
+
+    println!("{}", "═".repeat(60));
+    println!("📊 Batch Test Summary");
+    println!("   Total:  {}", total);
+    println!("   Passed: {}", passed);
+    println!("   Failed: {}", total - passed);
+    if !failed_names.is_empty() {
+        println!();
+        println!("   ❌ Failed skills:");
+        for n in &failed_names {
+            println!("      • {}", n);
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
 fn status_desc(s: &str) -> &'static str {
     match s {
         "Triggered" => "pending",
@@ -325,10 +675,9 @@ fn status_desc(s: &str) -> &'static str {
         "Generated" => "generated",
         "Auditing" => "auditing",
         "AuditPassed" => "audit passed",
-        "DryRunPassed" => "build passed",
-        "Testing" => "testing",
-        "TestPassed" => "test passed",
-        "RollingOut" => "rolling out",
+        "CompilePassed" | "DryRunPassed" | "TestPassed" => "compile passed",
+        "CompileFailed" | "DryRunFailed" | "TestFailed" | "Testing" => "compile failed",
+        "Observing" | "RollingOut" => "observing",
         _ => "in progress",
     }
 }

@@ -1779,7 +1779,7 @@ async fn handle_evolution_summary(State(state): State<GatewayState>) -> impl Int
                         let status = record.get("status").and_then(|s| s.as_str()).unwrap_or("");
                         match status {
                             "Completed" => skill_completed += 1,
-                            "Failed" | "RolledBack" | "AuditFailed" | "DryRunFailed" | "TestFailed" => skill_failed += 1,
+                            "Failed" | "RolledBack" | "AuditFailed" | "CompileFailed" | "DryRunFailed" | "TestFailed" => skill_failed += 1,
                             _ => skill_active += 1,
                         }
                     }
@@ -3432,7 +3432,12 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         }
     }
 
-    let mut core_evo = CoreEvolution::new(paths.workspace().to_path_buf(), cap_registry_raw.clone());
+    let llm_timeout_secs = 300u64;
+    let mut core_evo = CoreEvolution::new(
+        paths.workspace().to_path_buf(),
+        cap_registry_raw.clone(),
+        llm_timeout_secs,
+    );
     if let Ok(evo_provider) = super::provider::create_provider(&config) {
         let llm_bridge = Arc::new(ProviderLLMBridge::new(evo_provider));
         core_evo.set_llm_provider(llm_bridge);
@@ -3465,6 +3470,22 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     // ── Create agent runtime with full component wiring ──
     let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+    
+    // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
+    if config.agents.defaults.evolution_model.is_some()
+        || config.agents.defaults.evolution_provider.is_some()
+    {
+        match super::provider::create_evolution_provider(&config) {
+            Ok(evo_provider) => {
+                runtime.set_evolution_provider(evo_provider);
+                info!("Evolution provider configured with independent model");
+            }
+            Err(e) => {
+                warn!("Failed to create evolution provider: {}, using main provider", e);
+            }
+        }
+    }
+    
     runtime.set_outbound(outbound_tx);
     runtime.set_task_manager(task_manager.clone());
     if let Some(ref store) = memory_store_handle {

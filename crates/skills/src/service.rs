@@ -1,9 +1,9 @@
 use crate::evolution::{
     EvolutionContext, EvolutionRecord, EvolutionStatus, FeedbackEntry,
-    LLMProvider, ShadowTestExecutor, ShadowTestResult, SkillEvolution, TriggerReason,
+    LLMProvider, SkillEvolution, TriggerReason,
 };
 use blockcell_core::{Error, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -107,12 +107,17 @@ pub struct CapabilityErrorReport {
 /// 错误追踪器：记录每个技能的错误次数和时间窗口
 #[derive(Debug, Clone)]
 struct ErrorTracker {
-    /// skill_name -> 错误时间戳列表
-    errors: HashMap<String, Vec<i64>>,
+    /// skill_name -> (错误时间戳列表, 已触发进化的时间戳)
+    errors: HashMap<String, (Vec<i64>, Option<i64>)>,
     /// 触发进化所需的连续错误次数
     threshold: u32,
     /// 错误统计的时间窗口（分钟）
     window_minutes: u32,
+    /// 回滚冷却期：skill_name -> 冷却结束时间戳
+    /// 在冷却期内不会触发新的进化，避免“进化→回滚→再进化”死循环
+    cooldowns: HashMap<String, i64>,
+    /// 冷却期时长（分钟），默认 60 分钟
+    cooldown_minutes: u32,
 }
 
 /// ErrorTracker 内部返回
@@ -128,6 +133,8 @@ impl ErrorTracker {
             errors: HashMap::new(),
             threshold,
             window_minutes,
+            cooldowns: HashMap::new(),
+            cooldown_minutes: 60, // 默认 1 小时冷却期
         }
     }
 
@@ -136,19 +143,44 @@ impl ErrorTracker {
         let now = chrono::Utc::now().timestamp();
         let cutoff = now - (self.window_minutes as i64 * 60);
 
-        let timestamps = self.errors.entry(skill_name.to_string()).or_default();
+        let entry = self.errors.entry(skill_name.to_string()).or_insert((Vec::new(), None));
+        let (timestamps, triggered_at) = entry;
+        
         let was_empty = timestamps.is_empty();
         timestamps.push(now);
 
         // 清理过期的错误记录
         timestamps.retain(|&t| t > cutoff);
+        
+        // 如果已触发的进化也过期了，清除标记
+        if let Some(trigger_time) = *triggered_at {
+            if trigger_time <= cutoff {
+                *triggered_at = None;
+            }
+        }
 
         let count = timestamps.len() as u32;
         let is_first = was_empty || count == 1;
 
-        if count >= self.threshold {
-            // 清空计数器，避免重复触发
-            timestamps.clear();
+        // 检查冷却期：回滚后的冷却期内不触发新进化
+        let in_cooldown = if let Some(&cooldown_until) = self.cooldowns.get(skill_name) {
+            if now < cooldown_until {
+                true
+            } else {
+                // 冷却期已过，清除
+                self.cooldowns.remove(skill_name);
+                false
+            }
+        } else {
+            false
+        };
+
+        // 检查是否应该触发进化：达到阈值 且 未在窗口期内触发过 且 不在冷却期
+        let should_trigger = count >= self.threshold && triggered_at.is_none() && !in_cooldown;
+        
+        if should_trigger {
+            // 标记已触发，但不清空计数器（保留历史用于统计）
+            *triggered_at = Some(now);
             TrackResult {
                 count,
                 is_first,
@@ -170,20 +202,45 @@ impl ErrorTracker {
     fn clear(&mut self, skill_name: &str) {
         self.errors.remove(skill_name);
     }
+    
+    /// 重置触发标记（允许再次触发进化）
+    #[allow(dead_code)]
+    fn reset_trigger(&mut self, skill_name: &str) {
+        if let Some(entry) = self.errors.get_mut(skill_name) {
+            entry.1 = None;
+        }
+    }
+
+    /// 设置冷却期（回滚后调用，避免立即重新触发进化）
+    fn set_cooldown(&mut self, skill_name: &str) {
+        let cooldown_until = chrono::Utc::now().timestamp()
+            + (self.cooldown_minutes as i64 * 60);
+        self.cooldowns.insert(skill_name.to_string(), cooldown_until);
+    }
+
+    /// 检查某个技能是否在冷却期内
+    #[allow(dead_code)]
+    fn is_in_cooldown(&self, skill_name: &str) -> bool {
+        if let Some(&cooldown_until) = self.cooldowns.get(skill_name) {
+            chrono::Utc::now().timestamp() < cooldown_until
+        } else {
+            false
+        }
+    }
 }
 
-/// 灰度发布追踪器：记录灰度期间的执行统计
+/// 观察期统计追踪器：记录部署后观察窗口内的执行统计
 #[derive(Debug, Clone, Default)]
-struct RolloutStats {
-    /// evolution_id -> (total_calls, error_calls, stage_started_at)
-    active: HashMap<String, (u64, u64, i64)>,
+struct ObservationStats {
+    /// evolution_id -> (total_calls, error_calls)
+    active: HashMap<String, (u64, u64)>,
 }
 
-impl RolloutStats {
+impl ObservationStats {
     /// 记录一次技能调用结果
     fn record_call(&mut self, evolution_id: &str, is_error: bool) {
         let entry = self.active.entry(evolution_id.to_string())
-            .or_insert((0, 0, chrono::Utc::now().timestamp()));
+            .or_insert((0, 0));
         entry.0 += 1;
         if is_error {
             entry.1 += 1;
@@ -192,29 +249,10 @@ impl RolloutStats {
 
     /// 获取当前错误率
     fn error_rate(&self, evolution_id: &str) -> f64 {
-        if let Some(&(total, errors, _)) = self.active.get(evolution_id) {
+        if let Some(&(total, errors)) = self.active.get(evolution_id) {
             if total == 0 { 0.0 } else { errors as f64 / total as f64 }
         } else {
             0.0
-        }
-    }
-
-    /// 获取当前阶段已经运行的分钟数
-    fn stage_elapsed_minutes(&self, evolution_id: &str) -> u32 {
-        if let Some(&(_, _, started_at)) = self.active.get(evolution_id) {
-            let elapsed = chrono::Utc::now().timestamp() - started_at;
-            (elapsed / 60).max(0) as u32
-        } else {
-            0
-        }
-    }
-
-    /// 重置某个 evolution 的阶段统计（推进到下一阶段时调用）
-    fn reset_stage(&mut self, evolution_id: &str) {
-        if let Some(entry) = self.active.get_mut(evolution_id) {
-            entry.0 = 0;
-            entry.1 = 0;
-            entry.2 = chrono::Utc::now().timestamp();
         }
     }
 
@@ -235,6 +273,8 @@ pub struct EvolutionServiceConfig {
     pub enabled: bool,
     /// 每个阶段失败后的最大重试次数（审计/编译/测试失败都会重试）
     pub max_retries: u32,
+    /// LLM 调用超时时间（秒）
+    pub llm_timeout_secs: u64,
 }
 
 impl Default for EvolutionServiceConfig {
@@ -244,6 +284,7 @@ impl Default for EvolutionServiceConfig {
             error_window_minutes: 30,
             enabled: true,
             max_retries: 3,
+            llm_timeout_secs: 300, // 5分钟
         }
     }
 }
@@ -258,9 +299,11 @@ impl Default for EvolutionServiceConfig {
 pub struct EvolutionService {
     evolution: SkillEvolution,
     error_tracker: Arc<Mutex<ErrorTracker>>,
-    rollout_stats: Arc<Mutex<RolloutStats>>,
+    observation_stats: Arc<Mutex<ObservationStats>>,
     /// 当前正在进行中的 evolution_id 列表（skill_name -> evolution_id）
     active_evolutions: Arc<Mutex<HashMap<String, String>>>,
+    /// P2-6: pipeline 并发互斥锁（正在执行 pipeline 的 evolution_id 集合）
+    pipeline_locks: Arc<Mutex<HashSet<String>>>,
     config: EvolutionServiceConfig,
     /// 可选的 LLM provider，设置后 tick() 会自动驱动完整进化 pipeline
     llm_provider: Option<Arc<dyn LLMProvider>>,
@@ -274,10 +317,11 @@ impl EvolutionService {
         );
 
         Self {
-            evolution: SkillEvolution::new(skills_dir),
+            evolution: SkillEvolution::new(skills_dir, config.llm_timeout_secs),
             error_tracker: Arc::new(Mutex::new(error_tracker)),
-            rollout_stats: Arc::new(Mutex::new(RolloutStats::default())),
+            observation_stats: Arc::new(Mutex::new(ObservationStats::default())),
             active_evolutions: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_locks: Arc::new(Mutex::new(HashSet::new())),
             config,
             llm_provider: None,
         }
@@ -411,12 +455,11 @@ impl EvolutionService {
 
     /// 执行待处理的进化流程（完整 pipeline）
     ///
-    /// 流程：生成补丁 → 审计 → Dry Run → Shadow Test → 开始灰度发布
-    /// 需要 LLM provider 和 test executor 来驱动。
+    /// 流程：生成补丁 → 审计 → 编译检查 → 部署+观察
+    /// 需要 LLM provider 来驱动。
     pub async fn run_pending_evolutions(
         &self,
         llm_provider: &dyn LLMProvider,
-        test_executor: &dyn ShadowTestExecutor,
     ) -> Result<Vec<String>> {
         let active = self.active_evolutions.lock().await;
         let pending: Vec<(String, String)> = active.iter()
@@ -427,17 +470,16 @@ impl EvolutionService {
         let mut completed = Vec::new();
 
         for (skill_name, evolution_id) in pending {
-            match self.run_single_evolution(&evolution_id, llm_provider, test_executor).await {
+            match self.run_single_evolution(&evolution_id, llm_provider).await {
                 Ok(true) => {
                     info!(
                         skill = %skill_name,
                         evolution_id = %evolution_id,
-                        "Evolution pipeline completed, rollout started"
+                        "Evolution pipeline completed, observation started"
                     );
                     completed.push(evolution_id);
                 }
                 Ok(false) => {
-                    // 某个阶段失败，清理资源（包括错误计数器，允许重新触发）
                     warn!(
                         skill = %skill_name,
                         evolution_id = %evolution_id,
@@ -462,16 +504,40 @@ impl EvolutionService {
 
     /// 执行单个进化的完整 pipeline（带重试机制）
     ///
-    /// 新流程：
-    /// 1. 生成补丁 → 2. 审计 → 3. 编译检查 → 4. Shadow Test → 5. 灰度发布
+    /// 流程：1. 生成补丁 → 2. 审计 → 3. 编译检查 → 4. 部署+观察
     ///
-    /// 如果审计/编译/测试失败，会将失败反馈给 LLM 重新生成，最多重试 max_retries 次。
-    /// 目标是尽一切努力让进化成功，而不是遇到问题就终止。
+    /// 如果审计/编译失败，会将失败反馈给 LLM 重新生成，最多重试 max_retries 次。
     async fn run_single_evolution(
         &self,
         evolution_id: &str,
         llm_provider: &dyn LLMProvider,
-        test_executor: &dyn ShadowTestExecutor,
+    ) -> Result<bool> {
+        // P2-6: 获取 pipeline 锁，防止同一 evolution 并发执行
+        {
+            let mut locks = self.pipeline_locks.lock().await;
+            if locks.contains(evolution_id) {
+                info!(evolution_id = %evolution_id, "🧠 [pipeline] Already running, skipping");
+                return Ok(true); // 已在执行中，不重复
+            }
+            locks.insert(evolution_id.to_string());
+        }
+
+        let result = self.run_single_evolution_inner(evolution_id, llm_provider).await;
+
+        // 释放 pipeline 锁
+        {
+            let mut locks = self.pipeline_locks.lock().await;
+            locks.remove(evolution_id);
+        }
+
+        result
+    }
+
+    /// pipeline 内部实现（被 run_single_evolution 包装以管理锁）
+    async fn run_single_evolution_inner(
+        &self,
+        evolution_id: &str,
+        llm_provider: &dyn LLMProvider,
     ) -> Result<bool> {
         let max_retries = self.config.max_retries;
         let record = self.evolution.load_record(evolution_id)?;
@@ -500,7 +566,7 @@ impl EvolutionService {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Step 2+3+4: 审计 → 编译 → 测试（带重试循环）
+        // Step 2+3: 审计 → 编译检查（带重试循环）
         // ═══════════════════════════════════════════════════════════
         let mut attempt = 0u32;
         loop {
@@ -544,7 +610,6 @@ impl EvolutionService {
                         audit.issues.len()
                     );
 
-                    // 获取当前代码用于反馈
                     let current_code = record.patch.as_ref()
                         .map(|p| p.diff.clone())
                         .unwrap_or_default();
@@ -557,18 +622,17 @@ impl EvolutionService {
                         timestamp: chrono::Utc::now().timestamp(),
                     };
 
-                    // 重新生成
                     self.evolution.regenerate_with_feedback(evolution_id, llm_provider, &feedback).await?;
-                    continue; // 回到循环顶部重新审计
+                    continue;
                 }
                 info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Audit passed (attempt {})", attempt);
             }
 
-            // --- 3. Dry Run (编译检查) ---
+            // --- 3. 编译检查（合并了原 dry_run + shadow_test）---
             let record = self.evolution.load_record(evolution_id)?;
             if record.status == EvolutionStatus::AuditPassed {
-                info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Dry run / compile check (attempt {}) ═══", attempt);
-                let (passed, compile_error) = self.evolution.dry_run(evolution_id).await?;
+                info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Compile check (attempt {}) ═══", attempt);
+                let (passed, compile_error) = self.evolution.compile_check(evolution_id).await?;
 
                 if !passed {
                     let error_msg = compile_error.unwrap_or_else(|| "Unknown compilation error".to_string());
@@ -591,42 +655,9 @@ impl EvolutionService {
                     };
 
                     self.evolution.regenerate_with_feedback(evolution_id, llm_provider, &feedback).await?;
-                    continue; // 回到循环顶部重新审计+编译
+                    continue;
                 }
-                info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Compilation passed (attempt {})", attempt);
-            }
-
-            // --- 4. Shadow Test ---
-            let record = self.evolution.load_record(evolution_id)?;
-            if record.status == EvolutionStatus::DryRunPassed {
-                info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Shadow test (attempt {}) ═══", attempt);
-                let result = self.evolution.shadow_test(evolution_id, test_executor).await?;
-
-                if !result.passed {
-                    let errors_text = result.errors.join("\n");
-                    warn!(
-                        evolution_id = %evolution_id,
-                        errors = result.errors.len(),
-                        "🧠 [pipeline] Shadow test FAILED ({} errors), will regenerate with feedback",
-                        result.errors.len()
-                    );
-
-                    let current_code = record.patch.as_ref()
-                        .map(|p| p.diff.clone())
-                        .unwrap_or_default();
-
-                    let feedback = FeedbackEntry {
-                        attempt: record.attempt,
-                        stage: "test".to_string(),
-                        feedback: format!("Shadow test failed with {} errors:\n{}", result.errors.len(), errors_text),
-                        previous_code: current_code,
-                        timestamp: chrono::Utc::now().timestamp(),
-                    };
-
-                    self.evolution.regenerate_with_feedback(evolution_id, llm_provider, &feedback).await?;
-                    continue; // 回到循环顶部重新审计+编译+测试
-                }
-                info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Shadow test passed (attempt {})", attempt);
+                info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Compile check passed (attempt {})", attempt);
             }
 
             // 所有检查都通过了，跳出循环
@@ -634,20 +665,17 @@ impl EvolutionService {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Step 5: 灰度发布
+        // Step 4: 部署 + 进入观察窗口
         // ═══════════════════════════════════════════════════════════
         let record = self.evolution.load_record(evolution_id)?;
-        if record.status == EvolutionStatus::TestPassed {
-            info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Step 5: Starting rollout ═══");
-            self.evolution.start_rollout(evolution_id).await?;
+        if record.status.is_compile_passed() {
+            info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Step 4: Deploy and observe ═══");
+            self.evolution.deploy_and_observe(evolution_id).await?;
 
-            // 初始化灰度统计
-            let mut stats = self.rollout_stats.lock().await;
-            stats.active.insert(
-                evolution_id.to_string(),
-                (0, 0, chrono::Utc::now().timestamp()),
-            );
-            info!(evolution_id = %evolution_id, "🧠 [pipeline] Step 5 DONE: rollout started");
+            // 初始化观察期统计
+            let mut stats = self.observation_stats.lock().await;
+            stats.active.insert(evolution_id.to_string(), (0, 0));
+            info!(evolution_id = %evolution_id, "🧠 [pipeline] Step 4 DONE: deployed, observation started");
         }
 
         let record = self.evolution.load_record(evolution_id)?;
@@ -664,13 +692,12 @@ impl EvolutionService {
     /// 定时调度器 tick
     ///
     /// 应由外部定时调用（建议每 60 秒一次）。
-    /// 1. 处理待执行的进化（Triggered 状态 → 记录学习意图）
-    /// 2. 检查所有正在灰度发布的进化记录：
+    /// 1. 处理待执行的进化（Triggered 状态 → 驱动完整 pipeline）
+    /// 2. 检查所有正在观察中的进化记录：
     ///    - 如果错误率超过阈值 → 自动回滚
-    ///    - 如果当前阶段持续时间已满且错误率正常 → 推进到下一阶段
-    ///    - 如果已到最后阶段 → 标记完成，清理资源
+    ///    - 如果观察窗口到期且错误率正常 → 标记完成，清理资源
     pub async fn tick(&self) -> Result<()> {
-        // Phase 1: Process pending evolutions (Triggered → record as learning)
+        // Phase 1: Process pending evolutions (Triggered → run pipeline)
         let pending = self.list_pending_ids().await;
         if !pending.is_empty() {
             info!(
@@ -696,19 +723,19 @@ impl EvolutionService {
             }
         }
 
-        // Phase 2: Drive rollout advancement
+        // Phase 2: Check observation windows
         let active = self.active_evolutions.lock().await;
-        let rolling_out: Vec<(String, String)> = active.iter()
+        let observing: Vec<(String, String)> = active.iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         drop(active);
 
-        for (skill_name, evolution_id) in rolling_out {
-            if let Err(e) = self.tick_single_rollout(&skill_name, &evolution_id).await {
+        for (skill_name, evolution_id) in observing {
+            if let Err(e) = self.tick_single_observation(&skill_name, &evolution_id).await {
                 error!(
                     evolution_id = %evolution_id,
                     error = %e,
-                    "🧠 [自进化] 灰度发布 tick 错误"
+                    "🧠 [自进化] 观察窗口 tick 错误"
                 );
             }
         }
@@ -718,7 +745,7 @@ impl EvolutionService {
 
     /// Process a pending evolution.
     ///
-    /// If an LLM provider is configured, runs the full pipeline (generate→audit→dry run→shadow test→rollout).
+    /// If an LLM provider is configured, runs the full pipeline (generate→audit→compile→deploy+observe).
     /// Otherwise, just marks the record as "Generating" so list_skills can show it.
     async fn process_pending_evolution(
         &self,
@@ -758,21 +785,15 @@ impl EvolutionService {
                 evolution_id = %evolution_id,
                 "🧠 [自进化] LLM provider 可用，开始执行完整进化 pipeline"
             );
-            let test_executor = RhaiSyntaxTestExecutor {
-                skills_dir: self.evolution.skills_dir().to_path_buf(),
-            };
-            match self.run_single_evolution(evolution_id, llm_provider.as_ref(), &test_executor).await {
+            match self.run_single_evolution(evolution_id, llm_provider.as_ref()).await {
                 Ok(true) => {
                     info!(
                         skill = %skill_name,
                         evolution_id = %evolution_id,
-                        "🧠 [自进化] 技能 `{}` 进化 pipeline 完成，灰度发布已启动",
+                        "🧠 [自进化] 技能 `{}` 进化 pipeline 完成，观察窗口已启动",
                         skill_name
                     );
-                    // Initialize rollout stats
-                    let mut stats = self.rollout_stats.lock().await;
-                    stats.active.entry(evolution_id.to_string())
-                        .or_insert((0, 0, chrono::Utc::now().timestamp()));
+                    // Observation stats already initialized in run_single_evolution
                 }
                 Ok(false) => {
                     warn!(
@@ -811,79 +832,62 @@ impl EvolutionService {
         Ok(())
     }
 
-    async fn tick_single_rollout(
+    /// P1: 观察窗口 tick — 检查错误率和观察时间
+    async fn tick_single_observation(
         &self,
         skill_name: &str,
         evolution_id: &str,
     ) -> Result<()> {
         let record = match self.evolution.load_record(evolution_id) {
             Ok(r) => r,
-            Err(_) => return Ok(()), // 记录不存在，跳过
+            Err(_) => return Ok(()),
         };
 
-        // 只处理 RollingOut 状态
-        if record.status != EvolutionStatus::RollingOut {
+        // 只处理 Observing 状态（兼容旧 RollingOut）
+        let status = record.status.normalize();
+        if *status != EvolutionStatus::Observing {
             // 如果已完成或已回滚，清理
-            if record.status == EvolutionStatus::Completed
-                || record.status == EvolutionStatus::RolledBack
-                || record.status == EvolutionStatus::Failed
+            if *status == EvolutionStatus::Completed
+                || *status == EvolutionStatus::RolledBack
+                || *status == EvolutionStatus::Failed
             {
                 self.cleanup_evolution(skill_name, evolution_id).await;
             }
             return Ok(());
         }
 
-        let rollout = record.rollout.as_ref()
-            .ok_or_else(|| Error::Evolution("No rollout config".to_string()))?;
-
-        let current_stage = &rollout.stages[rollout.current_stage];
-        let stats = self.rollout_stats.lock().await;
+        let stats = self.observation_stats.lock().await;
         let error_rate = stats.error_rate(evolution_id);
-        let elapsed_minutes = stats.stage_elapsed_minutes(evolution_id);
         drop(stats);
 
-        // 检查是否需要回滚
-        if error_rate > current_stage.error_threshold {
-            warn!(
-                evolution_id = %evolution_id,
-                error_rate = error_rate,
-                threshold = current_stage.error_threshold,
-                stage = rollout.current_stage,
-                "Error rate exceeded threshold, rolling back"
-            );
-            self.evolution.rollback(evolution_id, &format!(
-                "Error rate {:.2}% exceeded threshold {:.2}% at stage {}",
-                error_rate * 100.0,
-                current_stage.error_threshold * 100.0,
-                rollout.current_stage,
-            )).await?;
-            self.cleanup_evolution(skill_name, evolution_id).await;
-            return Ok(());
-        }
-
-        // 检查是否可以推进到下一阶段
-        if elapsed_minutes >= current_stage.duration_minutes {
-            info!(
-                evolution_id = %evolution_id,
-                stage = rollout.current_stage,
-                elapsed_minutes = elapsed_minutes,
-                error_rate = error_rate,
-                "Stage duration met, advancing rollout"
-            );
-
-            let completed = self.evolution.advance_rollout_stage(evolution_id).await?;
-
-            if completed {
+        // 使用 check_observation 检查观察窗口状态
+        match self.evolution.check_observation(evolution_id, error_rate)? {
+            Some(true) => {
+                // 观察完成，标记成功
                 info!(
                     evolution_id = %evolution_id,
                     skill = %skill_name,
-                    "Rollout completed successfully"
+                    error_rate = error_rate,
+                    "🧠 [观察] 观察窗口到期，错误率正常，标记完成"
                 );
+                self.evolution.mark_completed(evolution_id)?;
                 self.cleanup_evolution(skill_name, evolution_id).await;
-            } else {
-                // 重置阶段统计
-                let mut stats = self.rollout_stats.lock().await;
-                stats.reset_stage(evolution_id);
+            }
+            Some(false) => {
+                // 错误率超阈值，回滚
+                warn!(
+                    evolution_id = %evolution_id,
+                    error_rate = error_rate,
+                    "🧠 [观察] 错误率超阈值，回滚"
+                );
+                self.evolution.rollback(evolution_id, &format!(
+                    "Error rate {:.2}% exceeded threshold during observation",
+                    error_rate * 100.0,
+                )).await?;
+                self.cleanup_evolution_rollback(skill_name, evolution_id).await;
+            }
+            None => {
+                // 仍在观察中，不做操作
             }
         }
 
@@ -891,10 +895,6 @@ impl EvolutionService {
     }
 
     /// 报告能力执行错误（统一错误追踪）
-    ///
-    /// 与 report_error() 类似，但用于 Capability 执行失败。
-    /// 当错误达到阈值时，返回 should_re_evolve=true，
-    /// 由调用方决定是否触发 CoreEvolution 重新进化。
     pub async fn report_capability_error(
         &self,
         capability_id: &str,
@@ -938,30 +938,26 @@ impl EvolutionService {
         }
     }
 
-    /// 报告灰度期间的技能调用结果（供外部在执行技能后调用）
+    /// 报告观察期间的技能调用结果（供外部在执行技能后调用）
     pub async fn report_skill_call(&self, skill_name: &str, is_error: bool) {
         let active = self.active_evolutions.lock().await;
         if let Some(evolution_id) = active.get(skill_name) {
             let evolution_id = evolution_id.clone();
             drop(active);
-            let mut stats = self.rollout_stats.lock().await;
+            let mut stats = self.observation_stats.lock().await;
             stats.record_call(&evolution_id, is_error);
         }
     }
 
-    /// 获取某个技能当前的灰度百分比（供路由逻辑使用）
-    pub async fn get_rollout_percentage(&self, skill_name: &str) -> Option<u8> {
+    /// 检查某个技能是否在观察期中
+    pub async fn is_observing(&self, skill_name: &str) -> bool {
         let active = self.active_evolutions.lock().await;
-        let evolution_id = active.get(skill_name)?.clone();
-        drop(active);
-
-        let record = self.evolution.load_record(&evolution_id).ok()?;
-        let rollout = record.rollout.as_ref()?;
-        if record.status == EvolutionStatus::RollingOut {
-            Some(rollout.stages[rollout.current_stage].percentage)
-        } else {
-            None
+        if let Some(evolution_id) = active.get(skill_name) {
+            if let Ok(record) = self.evolution.load_record(evolution_id) {
+                return *record.status.normalize() == EvolutionStatus::Observing;
+            }
         }
+        false
     }
 
     /// 获取活跃进化列表
@@ -969,25 +965,46 @@ impl EvolutionService {
         self.active_evolutions.lock().await.clone()
     }
 
-    /// 清理已完成/失败的进化
+    /// 清理已完成/失败的进化（成功时清除错误计数器）
     async fn cleanup_evolution(&self, skill_name: &str, evolution_id: &str) {
+        self.cleanup_evolution_inner(skill_name, evolution_id, false).await;
+    }
+
+    /// 清理回滚的进化（设置冷却期，不清除错误计数器）
+    async fn cleanup_evolution_rollback(&self, skill_name: &str, evolution_id: &str) {
+        self.cleanup_evolution_inner(skill_name, evolution_id, true).await;
+    }
+
+    async fn cleanup_evolution_inner(&self, skill_name: &str, evolution_id: &str, is_rollback: bool) {
         let mut active = self.active_evolutions.lock().await;
         active.remove(skill_name);
         drop(active);
 
-        let mut stats = self.rollout_stats.lock().await;
+        let mut stats = self.observation_stats.lock().await;
         stats.remove(evolution_id);
         drop(stats);
 
         let mut tracker = self.error_tracker.lock().await;
-        tracker.clear(skill_name);
-
-        info!(
-            skill = %skill_name,
-            evolution_id = %evolution_id,
-            "🧠 [自进化] 技能 `{}` 进化记录已清理 ({})",
-            skill_name, evolution_id
-        );
+        if is_rollback {
+            // 回滚时：设置冷却期，避免立即重新触发进化
+            tracker.set_cooldown(skill_name);
+            info!(
+                skill = %skill_name,
+                evolution_id = %evolution_id,
+                cooldown_minutes = tracker.cooldown_minutes,
+                "🧠 [自进化] 技能 `{}` 已回滚，进入 {} 分钟冷却期 ({})",
+                skill_name, tracker.cooldown_minutes, evolution_id
+            );
+        } else {
+            // 成功时：清除错误计数器
+            tracker.clear(skill_name);
+            info!(
+                skill = %skill_name,
+                evolution_id = %evolution_id,
+                "🧠 [自进化] 技能 `{}` 进化记录已清理 ({})",
+                skill_name, evolution_id
+            );
+        }
     }
 
     /// 列出所有待处理的进化 ID（状态为 Triggered 但尚未开始 pipeline 的）
@@ -1129,7 +1146,7 @@ impl EvolutionService {
             tracker.errors.clear();
         }
         {
-            let mut stats = self.rollout_stats.lock().await;
+            let mut stats = self.observation_stats.lock().await;
             stats.active.clear();
         }
 
@@ -1198,15 +1215,16 @@ impl EvolutionService {
                     EvolutionStatus::Auditing => "正在审计".to_string(),
                     EvolutionStatus::AuditPassed => "审计通过".to_string(),
                     EvolutionStatus::AuditFailed => "审计失败".to_string(),
-                    EvolutionStatus::DryRunPassed => "编译检查通过".to_string(),
-                    EvolutionStatus::DryRunFailed => "编译检查失败".to_string(),
-                    EvolutionStatus::Testing => "正在测试".to_string(),
-                    EvolutionStatus::TestPassed => "测试通过".to_string(),
-                    EvolutionStatus::TestFailed => "测试失败".to_string(),
-                    EvolutionStatus::RollingOut => "灰度发布中".to_string(),
+                    EvolutionStatus::CompilePassed => "编译检查通过".to_string(),
+                    EvolutionStatus::CompileFailed => "编译检查失败".to_string(),
+                    EvolutionStatus::Observing => "已部署，观察中".to_string(),
                     EvolutionStatus::Completed => "已完成".to_string(),
                     EvolutionStatus::RolledBack => "已回滚".to_string(),
                     EvolutionStatus::Failed => "失败".to_string(),
+                    // Legacy statuses
+                    EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "编译检查通过".to_string(),
+                    EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "编译检查失败".to_string(),
+                    EvolutionStatus::RollingOut => "已部署，观察中".to_string(),
                 },
                 created_at: r.created_at,
                 error_snippet: r.context.error_stack.as_ref().map(|e| {
@@ -1221,110 +1239,13 @@ impl EvolutionService {
             match r.status {
                 EvolutionStatus::Completed => learned.push(summary),
                 EvolutionStatus::Failed | EvolutionStatus::RolledBack
-                    | EvolutionStatus::AuditFailed | EvolutionStatus::DryRunFailed
-                    | EvolutionStatus::TestFailed => failed.push(summary),
+                    | EvolutionStatus::AuditFailed | EvolutionStatus::CompileFailed
+                    | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed => failed.push(summary),
                 _ => learning.push(summary),
             }
         }
 
         Ok((learning, learned, failed))
-    }
-}
-
-/// 真实的 Rhai 语法测试执行器
-///
-/// 将生成的 Rhai 脚本写入临时文件并用 Rhai 引擎编译，
-/// 验证语法正确性。比 BasicTestExecutor（永远返回 pass）更有意义。
-struct RhaiSyntaxTestExecutor {
-    skills_dir: std::path::PathBuf,
-}
-
-#[async_trait::async_trait]
-impl ShadowTestExecutor for RhaiSyntaxTestExecutor {
-    async fn execute_tests(&self, skill_name: &str, diff: &str) -> Result<ShadowTestResult> {
-        let now = chrono::Utc::now().timestamp();
-
-        // Write the script to a temp file and compile it
-        let temp_path = std::env::temp_dir()
-            .join(format!("evo_test_{}_{}.rhai", skill_name, now));
-        if let Err(e) = std::fs::write(&temp_path, diff) {
-            return Ok(ShadowTestResult {
-                passed: false,
-                test_cases_run: 1,
-                test_cases_passed: 0,
-                errors: vec![format!("Failed to write temp file: {}", e)],
-                tested_at: now,
-            });
-        }
-
-        let engine = rhai::Engine::new();
-        let content = match std::fs::read_to_string(&temp_path) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(ShadowTestResult {
-                    passed: false,
-                    test_cases_run: 1,
-                    test_cases_passed: 0,
-                    errors: vec![format!("Failed to read temp file: {}", e)],
-                    tested_at: now,
-                });
-            }
-        };
-
-        let _ = std::fs::remove_file(&temp_path);
-
-        match engine.compile(&content) {
-            Ok(_) => {
-                // Also check if the skill has test fixtures and run them
-                let tests_dir = self.skills_dir.join(skill_name).join("tests");
-                let mut errors = Vec::new();
-                let mut cases_run = 1u32; // 1 for syntax check
-                let mut cases_passed = 1u32;
-
-                if tests_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&tests_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().is_some_and(|e| e == "json") {
-                                cases_run += 1;
-                                // For now just verify the fixture JSON is valid
-                                match std::fs::read_to_string(&path) {
-                                    Ok(fixture_content) => {
-                                        if serde_json::from_str::<serde_json::Value>(&fixture_content).is_ok() {
-                                            cases_passed += 1;
-                                        } else {
-                                            errors.push(format!(
-                                                "Invalid test fixture JSON: {}",
-                                                path.file_name().unwrap_or_default().to_string_lossy()
-                                            ));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        errors.push(format!("Cannot read fixture: {}", e));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Ok(ShadowTestResult {
-                    passed: errors.is_empty(),
-                    test_cases_run: cases_run,
-                    test_cases_passed: cases_passed,
-                    errors,
-                    tested_at: now,
-                })
-            }
-            Err(e) => Ok(ShadowTestResult {
-                passed: false,
-                test_cases_run: 1,
-                test_cases_passed: 0,
-                errors: vec![format!("Rhai syntax error: {}", e)],
-                tested_at: now,
-            }),
-        }
     }
 }
 
@@ -1369,12 +1290,10 @@ mod tests {
         let mut tracker = ErrorTracker::new(1, 30);
         let r = tracker.record_error("test_skill");
         assert!(r.trigger.is_some());
-        // After trigger, counter is cleared internally.
-        // But clear() also resets, so next error is first again.
         tracker.clear("test_skill");
         let r = tracker.record_error("test_skill");
         assert!(r.is_first);
-        assert!(r.trigger.is_some()); // triggers again at threshold=1
+        assert!(r.trigger.is_some());
     }
 
     #[test]
@@ -1389,9 +1308,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rollout_stats() {
-        let mut stats = RolloutStats::default();
-        stats.active.insert("evo_1".to_string(), (0, 0, chrono::Utc::now().timestamp()));
+    fn test_observation_stats() {
+        let mut stats = ObservationStats::default();
+        stats.active.insert("evo_1".to_string(), (0, 0));
 
         stats.record_call("evo_1", false);
         stats.record_call("evo_1", false);

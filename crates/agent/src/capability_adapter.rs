@@ -197,8 +197,8 @@ impl CoreEvolutionOps for CoreEvolutionAdapter {
         Ok(json!({
             "capability_id": capability_id,
             "unblocked": unblocked,
-            "message": if unblocked {
-                format!("Capability '{}' has been unblocked. It can now be auto-triggered again.", capability_id)
+            "message": if unblocked > 0 {
+                format!("Capability '{}' has been unblocked ({} records). It can now be auto-triggered again.", capability_id, unblocked)
             } else {
                 format!("Capability '{}' was not blocked.", capability_id)
             }

@@ -61,7 +61,8 @@ impl ListSkillsTool {
             .filter(|r| {
                 let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 matches!(status, "Triggered" | "Generating" | "Generated" | "Auditing"
-                    | "AuditPassed" | "DryRunPassed" | "Testing" | "TestPassed" | "RollingOut")
+                    | "AuditPassed" | "CompilePassed" | "DryRunPassed" | "Testing" | "TestPassed"
+                    | "Observing" | "RollingOut")
             })
             .map(|r| {
                 let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -70,11 +71,10 @@ impl ListSkillsTool {
                     "Generating" => "正在生成改进方案",
                     "Generated" => "改进方案已生成，等待审计",
                     "Auditing" => "正在审计改进方案",
-                    "AuditPassed" => "审计通过，准备测试",
-                    "DryRunPassed" => "编译检查通过，准备影子测试",
-                    "Testing" => "正在进行影子测试",
-                    "TestPassed" => "测试通过，准备灰度发布",
-                    "RollingOut" => "正在灰度发布中",
+                    "AuditPassed" => "审计通过，准备编译检查",
+                    "CompilePassed" | "DryRunPassed" | "TestPassed" => "编译检查通过，准备部署",
+                    "Testing" => "正在编译检查",
+                    "Observing" | "RollingOut" => "已部署，观察窗口中",
                     _ => status,
                 };
                 json!({

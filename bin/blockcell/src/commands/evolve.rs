@@ -1,6 +1,6 @@
 use blockcell_core::{Config, Paths};
 use blockcell_skills::evolution::{
-    EvolutionRecord, EvolutionStatus, LLMProvider, ShadowTestExecutor, ShadowTestResult,
+    EvolutionRecord, EvolutionStatus, LLMProvider,
 };
 use blockcell_skills::service::{EvolutionService, EvolutionServiceConfig};
 use blockcell_skills::is_builtin_tool;
@@ -31,25 +31,6 @@ impl LLMProvider for OpenAILLMAdapter {
         ];
         let response = self.provider.chat(&messages, &[]).await?;
         Ok(response.content.unwrap_or_default())
-    }
-}
-
-// === Shadow Test Executor ===
-// Basic implementation that always passes (for manual evolution, the user
-// will verify the result themselves).
-
-struct BasicTestExecutor;
-
-#[async_trait::async_trait]
-impl ShadowTestExecutor for BasicTestExecutor {
-    async fn execute_tests(&self, _skill_name: &str, _diff: &str) -> blockcell_core::Result<ShadowTestResult> {
-        Ok(ShadowTestResult {
-            passed: true,
-            test_cases_run: 1,
-            test_cases_passed: 1,
-            errors: vec![],
-            tested_at: chrono::Utc::now().timestamp(),
-        })
     }
 }
 
@@ -94,13 +75,11 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let test_executor = BasicTestExecutor;
-
     // Step 3: Drive the full pipeline with progress output
     println!("  🔧 Running evolution pipeline...");
     println!();
 
-    match service.run_pending_evolutions(&llm_adapter, &test_executor).await {
+    match service.run_pending_evolutions(&llm_adapter).await {
         Ok(completed) => {
             // Reload the record to show final status
             let records_dir = paths.workspace().join("evolution_records");
@@ -139,23 +118,16 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
                         }
                     }
                 }
-                if record.status == EvolutionStatus::DryRunFailed {
+                if record.status == EvolutionStatus::CompileFailed || record.status == EvolutionStatus::DryRunFailed {
                     println!("  ❌ Build check failed");
                 }
-                if let Some(ref test) = record.shadow_test {
-                    println!("  🧪 Tests: {}/{} passed", test.test_cases_passed, test.test_cases_run);
-                }
-                if record.status == EvolutionStatus::RollingOut || record.status == EvolutionStatus::Completed {
-                    if let Some(ref rollout) = record.rollout {
-                        let stage = &rollout.stages[rollout.current_stage];
-                        println!("  🚀 Canary rollout: stage {}/{} ({}%)",
-                            rollout.current_stage + 1, rollout.stages.len(), stage.percentage);
-                    }
+                if record.status == EvolutionStatus::Observing || record.status == EvolutionStatus::Completed {
+                    println!("  🚀 Deployed, observation window active");
                 }
 
                 if !completed.is_empty() {
                     println!();
-                    println!("  🎉 Evolution pipeline complete, canary rollout started!");
+                    println!("  🎉 Evolution pipeline complete, observation started!");
                 }
             }
         }
@@ -420,24 +392,14 @@ async fn watch_evolution(paths: &Paths, evolution_id: &str) -> anyhow::Result<()
                                 }
                             }
                         }
-                        EvolutionStatus::TestPassed => {
-                            if let Some(ref test) = record.shadow_test {
-                                println!("     ✅ Tests {}/{} passed", test.test_cases_passed, test.test_cases_run);
-                            }
+                        EvolutionStatus::CompilePassed | EvolutionStatus::TestPassed | EvolutionStatus::DryRunPassed => {
+                            println!("     ✅ Compile check passed");
                         }
-                        EvolutionStatus::TestFailed => {
-                            if let Some(ref test) = record.shadow_test {
-                                for err in &test.errors {
-                                    println!("     ❌ {}", err);
-                                }
-                            }
+                        EvolutionStatus::CompileFailed | EvolutionStatus::TestFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::Testing => {
+                            println!("     ❌ Compile check failed");
                         }
-                        EvolutionStatus::RollingOut => {
-                            if let Some(ref rollout) = record.rollout {
-                                let stage = &rollout.stages[rollout.current_stage];
-                                println!("     🚀 Canary stage {}/{} ({}%)",
-                                    rollout.current_stage + 1, rollout.stages.len(), stage.percentage);
-                            }
+                        EvolutionStatus::Observing | EvolutionStatus::RollingOut => {
+                            println!("     🚀 Deployed, observation window active");
                         }
                         EvolutionStatus::Completed => {
                             println!("     🎉 Evolution complete!");
@@ -535,11 +497,10 @@ fn print_record_detail(record: &EvolutionRecord) {
     // Pipeline stages
     println!("  📋 Pipeline:");
     print_pipeline_stage("Triggered", true, record.status != EvolutionStatus::Triggered);
-    print_pipeline_stage("Generate Patch", record.patch.is_some(), matches!(record.status, EvolutionStatus::Generated | EvolutionStatus::Auditing | EvolutionStatus::AuditPassed | EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed));
+    print_pipeline_stage("Generate Patch", record.patch.is_some(), matches!(record.status, EvolutionStatus::Generated | EvolutionStatus::Auditing | EvolutionStatus::AuditPassed | EvolutionStatus::CompilePassed | EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut));
     print_pipeline_stage("Audit", record.audit.is_some(), record.audit.as_ref().is_some_and(|a| a.passed));
-    print_pipeline_stage("Dry Run", matches!(record.status, EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed), matches!(record.status, EvolutionStatus::DryRunPassed | EvolutionStatus::Testing | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut | EvolutionStatus::Completed));
-    print_pipeline_stage("Shadow Test", record.shadow_test.is_some(), record.shadow_test.as_ref().is_some_and(|t| t.passed));
-    print_pipeline_stage("Canary Rollout", record.rollout.is_some(), record.status == EvolutionStatus::Completed);
+    print_pipeline_stage("Compile Check", record.status.is_compile_passed() || matches!(record.status, EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::RollingOut), record.status.is_compile_passed() || matches!(record.status, EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::RollingOut));
+    print_pipeline_stage("Deploy & Observe", record.observation.is_some() || record.rollout.is_some(), record.status == EvolutionStatus::Completed);
     println!();
 
     // Patch detail
@@ -573,23 +534,12 @@ fn print_record_detail(record: &EvolutionRecord) {
         println!();
     }
 
-    // Test detail
-    if let Some(ref test) = record.shadow_test {
-        println!("  🧪 Tests: {}/{} passed", test.test_cases_passed, test.test_cases_run);
-        for err in &test.errors {
-            println!("    ❌ {}", err);
-        }
-        println!();
-    }
-
-    // Rollout detail
-    if let Some(ref rollout) = record.rollout {
-        println!("  🚀 Canary Rollout:");
-        for (i, stage) in rollout.stages.iter().enumerate() {
-            let marker = if i == rollout.current_stage { "→" } else if i < rollout.current_stage { "✓" } else { " " };
-            println!("    {} Stage {}: {}% ({}min, error threshold {:.0}%)",
-                marker, i + 1, stage.percentage, stage.duration_minutes, stage.error_threshold * 100.0);
-        }
+    // Observation detail
+    if let Some(ref obs) = record.observation {
+        println!("  🚀 Observation Window:");
+        println!("    Duration: {} min, Error threshold: {:.0}%", obs.duration_minutes, obs.error_threshold * 100.0);
+        let elapsed = (chrono::Utc::now().timestamp() - obs.started_at) / 60;
+        println!("    Elapsed: {} min", elapsed);
         println!();
     }
 }
@@ -609,8 +559,8 @@ fn print_all_status(paths: &Paths) -> anyhow::Result<()> {
     let completed_count = records.iter().filter(|r| r.status == EvolutionStatus::Completed).count();
     let failed_count = records.iter().filter(|r| matches!(r.status,
         EvolutionStatus::Failed | EvolutionStatus::RolledBack |
-        EvolutionStatus::AuditFailed | EvolutionStatus::DryRunFailed |
-        EvolutionStatus::TestFailed
+        EvolutionStatus::AuditFailed | EvolutionStatus::CompileFailed |
+        EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed
     )).count();
 
     println!();
@@ -681,6 +631,7 @@ fn is_terminal(status: &EvolutionStatus) -> bool {
         EvolutionStatus::Failed |
         EvolutionStatus::RolledBack |
         EvolutionStatus::AuditFailed |
+        EvolutionStatus::CompileFailed |
         EvolutionStatus::DryRunFailed |
         EvolutionStatus::TestFailed
     )
@@ -694,12 +645,9 @@ fn status_icon(status: &EvolutionStatus) -> &'static str {
         EvolutionStatus::Auditing => "🔍",
         EvolutionStatus::AuditPassed => "✅",
         EvolutionStatus::AuditFailed => "❌",
-        EvolutionStatus::DryRunPassed => "✅",
-        EvolutionStatus::DryRunFailed => "❌",
-        EvolutionStatus::Testing => "🧪",
-        EvolutionStatus::TestPassed => "✅",
-        EvolutionStatus::TestFailed => "❌",
-        EvolutionStatus::RollingOut => "🚀",
+        EvolutionStatus::CompilePassed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "✅",
+        EvolutionStatus::CompileFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "❌",
+        EvolutionStatus::Observing | EvolutionStatus::RollingOut => "🚀",
         EvolutionStatus::Completed => "🎉",
         EvolutionStatus::RolledBack => "⏪",
         EvolutionStatus::Failed => "💥",
@@ -714,12 +662,9 @@ fn status_desc_cn(status: &EvolutionStatus) -> &'static str {
         EvolutionStatus::Auditing => "auditing",
         EvolutionStatus::AuditPassed => "audit passed",
         EvolutionStatus::AuditFailed => "audit failed",
-        EvolutionStatus::DryRunPassed => "build passed",
-        EvolutionStatus::DryRunFailed => "build failed",
-        EvolutionStatus::Testing => "testing",
-        EvolutionStatus::TestPassed => "test passed",
-        EvolutionStatus::TestFailed => "test failed",
-        EvolutionStatus::RollingOut => "rolling out",
+        EvolutionStatus::CompilePassed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "compile passed",
+        EvolutionStatus::CompileFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "compile failed",
+        EvolutionStatus::Observing | EvolutionStatus::RollingOut => "observing",
         EvolutionStatus::Completed => "completed",
         EvolutionStatus::RolledBack => "rolled back",
         EvolutionStatus::Failed => "failed",

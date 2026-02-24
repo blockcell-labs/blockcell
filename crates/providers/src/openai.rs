@@ -254,6 +254,97 @@ impl OpenAIProvider {
             remaining = pass3_remaining;
         }
 
+        // Pass 4: extract <invoke name="tool_name">...<parameter name="key">value</parameter>...</invoke>
+        // with optional </minimax:tool_call> wrapper.
+        // Format observed from xminimaxm25:
+        //   <invoke name="list_skills">\n</invoke>\n</minimax:tool_call>
+        //   <invoke name="exec">\n<parameter name="command">ls -la</parameter>\n</invoke>\n</minimax:tool_call>
+        if tool_calls.is_empty() {
+            let mut pass4_remaining = String::new();
+            let mut rest4 = remaining.as_str();
+            loop {
+                let lower4 = rest4.to_lowercase();
+                if let Some(invoke_start) = lower4.find("<invoke") {
+                    pass4_remaining.push_str(&rest4[..invoke_start]);
+                    let after_invoke = &rest4[invoke_start + "<invoke".len()..];
+                    // Extract name="..." from the <invoke> tag
+                    if let Some(name_attr_start) = after_invoke.find("name=\"") {
+                        let after_name = &after_invoke[name_attr_start + "name=\"".len()..];
+                        if let Some(name_end) = after_name.find('"') {
+                            let tool_name = after_name[..name_end].trim().to_string();
+                            // Find the > that closes the <invoke ...> tag
+                            let tag_content_start = &after_invoke[name_attr_start + "name=\"".len() + name_end + 1..];
+                            if let Some(gt_pos) = tag_content_start.find('>') {
+                                let body = &tag_content_start[gt_pos + 1..];
+                                // Find </invoke> end
+                                let body_lower = body.to_lowercase();
+                                let invoke_end = body_lower.find("</invoke>");
+                                let (params_str, after_body) = if let Some(end) = invoke_end {
+                                    (&body[..end], &body[end + "</invoke>".len()..])
+                                } else {
+                                    (body, "")
+                                };
+                                // Parse <parameter name="key">value</parameter> pairs
+                                let mut args = serde_json::Map::new();
+                                let mut scan = params_str;
+                                loop {
+                                    let sl = scan.to_lowercase();
+                                    if let Some(p_start) = sl.find("<parameter") {
+                                        let after_p = &scan[p_start + "<parameter".len()..];
+                                        if let Some(ns) = after_p.find("name=\"") {
+                                            let an = &after_p[ns + "name=\"".len()..];
+                                            if let Some(ne) = an.find('"') {
+                                                let param_name = an[..ne].to_string();
+                                                if let Some(gt) = after_p.find('>') {
+                                                    let value_str = &after_p[gt + 1..];
+                                                    let vl = value_str.to_lowercase();
+                                                    if let Some(close) = vl.find("</parameter>") {
+                                                        let value = value_str[..close].to_string();
+                                                        // Try to parse as JSON value (number, bool, etc.)
+                                                        let json_val = serde_json::from_str::<Value>(&value)
+                                                            .unwrap_or(Value::String(value));
+                                                        args.insert(param_name, json_val);
+                                                        scan = &value_str[close + "</parameter>".len()..];
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        scan = &scan[p_start + "<parameter".len()..];
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if !tool_name.is_empty() {
+                                    tool_calls.push(ToolCallRequest {
+                                        id: format!("text_call_{}", call_index),
+                                        name: tool_name,
+                                        arguments: Value::Object(args),
+                                    });
+                                    call_index += 1;
+                                }
+                                // Skip optional </minimax:tool_call> after </invoke>
+                                let trimmed_after = after_body.trim_start();
+                                rest4 = if trimmed_after.to_lowercase().starts_with("</minimax:tool_call>") {
+                                    &trimmed_after["</minimax:tool_call>".len()..]
+                                } else {
+                                    after_body
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    // Couldn't parse this <invoke>, skip it
+                    pass4_remaining.push_str(&rest4[invoke_start..invoke_start + "<invoke".len()]);
+                    rest4 = &rest4[invoke_start + "<invoke".len()..];
+                } else {
+                    pass4_remaining.push_str(rest4);
+                    break;
+                }
+            }
+            remaining = pass4_remaining;
+        }
+
         let remaining = remaining.trim().to_string();
         (remaining, tool_calls)
     }
@@ -744,5 +835,47 @@ Done."#;
         let tc = OpenAIProvider::parse_nonstandard_tool_block(block, 0).unwrap();
         assert_eq!(tc.name, "read_file");
         assert_eq!(tc.arguments["path"], "/tmp/test.txt");
+    }
+
+    #[test]
+    fn test_parse_minimax_invoke_no_params() {
+        // Exact format from xminimaxm25 logs: <invoke name="list_skills">\n</invoke>\n</minimax:tool_call>
+        let content = "\n\n\n\n<invoke name=\"list_skills\">\n</invoke>\n</minimax:tool_call>";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1, "Should parse 1 tool call, got: {:?}", calls);
+        assert_eq!(calls[0].name, "list_skills");
+        assert!(calls[0].arguments.as_object().unwrap().is_empty());
+        assert!(remaining.is_empty(), "remaining should be empty, got: {:?}", remaining);
+    }
+
+    #[test]
+    fn test_parse_minimax_invoke_with_params() {
+        let content = "<invoke name=\"exec\">\n<parameter name=\"command\">ls -la</parameter>\n</invoke>\n</minimax:tool_call>";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "exec");
+        assert_eq!(calls[0].arguments["command"], "ls -la");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_parse_minimax_invoke_multiple_params() {
+        let content = "<invoke name=\"finance_api\">\n<parameter name=\"action\">stock_quote</parameter>\n<parameter name=\"symbol\">601318</parameter>\n</invoke>\n</minimax:tool_call>";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "finance_api");
+        assert_eq!(calls[0].arguments["action"], "stock_quote");
+        assert_eq!(calls[0].arguments["symbol"], 601318);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_parse_minimax_invoke_without_minimax_wrapper() {
+        // Sometimes the model omits the </minimax:tool_call> wrapper
+        let content = "Let me check.\n<invoke name=\"list_skills\">\n</invoke>\nDone.";
+        let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_skills");
+        assert!(remaining.contains("Let me check."));
     }
 }

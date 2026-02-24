@@ -432,6 +432,7 @@ dependencies = [
  "futures",
  "mime_guess",
  "reqwest",
+ "rhai",
  "rusqlite",
  "rust-embed",
  "serde",

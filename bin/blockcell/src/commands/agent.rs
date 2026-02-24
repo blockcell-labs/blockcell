@@ -25,7 +25,7 @@ use blockcell_storage::MemoryStore;
 use blockcell_tools::{CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Built-in tools grouped by category for /tools display.
 /// This must include ALL tools registered in ToolRegistry::with_defaults().
@@ -191,7 +191,13 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
         }
     }
 
-    let mut core_evo = CoreEvolution::new(paths.workspace().to_path_buf(), cap_registry_raw.clone());
+    // 使用配置中的 LLM 超时设置，默认 300 秒
+    let llm_timeout_secs = 300u64;
+    let mut core_evo = CoreEvolution::new(
+        paths.workspace().to_path_buf(),
+        cap_registry_raw.clone(),
+        llm_timeout_secs,
+    );
 
     // Create an LLM provider bridge so CoreEvolution can generate code autonomously
     if let Ok(evo_provider) = create_provider(&config) {
@@ -212,7 +218,23 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
     if let Some(msg) = message {
         // Single message mode — no need for CronService
         let tool_registry = ToolRegistry::with_defaults();
-        let mut runtime = AgentRuntime::new(config, paths, provider, tool_registry)?;
+        let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+        
+        // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
+        if config.agents.defaults.evolution_model.is_some()
+            || config.agents.defaults.evolution_provider.is_some()
+        {
+            match super::provider::create_evolution_provider(&config) {
+                Ok(evo_provider) => {
+                    runtime.set_evolution_provider(evo_provider);
+                    info!("Evolution provider configured with independent model");
+                }
+                Err(e) => {
+                    warn!("Failed to create evolution provider: {}, using main provider", e);
+                }
+            }
+        }
+        
         if let Some(ref store) = memory_store_handle {
             runtime.set_memory_store(store.clone());
         }
@@ -321,7 +343,23 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
 
         // Create agent runtime with outbound channel (consumes config)
         let tool_registry = ToolRegistry::with_defaults();
-        let mut runtime = AgentRuntime::new(config, paths.clone(), provider, tool_registry)?;
+        let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+        
+        // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
+        if config.agents.defaults.evolution_model.is_some()
+            || config.agents.defaults.evolution_provider.is_some()
+        {
+            match super::provider::create_evolution_provider(&config) {
+                Ok(evo_provider) => {
+                    runtime.set_evolution_provider(evo_provider);
+                    info!("Evolution provider configured with independent model");
+                }
+                Err(e) => {
+                    warn!("Failed to create evolution provider: {}, using main provider", e);
+                }
+            }
+        }
+        
         runtime.set_outbound(outbound_tx);
         runtime.set_confirm(confirm_tx);
         runtime.set_task_manager(task_manager.clone());
@@ -844,10 +882,9 @@ fn print_skills_status(paths: &Paths) {
                 "Generated" => "generated",
                 "Auditing" => "auditing",
                 "AuditPassed" => "audit passed",
-                "DryRunPassed" => "build passed",
-                "Testing" => "testing",
-                "TestPassed" => "test passed",
-                "RollingOut" => "rolling out",
+                "CompilePassed" | "DryRunPassed" | "TestPassed" => "compile passed",
+                "CompileFailed" | "DryRunFailed" | "TestFailed" | "Testing" => "compile failed",
+                "Observing" | "RollingOut" => "observing",
                 _ => "in progress",
             };
             println!("    • {} [{}] ({})", r.skill_name, status_desc, format_timestamp(r.created_at));

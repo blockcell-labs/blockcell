@@ -426,8 +426,8 @@ impl AgentRuntime {
     ) -> Result<Self> {
         let mut context_builder = ContextBuilder::new(paths.clone(), config.clone());
 
-        // Wrap the provider in an Arc so it can be shared with the EvolutionService.
-        // This enables tick() to automatically drive the full evolution pipeline.
+        // 默认使用主 provider 作为 evolution provider
+        // 可以通过 set_evolution_provider() 方法覆盖
         let provider_arc: Arc<dyn Provider> = Arc::from(provider);
         let llm_adapter = Arc::new(ProviderLLMAdapter {
             provider: provider_arc.clone(),
@@ -483,6 +483,16 @@ impl AgentRuntime {
     /// Set the broadcast sender for streaming events to WebSocket clients.
     pub fn set_event_tx(&mut self, tx: broadcast::Sender<String>) {
         self.event_tx = Some(tx);
+    }
+
+    /// 设置独立的自进化 LLM provider
+    /// 用于避免自进化与对话抢占并发
+    pub fn set_evolution_provider(&mut self, provider: Box<dyn Provider>) {
+        let provider_arc: Arc<dyn Provider> = Arc::from(provider);
+        let llm_adapter = Arc::new(ProviderLLMAdapter {
+            provider: provider_arc,
+        });
+        self.context_builder.set_evolution_llm_provider(llm_adapter);
     }
 
     /// Set the memory store handle for tools and context builder.

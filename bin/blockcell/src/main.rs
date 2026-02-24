@@ -462,6 +462,28 @@ enum SkillsCommands {
         /// Skill name to forget
         name: String,
     },
+    /// Test a skill directory (validate meta.yaml + dry-run SKILL.rhai with mock tools)
+    Test {
+        /// Path to the skill directory (e.g. ./skills/web_search)
+        path: String,
+        /// Simulated user input injected as user_input variable
+        #[arg(long, short)]
+        input: Option<String>,
+        /// Show script logs and verbose meta.yaml output
+        #[arg(long, short)]
+        verbose: bool,
+    },
+    /// Batch-test all skills under a directory
+    TestAll {
+        /// Path to the skills directory (e.g. ./skills)
+        dir: String,
+        /// Simulated user input injected as user_input variable
+        #[arg(long, short)]
+        input: Option<String>,
+        /// Show script logs
+        #[arg(long, short)]
+        verbose: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -675,6 +697,12 @@ async fn main() -> anyhow::Result<()> {
             }
             SkillsCommands::Forget { name } => {
                 commands::skills::forget(&name).await?;
+            }
+            SkillsCommands::Test { path, input, verbose } => {
+                commands::skills::test(&path, input, verbose).await?;
+            }
+            SkillsCommands::TestAll { dir, input, verbose } => {
+                commands::skills::test_all(&dir, input, verbose).await?;
             }
         },
         Commands::Evolve { command } => match command {

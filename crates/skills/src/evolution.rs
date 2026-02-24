@@ -9,6 +9,7 @@ pub struct SkillEvolution {
     skills_dir: PathBuf,
     evolution_db: PathBuf,
     version_manager: VersionManager,
+    llm_timeout_secs: u64,
 }
 
 /// 进化触发原因
@@ -73,48 +74,45 @@ pub struct ShadowTestResult {
     pub tested_at: i64,
 }
 
-/// 灰度发布配置
+/// 观察窗口配置（简化模型：部署后进入观察期，错误率超阈值则回滚）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationWindow {
+    /// 观察窗口时长（分钟）
+    pub duration_minutes: u32,
+    /// 错误率阈值，超过则回滚
+    pub error_threshold: f64,
+    /// 观察开始时间戳
+    pub started_at: i64,
+}
+
+impl Default for ObservationWindow {
+    fn default() -> Self {
+        Self {
+            duration_minutes: 60,
+            error_threshold: 0.1,
+            started_at: chrono::Utc::now().timestamp(),
+        }
+    }
+}
+
+// Legacy type aliases for backward-compatible deserialization of old records
+/// Legacy rollout config (kept for serde compatibility with old records)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutConfig {
+    #[serde(default)]
     pub stages: Vec<RolloutStage>,
+    #[serde(default)]
     pub current_stage: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutStage {
-    pub percentage: u8, // 1, 10, 50, 100
+    #[serde(default)]
+    pub percentage: u8,
+    #[serde(default)]
     pub duration_minutes: u32,
-    pub error_threshold: f64, // 错误率阈值，超过则回滚
-}
-
-impl Default for RolloutConfig {
-    fn default() -> Self {
-        Self {
-            stages: vec![
-                RolloutStage {
-                    percentage: 1,
-                    duration_minutes: 30,
-                    error_threshold: 0.1,
-                },
-                RolloutStage {
-                    percentage: 10,
-                    duration_minutes: 60,
-                    error_threshold: 0.05,
-                },
-                RolloutStage {
-                    percentage: 50,
-                    duration_minutes: 120,
-                    error_threshold: 0.02,
-                },
-                RolloutStage {
-                    percentage: 100,
-                    duration_minutes: 0,
-                    error_threshold: 0.01,
-                },
-            ],
-            current_stage: 0,
-        }
-    }
+    #[serde(default)]
+    pub error_threshold: f64,
 }
 
 /// 每次重试的反馈记录
@@ -136,6 +134,10 @@ pub struct EvolutionRecord {
     pub patch: Option<GeneratedPatch>,
     pub audit: Option<AuditResult>,
     pub shadow_test: Option<ShadowTestResult>,
+    /// 观察窗口（部署后的错误率监控）
+    pub observation: Option<ObservationWindow>,
+    /// Legacy rollout field (for backward-compatible deserialization of old records)
+    #[serde(default, skip_serializing)]
     pub rollout: Option<RolloutConfig>,
     pub status: EvolutionStatus,
     /// 当前尝试次数（从 1 开始）
@@ -158,19 +160,43 @@ pub enum EvolutionStatus {
     Auditing,
     AuditPassed,
     AuditFailed,
+    /// 编译检查通过（合并了原 DryRunPassed + TestPassed）
+    CompilePassed,
+    /// 编译检查失败（合并了原 DryRunFailed + TestFailed）
+    CompileFailed,
+    /// 已部署，观察窗口中（替代原 RollingOut）
+    Observing,
+    Completed,
+    RolledBack,
+    Failed,
+    // Legacy variants kept for backward-compatible deserialization of old records
     DryRunPassed,
     DryRunFailed,
     Testing,
     TestPassed,
     TestFailed,
     RollingOut,
-    Completed,
-    RolledBack,
-    Failed,
+}
+
+impl EvolutionStatus {
+    /// 将旧状态映射到新状态（用于处理旧记录）
+    pub fn normalize(&self) -> &EvolutionStatus {
+        match self {
+            EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => &EvolutionStatus::CompilePassed,
+            EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => &EvolutionStatus::CompileFailed,
+            EvolutionStatus::RollingOut => &EvolutionStatus::Observing,
+            other => other,
+        }
+    }
+
+    /// 检查状态是否等价于 CompilePassed（包括旧状态）
+    pub fn is_compile_passed(&self) -> bool {
+        matches!(self, EvolutionStatus::CompilePassed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed)
+    }
 }
 
 impl SkillEvolution {
-    pub fn new(skills_dir: PathBuf) -> Self {
+    pub fn new(skills_dir: PathBuf, llm_timeout_secs: u64) -> Self {
         let evolution_db = skills_dir.parent()
             .unwrap_or(Path::new("."))
             .join("evolution.db");
@@ -180,6 +206,7 @@ impl SkillEvolution {
             skills_dir,
             evolution_db,
             version_manager,
+            llm_timeout_secs,
         }
     }
 
@@ -229,6 +256,7 @@ impl SkillEvolution {
             patch: None,
             audit: None,
             shadow_test: None,
+            observation: None,
             rollout: None,
             status: EvolutionStatus::Triggered,
             attempt: 1,
@@ -267,9 +295,15 @@ impl SkillEvolution {
             prompt
         );
 
-        // 调用 LLM
+        // 调用 LLM（带超时保护）
         info!(evolution_id = %evolution_id, "📝 [generate] Calling LLM...");
-        let response = llm_provider.generate(&prompt).await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(self.llm_timeout_secs),
+            llm_provider.generate(&prompt)
+        )
+        .await
+        .map_err(|_| Error::Evolution(format!("LLM call timed out after {} seconds", self.llm_timeout_secs)))?
+        .map_err(|e| Error::Evolution(format!("LLM generation failed: {}", e)))?;
 
         info!(
             evolution_id = %evolution_id,
@@ -355,9 +389,15 @@ impl SkillEvolution {
             prompt
         );
 
-        // 调用 LLM
+        // 调用 LLM（带超时保护）
         info!(evolution_id = %evolution_id, "🔄 [regenerate] Calling LLM...");
-        let response = llm_provider.generate(&prompt).await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(self.llm_timeout_secs),
+            llm_provider.generate(&prompt)
+        )
+        .await
+        .map_err(|_| Error::Evolution(format!("LLM call timed out after {} seconds", self.llm_timeout_secs)))?
+        .map_err(|e| Error::Evolution(format!("LLM generation failed: {}", e)))?;
 
         info!(
             evolution_id = %evolution_id,
@@ -397,6 +437,7 @@ impl SkillEvolution {
         record.patch = Some(patch.clone());
         record.audit = None;       // 清除旧审计结果
         record.shadow_test = None;  // 清除旧测试结果
+        record.observation = None;  // 清除观察窗口配置，确保状态一致性
         record.status = EvolutionStatus::Generated;
         record.updated_at = chrono::Utc::now().timestamp();
         self.save_record(&record)?;
@@ -412,6 +453,8 @@ impl SkillEvolution {
     }
 
     /// 审计补丁（独立 LLM 会话）
+    ///
+    /// P0-1 fix: 审计基于应用后的完整脚本，而非原始 patch.diff
     pub async fn audit_patch(
         &self,
         evolution_id: &str,
@@ -426,7 +469,10 @@ impl SkillEvolution {
 
         info!(evolution_id = %evolution_id, "Auditing patch");
 
-        let prompt = self.build_audit_prompt(&record.context, patch)?;
+        // P0-1: 解析最终脚本内容用于审计（而非 diff 文本）
+        let final_script = self.resolve_final_script(&record.skill_name, &patch.diff)?;
+
+        let prompt = self.build_audit_prompt(&record.context, &final_script)?;
 
         info!(
             evolution_id = %evolution_id,
@@ -440,7 +486,13 @@ impl SkillEvolution {
         );
 
         info!(evolution_id = %evolution_id, "🔍 [audit] Calling LLM...");
-        let response = llm_provider.generate(&prompt).await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(self.llm_timeout_secs),
+            llm_provider.generate(&prompt)
+        )
+        .await
+        .map_err(|_| Error::Evolution(format!("LLM call timed out after {} seconds", self.llm_timeout_secs)))?
+        .map_err(|e| Error::Evolution(format!("LLM generation failed: {}", e)))?;
 
         info!(
             evolution_id = %evolution_id,
@@ -488,69 +540,92 @@ impl SkillEvolution {
         Ok(audit_result)
     }
 
-    /// Dry Run - 编译检查
-    /// 返回 (是否通过, 编译错误信息)
-    pub async fn dry_run(&self, evolution_id: &str) -> Result<(bool, Option<String>)> {
+    /// 编译检查（合并了原 dry_run + shadow_test）
+    ///
+    /// P0-3: 单一编译步骤，返回 (是否通过, 编译错误信息)
+    pub async fn compile_check(&self, evolution_id: &str) -> Result<(bool, Option<String>)> {
         let mut record = self.load_record(evolution_id)?;
         let patch = record.patch.as_ref()
-            .ok_or_else(|| Error::Evolution("No patch for dry run".to_string()))?;
+            .ok_or_else(|| Error::Evolution("No patch for compile check".to_string()))?;
 
-        info!(evolution_id = %evolution_id, "Running dry run");
+        info!(evolution_id = %evolution_id, "Running compile check");
 
-        // 应用补丁到临时文件
-        let temp_skill_path = self.apply_patch_to_temp(&record.skill_name, &patch.diff)?;
+        // 解析最终脚本内容
+        let final_script = self.resolve_final_script(&record.skill_name, &patch.diff)?;
+
+        // 写入临时文件
+        let temp_path = std::env::temp_dir().join(format!("{}_compile.rhai", record.skill_name));
+        std::fs::write(&temp_path, &final_script)?;
+
         info!(
             evolution_id = %evolution_id,
-            temp_path = %temp_skill_path.display(),
-            "🔨 [dry_run] Patch applied to temp file"
+            content_len = final_script.len(),
+            content_lines = final_script.lines().count(),
+            "🔨 [compile] Script: {} chars, {} lines",
+            final_script.len(), final_script.lines().count()
+        );
+        debug!(
+            evolution_id = %evolution_id,
+            "🔨 [compile] Script content:\n{}",
+            final_script
         );
 
-        // Log the temp file content for debugging
-        if let Ok(temp_content) = std::fs::read_to_string(&temp_skill_path) {
-            info!(
-                evolution_id = %evolution_id,
-                content_len = temp_content.len(),
-                content_lines = temp_content.lines().count(),
-                "🔨 [dry_run] Temp file: {} chars, {} lines",
-                temp_content.len(), temp_content.lines().count()
-            );
-            debug!(
-                evolution_id = %evolution_id,
-                "🔨 [dry_run] Temp file content:\n{}",
-                temp_content
-            );
-        }
+        // 编译检查
+        info!(evolution_id = %evolution_id, "🔨 [compile] Compiling with Rhai engine...");
+        let (passed, compile_error) = self.compile_skill(&temp_path).await?;
 
-        // 尝试编译
-        info!(evolution_id = %evolution_id, "🔨 [dry_run] Compiling with Rhai engine...");
-        let (passed, compile_error) = self.compile_skill(&temp_skill_path).await?;
+        // 清理临时文件
+        let _ = std::fs::remove_file(&temp_path);
 
         info!(
             evolution_id = %evolution_id,
             passed = passed,
-            "🔨 [dry_run] Compilation result: {}",
+            "🔨 [compile] Result: {}",
             if passed { "PASSED" } else { "FAILED" }
         );
         if let Some(ref err) = compile_error {
             info!(
                 evolution_id = %evolution_id,
-                "🔨 [dry_run] Compile error: {}",
+                "🔨 [compile] Error: {}",
                 err
             );
         }
 
-        // 清理临时文件
-        let _ = std::fs::remove_file(&temp_skill_path);
+        // 如果编译通过，还检查测试 fixtures
+        if passed {
+            let tests_dir = self.skills_dir.join(&record.skill_name).join("tests");
+            if tests_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&tests_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().is_some_and(|e| e == "json") {
+                            if let Ok(fixture_content) = std::fs::read_to_string(&path) {
+                                if serde_json::from_str::<serde_json::Value>(&fixture_content).is_err() {
+                                    let err_msg = format!(
+                                        "Invalid test fixture JSON: {}",
+                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                    );
+                                    warn!(evolution_id = %evolution_id, "🔨 [compile] {}", err_msg);
+                                    record.status = EvolutionStatus::CompileFailed;
+                                    record.updated_at = chrono::Utc::now().timestamp();
+                                    self.save_record(&record)?;
+                                    return Ok((false, Some(err_msg)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-        // 持久化 dry run 结果
         let new_status = if passed {
-            EvolutionStatus::DryRunPassed
+            EvolutionStatus::CompilePassed
         } else {
-            EvolutionStatus::DryRunFailed
+            EvolutionStatus::CompileFailed
         };
         info!(
             evolution_id = %evolution_id,
-            "🔨 [dry_run] Status -> {:?}",
+            "🔨 [compile] Status -> {:?}",
             new_status
         );
         record.status = new_status;
@@ -560,142 +635,79 @@ impl SkillEvolution {
         Ok((passed, compile_error))
     }
 
-    /// Shadow Test - 隔离环境测试
-    pub async fn shadow_test(
-        &self,
-        evolution_id: &str,
-        test_executor: &dyn ShadowTestExecutor,
-    ) -> Result<ShadowTestResult> {
-        let mut record = self.load_record(evolution_id)?;
-        record.status = EvolutionStatus::Testing;
-        self.save_record(&record)?;
-
-        let patch = record.patch.as_ref()
-            .ok_or_else(|| Error::Evolution("No patch for shadow test".to_string()))?;
-
-        info!(evolution_id = %evolution_id, "Running shadow test");
-        info!(
-            evolution_id = %evolution_id,
-            skill = %record.skill_name,
-            diff_len = patch.diff.len(),
-            "🧪 [shadow_test] Executing tests for skill '{}'",
-            record.skill_name
-        );
-
-        let result = test_executor.execute_tests(&record.skill_name, &patch.diff).await?;
-
-        info!(
-            evolution_id = %evolution_id,
-            passed = result.passed,
-            run = result.test_cases_run,
-            passed_count = result.test_cases_passed,
-            errors_count = result.errors.len(),
-            "🧪 [shadow_test] Result: passed={}, {}/{} cases, {} errors",
-            result.passed, result.test_cases_passed, result.test_cases_run, result.errors.len()
-        );
-        for (i, err) in result.errors.iter().enumerate() {
-            info!(
-                evolution_id = %evolution_id,
-                "🧪 [shadow_test]   Error #{}: {}",
-                i + 1, err
-            );
-        }
-
-        record.shadow_test = Some(result.clone());
-        let new_status = if result.passed {
-            EvolutionStatus::TestPassed
-        } else {
-            EvolutionStatus::TestFailed
-        };
-        info!(
-            evolution_id = %evolution_id,
-            "🧪 [shadow_test] Status -> {:?}",
-            new_status
-        );
-        record.status = new_status;
-        record.updated_at = chrono::Utc::now().timestamp();
-        self.save_record(&record)?;
-
-        Ok(result)
-    }
-
-    /// 开始灰度发布
-    pub async fn start_rollout(&self, evolution_id: &str) -> Result<()> {
+    /// 部署新版本并进入观察窗口
+    ///
+    /// P1: 简化模型 — 直接部署，进入观察期（无灰度百分比分流）
+    pub async fn deploy_and_observe(&self, evolution_id: &str) -> Result<()> {
         let mut record = self.load_record(evolution_id)?;
         
-        // 检查前置条件：审计、dry run、shadow test 都必须通过
-        if record.status != EvolutionStatus::TestPassed {
+        // 检查前置条件（兼容旧状态 DryRunPassed/TestPassed）
+        if !record.status.is_compile_passed() {
             return Err(Error::Evolution(format!(
-                "Cannot start rollout: expected status TestPassed, got {:?}",
+                "Cannot deploy: expected status CompilePassed, got {:?}",
                 record.status
             )));
         }
         if record.audit.as_ref().map(|a| !a.passed).unwrap_or(true) {
             return Err(Error::Evolution("Audit not passed".to_string()));
         }
-        if record.shadow_test.as_ref().map(|t| !t.passed).unwrap_or(true) {
-            return Err(Error::Evolution("Shadow test not passed".to_string()));
-        }
 
-        info!(evolution_id = %evolution_id, "Starting rollout");
+        info!(evolution_id = %evolution_id, "Deploying and starting observation");
         info!(
             evolution_id = %evolution_id,
             skill = %record.skill_name,
-            "🚀 [rollout] Pre-conditions met, deploying new version"
+            "🚀 [deploy] Pre-conditions met, deploying new version"
         );
 
-        record.rollout = Some(RolloutConfig::default());
-        record.status = EvolutionStatus::RollingOut;
+        // 创建新版本（直接写入）
+        self.create_new_version(&record)?;
+
+        // 设置观察窗口
+        record.observation = Some(ObservationWindow::default());
+        record.status = EvolutionStatus::Observing;
         record.updated_at = chrono::Utc::now().timestamp();
         self.save_record(&record)?;
 
-        // 创建新版本
-        info!(
-            evolution_id = %evolution_id,
-            "🚀 [rollout] Creating new version via VersionManager..."
-        );
-        self.create_new_version(&record)?;
-
         info!(
             evolution_id = %evolution_id,
             skill = %record.skill_name,
-            "🚀 [rollout] Version deployed, rollout started at 1%"
+            "🚀 [deploy] Version deployed, observation window started (60 min)"
         );
 
         Ok(())
     }
 
-    /// 推进灰度阶段
-    pub async fn advance_rollout_stage(&self, evolution_id: &str) -> Result<bool> {
-        let mut record = self.load_record(evolution_id)?;
+    /// 检查观察窗口状态
+    ///
+    /// 返回: Ok(Some(true)) = 观察完成可标记成功, Ok(Some(false)) = 需要回滚, Ok(None) = 仍在观察中
+    pub fn check_observation(&self, evolution_id: &str, error_rate: f64) -> Result<Option<bool>> {
+        let record = self.load_record(evolution_id)?;
         
-        let rollout = record.rollout.as_mut()
-            .ok_or_else(|| Error::Evolution("No rollout in progress".to_string()))?;
+        let obs = record.observation.as_ref()
+            .ok_or_else(|| Error::Evolution("No observation window".to_string()))?;
 
-        let is_last = rollout.current_stage >= rollout.stages.len() - 1;
-
-        if is_last {
-            record.status = EvolutionStatus::Completed;
-            record.updated_at = chrono::Utc::now().timestamp();
-            self.save_record(&record)?;
-            return Ok(true);
+        // 错误率超阈值 → 回滚
+        if error_rate > obs.error_threshold {
+            return Ok(Some(false));
         }
 
-        rollout.current_stage += 1;
-        let stage = rollout.current_stage;
-        let percentage = rollout.stages[stage].percentage;
+        // 观察时间到且错误率正常 → 完成
+        let elapsed_minutes = (chrono::Utc::now().timestamp() - obs.started_at) / 60;
+        if elapsed_minutes >= obs.duration_minutes as i64 {
+            return Ok(Some(true));
+        }
 
+        // 仍在观察中
+        Ok(None)
+    }
+
+    /// 标记进化完成
+    pub fn mark_completed(&self, evolution_id: &str) -> Result<()> {
+        let mut record = self.load_record(evolution_id)?;
+        record.status = EvolutionStatus::Completed;
         record.updated_at = chrono::Utc::now().timestamp();
         self.save_record(&record)?;
-
-        info!(
-            evolution_id = %evolution_id,
-            stage = stage,
-            percentage = percentage,
-            "Advanced to next rollout stage"
-        );
-
-        Ok(false)
+        Ok(())
     }
 
     /// 回滚
@@ -716,17 +728,6 @@ impl SkillEvolution {
         self.save_record(&record)?;
 
         Ok(())
-    }
-
-    /// 检查是否应该回滚（基于错误率）
-    pub async fn should_rollback(&self, evolution_id: &str, error_rate: f64) -> Result<bool> {
-        let record = self.load_record(evolution_id)?;
-        
-        let rollout = record.rollout.as_ref()
-            .ok_or_else(|| Error::Evolution("No rollout in progress".to_string()))?;
-
-        let current_stage = &rollout.stages[rollout.current_stage];
-        Ok(error_rate > current_stage.error_threshold)
     }
 
     // === 辅助方法 ===
@@ -781,17 +782,12 @@ impl SkillEvolution {
             prompt.push('\n');
         }
 
-        // Output format
-        if has_existing_source {
-            prompt.push_str("## Output Format\n");
-            prompt.push_str("Generate a unified diff patch against the current SKILL.rhai.\n");
-            prompt.push_str("Output ONLY the diff in a ```diff code block. The diff must apply to the Rhai source above.\n");
-        } else {
-            prompt.push_str("## Output Format\n");
-            prompt.push_str("Generate the complete SKILL.rhai file content.\n");
-            prompt.push_str("Output ONLY the Rhai code in a ```rhai code block.\n");
-            prompt.push_str("The script should be a valid, self-contained Rhai script.\n");
-        }
+        // Output format — P0-2: always request complete script (never diff)
+        prompt.push_str("## Output Format\n");
+        prompt.push_str("Generate the COMPLETE SKILL.rhai file content.\n");
+        prompt.push_str("Output ONLY the Rhai code in a ```rhai code block.\n");
+        prompt.push_str("The script must be a valid, self-contained Rhai script with no syntax errors.\n");
+        let _ = has_existing_source; // suppress unused warning
 
         Ok(prompt)
     }
@@ -867,16 +863,16 @@ impl SkillEvolution {
         Ok(prompt)
     }
 
-    fn build_audit_prompt(&self, context: &EvolutionContext, patch: &GeneratedPatch) -> Result<String> {
+    fn build_audit_prompt(&self, context: &EvolutionContext, script_content: &str) -> Result<String> {
         let mut prompt = String::new();
 
         prompt.push_str(&format!(
             "You are a security auditor for Rhai scripts in the blockcell agent framework.\n\
-            Review the following code change for skill '{}'.\n\n",
+            Review the following complete script for skill '{}'.\n\n",
             context.skill_name
         ));
 
-        prompt.push_str(&format!("Code:\n```rhai\n{}\n```\n\n", patch.diff));
+        prompt.push_str(&format!("Code:\n```rhai\n{}\n```\n\n", script_content));
 
         prompt.push_str("\
 Check for the following Rhai-specific issues:\n\
@@ -977,132 +973,16 @@ or\n\
         })
     }
 
-    fn apply_patch_to_temp(&self, skill_name: &str, diff: &str) -> Result<PathBuf> {
-        let skill_path = self.skills_dir.join(skill_name).join("SKILL.rhai");
-        let temp_path = std::env::temp_dir().join(format!("{}_temp.rhai", skill_name));
-
-        if skill_path.exists() {
-            // Existing skill: apply diff patch
-            let original = std::fs::read_to_string(&skill_path)?;
-            let patched = self.apply_diff(&original, diff)?;
-            std::fs::write(&temp_path, patched)?;
-        } else {
-            // New skill: diff IS the full Rhai script content
-            std::fs::write(&temp_path, diff)?;
-        }
-
-        Ok(temp_path)
-    }
-
-    fn apply_diff(&self, original: &str, diff: &str) -> Result<String> {
-        // 逐行应用 unified diff 补丁
-        // hunk header 中的行号是 1-indexed，result_lines 是 0-indexed
-        let result_lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
-        let diff_lines: Vec<&str> = diff.lines().collect();
-
-        let mut orig_idx: usize = 0;
-        let mut i = 0;
-        let mut output = Vec::new();
-        let mut in_hunk = false;
-        let mut misaligned_context = 0usize;
-
-        while i < diff_lines.len() {
-            let line = diff_lines[i];
-
-            // 解析 hunk header: @@ -start,count +start,count @@
-            if line.starts_with("@@") {
-                if let Some(hunk_start) = Self::parse_hunk_header(line) {
-                    // hunk_start 是 1-indexed，转换为 0-indexed 目标位置
-                    let target_idx = hunk_start.saturating_sub(1);
-                    // 先输出 hunk 之前未处理的原始行
-                    while orig_idx < target_idx && orig_idx < result_lines.len() {
-                        output.push(result_lines[orig_idx].clone());
-                        orig_idx += 1;
-                    }
-                    in_hunk = true;
-                    misaligned_context = 0;
-                }
-                i += 1;
-                continue;
-            }
-
-            if !in_hunk {
-                i += 1;
-                continue;
-            }
-
-            if line.starts_with("---") || line.starts_with("+++") {
-                // diff 文件头行，跳过
-            } else if line.starts_with('-') {
-                // 删除行：跳过原始行（不输出）
-                if orig_idx < result_lines.len() {
-                    orig_idx += 1;
-                }
-            } else if line.starts_with('+') {
-                // 新增行：输出到结果
-                output.push(line[1..].to_string());
-            } else if let Some(ctx) = line.strip_prefix(' ') {
-                // 上下文行：验证内容匹配，然后输出原始行
-                if orig_idx < result_lines.len() {
-                    if result_lines[orig_idx].trim() != ctx.trim() {
-                        // 内容不匹配，记录但继续（宽松模式）
-                        misaligned_context += 1;
-                        if misaligned_context > 3 {
-                            // 太多不匹配，说明 diff 与原文严重偏差，回退到原始内容
-                            warn!(
-                                "Diff context mismatch at line {}: expected {:?}, got {:?}. \
-                                Falling back to original content.",
-                                orig_idx + 1, ctx.trim(), result_lines[orig_idx].trim()
-                            );
-                            return Ok(original.to_string());
-                        }
-                    }
-                    output.push(result_lines[orig_idx].clone());
-                    orig_idx += 1;
-                }
-            } else if line.is_empty() {
-                // 空行作为上下文行处理
-                if orig_idx < result_lines.len() {
-                    output.push(result_lines[orig_idx].clone());
-                    orig_idx += 1;
-                }
-            }
-            // 其他行（如 diff 文件头 --- / +++）已在上面处理，这里跳过
-
-            i += 1;
-        }
-
-        // 输出剩余的原始行
-        while orig_idx < result_lines.len() {
-            output.push(result_lines[orig_idx].clone());
-            orig_idx += 1;
-        }
-
-        // 如果 diff 为空或无法解析，返回原始内容
-        if output.is_empty() && !original.is_empty() {
-            warn!("Diff produced empty output, returning original content");
-            return Ok(original.to_string());
-        }
-
-        Ok(output.join("\n"))
-    }
-
-    /// 解析 hunk header，返回原始文件的起始行号
-    fn parse_hunk_header(line: &str) -> Option<usize> {
-        // 格式: @@ -start[,count] +start[,count] @@
-        let line = line.trim_start_matches('@').trim();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(old_range) = parts.first() {
-            let old_range = old_range.trim_start_matches('-');
-            let start_str = old_range.split(',').next()?;
-            return start_str.parse::<usize>().ok();
-        }
-        None
+    /// 解析最终脚本内容
+    ///
+    /// P0-2: 由于所有生成都输出完整脚本，这里直接返回 patch.diff 内容。
+    /// 保留此方法作为统一入口，便于未来扩展。
+    fn resolve_final_script(&self, _skill_name: &str, script_content: &str) -> Result<String> {
+        Ok(script_content.to_string())
     }
 
     /// 编译 Rhai 脚本，返回 (是否成功, 错误信息)
     async fn compile_skill(&self, skill_path: &Path) -> Result<(bool, Option<String>)> {
-        // 使用 Rhai 引擎编译检查
         let engine = rhai::Engine::new();
         let content = std::fs::read_to_string(skill_path)?;
         
@@ -1123,25 +1003,19 @@ or\n\
         }
     }
 
+    /// P0-2: create_new_version 直接写入完整脚本（不再 apply diff）
     fn create_new_version(&self, record: &EvolutionRecord) -> Result<()> {
         let patch = record.patch.as_ref()
             .ok_or_else(|| Error::Evolution("No patch to deploy".to_string()))?;
 
         let skill_dir = self.skills_dir.join(&record.skill_name);
-        let original_path = skill_dir.join("SKILL.rhai");
+        let skill_path = skill_dir.join("SKILL.rhai");
 
         // Ensure skill directory exists (for new skills)
         std::fs::create_dir_all(&skill_dir)?;
 
-        if original_path.exists() {
-            // Existing skill: apply diff patch
-            let original = std::fs::read_to_string(&original_path)?;
-            let patched = self.apply_diff(&original, &patch.diff)?;
-            std::fs::write(&original_path, &patched)?;
-        } else {
-            // New skill: diff IS the full Rhai script content
-            std::fs::write(&original_path, &patch.diff)?;
-        }
+        // 直接写入完整脚本（所有生成都是完整脚本）
+        std::fs::write(&skill_path, &patch.diff)?;
 
         // 通过 VersionManager 创建版本快照
         let changelog = Some(format!(
@@ -1172,14 +1046,19 @@ or\n\
         self.save_record(record)
     }
 
+    /// P2-7: 原子写入 — write-tmp-then-rename，避免崩溃时文件损坏
     fn save_record(&self, record: &EvolutionRecord) -> Result<()> {
-        // 简化实现：使用 JSON 文件存储
         let records_dir = self.evolution_db.parent().unwrap().join("evolution_records");
         std::fs::create_dir_all(&records_dir)?;
         
         let record_file = records_dir.join(format!("{}.json", record.id));
+        let temp_file = records_dir.join(format!("{}.json.tmp", record.id));
         let json = serde_json::to_string_pretty(record)?;
-        std::fs::write(record_file, json)?;
+        
+        // 先写入临时文件
+        std::fs::write(&temp_file, &json)?;
+        // 原子重命名（同一文件系统上是原子操作）
+        std::fs::rename(&temp_file, &record_file)?;
         
         Ok(())
     }
@@ -1202,7 +1081,3 @@ pub trait LLMProvider: Send + Sync {
     async fn generate(&self, prompt: &str) -> Result<String>;
 }
 
-#[async_trait::async_trait]
-pub trait ShadowTestExecutor: Send + Sync {
-    async fn execute_tests(&self, skill_name: &str, diff: &str) -> Result<ShadowTestResult>;
-}

@@ -39,6 +39,7 @@ mime_guess = { workspace = true }
 reqwest = { workspace = true }
 zip = { workspace = true }
 urlencoding = { workspace = true }
+rhai = { workspace = true }
 
 [features]
 default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark"]
