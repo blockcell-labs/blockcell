@@ -22,6 +22,28 @@ fn redact_hub_url(url: &str) -> String {
     "hub".to_string()
 }
 
+fn resolve_download_url(hub_url: &str, skill_name: &str, info: &Value) -> String {
+    let dist_url = info.get("dist_url").and_then(|v| v.as_str());
+    let source_url = info.get("source_url").and_then(|v| v.as_str());
+
+    if let Some(u) = dist_url.or(source_url) {
+        if u.starts_with("http://") || u.starts_with("https://") {
+            return u.to_string();
+        }
+        let base = hub_url.trim_end_matches('/');
+        if u.starts_with('/') {
+            return format!("{}{}", base, u);
+        }
+        return format!("{}/{}", base, u);
+    }
+
+    format!(
+        "{}/v1/skills/{}/download",
+        hub_url.trim_end_matches('/'),
+        urlencoding::encode(skill_name)
+    )
+}
+
 fn resolve_hub_url(ctx: &ToolContext, params: &Value) -> Option<String> {
     let _ = params;
     // 1. Config community_hub.hub_url
@@ -346,8 +368,16 @@ impl Tool for CommunityHubTool {
                 let name = params.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
                 info!(skill = %name, "Community Hub: installing skill");
 
-                // Download zip from hub
-                let url = format!("{}/v1/skills/{}/download", hub_url, urlencoding::encode(name));
+                let info_url = format!("{}/v1/skills/{}/latest", hub_url.trim_end_matches('/'), urlencoding::encode(name));
+                debug!(skill = %name, url = %info_url, "Community Hub: resolving skill metadata");
+                let info = hub_get(&client, &info_url, &api_key).await.unwrap_or_else(|e| {
+                    warn!(skill = %name, err = %e, "Community Hub: failed to fetch skill metadata; falling back to download endpoint");
+                    json!({})
+                });
+
+                let url = resolve_download_url(&hub_url, name, &info);
+                debug!(skill = %name, url = %url, "Community Hub: resolved download url");
+
                 let mut req = client.get(&url);
                 if let Some(ref key) = api_key {
                     req = req.header("Authorization", format!("Bearer {}", key));
