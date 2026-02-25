@@ -11,7 +11,7 @@ impl Tool for SpawnTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "spawn",
-            description: "Spawn a background sub-agent to handle a task. The sub-agent runs independently and reports back when done.",
+            description: "Spawn a long-running background sub-agent for tasks that take minutes to complete (e.g. multi-step research, batch processing, continuous monitoring). DO NOT use spawn if you can answer the user directly in this conversation — spawn is only for truly async workloads that should not block the current reply. The sub-agent runs independently and sends a completion notification when done.",
             parameters: json!({
                 "type": "object",
                 "properties": {

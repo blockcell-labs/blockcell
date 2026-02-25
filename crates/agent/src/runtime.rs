@@ -2220,23 +2220,12 @@ async fn run_subagent_task(
             task_manager.set_completed(&task_id, &result).await;
             info!(task_id = %task_id, label = %label, "Subagent completed");
 
-            // Notify the origin channel that the task is done
+            // Send the sub-agent's result directly to the origin channel.
             if let Some(tx) = &outbound_tx {
-                let short_id = truncate_str(&task_id, 8);
-                let result_preview = if result.chars().count() > 500 {
-                    format!("{}...", truncate_str(&result, 500))
-                } else {
-                    result
-                };
                 let notification = OutboundMessage::new(
                     &origin_channel,
                     &origin_chat_id,
-                    &format!(
-                        "\n📋 后台任务完成: **{}** (ID: {})\n\n{}",
-                        label,
-                        short_id,
-                        result_preview,
-                    ),
+                    &result,
                 );
                 let _ = tx.send(notification).await;
             }

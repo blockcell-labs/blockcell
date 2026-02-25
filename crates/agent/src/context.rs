@@ -229,6 +229,7 @@ impl ContextBuilder {
                 prompt.push_str("- **发送图片/文件给用户（通过聊天渠道）**: 调用 `message` 工具，参数 `media=[\"<本地文件路径>\"]`。仅在回复文字中写 markdown 图片语法无法真正发送文件，必须用工具调用。\n");
             }
             prompt.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。\n");
+            prompt.push_str("- **`spawn` 互斥原则**: `spawn` 只用于用户明确要求后台执行、或任务需要数分钟以上的真正异步场景。**禁止**在同一轮对话中既直接回复用户又 spawn 子任务做同样的事——二者必须二选一：能直接回答就直接回答，不能直接回答才 spawn 并告知用户「正在后台处理」。\n");
             prompt.push_str("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.\n");
             prompt.push_str("- **定时任务 (cron)**: 用户要求定时执行某项任务时，**优先**检查是否有对应技能：先调用 `list_skills` 查看可用技能列表，若有名称匹配的技能（如用户说 AI新闻 -> 技能名 `ai_news`），则在 `cron` 工具中设置 `skill_name='ai_news'`，触发时直接执行技能脚本，无需 LLM 介入，最可靠。若无匹配技能，则用 `message` 参数描述任务指令。 [TIMEZONE] `cron_expr` 使用 UTC 时间，中国用户（UTC+8）说每天 9 点应填 `cron_expr='0 0 1 * * *'`（UTC 1:00 = 北京时间 9:00）。一次性任务设 `delete_after_run=true`；周期任务用 `cron_expr` 或 `every_seconds`。\n");
             prompt.push_str("- **Community Hub 技能安装**: 用户说「安装技能」「从Hub安装」「下载技能」「install skill」时，**必须**使用 `community_hub` 工具，流程：①先调用 action='list_installed' 查本地是否已装；②调用 action='skill_info' skill_name='xxx' 查Hub上该技能信息；③调用 action='install_skill' skill_name='xxx' 下载安装。卸载用 action='uninstall_skill'，浏览用 action='trending' 或 action='search_skills'。Hub URL 和 API key 自动从配置读取，无需手动填写。\n");
