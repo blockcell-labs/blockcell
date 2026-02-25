@@ -256,17 +256,23 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     
     let info: serde_json::Value = resp.json().await?;
     let dist_url = info.get("dist_url").and_then(|v| v.as_str());
-    
-    // Fallback: if no dist_url (e.g. source-only), we might need to clone or error. 
-    // For now, assume dist_url is present or use source_url.
+    let source_url = info.get("source_url").and_then(|v| v.as_str());
     let download_url = dist_url
-        .or_else(|| info.get("source_url").and_then(|v| v.as_str()))
-        .ok_or_else(|| anyhow::anyhow!("No download URL (dist_url or source_url) found for skill"))?;
+        .or(source_url)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/v1/skills/{}/download",
+                hub_url,
+                urlencoding::encode(name)
+            )
+        });
 
+    println!("📦 最终下载地址: {}", download_url);
     println!("📦 Downloading from {}...", download_url);
 
     // 2. Download artifact
-    let resp = client.get(download_url).send().await?;
+    let resp = client.get(&download_url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("Download failed: {}", resp.status());
     }
