@@ -95,12 +95,47 @@ impl CronService {
         self.jobs.read().await.clone()
     }
 
+    /// Update the enabled state of a job by ID prefix. Returns the job name if found.
+    pub async fn update_job_enabled(&self, id_prefix: &str, enabled: bool) -> Result<Option<String>> {
+        let mut jobs = self.jobs.write().await;
+        let matching: Vec<usize> = jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.id.starts_with(id_prefix))
+            .map(|(i, _)| i)
+            .collect();
+
+        match matching.len() {
+            0 => return Ok(None),
+            1 => {
+                let job = &mut jobs[matching[0]];
+                job.enabled = enabled;
+                job.updated_at_ms = chrono::Utc::now().timestamp_millis();
+                let name = job.name.clone();
+                drop(jobs);
+                self.save().await?;
+                Ok(Some(name))
+            }
+            _ => {
+                // Multiple matches — return Err with disambiguation hint
+                let names: Vec<String> = matching.iter()
+                    .map(|&i| format!("{} ({})", &jobs[i].id.chars().take(8).collect::<String>(), jobs[i].name))
+                    .collect();
+                Err(blockcell_core::Error::Other(format!(
+                    "Multiple jobs match '{}': {}",
+                    id_prefix,
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
     pub async fn run_tick(&self) -> Result<()> {
         // Reload jobs from disk to pick up changes made by CronTool.
         // 注意：只在内存中没有 next_run_at_ms 的 job 才需要从磁盘重新初始化；
         // 已经在内存中运行过的 job 状态以内存为准，避免磁盘旧状态覆盖导致重复触发。
         if let Err(e) = self.load().await {
-            error!(error = %e, "Failed to reload cron jobs from disk");
+            error!(error = %e.to_string(), "Failed to reload cron jobs from disk");
         }
 
         let now_ms = Utc::now().timestamp_millis();
@@ -295,7 +330,7 @@ impl CronService {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = self.run_tick().await {
-                        error!(error = %e, "Cron tick failed");
+                        error!(error = %e.to_string(), "Cron tick failed");
                     }
                 }
                 _ = shutdown.recv() => {

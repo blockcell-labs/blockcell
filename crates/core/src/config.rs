@@ -513,7 +513,7 @@ pub struct AutoUpgradeConfig {
     pub enabled: bool,
     #[serde(default = "default_upgrade_channel")]
     pub channel: String,
-    #[serde(default)]
+    #[serde(default = "default_manifest_url")]
     pub manifest_url: String,
     #[serde(default = "default_require_signature")]
     pub require_signature: bool,
@@ -526,7 +526,11 @@ fn default_upgrade_channel() -> String {
 }
 
 fn default_require_signature() -> bool {
-    true
+    false
+}
+
+fn default_manifest_url() -> String {
+    "https://github.com/blockcell-labs/blockcell/releases/latest/download/manifest.json".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

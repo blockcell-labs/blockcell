@@ -1,5 +1,6 @@
 use blockcell_core::Paths;
 use std::io::{self, Write};
+use std::process::Command;
 
 const AGENTS_MD: &str = r#"# Agent Guidelines
 
@@ -253,21 +254,50 @@ const EXAMPLE_CONFIG: &str = r#"{
       "restrictToWorkspace": false
     },
     "tickIntervalSecs": 30
+  },
+  "autoUpgrade": {
+    "enabled": true,
+    "channel": "stable",
+    "manifestUrl": "https://github.com/blockcell-labs/blockcell/releases/latest/download/manifest.json",
+    "requireSignature": false,
+    "maintenanceWindow": ""
   }
 }
 "#;
 
-pub async fn run(force: bool) -> anyhow::Result<()> {
+pub async fn run(
+    force: bool,
+    provider: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    channels_only: bool,
+) -> anyhow::Result<()> {
     let paths = Paths::new();
 
+    if channels_only {
+        // Only update channel config — open in editor or print hint
+        if !paths.config_file().exists() {
+            println!("Config file not found. Run `blockcell onboard` first to create it.");
+            return Ok(());
+        }
+        println!("✓ Config file: {}", paths.config_file().display());
+        println!();
+        println!("To configure channels, edit the config file and set:");
+        println!("  channels.telegram.enabled = true");
+        println!("  channels.telegram.token    = \"<your-bot-token>\"");
+        println!();
+        println!("Run `blockcell config edit` to open the config file in your editor.");
+        return Ok(());
+    }
+
     // Check if config exists
-    if paths.config_file().exists() && !force {
+    if paths.config_file().exists() && !force && provider.is_none() && api_key.is_none() && model.is_none() {
         print!("Config already exists. Overwrite? [y/N] ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        
+
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Aborted.");
             return Ok(());
@@ -277,7 +307,51 @@ pub async fn run(force: bool) -> anyhow::Result<()> {
     // Create directories
     paths.ensure_dirs()?;
 
-    // Write the annotated example config (includes all channels with placeholder values)
+    // If quick-setup flags are provided, patch existing or new config
+    if let Some(ref prov) = provider {
+        // Load existing config or start from example
+        let config_str = if paths.config_file().exists() {
+            std::fs::read_to_string(paths.config_file())?
+        } else {
+            EXAMPLE_CONFIG.to_string()
+        };
+
+        let mut json: serde_json::Value = serde_json::from_str(&config_str)
+            .unwrap_or_else(|_| serde_json::from_str(EXAMPLE_CONFIG).unwrap());
+
+        ensure_auto_upgrade_defaults(&mut json);
+
+        // Set api_key in providers.<provider>
+        if let Some(ref key) = api_key {
+            json["providers"][prov]["apiKey"] = serde_json::json!(key);
+        }
+
+        // Set model
+        if let Some(ref m) = model {
+            json["agents"]["defaults"]["model"] = serde_json::json!(m);
+        } else {
+            // Set a sensible default model for the provider
+            let default_model = default_model_for_provider(prov);
+            json["agents"]["defaults"]["model"] = serde_json::json!(default_model);
+        }
+
+        if let Some(parent) = paths.config_file().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(paths.config_file(), serde_json::to_string_pretty(&json)?)?;
+
+        println!("✓ Provider configured: {}", prov);
+        if api_key.is_some() {
+            println!("  ✓ API key set");
+        }
+        println!("  ✓ Model: {}", json["agents"]["defaults"]["model"].as_str().unwrap_or("?"));
+        println!("✓ Config: {}", paths.config_file().display());
+        println!();
+        println!("Run `blockcell agent` to start chatting.");
+        return Ok(());
+    }
+
+    // Full onboard: write the annotated example config
     if let Some(parent) = paths.config_file().parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -292,14 +366,88 @@ pub async fn run(force: bool) -> anyhow::Result<()> {
     write_if_not_exists(&paths.memory_md(), MEMORY_MD)?;
     write_if_not_exists(&paths.heartbeat_md(), HEARTBEAT_MD)?;
 
+    // Probe environment and write self-knowledge to MEMORY.md
+    let memory_path = paths.memory_md();
+    if !memory_path.exists() {
+        let env_snapshot = probe_environment();
+        write_if_not_exists(&memory_path, &env_snapshot)?;
+    } else {
+        // Already exists — update the hardware section in place
+        let existing = std::fs::read_to_string(&memory_path).unwrap_or_default();
+        if !existing.contains("## Hardware") {
+            let env_snapshot = probe_environment();
+            let updated = format!("{}
+
+---
+{}", existing.trim_end(), env_snapshot.trim_start());
+            std::fs::write(&memory_path, updated)?;
+        }
+    }
+    println!("  ✓ Environment snapshot written to MEMORY.md");
+
+    // Extract builtin skills to workspace/skills/ (skip existing files)
+    let skills_dir = paths.skills_dir();
+    match super::embedded_skills::extract_to_workspace(&skills_dir) {
+        Ok(new_skills) if !new_skills.is_empty() => {
+            println!("  ✓ Installed {} builtin skill(s): {}", new_skills.len(), new_skills.join(", "));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("  ⚠️  Failed to extract builtin skills: {}", e);
+        }
+    }
+
     println!("✓ Created workspace: {}", paths.workspace().display());
     println!();
     println!("Next steps:");
     println!("  1. Edit {} to add your API keys", paths.config_file().display());
     println!("  2. Run `blockcell status` to verify configuration");
     println!("  3. Run `blockcell agent` to start chatting");
+    println!();
+    println!("Quick setup examples:");
+    println!("  blockcell onboard --provider deepseek --api-key sk-xxx --model deepseek-chat");
+    println!("  blockcell onboard --provider kimi --api-key sk-xxx --model moonshot-v1-8k");
+    println!("  blockcell onboard --provider openai --api-key sk-xxx");
 
     Ok(())
+}
+
+fn ensure_auto_upgrade_defaults(json: &mut serde_json::Value) {
+    if json.get("autoUpgrade").is_none() || json["autoUpgrade"].is_null() {
+        json["autoUpgrade"] = serde_json::json!({});
+    }
+
+    if json["autoUpgrade"].get("enabled").is_none() {
+        json["autoUpgrade"]["enabled"] = serde_json::json!(true);
+    }
+    if json["autoUpgrade"].get("channel").is_none() {
+        json["autoUpgrade"]["channel"] = serde_json::json!("stable");
+    }
+    if json["autoUpgrade"].get("manifestUrl").is_none() {
+        json["autoUpgrade"]["manifestUrl"] = serde_json::json!(
+            "https://github.com/blockcell-labs/blockcell/releases/latest/download/manifest.json"
+        );
+    }
+    if json["autoUpgrade"].get("requireSignature").is_none() {
+        json["autoUpgrade"]["requireSignature"] = serde_json::json!(false);
+    }
+    if json["autoUpgrade"].get("maintenanceWindow").is_none() {
+        json["autoUpgrade"]["maintenanceWindow"] = serde_json::json!("");
+    }
+}
+
+fn default_model_for_provider(provider: &str) -> &'static str {
+    match provider.to_lowercase().as_str() {
+        "deepseek" => "deepseek-chat",
+        "openai" => "gpt-4o",
+        "anthropic" => "claude-sonnet-4-20250514",
+        "kimi" | "moonshot" => "moonshot-v1-8k",
+        "gemini" => "gemini-1.5-flash",
+        "groq" => "llama-3.1-70b-versatile",
+        "zhipu" => "glm-4",
+        "ollama" => "llama3",
+        _ => "gpt-4o",
+    }
 }
 
 fn write_if_not_exists(path: &std::path::Path, content: &str) -> io::Result<()> {
@@ -311,4 +459,169 @@ fn write_if_not_exists(path: &std::path::Path, content: &str) -> io::Result<()> 
         println!("  ✓ Created {}", path.file_name().unwrap().to_string_lossy());
     }
     Ok(())
+}
+
+/// Run a shell command and return trimmed stdout, or None on failure.
+fn sh(cmd: &str, args: &[&str]) -> Option<String> {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn check_bin(name: &str) -> &'static str {
+    if std::process::Command::new("which").arg(name).output()
+        .map(|o| o.status.success()).unwrap_or(false) { "yes" } else { "no" }
+}
+
+/// Probe hardware/software environment synchronously at onboard time.
+/// Returns a Markdown string suitable for writing into MEMORY.md.
+fn probe_environment() -> String {
+    let mut out = String::from("# Long-term Memory\n\n");
+
+    // ── Hardware ────────────────────────────────────────────────────────────
+    out.push_str("## Hardware\n\n");
+
+    // OS / arch
+    out.push_str(&format!(
+        "- **OS**: {} ({}) {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        sh("sw_vers", &["-productVersion"])
+            .or_else(|| sh("uname", &["-r"]))
+            .unwrap_or_default()
+    ));
+
+    // CPU cores
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    out.push_str(&format!("- **CPU cores**: {}\n", cores));
+
+    // CPU model
+    if let Some(cpu) = sh("sysctl", &["-n", "machdep.cpu.brand_string"])
+        .or_else(|| sh("grep", &["-m1", "model name", "/proc/cpuinfo"]))
+    {
+        out.push_str(&format!("- **CPU model**: {}\n", cpu));
+    }
+
+    // RAM
+    if let Some(mem_bytes) = sh("sysctl", &["-n", "hw.memsize"]) {
+        if let Ok(bytes) = mem_bytes.parse::<u64>() {
+            out.push_str(&format!("- **RAM**: {:.1} GB\n", bytes as f64 / 1_073_741_824.0));
+        }
+    } else if let Some(meminfo) = sh("grep", &["MemTotal", "/proc/meminfo"]) {
+        out.push_str(&format!("- **RAM**: {}\n", meminfo));
+    }
+
+    // GPU
+    let gpu = sh("system_profiler", &["SPDisplaysDataType"])
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.trim().starts_with("Chipset Model:") || l.trim().starts_with("Chip:"))
+                .map(|l| l.trim().trim_start_matches("Chipset Model:").trim_start_matches("Chip:").trim().to_string())
+        })
+        .or_else(|| sh("lspci", &[]).and_then(|s| {
+            s.lines().find(|l| l.contains("VGA") || l.contains("3D")).map(|l| l.to_string())
+        }));
+    if let Some(g) = gpu {
+        out.push_str(&format!("- **GPU**: {}\n", g));
+    }
+
+    // Disk
+    if let Some(disk) = sh("df", &["-h", "."]) {
+        let summary = disk.lines().nth(1).unwrap_or("").split_whitespace()
+            .collect::<Vec<_>>();
+        if summary.len() >= 4 {
+            out.push_str(&format!("- **Disk** (workspace): total={} used={} free={}\n",
+                summary[1], summary[2], summary[3]));
+        }
+    }
+
+    // Camera
+    let has_camera = sh("system_profiler", &["SPCameraDataType"])
+        .map(|s| s.contains("Camera") || s.contains("FaceTime"))
+        .unwrap_or(false)
+        || std::path::Path::new("/dev/video0").exists();
+    out.push_str(&format!("- **Camera**: {}\n", if has_camera { "available" } else { "not detected" }));
+
+    // Microphone
+    let has_mic = sh("system_profiler", &["SPAudioDataType"])
+        .map(|s| s.contains("Input") || s.contains("Microphone"))
+        .unwrap_or(false);
+    out.push_str(&format!("- **Microphone**: {}\n", if has_mic { "available" } else { "not detected" }));
+
+    // ── Software & Runtimes ──────────────────────────────────────────────────
+    out.push_str("\n## Software & Runtimes\n\n");
+
+    let binaries = [
+        ("python3", &["--version"][..]),
+        ("node",    &["--version"][..]),
+        ("rustc",   &["--version"][..]),
+        ("git",     &["--version"][..]),
+        ("docker",  &["--version"][..]),
+        ("ffmpeg",  &["-version"][..]),
+    ];
+    for (bin, args) in &binaries {
+        let ver = sh(bin, args)
+            .map(|v| v.lines().next().unwrap_or("").to_string())
+            .unwrap_or_else(|| "not installed".to_string());
+        out.push_str(&format!("- **{}**: {}\n", bin, ver));
+    }
+
+    // Package managers
+    out.push_str(&format!(
+        "- **brew**: {} | **pip3**: {} | **npm**: {}\n",
+        check_bin("brew"), check_bin("pip3"), check_bin("npm")
+    ));
+
+    // Chrome
+    let chrome_paths = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ];
+    let has_chrome = chrome_paths.iter().any(|p| std::path::Path::new(p).exists())
+        || sh("which", &["google-chrome"]).is_some()
+        || sh("which", &["chromium"]).is_some();
+    out.push_str(&format!("- **Chrome/Chromium**: {}\n", if has_chrome { "available" } else { "not found" }));
+
+    // ── Network ──────────────────────────────────────────────────────────────
+    out.push_str("\n## Network\n\n");
+
+    let hostname = sh("hostname", &[]).unwrap_or_else(|| "unknown".to_string());
+    out.push_str(&format!("- **Hostname**: {}\n", hostname));
+
+    // Quick internet check via DNS
+    use std::net::ToSocketAddrs;
+    let internet = "1.1.1.1:53".to_socket_addrs()
+        .map(|mut a| a.next().is_some())
+        .unwrap_or(false);
+    out.push_str(&format!("- **Internet**: {}\n", if internet { "reachable" } else { "unreachable" }));
+
+    // ── Capabilities Summary ─────────────────────────────────────────────────
+    out.push_str("\n## Agent Capabilities (at onboard time)\n\n");
+    out.push_str("- Can read/write files, execute shell commands\n");
+    out.push_str("- Can search web and fetch URLs\n");
+    if sh("which", &["rustc"]).is_some() {
+        out.push_str("- Can compile Rust code (rustc available) → can evolve new tools\n");
+    }
+    if sh("which", &["python3"]).is_some() {
+        out.push_str("- Can run Python scripts (charts, office docs, ML tasks)\n");
+    }
+    if sh("which", &["node"]).is_some() {
+        out.push_str("- Can run Node.js scripts\n");
+    }
+    if sh("which", &["ffmpeg"]).is_some() {
+        out.push_str("- Can process audio/video (ffmpeg available)\n");
+    }
+    if has_camera {
+        out.push_str("- Camera available (can capture images)\n");
+    }
+    if has_mic {
+        out.push_str("- Microphone available (can record/transcribe audio)\n");
+    }
+
+    out.push_str("\n<!-- Updated by: blockcell onboard -->\n");
+    out
 }

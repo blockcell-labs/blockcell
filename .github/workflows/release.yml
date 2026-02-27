@@ -229,6 +229,52 @@ jobs:
           done > ../checksums.txt
           cat ../checksums.txt
 
+      - name: Generate updater manifest.json
+        shell: bash
+        run: |
+          TAG="${{ steps.reltag.outputs.tag }}"
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPO="${{ github.repository }}"
+
+          artifacts_json="[]"
+
+          while IFS= read -r line; do
+            sha="$(echo "$line" | awk '{print $1}')"
+            path="$(echo "$line" | awk '{print $2}')"
+            file="$(basename "$path")"
+
+            if [[ "$file" =~ ^blockcell-${TAG}-darwin-arm64\\.tar\\.gz$ ]]; then
+              os="macos"; arch="aarch64"
+            elif [[ "$file" =~ ^blockcell-${TAG}-darwin-amd64\\.tar\\.gz$ ]]; then
+              os="macos"; arch="x86_64"
+            elif [[ "$file" =~ ^blockcell-${TAG}-linux-amd64\\.tar\\.gz$ ]]; then
+              os="linux"; arch="x86_64"
+            elif [[ "$file" =~ ^blockcell-${TAG}-windows-amd64\\.zip$ ]]; then
+              os="windows"; arch="x86_64"
+            else
+              continue
+            fi
+
+            url="https://github.com/${REPO}/releases/download/${TAG}/${file}"
+            artifacts_json=$(echo "$artifacts_json" | jq -c \
+              --arg os "$os" \
+              --arg arch "$arch" \
+              --arg url "$url" \
+              --arg sha256 "$sha" \
+              '. + [{os:$os, arch:$arch, url:$url, sha256:$sha256}]')
+          done < checksums.txt
+
+          jq -n -c \
+            --arg channel "stable" \
+            --arg version "$TAG" \
+            --arg publishedAt "$PUBLISHED_AT" \
+            --arg notes "" \
+            --argjson artifacts "$artifacts_json" \
+            '{channel:$channel, version:$version, publishedAt:$publishedAt, artifacts:$artifacts, notes:$notes}' \
+            > manifest.json
+
+          cat manifest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -241,3 +287,4 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
             checksums.txt
+            manifest.json

@@ -273,7 +273,7 @@ impl GhostService {
                         // 推进到下一个计划时间
                         next_scheduled = schedule.upcoming(Utc).next();
                         if let Err(e) = self.run_routine().await {
-                            warn!(error = %e, "Ghost routine failed");
+                            warn!(error = %e.to_string(), "Ghost routine failed");
                         }
                     }
                 }

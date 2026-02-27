@@ -1,4 +1,5 @@
 pub mod onboard;
+pub mod embedded_skills;
 pub mod status;
 pub mod agent;
 pub mod gateway;
@@ -18,3 +19,4 @@ pub mod streams_cmd;
 pub mod knowledge_cmd;
 pub mod completions_cmd;
 pub mod logs_cmd;
+pub mod tasks_cmd;

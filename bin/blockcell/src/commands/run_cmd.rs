@@ -42,5 +42,5 @@ pub async fn tool(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
 /// Run a message through the agent (shortcut for `agent -m`).
 pub async fn message(msg: &str, session: &str) -> anyhow::Result<()> {
     // Delegate to agent command with message mode
-    super::agent::run(Some(msg.to_string()), session.to_string()).await
+    super::agent::run(Some(msg.to_string()), session.to_string(), None, None).await
 }

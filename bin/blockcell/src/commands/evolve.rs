@@ -240,6 +240,111 @@ pub async fn list(all: bool, verbose: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Show evolution history for a skill by name (alias for status filtered by skill_name).
+pub async fn show(skill_name: &str) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let records_dir = paths.workspace().join("evolution_records");
+
+    let mut records = load_all_records(&records_dir);
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    // Try to match by skill_name or evolution ID prefix
+    let matched: Vec<&EvolutionRecord> = records.iter().filter(|r| {
+        r.skill_name == skill_name || r.id.starts_with(skill_name)
+    }).collect();
+
+    if matched.is_empty() {
+        // Try status lookup by ID
+        if let Ok(resolved) = resolve_evolution_id(&paths, skill_name) {
+            let record = load_record(&records_dir, &resolved)?;
+            print_record_detail(&record);
+            return Ok(());
+        }
+        println!();
+        println!("  No evolution records found for skill '{}'", skill_name);
+        println!();
+        return Ok(());
+    }
+
+    println!();
+    println!("🧬 Evolution history for '{}'  ({} record(s))", skill_name, matched.len());
+    println!();
+
+    for r in &matched {
+        let icon = status_icon(&r.status);
+        let desc = status_desc_cn(&r.status);
+        println!("  {} [{}] {}", icon, desc, &r.id.chars().take(20).collect::<String>());
+        println!("    Created: {}  Updated: {}", format_ts(r.created_at), format_ts(r.updated_at));
+        if let Some(ref patch) = r.patch {
+            println!("    Patch: {}", patch.patch_id);
+        }
+        if let Some(ref audit) = r.audit {
+            println!("    Audit: {}", if audit.passed { "passed" } else { "failed" });
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Rollback a skill evolution to a previous version.
+pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let records_dir = paths.workspace().join("evolution_records");
+
+    let mut records = load_all_records(&records_dir);
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let skill_records: Vec<&EvolutionRecord> = records.iter().filter(|r| {
+        r.skill_name == skill_name
+    }).collect();
+
+    if skill_records.is_empty() {
+        println!("  No evolution records found for skill '{}'.", skill_name);
+        return Ok(());
+    }
+
+    // Find the target record (by version tag or just "previous")
+    let target = if let Some(ref version) = to {
+        skill_records.iter().find(|r| {
+            r.id.starts_with(version.as_str()) ||
+            r.patch.as_ref().map(|p| p.patch_id.starts_with(version.as_str())).unwrap_or(false)
+        }).copied()
+    } else {
+        // Default: use the second-most-recent completed record
+        skill_records.iter().skip(1).find(|r| r.status == EvolutionStatus::Completed).copied()
+    };
+
+    match target {
+        None => {
+            println!("  ⚠️  No rollback target found for skill '{}'.", skill_name);
+            if to.is_some() {
+                println!("  Available records:");
+                for r in &skill_records {
+                    println!("    {} {:?} — {}", &r.id.chars().take(20).collect::<String>(), r.status, format_ts(r.created_at));
+                }
+            } else {
+                println!("  No previous completed version available.");
+            }
+        }
+        Some(target_record) => {
+            println!();
+            println!("⏪ Rollback: skill '{}' → record {}", skill_name, &target_record.id.chars().take(20).collect::<String>());
+            println!("  Status: {:?}", target_record.status);
+            println!("  Created: {}", format_ts(target_record.created_at));
+            if let Some(ref patch) = target_record.patch {
+                println!("  Patch: {}", patch.patch_id);
+            }
+            println!();
+            println!("  ℹ️  Rollback of skill evolution records is informational only.");
+            println!("  The actual skill files in workspace/skills/{} remain unchanged.", skill_name);
+            println!("  To restore a previous skill version, manually revert the files in that directory.");
+        }
+    }
+
+    Ok(())
+}
+
 // --- Internal helpers ---
 
 /// Derive a skill name from a description string.

@@ -103,22 +103,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     // --- 4. Skills ---
     println!("🧠 Skills");
+    // Skills are extracted to workspace/skills/ on first run/onboard — only scan there.
     let skills_dir = paths.skills_dir();
     let mut skill_count = 0usize;
     if skills_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {
-                    skill_count += 1;
-                }
-            }
-        }
-    }
-    // Also count builtin skills
-    let builtin_dir = paths.builtin_skills_dir();
-    if builtin_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&builtin_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {

@@ -213,8 +213,9 @@ impl ContextBuilder {
             prompt.push_str("- Validate tool parameters against schema.\n");
             prompt.push_str("- Search `memory_query` before asking the user for information you might already know.\n");
             prompt.push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
+            prompt.push_str("- **金融数据**: `finance_api` 使用东方财富(A股/港股完全免费)、CoinGecko(加密货币免费)、Alpha Vantage(美股,可选key)，**无需用户配置任何 API Key** 即可查询A股/港股/加密货币行情。\n");
             prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
-            prompt.push_str("- **Web search**: Use `web_search` for discovery. For 'latest/最近/24小时/今天' news queries, set `freshness=day` when possible and use multiple targeted queries (Chinese + English) before concluding there's no news.\n");
+            prompt.push_str("- **Web search**: Use `web_search` for discovery. Chinese queries automatically use Bing for best results. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. **If results are irrelevant**: retry with rephrased query (shorter, different keywords) before concluding no results exist — never give up after just one failed search.\n");
             prompt.push_str("- **Web content**: `web_fetch` returns markdown by default — uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents). If server supports it, markdown is returned directly with ~80% token savings. Otherwise HTML is converted to markdown locally. Use `browse` for full browser automation (CDP) — `get_content` also returns markdown. Use `web_fetch` extractMode='raw' only when you need the original HTML.\n");
             // Media display rule depends on channel type:
             // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
@@ -365,13 +366,14 @@ impl ContextBuilder {
 
                 if !relevant.is_empty() {
                     prompt.push_str("## Relevant Skills\n");
-                    for skill in relevant {
+                    prompt.push_str("Skills handle complex multi-step workflows. **Prefer calling tools directly** (finance_api, web_search) for simple queries. Only use `spawn` with `skill_name` for background tasks or when you cannot answer directly.\n\n");
+                    for skill in &relevant {
                         let triggers = skill.meta.triggers.iter()
                             .take(4)
                             .cloned()
                             .collect::<Vec<String>>()
                             .join(" | ");
-                        prompt.push_str(&format!("- {} — {}\n", skill.name, triggers));
+                        prompt.push_str(&format!("- **{}** — {}\n", skill.name, triggers));
                     }
                     prompt.push('\n');
                 }
@@ -436,22 +438,52 @@ impl ContextBuilder {
     /// Build financial analysis guidelines section (Method C: conditional injection).
     fn build_finance_guidelines(&self, prompt: &mut String) {
         prompt.push_str("\n## Financial Analysis Guidelines\n");
-        prompt.push_str("When handling financial/stock queries:\n\n");
-        prompt.push_str("### Stock Data Sourcing (IMPORTANT — follow this order, do NOT guess URLs)\n");
-        prompt.push_str("**A股/港股 (Chinese stocks):**\n");
-        prompt.push_str("- **Step 1: Real-time quote** → `finance_api` action='stock_quote' symbol='601318' (直接用6位代码，自动走东方财富API)\n");
-        prompt.push_str("- **Step 2: K-line history** → `finance_api` action='stock_history' symbol='601318' interval='1mo'\n");
-        prompt.push_str("- **Step 3: Technical indicators** → Calculate locally from K-line data: MA(5/10/20/60), MACD, RSI, KDJ, BOLL. Do NOT search for APIs.\n");
-        prompt.push_str("- **Step 4: Advanced data** → Use `http_request` with verified 东方财富 APIs (secid格式: 1.601318=沪市, 0.000001=深市):\n");
-        prompt.push_str("  - 资金流向: push2.eastmoney.com/api/qt/stock/fflow/kline/get\n");
-        prompt.push_str("  - 北向资金: push2.eastmoney.com/api/qt/kamt.rtmin/get\n");
-        prompt.push_str("  - 龙虎榜: datacenter-web.eastmoney.com/api/data/v1/get\n");
-        prompt.push_str("  - Headers: Referer='https://quote.eastmoney.com', User-Agent='Mozilla/5.0'\n");
-        prompt.push_str("\n**Common Chinese stock codes:** 中国平安=601318, 贵州茅台=600519, 宁德时代=300750, 比亚迪=002594, 招商银行=600036, 腾讯=00700.HK, 阿里巴巴=09988.HK\n");
-        prompt.push_str("\n**Technical Indicators** (calculate from K-line, do NOT search for APIs):\n");
-        prompt.push_str("- MA(N)=avg of last N closes, MACD: DIF=EMA12-EMA26, DEA=EMA(DIF,9), RSI(N)=100-100/(1+avg_gain/avg_loss), BOLL(20): mid=MA20, upper/lower=mid±2*std\n");
-        prompt.push_str("\n**Monitoring**: cron (periodic) + alert_rule (threshold) + stream_subscribe (real-time) + notification (alerts)\n");
-        prompt.push_str("**Risk**: Always note data delays — informational only, not investment advice.\n");
+        prompt.push_str("All core financial data is **free, no API key required**. Use `finance_api` as primary tool.\n\n");
+
+        prompt.push_str("### Step 0: Unknown Stock Code? Use stock_search FIRST\n");
+        prompt.push_str("**If user gives a company name (not a code), ALWAYS call `finance_api` action='stock_search' query='公司名' first to get the stock code.**\n");
+        prompt.push_str("Example: user says '分析摩尔线程' → call stock_search query='摩尔线程' → check if listed.\n");
+        prompt.push_str("- If **found**: use the returned code for stock_quote / stock_history etc.\n");
+        prompt.push_str("- If **not found / unlisted**: explicitly tell the user the company is not publicly listed, then search for **related concept stocks** using web_search or stock_screen with industry filter. Provide analysis of publicly-traded peers in the same sector.\n\n");
+
+        prompt.push_str("### Step 1: web_search Retry Strategy\n");
+        prompt.push_str("If `web_search` returns irrelevant results (wrong topic, foreign language), **do NOT give up immediately**. Try these alternatives:\n");
+        prompt.push_str("1. Rephrase query in Chinese: '公司名 公司 行业 融资' or '公司名 A股 概念股'\n");
+        prompt.push_str("2. Use shorter, more specific terms: just the company name + key noun\n");
+        prompt.push_str("3. Try web_fetch on a specific known URL (e.g. eastmoney.com, xueqiu.com)\n");
+        prompt.push_str("4. Only conclude 'no information found' after 2+ failed attempts with different queries.\n\n");
+
+        prompt.push_str("### Data Source Priority\n");
+        prompt.push_str("1. **`finance_api`** — primary (东方财富 A股/港股 free real-time, CoinGecko crypto free)\n");
+        prompt.push_str("2. **`http_request`** — advanced 东方财富 APIs (资金流向/龙虎榜/北向资金/板块)\n");
+        prompt.push_str("3. **`web_search`** + **`web_fetch`** — news, analysis articles, macro context\n\n");
+
+        prompt.push_str("### finance_api Quick Reference\n");
+        prompt.push_str("- **搜索股票代码**: action='stock_search' query='公司名' (必须先做！)\n");
+        prompt.push_str("- **行情**: action='stock_quote' symbol='601318' (A股 6位) / '00700.HK' (港股) / 'AAPL' (美股)\n");
+        prompt.push_str("- **K线**: action='stock_history' symbol='600519' interval='1d'\n");
+        prompt.push_str("- **财务**: action='financial_statement' symbol='600519' report_type='indicator'\n");
+        prompt.push_str("- **资金流向**: action='capital_flow' symbol='601318'\n");
+        prompt.push_str("- **选股(同行业)**: action='stock_screen' screen_filters={industry:'GPU芯片', board:'科创板'}\n");
+        prompt.push_str("- **龙虎榜**: action='top_list' list_type='dragon_tiger'\n");
+        prompt.push_str("- **北向资金**: action='northbound_flow'\n");
+        prompt.push_str("- **涨停板**: action='top_list' list_type='limit_up'\n");
+        prompt.push_str("- **大盘行情**: action='market_overview'\n");
+        prompt.push_str("- **行业资金**: action='industry_fund_flow'\n");
+        prompt.push_str("- **加密货币**: action='crypto_price' symbol='bitcoin'\n");
+        prompt.push_str("- **外汇**: action='forex_rate' from_currency='USD' to_currency='CNY'\n");
+        prompt.push_str("- **新闻**: action='stock_news' symbol='600519'\n");
+        prompt.push_str("- **宏观数据**: action='macro_data' indicator='gdp'|'cpi'|'pmi'|'social_financing'\n\n");
+
+        prompt.push_str("### Technical Indicators (calculate locally from K-line data)\n");
+        prompt.push_str("MA: sum(closes, N)/N | MACD: EMA12-EMA26, signal=EMA9(MACD) | RSI: 100-100/(1+avg_gain/avg_loss)\n\n");
+        prompt.push_str("### Common Stock Codes\n");
+        prompt.push_str("A股: 中国平安=601318, 贵州茅台=600519, 宁德时代=300750, 比亚迪=002594, 招商银行=600036\n");
+        prompt.push_str("港股: 腾讯=00700.HK, 阿里=09988.HK, 美团=03690.HK\n");
+        prompt.push_str("美股: AAPL, MSFT, TSLA, NVDA, AMZN\n\n");
+        prompt.push_str("### Monitoring Pipeline\n");
+        prompt.push_str("cron (periodic fetch) + alert_rule (price/change threshold) + stream_subscribe (real-time WebSocket) + notification (push alert)\n");
+        prompt.push_str("⚠️ **Risk**: Always add disclaimer — data is informational only, not investment advice.\n");
     }
 
     /// Try to match user input against skill triggers.

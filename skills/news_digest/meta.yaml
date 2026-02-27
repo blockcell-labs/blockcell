@@ -1,0 +1,25 @@
+name: news_digest
+description: "新闻摘要技能 — web_search + finance_api个股新闻，获取实时新闻、财经资讯、热点事件，零API Key"
+requires:
+  bins: []
+  env: []
+permissions: []
+always: false
+triggers:
+  - "新闻"
+  - "资讯"
+  - "热点"
+  - "头条"
+  - "news"
+  - "headlines"
+  - "最新消息"
+  - "今日要闻"
+  - "财经新闻"
+  - "科技新闻"
+capabilities:
+  - "web_search"
+  - "finance_api"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法获取新闻数据。将使用 web_search 搜索最新新闻。"

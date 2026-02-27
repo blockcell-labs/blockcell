@@ -11,7 +11,7 @@ pub enum IntentCategory {
     FileOps,
     /// 网页/搜索 — web_search, web_fetch, browse
     WebSearch,
-    /// 金融/股票/加密货币 — finance_api, exchange_api, alert_rule, stream_subscribe, ...
+    /// 金融/股票/加密货币 — qveris, exchange_api, alert_rule, stream_subscribe, ...
     Finance,
     /// 区块链/DeFi/NFT — blockchain_rpc, blockchain_tx, contract_security, bridge_api, nft_market, multisig
     Blockchain,
@@ -250,7 +250,7 @@ impl IntentClassifier {
                 category: IntentCategory::DevOps,
                 keywords: vec![
                     "GitHub", "github", "Git", "git", "PR", "pull request", "issue",
-                    "部署", "服务器", "云", "AWS", "aws", "GCP", "gcp", "Azure", "azure",
+                    "部署", "服务器", "云服务", "云计算", "云平台", "AWS", "aws", "GCP", "gcp", "Azure", "azure",
                     "Docker", "docker", "容器", "K8s", "k8s",
                     "网络", "ping", "端口", "SSL", "ssl", "证书", "DNS", "dns",
                     "whois", "traceroute", "域名", "带宽", "网速",
@@ -382,14 +382,14 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             t.extend([
                 "finance_api", "exchange_api", "http_request", "data_process",
                 "chart_generate", "alert_rule", "stream_subscribe", "notification",
-                "knowledge_graph", "cron", "office_write", "spawn",
+                "knowledge_graph", "cron", "office_write", "browse",
             ]);
             t
         }
         IntentCategory::Blockchain => {
             let mut t = core.clone();
             t.extend([
-                "blockchain_rpc", "blockchain_tx", "contract_security",
+                "finance_api", "blockchain_rpc", "blockchain_tx", "contract_security",
                 "bridge_api", "nft_market", "multisig", "exchange_api",
                 "stream_subscribe", "http_request", "knowledge_graph",
             ]);
@@ -507,6 +507,11 @@ mod tests {
 
         let intents = classifier.classify("BTC价格多少");
         assert!(intents.contains(&IntentCategory::Finance));
+
+        // 云天化 should match Finance (涨停), NOT DevOps (云 was a false positive)
+        let intents = classifier.classify("分析股票云天化近期涨停原因");
+        assert!(intents.contains(&IntentCategory::Finance));
+        assert!(!intents.contains(&IntentCategory::DevOps), "云天化 should not trigger DevOps");
     }
 
     #[test]
@@ -557,6 +562,7 @@ mod tests {
         assert!(tools.contains(&"finance_api"));
         assert!(tools.contains(&"exchange_api"));
         assert!(tools.contains(&"read_file")); // core tool
+        assert!(!tools.contains(&"qveris")); // qveris removed
     }
 
     #[test]
@@ -564,6 +570,6 @@ mod tests {
         let tools = tools_for_intents(&[IntentCategory::Unknown]);
         assert!(tools.contains(&"read_file"));
         assert!(tools.contains(&"browse"));
-        assert!(!tools.contains(&"finance_api")); // not in unknown
+        assert!(!tools.contains(&"qveris"));
     }
 }

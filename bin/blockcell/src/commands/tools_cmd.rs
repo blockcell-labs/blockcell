@@ -3,6 +3,10 @@ use blockcell_tools::ToolRegistry;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+fn schema_function(schema: &Value) -> &Value {
+    schema.get("function").unwrap_or(schema)
+}
+
 /// List all registered tools.
 pub async fn list(category: Option<String>) -> anyhow::Result<()> {
     let registry = ToolRegistry::with_defaults();
@@ -16,7 +20,8 @@ pub async fn list(category: Option<String>) -> anyhow::Result<()> {
     let mut categorized: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
 
     for schema in &schemas {
-        let name = schema["name"].as_str().unwrap_or("");
+        let func = schema_function(schema);
+        let name = func["name"].as_str().unwrap_or("");
         let cat = categorize_tool(name);
         categorized.entry(cat).or_default().push(schema);
     }
@@ -32,8 +37,9 @@ pub async fn list(category: Option<String>) -> anyhow::Result<()> {
 
         println!("  📂 {} ({})", cat, tools.len());
         for tool in tools {
-            let name = tool["name"].as_str().unwrap_or("");
-            let desc = tool["description"].as_str().unwrap_or("");
+            let func = schema_function(tool);
+            let name = func["name"].as_str().unwrap_or("");
+            let desc = func["description"].as_str().unwrap_or("");
             let short_desc: String = desc.chars().take(60).collect();
             let ellipsis = if desc.chars().count() > 60 { "..." } else { "" };
             println!("     {:<22} {}{}", name, short_desc, ellipsis);
@@ -50,18 +56,19 @@ pub async fn info(tool_name: &str) -> anyhow::Result<()> {
     let schemas = registry.get_tool_schemas();
 
     let schema = schemas.iter().find(|s: &&Value| {
-        s["name"].as_str() == Some(tool_name)
+        schema_function(s)["name"].as_str() == Some(tool_name)
     });
 
     match schema {
         Some(s) => {
+            let func = schema_function(s);
             println!();
-            println!("🔧 {}", s["name"].as_str().unwrap_or(""));
+            println!("🔧 {}", func["name"].as_str().unwrap_or(""));
             println!();
-            println!("  Description: {}", s["description"].as_str().unwrap_or(""));
+            println!("  Description: {}", func["description"].as_str().unwrap_or(""));
             println!();
 
-            if let Some(params) = s.get("parameters") {
+            if let Some(params) = func.get("parameters") {
                 println!("  Parameters:");
                 let params_obj: &Value = params;
                 if let Some(props) = params_obj.get("properties") {

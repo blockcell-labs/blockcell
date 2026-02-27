@@ -168,13 +168,22 @@ pub async fn enable(job_id: &str, enabled: bool) -> anyhow::Result<()> {
     let service = CronService::new(paths, tx);
     service.load().await?;
 
-    // This is a simplified implementation
-    // In a real implementation, we'd update the job in place
-    println!(
-        "Job {} would be {}",
-        job_id,
-        if enabled { "enabled" } else { "disabled" }
-    );
+    match service.update_job_enabled(job_id, enabled).await {
+        Ok(Some(name)) => {
+            println!(
+                "Job {} ({}) {}",
+                &job_id.chars().take(8).collect::<String>(),
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            );
+        }
+        Ok(None) => {
+            println!("No job found with ID starting with: {}", job_id);
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+        }
+    }
 
     Ok(())
 }

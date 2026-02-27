@@ -25,7 +25,7 @@ impl Tool for FinanceApiTool {
         let arr_prop = |desc: &str| -> Value { json!({"type": "array", "description": desc}) };
 
         let mut props = serde_json::Map::new();
-        props.insert("action".into(), str_prop("Action: stock_quote|stock_history|stock_search|stock_screen|financial_statement|dividend_history|top_list|bond_yield|bond_info|convertible_bond|futures_position|futures_contract_info|institutional_holdings|analyst_ratings|crypto_price|crypto_history|crypto_list|forex_rate|forex_history|portfolio_value|market_overview"));
+        props.insert("action".into(), str_prop("Action: stock_quote|stock_history|stock_search|stock_screen|financial_statement|dividend_history|top_list|capital_flow|northbound_flow|industry_fund_flow|stock_news|macro_data|bond_yield|bond_info|convertible_bond|futures_position|futures_contract_info|institutional_holdings|analyst_ratings|crypto_price|crypto_history|crypto_list|forex_rate|forex_history|portfolio_value|market_overview"));
         props.insert("symbol".into(), str_prop("Stock ticker (e.g. 'AAPL', 'MSFT', '601318', '000001', '601318.SH', '00700.HK') or crypto ID (e.g. 'bitcoin', 'ethereum')"));
         props.insert("symbols".into(), json!({"type": "array", "items": {"type": "string"}, "description": "Multiple symbols for batch queries"}));
         props.insert("from_currency".into(), str_prop("Source currency code (e.g. 'USD', 'BTC')"));
@@ -49,29 +49,41 @@ impl Tool for FinanceApiTool {
         props.insert("bond_code".into(), str_prop("(bond_info) Specific bond code, e.g. '019666', '127045'. (convertible_bond) Convertible bond code."));
         props.insert("futures_exchange".into(), str_prop("(futures_position/futures_contract_info) Exchange: 'shfe'|'dce'|'czce'|'cffex'|'ine'|'gfex'|'all' (default: all)"));
         props.insert("futures_symbol".into(), str_prop("(futures_position/futures_contract_info) Futures symbol, e.g. 'rb2505' (螺纹钢), 'au2506' (黄金), 'IF2503' (沪深300股指)"));
+        props.insert("period".into(), str_prop("(capital_flow) Period: 'today'|'3d'|'5d'|'10d' (default: today). (northbound_flow) Period: 'today'|'10d'|'30d' (default: today)."));
+        props.insert("indicator".into(), str_prop("(macro_data) Macro indicator: 'gdp'|'cpi'|'ppi'|'pmi_manufacturing'|'pmi_services'|'social_financing'|'m2'|'reserve_ratio'|'interest_rate'|'retail_sales'|'industrial_output'|'trade_balance'"));
+        props.insert("industry".into(), str_prop("(industry_fund_flow) Industry name filter, e.g. '半导体'. Leave empty for all industries."));
 
         ToolSchema {
             name: "finance_api",
-            description: "Query financial market data. Chinese stocks (A股/港股) use 东方财富 API (free, real-time). \
-                NEW: bond_yield (国债收益率曲线, 中美国债), bond_info (债券详情: 票面利率/到期日/信用评级), \
-                convertible_bond (可转债列表: 转股价/溢价率/到期收益率), futures_position (期货持仓量/多空比), \
-                futures_contract_info (期货合约规格: 保证金/交割日/涨跌停), institutional_holdings (机构持仓变化: 基金/QFII/社保), \
-                analyst_ratings (券商研报评级: 目标价/评级变化). \
-                Also: stock_quote, stock_history, stock_search, stock_screen, financial_statement, dividend_history, top_list, \
-                crypto_price/history/list, forex_rate/history, portfolio_value, market_overview.",
+            description: "Query financial market data. All Chinese data (A股/港股) via 东方财富 API — **free, no API key**. \
+                Core: stock_quote (实时行情), stock_history (K线), stock_search (搜股), stock_screen (选股), \
+                financial_statement (财务报表: ROE/毛利率/净利率), dividend_history (分红历史), \
+                top_list (涨幅榜/跌幅榜/成交量/龙虎榜/涨停板), \
+                capital_flow (个股资金流向: 主力/超大单/大单净流入), \
+                northbound_flow (北向资金: 沪股通+深股通实时净流入), \
+                industry_fund_flow (行业板块资金流向排名), \
+                stock_news (东方财富个股新闻), \
+                macro_data (宏观经济指标: GDP/CPI/PPI/PMI/社融/M2/LPR/存款准备金率), \
+                bond_yield (国债收益率曲线), bond_info (债券详情), convertible_bond (可转债), \
+                futures_position (期货持仓), futures_contract_info (期货合约规格), \
+                institutional_holdings (机构持仓), analyst_ratings (券商评级), \
+                crypto_price/history/list (CoinGecko免费), forex_rate/history, portfolio_value, market_overview.",
             parameters: json!({
                 "type": "object",
                 "properties": Value::Object(props),
                 "required": ["action"]
             }),
         }
+
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let valid = [
             "stock_quote", "stock_history", "stock_search",
-            "stock_screen", "financial_statement", "dividend_history", "top_list",
+            "stock_screen", "financial_statement", "dividend_history", "top_list", "lhb_detail",
+            "capital_flow", "northbound_flow", "industry_fund_flow",
+            "stock_news", "macro_data",
             "bond_yield", "bond_info", "convertible_bond",
             "futures_position", "futures_contract_info",
             "institutional_holdings", "analyst_ratings",
@@ -128,6 +140,14 @@ impl Tool for FinanceApiTool {
             "financial_statement" => self.financial_statement(&params, &client).await,
             "dividend_history" => self.dividend_history(&params, &client).await,
             "top_list" => self.top_list(&params, &client).await,
+            "lhb_detail" => {
+                // Alias: lhb_detail = top_list with list_type=dragon_tiger
+                let mut p = params.clone();
+                if p.get("list_type").is_none() {
+                    p["list_type"] = serde_json::Value::String("dragon_tiger".to_string());
+                }
+                self.top_list(&p, &client).await
+            }
             "crypto_price" => self.crypto_price(&params, &client).await,
             "crypto_history" => self.crypto_history(&params, &client).await,
             "crypto_list" => self.crypto_list(&params, &client).await,
@@ -142,6 +162,11 @@ impl Tool for FinanceApiTool {
             "institutional_holdings" => self.institutional_holdings(&params, &client).await,
             "analyst_ratings" => self.analyst_ratings(&params, &client).await,
             "market_overview" => self.market_overview(&params, &client).await,
+            "capital_flow" => self.capital_flow(&params, &client).await,
+            "northbound_flow" => self.northbound_flow(&params, &client).await,
+            "industry_fund_flow" => self.industry_fund_flow(&params, &client).await,
+            "stock_news" => self.stock_news(&params, &client).await,
+            "macro_data" => self.macro_data(&params, &client).await,
             _ => Err(Error::Tool(format!("Unknown action: {}", action))),
         }
     }
@@ -153,6 +178,90 @@ impl FinanceApiTool {
             .or_else(|| ctx.config.providers.get("alpha_vantage").map(|p| p.api_key.clone()))
             .or_else(|| std::env::var("ALPHA_VANTAGE_API_KEY").ok())
             .unwrap_or_default()
+    }
+
+    fn contains_non_ascii(s: &str) -> bool {
+        s.chars().any(|c| !c.is_ascii())
+    }
+
+    fn market_from_secid(secid: &str) -> &'static str {
+        if secid.starts_with("0.") {
+            "sz"
+        } else if secid.starts_with("1.") {
+            "sh"
+        } else if secid.starts_with("116.") {
+            "hk"
+        } else {
+            "unknown"
+        }
+    }
+
+    fn parse_eastmoney_suggest(body: &Value, limit: usize) -> Vec<Value> {
+        let mut results = Vec::new();
+        let items = body
+            .pointer("/QuotationCodeTable/Data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for item in items.into_iter().take(limit) {
+            let code = item.get("Code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if code.is_empty() {
+                continue;
+            }
+            let name = item.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let secid = item
+                .get("QuoteID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let market = if !secid.is_empty() {
+                Self::market_from_secid(&secid).to_string()
+            } else {
+                let (_secid, m, _code) = Self::to_eastmoney_secid(&code);
+                m.to_string()
+            };
+
+            results.push(json!({
+                "symbol": code,
+                "name": name,
+                "market": market,
+                "secid": secid,
+                "source": "eastmoney"
+            }));
+        }
+
+        results
+    }
+
+    async fn eastmoney_suggest(&self, query: &str, limit: usize, client: &Client) -> Result<Value> {
+        let limit = limit.clamp(1, 50);
+        let url = format!(
+            "https://searchapi.eastmoney.com/api/suggest/get?input={}&type=14&count={}",
+            urlencoding::encode(query),
+            limit
+        );
+        debug!(url = %url, "东方财富 suggest");
+        let resp = client
+            .get(&url)
+            .header("Referer", "https://quote.eastmoney.com")
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("东方财富 suggest request failed: {}", e)))?;
+
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Tool(format!("Failed to parse 东方财富 suggest response: {}", e)))?;
+
+        let results = Self::parse_eastmoney_suggest(&body, limit);
+        Ok(json!({
+            "query": query,
+            "count": results.len(),
+            "results": results,
+            "source": "eastmoney"
+        }))
     }
 
     // ─── Chinese Stock Helpers (东方财富) ───
@@ -546,7 +655,30 @@ impl FinanceApiTool {
 
     async fn stock_search(&self, ctx: &ToolContext, params: &Value, client: &Client) -> Result<Value> {
         let query = params.get("query").or(params.get("symbol")).and_then(|v| v.as_str()).unwrap_or("");
+        let source = params.get("source").and_then(|v| v.as_str()).unwrap_or("auto");
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
         let av_key = Self::resolve_av_key(ctx, params);
+
+        if (source == "eastmoney" || source == "auto")
+            && (Self::contains_non_ascii(query) || Self::is_chinese_stock(query))
+        {
+            match self.eastmoney_suggest(query, limit, client).await {
+                Ok(v) => {
+                    if v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) > 0 {
+                        return Ok(v);
+                    }
+                    if source == "eastmoney" {
+                        return Ok(v);
+                    }
+                }
+                Err(e) => {
+                    if source == "eastmoney" {
+                        return Err(e);
+                    }
+                    debug!(error = %e, "东方财富 suggest failed, trying fallback");
+                }
+            }
+        }
 
         if !av_key.is_empty() {
             let url = format!(
@@ -959,14 +1091,27 @@ impl FinanceApiTool {
                 }))
             }
             "dragon_tiger" => {
+                let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol_filter = if !symbol.is_empty() {
+                    // Normalize to SECUCODE format: 600096 -> 600096.SH, 000001 -> 000001.SZ
+                    let code = symbol.trim_end_matches(|c: char| !c.is_ascii_digit());
+                    let secucode = if code.starts_with('6') || code.starts_with('9') {
+                        format!("{}.SH", code)
+                    } else {
+                        format!("{}.SZ", code)
+                    };
+                    format!("&filter=(SECUCODE%3D%22{}%22)", secucode)
+                } else {
+                    String::new()
+                };
                 let url = format!(
                     "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_DAILYBILLBOARD_DETAILSNEW\
                     &columns=SECUCODE,SECURITY_NAME_ABBR,TRADE_DATE,CHANGE_RATE,CLOSE_PRICE,TURNOVERVALUE,\
                     BILLBOARD_NET_AMT,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,BILLBOARD_DEAL_AMT,ACCUM_AMOUNT,\
                     DEAL_NET_RATIO,DEAL_AMOUNT_RATIO,EXPLANATION\
                     &pageSize={}&sortColumns=TRADE_DATE,TURNOVERVALUE&sortTypes=-1,-1\
-                    &source=WEB&client=DATACENTER",
-                    limit
+                    &source=WEB&client=DATACENTER{}",
+                    limit, symbol_filter
                 );
                 let resp = client.get(&url)
                     .header("Referer", "https://data.eastmoney.com")
@@ -1837,6 +1982,329 @@ impl FinanceApiTool {
         Err(Error::Tool(format!("Could not get price for '{}'", symbol)))
     }
 
+    // ─── Capital Flow (东方财富 个股资金流向) ───
+
+    async fn capital_flow(&self, params: &Value, client: &Client) -> Result<Value> {
+        let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+        if symbol.is_empty() {
+            return Err(Error::Tool("'symbol' is required for capital_flow".into()));
+        }
+        let period = params.get("period").and_then(|v| v.as_str()).unwrap_or("today");
+        let (secid, _, code) = Self::to_eastmoney_secid(symbol);
+
+        // lsjd: 0=今日, 1=3日, 2=5日, 3=10日
+        let lsjd = match period {
+            "3d" => "1",
+            "5d" => "2",
+            "10d" => "3",
+            _ => "0",
+        };
+
+        let url = format!(
+            "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=0&klt=1&fid=f1,f2,f3,f62&secid={}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&ut=b2884a393a59ad64002292a3e90d46a5&cb=&lsjd={}",
+            secid, lsjd
+        );
+        debug!(url = %url, "东方财富 capital_flow");
+
+        // Also fetch today's total capital flow summary
+        let summary_url = format!(
+            "https://push2.eastmoney.com/api/qt/stock/fflow/get?secid={}&fields=f1,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87&ut=b2884a393a59ad64002292a3e90d46a5",
+            secid
+        );
+
+        let (kline_resp, summary_resp) = tokio::join!(
+            client.get(&url)
+                .header("Referer", "https://data.eastmoney.com")
+                .header("User-Agent", "Mozilla/5.0")
+                .send(),
+            client.get(&summary_url)
+                .header("Referer", "https://data.eastmoney.com")
+                .header("User-Agent", "Mozilla/5.0")
+                .send()
+        );
+
+        let summary: Value = match summary_resp {
+            Ok(r) => r.json().await.unwrap_or(json!({})),
+            Err(_) => json!({}),
+        };
+
+        let kline: Value = match kline_resp {
+            Ok(r) => r.json().await.unwrap_or(json!({})),
+            Err(_) => json!({}),
+        };
+
+        // Parse summary data: f62=主力净流入, f66=超大单流入, f69=超大单流出, f72=大单流入, f75=大单流出
+        // f78=中单流入, f81=中单流出, f84=小单流入, f87=小单流出
+        let empty = json!({});
+        let sd = summary.get("data").unwrap_or(&empty);
+        let div = 100_000_000.0_f64; // convert to 亿
+        let get_f = |f: &str| sd.get(f).and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0);
+
+        Ok(json!({
+            "symbol": code,
+            "period": period,
+            "summary": {
+                "main_net_inflow_亿": get_f("f62"),
+                "super_large_buy_亿": get_f("f66"),
+                "super_large_sell_亿": get_f("f69"),
+                "large_buy_亿": get_f("f72"),
+                "large_sell_亿": get_f("f75"),
+                "medium_buy_亿": get_f("f78"),
+                "medium_sell_亿": get_f("f81"),
+                "small_buy_亿": get_f("f84"),
+                "small_sell_亿": get_f("f87"),
+            },
+            "kline": kline.get("data").and_then(|d| d.get("klines")),
+            "source": "eastmoney",
+            "note": "主力净流入=(超大单+大单)净流入之和。正值=资金流入，负值=资金流出"
+        }))
+    }
+
+    // ─── Northbound Flow (北向资金 沪深港通) ───
+
+    async fn northbound_flow(&self, params: &Value, client: &Client) -> Result<Value> {
+        let period = params.get("period").and_then(|v| v.as_str()).unwrap_or("today");
+
+        // 北向资金实时数据 (沪股通+深股通)
+        let url = "https://push2.eastmoney.com/api/qt/stock/fflow/get?secid=1.000001&fields=f62,f184&ut=b2884a393a59ad64002292a3e90d46a5";
+
+        // 北向资金历史 via eastmoney data center
+        let days = match period {
+            "30d" => 30,
+            "10d" => 10,
+            _ => 1,
+        };
+
+        let history_url = format!(
+            "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MUTUAL_MARKET_SH&columns=TRADE_DATE,SH_NETBUY,SZ_NETBUY,ALL_NETBUY,SH_ACCBUY,SZ_ACCBUY&sortColumns=TRADE_DATE&sortTypes=-1&pageSize={}&pageNumber=1&source=WEB&client=WEB",
+            days.max(10)
+        );
+
+        let (rt_resp, hist_resp) = tokio::join!(
+            client.get(url)
+                .header("Referer", "https://data.eastmoney.com")
+                .header("User-Agent", "Mozilla/5.0")
+                .send(),
+            client.get(&history_url)
+                .header("Referer", "https://data.eastmoney.com")
+                .header("User-Agent", "Mozilla/5.0")
+                .send()
+        );
+
+        let rt: Value = match rt_resp {
+            Ok(r) => r.json().await.unwrap_or(json!({})),
+            Err(_) => json!({}),
+        };
+        let hist: Value = match hist_resp {
+            Ok(r) => r.json().await.unwrap_or(json!({})),
+            Err(_) => json!({}),
+        };
+
+        let div = 100_000_000.0_f64;
+        let rt_empty = json!({});
+        let rt_data = rt.get("data").unwrap_or(&rt_empty);
+        let today_net = rt_data.get("f62").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0);
+
+        let history = hist.pointer("/result/data").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter().take(days).map(|item| json!({
+                "date": item.get("TRADE_DATE"),
+                "sh_net_亿": item.get("SH_NETBUY").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+                "sz_net_亿": item.get("SZ_NETBUY").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+                "total_net_亿": item.get("ALL_NETBUY").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+            })).collect::<Vec<_>>()
+        });
+
+        Ok(json!({
+            "today_total_net_亿": today_net,
+            "period": period,
+            "history": history,
+            "source": "eastmoney",
+            "note": "北向资金=沪股通+深股通净买入。正值=外资净流入，负值=外资净流出"
+        }))
+    }
+
+    // ─── Industry Fund Flow (行业板块资金流向) ───
+
+    async fn industry_fund_flow(&self, params: &Value, client: &Client) -> Result<Value> {
+        let industry_filter = params.get("industry").and_then(|v| v.as_str()).unwrap_or("");
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        // 东方财富 行业资金流向
+        let url = format!(
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz={}&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f62&fs=m%3A90%20t%3A2%20f%3A!50&fields=f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124",
+            limit.max(50)
+        );
+
+        let resp = client.get(&url)
+            .header("Referer", "https://data.eastmoney.com")
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("行业资金流向 request failed: {}", e)))?;
+
+        let body: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse 行业资金流向 response: {}", e)))?;
+
+        let div = 100_000_000.0_f64;
+        let items = body.pointer("/data/diff").and_then(|v| v.as_array()).map(|arr| {
+            let mut result: Vec<Value> = arr.iter().map(|item| {
+                let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                json!({
+                    "industry": name,
+                    "code": item.get("f12").and_then(|v| v.as_str()),
+                    "change_pct": item.get("f3").and_then(|v| v.as_f64()).map(|v| v / 100.0),
+                    "main_net_亿": item.get("f62").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+                    "super_large_net_亿": item.get("f184").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+                    "large_net_亿": item.get("f66").and_then(|v| v.as_f64()).map(|v| (v / div * 100.0).round() / 100.0),
+                })
+            }).collect();
+            // filter by industry name if requested
+            if !industry_filter.is_empty() {
+                result.retain(|item| {
+                    item.get("industry").and_then(|v| v.as_str()).map(|n| n.contains(industry_filter)).unwrap_or(false)
+                });
+            }
+            result
+        }).unwrap_or_default();
+
+        Ok(json!({
+            "industries": items,
+            "source": "eastmoney",
+            "note": "主力净流入=(超大单+大单)净流入。正值=资金流入，行业按主力净流入降序排列"
+        }))
+    }
+
+    // ─── Stock News (东方财富 个股新闻) ───
+
+    async fn stock_news(&self, params: &Value, client: &Client) -> Result<Value> {
+        let symbol = params.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+        if symbol.is_empty() {
+            return Err(Error::Tool("'symbol' is required for stock_news".into()));
+        }
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let (_, _, code) = Self::to_eastmoney_secid(symbol);
+
+        // 东方财富 个股新闻 (datacenter API)
+        let news_url = format!(
+            "https://gsxq.eastmoney.com/data/stock/gsdt?secids={}&num={}&type=1",
+            {
+                let (secid, _, _) = Self::to_eastmoney_secid(symbol);
+                secid
+            },
+            limit
+        );
+
+        let resp = client.get(&news_url)
+            .header("Referer", "https://guba.eastmoney.com")
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("股票新闻 request failed: {}", e)))?;
+
+        let body: Value = resp.json().await.unwrap_or(json!({}));
+
+        // Parse list of news items
+        let news = body.pointer("/result/data").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter().take(limit).map(|item| json!({
+                "title": item.get("TITLE"),
+                "source": item.get("MEDIA_NAME"),
+                "time": item.get("PUBLISH_DATE"),
+                "url": item.get("URL"),
+            })).collect::<Vec<_>>()
+        }).or_else(|| {
+            // Try alternate format
+            body.get("data").and_then(|d| d.as_array()).map(|arr| {
+                arr.iter().take(limit).map(|item| json!({
+                    "title": item.get("title").or(item.get("TITLE")),
+                    "source": item.get("mediaName").or(item.get("source")),
+                    "time": item.get("showTime").or(item.get("time")),
+                    "url": item.get("url"),
+                })).collect::<Vec<_>>()
+            })
+        }).unwrap_or_else(|| {
+            // Fallback: use Eastmoney Guba (股吧) news list
+            vec![json!({ "note": "请使用 web_search 搜索该股票最新新闻" })]
+        });
+
+        // Also try 财联社 news (free)
+        let cls_url = format!(
+            "https://www.cls.cn/nodeapi/updateTelegraphList?app=CailianpressWeb&os=web&sv=7.7.5&sign=&rn={}&lastTime=0",
+            limit.min(20)
+        );
+        let cls_news = match client.get(&cls_url)
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+        {
+            Ok(r) => r.json::<Value>().await.unwrap_or(json!({})),
+            Err(_) => json!({}),
+        };
+
+        Ok(json!({
+            "symbol": code,
+            "news": news,
+            "market_flash": cls_news.pointer("/data/roll_data").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter().take(5).map(|item| json!({
+                    "content": item.get("content"),
+                    "time": item.get("ctime"),
+                })).collect::<Vec<_>>()
+            }),
+            "source": "eastmoney+cailianshe",
+        }))
+    }
+
+    // ─── Macro Data (宏观经济数据) ───
+
+    async fn macro_data(&self, params: &Value, client: &Client) -> Result<Value> {
+        let indicator = params.get("indicator").and_then(|v| v.as_str()).unwrap_or("cpi");
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(12) as usize;
+
+        // 东方财富 宏观数据中心
+        let (report_name, columns) = match indicator {
+            "gdp" => ("RPT_ECONOMY_GDP", "REPORT_DATE,DOMESTICL,DOMESTICL_SAME,FIRST_INDUSTRY,SECOND_INDUSTRY,THIRD_INDUSTRY"),
+            "cpi" => ("RPT_ECONOMY_CPI", "REPORT_DATE,NATIONAL_SAME,NATIONAL_BASE,CITY_SAME,RURAL_SAME,FOOD_SAME,NONFOOD_SAME"),
+            "ppi" => ("RPT_ECONOMY_PPI", "REPORT_DATE,INDUSTRY_SAME,INDUSTRY_BASE,MEANS_SAME,CONSUMER_SAME"),
+            "pmi_manufacturing" => ("RPT_ECONOMY_PMI", "REPORT_DATE,MAKE_PMI,MAKE_PMI_SAME,LARGE_PMI,MIDDLE_PMI,SMALL_PMI"),
+            "pmi_services" => ("RPT_ECONOMY_PMI", "REPORT_DATE,NMAKE_PMI,NMAKE_PMI_SAME,CONSTRUCTION_PMI,SERVICE_PMI"),
+            "social_financing" => ("RPT_ECONOMY_FINANCING", "REPORT_DATE,SCALE,SCALE_SAME,LOAN,ENTRUST_LOAN,TRUST_LOAN,BOND,EQUITY"),
+            "m2" => ("RPT_ECONOMY_MONEY_SUPPLY", "REPORT_DATE,M2,M2_SAME,M1,M1_SAME,M0,M0_SAME"),
+            "retail_sales" => ("RPT_ECONOMY_TOTAL_RETAIL", "REPORT_DATE,RETAIL_TOTAL,RETAIL_SAME,RETAIL_BASE"),
+            "industrial_output" => ("RPT_ECONOMY_INDUSTRIAL_OUTPUT", "REPORT_DATE,OUTPUTVAL,OUTPUTVAL_SAME,OUTPUTVAL_BASE"),
+            "trade_balance" => ("RPT_ECONOMY_TRADE", "REPORT_DATE,EXPORTS,EXPORTS_SAME,IMPORTS,IMPORTS_SAME,TRADE_BALANCE"),
+            "interest_rate" | "lpr" => ("RPT_ECONOMY_LPR", "REPORT_DATE,LPR_1Y,LPR_5Y"),
+            "reserve_ratio" | "rrr" => ("RPT_ECONOMY_RRR", "REPORT_DATE,RRR_LARGE,RRR_SMALL,EXCESS_RRR"),
+            _ => ("RPT_ECONOMY_CPI", "REPORT_DATE,NATIONAL_SAME,NATIONAL_BASE"),
+        };
+
+        let url = format!(
+            "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName={}&columns={}&sortColumns=REPORT_DATE&sortTypes=-1&pageSize={}&pageNumber=1&source=WEB&client=WEB",
+            report_name, columns, limit
+        );
+
+        debug!(url = %url, indicator = %indicator, "宏观数据");
+
+        let resp = client.get(&url)
+            .header("Referer", "https://data.eastmoney.com")
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .await
+            .map_err(|e| Error::Tool(format!("宏观数据 request failed: {}", e)))?;
+
+        let body: Value = resp.json().await
+            .map_err(|e| Error::Tool(format!("Failed to parse 宏观数据 response: {}", e)))?;
+
+        let data = body.pointer("/result/data").cloned().unwrap_or(json!([]));
+        let total = body.pointer("/result/count").and_then(|v| v.as_u64());
+
+        Ok(json!({
+            "indicator": indicator,
+            "data": data,
+            "total_records": total,
+            "source": "eastmoney_datacenter",
+            "note": format!("宏观数据来源: 国家统计局/央行。显示最近{}期数据。", limit)
+        }))
+    }
+
     // ─── Market Overview ───
 
     async fn market_overview(&self, params: &Value, client: &Client) -> Result<Value> {
@@ -2014,6 +2482,36 @@ mod tests {
         assert_eq!(secid, "1.601318");
         assert_eq!(market, "sh");
         assert_eq!(code, "601318");
+    }
+
+    #[test]
+    fn test_parse_eastmoney_suggest() {
+        let body = json!({
+            "QuotationCodeTable": {
+                "Data": [
+                    {
+                        "Code": "002949",
+                        "Name": "华阳国际",
+                        "QuoteID": "0.002949"
+                    },
+                    {
+                        "Code": "00700",
+                        "Name": "腾讯控股",
+                        "QuoteID": "116.00700"
+                    }
+                ],
+                "Status": 0,
+                "Message": "成功",
+                "TotalCount": 2
+            }
+        });
+
+        let parsed = FinanceApiTool::parse_eastmoney_suggest(&body, 10);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].get("symbol").and_then(|v| v.as_str()).unwrap_or(""), "002949");
+        assert_eq!(parsed[0].get("market").and_then(|v| v.as_str()).unwrap_or(""), "sz");
+        assert_eq!(parsed[1].get("symbol").and_then(|v| v.as_str()).unwrap_or(""), "00700");
+        assert_eq!(parsed[1].get("market").and_then(|v| v.as_str()).unwrap_or(""), "hk");
     }
 
     #[test]

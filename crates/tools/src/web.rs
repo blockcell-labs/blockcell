@@ -14,7 +14,7 @@ impl Tool for WebSearchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_search",
-            description: "Search the web. Uses Brave Search API if configured, otherwise falls back to Bing (free, no API key needed, works in China). Tip: set freshness=day for 'last 24 hours' news.",
+            description: "Search the web. Uses Brave Search API if configured. For Chinese queries, automatically uses Baidu first (best quality for Chinese content, especially from overseas servers), then falls back to Bing (zh-CN locale). Tip: set freshness=day for 'last 24 hours' news.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -68,12 +68,42 @@ impl Tool for WebSearchTool {
             }
         }
 
-        // Free fallback: Bing HTML scraping (accessible from China, no API key needed)
+        // Detect if query is primarily Chinese — use Baidu first for better results
+        let is_chinese_query = query.chars().any(|c| {
+            let cp = c as u32;
+            (0x4E00..=0x9FFF).contains(&cp)  // CJK Unified Ideographs
+        });
+
+        if is_chinese_query {
+            // Baidu: best quality for Chinese queries, especially from overseas servers
+            match baidu_search(query, count).await {
+                Ok(results) if !results.is_empty() => {
+                    return Ok(json!({ "query": query, "results": results, "source": "baidu" }));
+                }
+                Ok(_) => {
+                    tracing::warn!("Baidu returned empty results, trying Bing");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Baidu search failed, trying Bing");
+                }
+            }
+        }
+
+        // Bing with Chinese locale (works globally, zh-CN results)
         match bing_search(query, count).await {
             Ok(results) => return Ok(json!({ "query": query, "results": results, "source": "bing" })),
             Err(e) => {
                 tracing::warn!(error = %e, "Bing search failed");
-                return Err(e);
+                // Last resort for Chinese queries: try Baidu if not already tried
+                if !is_chinese_query {
+                    return Err(e);
+                }
+                match baidu_search(query, count).await {
+                    Ok(results) if !results.is_empty() => {
+                        return Ok(json!({ "query": query, "results": results, "source": "baidu" }));
+                    }
+                    _ => return Err(e),
+                }
             }
         }
     }
@@ -134,9 +164,16 @@ async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
 
     let response = client
         .get("https://www.bing.com/search")
-        .query(&[("q", query), ("count", &count.to_string())])
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .query(&[
+            ("q", query),
+            ("count", &count.to_string()),
+            ("mkt", "zh-CN"),
+            ("setlang", "zh-Hans"),
+            ("cc", "CN"),
+        ])
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Bing search failed: {}", e)))?;
@@ -190,6 +227,89 @@ async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
 
     if results.is_empty() {
         return Err(Error::Tool("Bing returned no parseable results. Try a different query.".to_string()));
+    }
+
+    Ok(results)
+}
+
+/// Baidu search scraper — best for Chinese queries, especially from overseas servers.
+async fn baidu_search(query: &str, count: usize) -> Result<Vec<Value>> {
+    use scraper::{Html, Selector};
+
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
+
+    let response = client
+        .get("https://www.baidu.com/s")
+        .query(&[("wd", query), ("rn", &count.to_string())])
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Accept-Language", "zh-CN,zh;q=0.9")
+        .header("Accept", "text/html,application/xhtml+xml")
+        .header("Referer", "https://www.baidu.com/")
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("Baidu search failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(Error::Tool(format!("Baidu returned status {}", response.status())));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|e| Error::Tool(format!("Failed to read Baidu response: {}", e)))?;
+
+    let document = Html::parse_document(&html);
+
+    // Baidu result containers: div.result, div.c-container
+    let result_sel = Selector::parse("div.result, div.c-container").unwrap();
+    let title_sel = Selector::parse("h3 a, .t a").unwrap();
+    let snippet_sel = Selector::parse(".c-abstract, .c-span9, .content-right_8Zs40").unwrap();
+
+    let mut results = Vec::new();
+
+    for el in document.select(&result_sel) {
+        if results.len() >= count {
+            break;
+        }
+
+        let title_el = el.select(&title_sel).next();
+        let title = title_el
+            .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+            .unwrap_or_default();
+
+        let url = title_el
+            .and_then(|e| e.value().attr("href").map(|h| h.to_string()))
+            .unwrap_or_default();
+
+        let snippet = el
+            .select(&snippet_sel)
+            .next()
+            .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+            .unwrap_or_default();
+
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+
+        // Skip Baidu's own promotional/ad results that start with /link?url=
+        // but keep actual URLs
+        let display_url = if url.starts_with("http") {
+            url.clone()
+        } else if url.starts_with("/link") {
+            format!("https://www.baidu.com{}", url)
+        } else {
+            continue;
+        };
+
+        results.push(json!({
+            "title": title,
+            "url": display_url,
+            "snippet": snippet
+        }));
     }
 
     Ok(results)

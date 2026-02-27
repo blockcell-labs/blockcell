@@ -6,7 +6,7 @@ use blockcell_storage::MemoryStore;
 use blockcell_tools::ToolRegistry;
 
 /// List all skill evolution records.
-pub async fn list(all: bool) -> anyhow::Result<()> {
+pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
     let paths = Paths::default();
     let records_dir = paths.workspace().join("evolution_records");
     let skills_dir = paths.skills_dir();
@@ -52,23 +52,47 @@ pub async fn list(all: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Count available skills
-    let mut available_count = 0;
+    // Collect available skills from workspace/skills/ only.
+    // (Builtin skills are extracted to workspace on first run/onboard.)
+    let mut available_skills: Vec<(String, std::path::PathBuf)> = Vec::new();
     if skills_dir.exists() && skills_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {
-                    available_count += 1;
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    available_skills.push((name, p));
                 }
             }
         }
     }
+    available_skills.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Filter by enabled if requested (skills with .disabled marker are excluded)
+    if enabled_only {
+        available_skills.retain(|(_, p)| !p.join(".disabled").exists());
+    }
+
+    let available_count = available_skills.len();
 
     println!();
     println!("🧠 Skill Status");
     println!("  📦 Loaded: {}  ✅ Learned: {}  🔄 Learning: {}  ❌ Failed: {}",
         available_count, learned.len(), learning.len(), failed.len());
+
+    if !available_skills.is_empty() {
+        println!();
+        println!("  📦 Available skills:");
+        for (name, path) in &available_skills {
+            let desc = read_skill_description(path);
+            if desc.is_empty() {
+                println!("    • {}", name);
+            } else {
+                println!("    • {} — {}", name, desc);
+            }
+            println!("      {}", path.display());
+        }
+    }
 
     if !learned.is_empty() {
         println!();
@@ -104,6 +128,138 @@ pub async fn list(all: bool) -> anyhow::Result<()> {
         println!("  (No skill records)");
     }
     println!();
+    Ok(())
+}
+
+/// Show details for a specific skill.
+pub async fn show(name: &str) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let skills_dir = paths.skills_dir();
+    let skill_path = skills_dir.join(name);
+
+    if !skill_path.exists() || !skill_path.is_dir() {
+        println!("❌ Skill '{}' not found in {}", name, skills_dir.display());
+        println!("  Use `blockcell skills list` to see available skills.");
+        return Ok(());
+    }
+
+    println!();
+    println!("🧠 Skill: {}", name);
+    println!("  Path: {}", skill_path.display());
+
+    let disabled = skill_path.join(".disabled").exists();
+    println!("  Status: {}", if disabled { "⏸  disabled" } else { "✅ enabled" });
+
+    let meta_path = skill_path.join("meta.yaml");
+    if meta_path.exists() {
+        println!();
+        println!("  meta.yaml:");
+        let content = std::fs::read_to_string(&meta_path).unwrap_or_default();
+        for line in content.lines().take(30) {
+            println!("    {}", line);
+        }
+    }
+
+    if skill_path.join("SKILL.rhai").exists() {
+        println!();
+        println!("  Script: SKILL.rhai ✓");
+    }
+    if skill_path.join("SKILL.md").exists() {
+        println!();
+        println!("  Manual: SKILL.md ✓");
+    }
+
+    // Show evolution records for this skill
+    let records_dir = paths.workspace().join("evolution_records");
+    let mut records: Vec<EvolutionRecord> = Vec::new();
+    if records_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&records_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|e| e == "json") {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        if let Ok(r) = serde_json::from_str::<EvolutionRecord>(&content) {
+                            if r.skill_name == name {
+                                records.push(r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    if !records.is_empty() {
+        println!();
+        println!("  Evolution records ({}):", records.len());
+        for r in records.iter().take(5) {
+            println!("    {} {:?} — {}", &r.id.chars().take(12).collect::<String>(), r.status, format_ts(r.created_at));
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Enable or disable a skill by creating/removing a .disabled marker.
+pub async fn set_enabled(name: &str, enable: bool) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let skill_path = paths.skills_dir().join(name);
+
+    if !skill_path.exists() || !skill_path.is_dir() {
+        println!("❌ Skill '{}' not found.", name);
+        return Ok(());
+    }
+
+    let marker = skill_path.join(".disabled");
+    if enable {
+        if marker.exists() {
+            std::fs::remove_file(&marker)?;
+            println!("✅ Skill '{}' enabled.", name);
+        } else {
+            println!("  Skill '{}' is already enabled.", name);
+        }
+    } else {
+        if !marker.exists() {
+            std::fs::write(&marker, "")?;
+            println!("⏸  Skill '{}' disabled.", name);
+        } else {
+            println!("  Skill '{}' is already disabled.", name);
+        }
+    }
+    Ok(())
+}
+
+/// Hot-reload: report skill count (actual reload happens at agent startup).
+pub async fn reload() -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let skills_dir = paths.skills_dir();
+
+    // Re-extract builtin skills (skips existing files)
+    match super::embedded_skills::extract_to_workspace(&skills_dir) {
+        Ok(new_skills) if !new_skills.is_empty() => {
+            println!("✓ Extracted {} new builtin skill(s): {}", new_skills.len(), new_skills.join(", "));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("⚠️  Failed to extract builtin skills: {}", e);
+        }
+    }
+
+    let mut count = 0usize;
+    if skills_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    println!("✅ Skills directory refreshed. {} skill(s) available.", count);
+    println!("   Note: Running agent processes will pick up changes on their next tick.");
     Ok(())
 }
 
@@ -686,6 +842,31 @@ fn status_desc(s: &str) -> &'static str {
         "Observing" | "RollingOut" => "observing",
         _ => "in progress",
     }
+}
+
+/// Read a skill's description from meta.yaml or meta.json (first `description:` line).
+fn read_skill_description(skill_dir: &std::path::Path) -> String {
+    // Try meta.yaml
+    let yaml = skill_dir.join("meta.yaml");
+    if yaml.exists() {
+        if let Ok(content) = std::fs::read_to_string(&yaml) {
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix("description:") {
+                    return val.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+    }
+    // Try meta.json
+    let json = skill_dir.join("meta.json");
+    if json.exists() {
+        if let Ok(content) = std::fs::read_to_string(&json) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                return v.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn format_ts(ts: i64) -> String {

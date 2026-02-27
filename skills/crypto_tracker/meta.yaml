@@ -1,0 +1,27 @@
+name: crypto_tracker
+description: "加密货币追踪技能 — CoinGecko免费API，获取实时币价、市场数据、趋势分析，零API Key"
+requires:
+  bins: []
+  env: []
+permissions: []
+always: false
+triggers:
+  - "币价"
+  - "加密货币"
+  - "比特币"
+  - "以太坊"
+  - "crypto"
+  - "bitcoin"
+  - "ethereum"
+  - "BTC"
+  - "ETH"
+  - "数字货币"
+  - "虚拟货币"
+  - "token price"
+  - "coin price"
+capabilities:
+  - "finance_api"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法获取加密货币数据，请稍后重试。"

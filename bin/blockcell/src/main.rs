@@ -23,6 +23,21 @@ enum Commands {
         /// Force overwrite existing configuration
         #[arg(long)]
         force: bool,
+        /// Run in interactive wizard mode (default)
+        #[arg(long)]
+        interactive: bool,
+        /// LLM provider name (e.g. deepseek, openai, kimi, anthropic)
+        #[arg(long)]
+        provider: Option<String>,
+        /// API key for the provider
+        #[arg(long, name = "api-key")]
+        api_key: Option<String>,
+        /// Model name (e.g. deepseek-chat, moonshot-v1-8k)
+        #[arg(long)]
+        model: Option<String>,
+        /// Only update channel configuration, skip provider setup
+        #[arg(long)]
+        channels_only: bool,
     },
 
     /// Show current configuration status
@@ -37,6 +52,14 @@ enum Commands {
         /// Session ID
         #[arg(short, long, default_value = "cli:default")]
         session: String,
+
+        /// Override LLM model for this session
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Override LLM provider for this session
+        #[arg(long)]
+        provider: Option<String>,
     },
 
     /// Start the gateway (long-running daemon)
@@ -65,6 +88,12 @@ enum Commands {
         command: ToolsCommands,
     },
 
+    /// View and manage background tasks
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommands,
+    },
+
     /// Execute a tool or agent message directly
     Run {
         #[command(subcommand)]
@@ -83,10 +112,13 @@ enum Commands {
         command: CronCommands,
     },
 
-    /// Manage upgrades
+    /// Check and install upgrades
     Upgrade {
+        /// Only check for updates, do not install
+        #[arg(long)]
+        check: bool,
         #[command(subcommand)]
-        command: UpgradeCommands,
+        command: Option<UpgradeCommands>,
     },
 
     /// Manage skill evolution records
@@ -139,10 +171,32 @@ enum Commands {
     },
 }
 
+// ── P0: Tasks ───────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum TasksCommands {
+    /// List all background tasks
+    List,
+    /// Show details for a specific task
+    Show {
+        /// Task ID (prefix match)
+        task_id: String,
+    },
+    /// Cancel a running task (if supported)
+    Cancel {
+        /// Task ID (prefix match)
+        task_id: String,
+    },
+}
+
 // ── P0: Config ──────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 enum ConfigCommands {
+    /// Show current configuration
+    Show,
+    /// Print the JSON Schema for the config file
+    Schema,
     /// Get a config value by dot-separated key (e.g. agents.defaults.model)
     Get {
         /// Config key path (e.g. "agents.defaults.model", "providers.openai.api_key")
@@ -176,6 +230,11 @@ enum ToolsCommands {
         /// Filter by category name
         #[arg(long)]
         category: Option<String>,
+    },
+    /// Show detailed info for a specific tool (alias for 'info')
+    Show {
+        /// Tool name
+        tool_name: String,
     },
     /// Show detailed info for a specific tool
     Info {
@@ -279,6 +338,11 @@ enum StreamsCommands {
         /// Subscription ID (prefix match)
         sub_id: String,
     },
+    /// Unsubscribe (alias for 'stop')
+    Unsubscribe {
+        /// Subscription ID (prefix match)
+        sub_id: String,
+    },
     /// Show restorable subscriptions
     Restore,
 }
@@ -329,12 +393,21 @@ enum LogsCommands {
         /// Number of lines to show
         #[arg(long, default_value = "50")]
         lines: usize,
+        /// Filter by keyword (e.g. evolution, ghost, tool)
+        #[arg(long)]
+        filter: Option<String>,
+        /// Alias for --lines
+        #[arg(short = 'n')]
+        last_n: Option<usize>,
         /// Filter by session ID
         #[arg(long)]
         session: Option<String>,
     },
     /// Follow logs in real-time (tail -f)
     Follow {
+        /// Filter by keyword
+        #[arg(long)]
+        filter: Option<String>,
         /// Filter by session ID
         #[arg(long)]
         session: Option<String>,
@@ -365,6 +438,16 @@ enum CronCommands {
         /// Show all jobs including disabled
         #[arg(long)]
         all: bool,
+    },
+    /// Pause (disable) a cron job
+    Pause {
+        /// Job ID
+        job_id: String,
+    },
+    /// Resume (enable) a paused cron job
+    Resume {
+        /// Job ID
+        job_id: String,
     },
     /// Add a new cron job
     Add {
@@ -434,13 +517,50 @@ enum UpgradeCommands {
     Status,
 }
 
+impl Default for UpgradeCommands {
+    fn default() -> Self {
+        UpgradeCommands::Check
+    }
+}
+
 #[derive(Subcommand)]
 enum SkillsCommands {
-    /// List skill evolution records
+    /// List all skills
     List {
         /// Show all records including built-in tool errors
         #[arg(long)]
         all: bool,
+        /// Only show enabled skills
+        #[arg(long)]
+        enabled: bool,
+    },
+    /// Show details for a specific skill
+    Show {
+        /// Skill name
+        name: String,
+    },
+    /// Enable a skill
+    Enable {
+        /// Skill name
+        name: String,
+    },
+    /// Disable a skill
+    Disable {
+        /// Skill name
+        name: String,
+    },
+    /// Hot-reload all skills from disk
+    Reload,
+    /// Run a skill test
+    Test {
+        /// Path to the skill directory (e.g. ./skills/web_search)
+        path: String,
+        /// Simulated user input injected as user_input variable
+        #[arg(long, short)]
+        input: Option<String>,
+        /// Show script logs and verbose meta.yaml output
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Learn a new skill by description
     Learn {
@@ -461,17 +581,6 @@ enum SkillsCommands {
     Forget {
         /// Skill name to forget
         name: String,
-    },
-    /// Test a skill directory (validate meta.yaml + dry-run SKILL.rhai with mock tools)
-    Test {
-        /// Path to the skill directory (e.g. ./skills/web_search)
-        path: String,
-        /// Simulated user input injected as user_input variable
-        #[arg(long, short)]
-        input: Option<String>,
-        /// Show script logs and verbose meta.yaml output
-        #[arg(long, short)]
-        verbose: bool,
     },
     /// Batch-test all skills under a directory
     TestAll {
@@ -496,6 +605,27 @@ enum EvolveCommands {
         #[arg(long, short)]
         watch: bool,
     },
+    /// Manually trigger evolution for a skill (alias for 'run')
+    Trigger {
+        /// Skill name to evolve
+        skill_name: String,
+        /// Optional reason / hint for the evolution
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Show evolution history for a skill (alias for 'status')
+    Show {
+        /// Skill name or evolution ID
+        skill_name: String,
+    },
+    /// Rollback a skill to a previous version
+    Rollback {
+        /// Skill name
+        skill_name: String,
+        /// Target version (e.g. v2)
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Watch evolution progress in real-time
     Watch {
         /// Evolution ID (optional, watches all if omitted)
@@ -519,6 +649,25 @@ enum EvolveCommands {
 
 #[derive(Subcommand)]
 enum MemoryCommands {
+    /// List recent memory items
+    List {
+        /// Filter by type (fact/preference/project/task/note/...)
+        #[arg(long, name = "type")]
+        item_type: Option<String>,
+        /// Max results
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Show a specific memory item by ID
+    Show {
+        /// Memory item ID
+        id: String,
+    },
+    /// Delete a memory item by ID
+    Delete {
+        /// Memory item ID
+        id: String,
+    },
     /// Show memory statistics
     Stats,
     /// Search memory items
@@ -561,19 +710,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 
     match cli.command {
-        Commands::Onboard { force } => {
-            commands::onboard::run(force).await?;
+        Commands::Onboard { force, interactive: _, provider, api_key, model, channels_only } => {
+            commands::onboard::run(force, provider, api_key, model, channels_only).await?;
         }
         Commands::Status => {
             commands::status::run().await?;
         }
-        Commands::Agent { message, session } => {
-            commands::agent::run(message, session).await?;
+        Commands::Agent { message, session, model, provider } => {
+            commands::agent::run(message, session, model, provider).await?;
         }
         Commands::Gateway { port, host } => {
             commands::gateway::run(host, port).await?;
@@ -586,6 +735,12 @@ async fn main() -> anyhow::Result<()> {
 
         // ── P0: Config ──────────────────────────────────────────────────
         Commands::Config { command } => match command {
+            ConfigCommands::Show => {
+                commands::config_cmd::show().await?;
+            }
+            ConfigCommands::Schema => {
+                commands::config_cmd::schema().await?;
+            }
             ConfigCommands::Get { key } => {
                 commands::config_cmd::get(&key).await?;
             }
@@ -608,7 +763,7 @@ async fn main() -> anyhow::Result<()> {
             ToolsCommands::List { category } => {
                 commands::tools_cmd::list(category).await?;
             }
-            ToolsCommands::Info { tool_name } => {
+            ToolsCommands::Show { tool_name } | ToolsCommands::Info { tool_name } => {
                 commands::tools_cmd::info(&tool_name).await?;
             }
             ToolsCommands::Test { tool_name, params } => {
@@ -617,6 +772,19 @@ async fn main() -> anyhow::Result<()> {
             ToolsCommands::Toggle { tool_name, enable, disable } => {
                 let enabled = if disable { false } else { enable || true };
                 commands::tools_cmd::toggle(&tool_name, enabled).await?;
+            }
+        },
+
+        // ── Tasks ───────────────────────────────────────────────────────
+        Commands::Tasks { command } => match command {
+            TasksCommands::List => {
+                commands::tasks_cmd::list().await?;
+            }
+            TasksCommands::Show { task_id } => {
+                commands::tasks_cmd::show(&task_id).await?;
+            }
+            TasksCommands::Cancel { task_id } => {
+                commands::tasks_cmd::cancel(&task_id).await?;
             }
         },
 
@@ -643,6 +811,12 @@ async fn main() -> anyhow::Result<()> {
             CronCommands::List { all } => {
                 commands::cron::list(all).await?;
             }
+            CronCommands::Pause { job_id } => {
+                commands::cron::enable(&job_id, false).await?;
+            }
+            CronCommands::Resume { job_id } => {
+                commands::cron::enable(&job_id, true).await?;
+            }
             CronCommands::Add {
                 name,
                 message,
@@ -665,26 +839,44 @@ async fn main() -> anyhow::Result<()> {
                 commands::cron::run_job(&job_id, force).await?;
             }
         },
-        Commands::Upgrade { command } => match command {
-            UpgradeCommands::Check => {
+        Commands::Upgrade { check, command } => {
+            if check {
                 commands::upgrade::check().await?;
+            } else {
+                match command.unwrap_or_default() {
+                    UpgradeCommands::Check => {
+                        commands::upgrade::check().await?;
+                    }
+                    UpgradeCommands::Download => {
+                        commands::upgrade::download().await?;
+                    }
+                    UpgradeCommands::Apply => {
+                        commands::upgrade::apply().await?;
+                    }
+                    UpgradeCommands::Rollback { to } => {
+                        commands::upgrade::rollback(to).await?;
+                    }
+                    UpgradeCommands::Status => {
+                        commands::upgrade::status().await?;
+                    }
+                }
             }
-            UpgradeCommands::Download => {
-                commands::upgrade::download().await?;
-            }
-            UpgradeCommands::Apply => {
-                commands::upgrade::apply().await?;
-            }
-            UpgradeCommands::Rollback { to } => {
-                commands::upgrade::rollback(to).await?;
-            }
-            UpgradeCommands::Status => {
-                commands::upgrade::status().await?;
-            }
-        },
+        }
         Commands::Skills { command } => match command {
-            SkillsCommands::List { all } => {
-                commands::skills::list(all).await?;
+            SkillsCommands::List { all, enabled } => {
+                commands::skills::list(all, enabled).await?;
+            }
+            SkillsCommands::Show { name } => {
+                commands::skills::show(&name).await?;
+            }
+            SkillsCommands::Enable { name } => {
+                commands::skills::set_enabled(&name, true).await?;
+            }
+            SkillsCommands::Disable { name } => {
+                commands::skills::set_enabled(&name, false).await?;
+            }
+            SkillsCommands::Reload => {
+                commands::skills::reload().await?;
             }
             SkillsCommands::Learn { description } => {
                 commands::skills::learn(&description).await?;
@@ -709,6 +901,21 @@ async fn main() -> anyhow::Result<()> {
             EvolveCommands::Run { description, watch } => {
                 commands::evolve::run(&description, watch).await?;
             }
+            EvolveCommands::Trigger { skill_name, reason } => {
+                let desc = reason.as_deref().unwrap_or(&skill_name);
+                let full_desc = if reason.is_some() {
+                    format!("{}: {}", skill_name, desc)
+                } else {
+                    skill_name.clone()
+                };
+                commands::evolve::run(&full_desc, false).await?;
+            }
+            EvolveCommands::Show { skill_name } => {
+                commands::evolve::show(&skill_name).await?;
+            }
+            EvolveCommands::Rollback { skill_name, to } => {
+                commands::evolve::rollback(&skill_name, to).await?;
+            }
             EvolveCommands::Watch { evolution_id } => {
                 commands::evolve::watch(evolution_id).await?;
             }
@@ -720,6 +927,15 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Memory { command } => match command {
+            MemoryCommands::List { item_type, limit } => {
+                commands::memory::list(item_type, limit).await?;
+            }
+            MemoryCommands::Show { id } => {
+                commands::memory::show(&id).await?;
+            }
+            MemoryCommands::Delete { id } => {
+                commands::memory::delete(&id).await?;
+            }
             MemoryCommands::Stats => {
                 commands::memory::stats().await?;
             }
@@ -761,7 +977,7 @@ async fn main() -> anyhow::Result<()> {
             StreamsCommands::Status { sub_id } => {
                 commands::streams_cmd::status(&sub_id).await?;
             }
-            StreamsCommands::Stop { sub_id } => {
+            StreamsCommands::Stop { sub_id } | StreamsCommands::Unsubscribe { sub_id } => {
                 commands::streams_cmd::stop(&sub_id).await?;
             }
             StreamsCommands::Restore => {
@@ -792,11 +1008,12 @@ async fn main() -> anyhow::Result<()> {
 
         // ── P2: Logs ────────────────────────────────────────────────────
         Commands::Logs { command } => match command {
-            LogsCommands::Show { lines, session } => {
-                commands::logs_cmd::show(lines, session).await?;
+            LogsCommands::Show { lines, filter, last_n, session } => {
+                let n = last_n.unwrap_or(lines);
+                commands::logs_cmd::show(n, filter, session).await?;
             }
-            LogsCommands::Follow { session } => {
-                commands::logs_cmd::follow(session).await?;
+            LogsCommands::Follow { filter, session } => {
+                commands::logs_cmd::follow(filter, session).await?;
             }
             LogsCommands::Clear { force } => {
                 commands::logs_cmd::clear(force).await?;

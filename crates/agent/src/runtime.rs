@@ -1,6 +1,6 @@
 use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
 use blockcell_core::types::{ChatMessage, ToolCallRequest};
-use blockcell_providers::{Provider, OpenAIProvider, AnthropicProvider, GeminiProvider, OllamaProvider};
+use blockcell_providers::Provider;
 use blockcell_storage::{SessionStore, AuditLogger};
 use blockcell_tools::{ToolRegistry, TaskManagerHandle, MemoryStoreHandle, SpawnHandle, CapabilityRegistryHandle, CoreEvolutionHandle};
 use std::collections::{HashMap, HashSet};
@@ -286,6 +286,49 @@ fn condense_web_search_result(raw: &str) -> Option<String> {
     } else {
         Some(out.trim().to_string())
     }
+}
+
+/// Detect if a web_search result is "thin" — only contains titles/URLs with no actual content.
+/// This happens when the search engine returns page titles but the snippets are empty or near-empty.
+/// In this case the LLM should be directed to web_fetch specific URLs instead of giving up.
+fn is_thin_search_result(raw: &str) -> bool {
+    let val: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let results = match val.get("results").and_then(|v| v.as_array()) {
+        Some(r) => r,
+        None => return false,
+    };
+    if results.is_empty() {
+        return false;
+    }
+    // Count results that have meaningful snippet content (>30 chars)
+    let rich_count = results.iter().filter(|r| {
+        let snippet = r.get("snippet").and_then(|v| v.as_str())
+            .or_else(|| r.get("description").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        snippet.chars().count() > 30
+    }).count();
+    // Thin if fewer than half the results have meaningful snippets
+    rich_count * 2 < results.len()
+}
+
+/// Extract URLs from a web_search result JSON (top 3 results).
+fn extract_urls_from_search_result(raw: &str) -> Vec<String> {
+    let val: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let results = match val.get("results").and_then(|v| v.as_array()) {
+        Some(r) => r,
+        None => return vec![],
+    };
+    results.iter()
+        .filter_map(|r| r.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter(|u| !u.is_empty())
+        .take(3)
+        .collect()
 }
 
 fn condense_web_fetch_result(raw: &str) -> Option<String> {
@@ -623,84 +666,9 @@ impl AgentRuntime {
     }
 
     /// Create a new provider instance for a subagent.
-    /// Dispatches to the correct provider based on model prefix or configured provider name.
+    /// Delegates to the unified factory in blockcell_providers::factory.
     pub fn create_subagent_provider(config: &Config) -> Option<Box<dyn Provider>> {
-        let model = &config.agents.defaults.model;
-        let max_tokens = config.agents.defaults.max_tokens;
-        let temperature = config.agents.defaults.temperature;
-
-        let (provider_name, provider_config) = config.get_api_key()?;
-
-        // Determine effective provider from model prefix
-        let effective_provider = if model.starts_with("anthropic/") || model.starts_with("claude-") {
-            "anthropic"
-        } else if model.starts_with("gemini/") || model.starts_with("gemini-") {
-            "gemini"
-        } else if model.starts_with("ollama/") {
-            "ollama"
-        } else if model.starts_with("kimi") || model.starts_with("moonshot") {
-            "kimi"
-        } else {
-            provider_name
-        };
-
-        let resolved_config = if effective_provider != provider_name {
-            config.get_provider(effective_provider).unwrap_or(provider_config)
-        } else {
-            provider_config
-        };
-
-        match effective_provider {
-            "anthropic" => {
-                Some(Box::new(AnthropicProvider::new(
-                    &resolved_config.api_key,
-                    resolved_config.api_base.as_deref(),
-                    model,
-                    max_tokens,
-                    temperature,
-                )))
-            }
-            "gemini" => {
-                Some(Box::new(GeminiProvider::new(
-                    &resolved_config.api_key,
-                    resolved_config.api_base.as_deref(),
-                    model,
-                    max_tokens,
-                    temperature,
-                )))
-            }
-            "ollama" => {
-                let api_base = resolved_config.api_base.as_deref()
-                    .or(Some("http://localhost:11434"));
-                Some(Box::new(OllamaProvider::new(
-                    api_base,
-                    model,
-                    max_tokens,
-                    temperature,
-                )))
-            }
-            _ => {
-                // OpenAI-compatible providers
-                let api_base = resolved_config.api_base.as_deref().unwrap_or({
-                    match effective_provider {
-                        "openrouter" => "https://openrouter.ai/api/v1",
-                        "openai" => "https://api.openai.com/v1",
-                        "deepseek" => "https://api.deepseek.com/v1",
-                        "groq" => "https://api.groq.com/openai/v1",
-                        "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
-                        "kimi" | "moonshot" => "https://api.moonshot.cn/v1",
-                        _ => "https://api.openai.com/v1",
-                    }
-                });
-                Some(Box::new(OpenAIProvider::new(
-                    &resolved_config.api_key,
-                    Some(api_base),
-                    model,
-                    max_tokens,
-                    temperature,
-                )))
-            }
-        }
+        blockcell_providers::create_main_provider(config).ok()
     }
 
     /// Build an extractive summary from session history (no LLM call).
@@ -1057,6 +1025,7 @@ impl AgentRuntime {
         let mut current_messages = messages;
         let mut final_response = String::new();
         let mut message_tool_sent_media = false;
+        let mut tool_fail_counts: HashMap<String, u32> = HashMap::new();
 
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
@@ -1152,6 +1121,7 @@ impl AgentRuntime {
                 let mut supplemented_tools = false;
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
+                let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
                 for tool_call in &response.tool_calls {
                     if tool_call.name == "web_search" || tool_call.name == "web_fetch" {
                         wants_forced_answer = true;
@@ -1168,6 +1138,29 @@ impl AgentRuntime {
                         }
                     }
                     let result = self.execute_tool_call(tool_call, &msg).await;
+
+                    // Detect thin web_search results (only titles/URLs, no actual content).
+                    // When this happens, extract the top URLs so the next hint can suggest web_fetch.
+                    if tool_call.name == "web_search" && !result.starts_with("Tool error:") {
+                        if is_thin_search_result(&result) {
+                            let urls = extract_urls_from_search_result(&result);
+                            if !urls.is_empty() {
+                                web_search_thin_results.extend(urls);
+                            }
+                        }
+                    }
+
+                    // Track tool failures for fallback hint injection
+                    let is_error = result.starts_with("Tool error:")
+                        || result.starts_with("Error:")
+                        || result.contains("failed");
+                    if is_error {
+                        let count = tool_fail_counts.entry(tool_call.name.clone()).or_insert(0);
+                        *count += 1;
+                    } else {
+                        // Reset on success
+                        tool_fail_counts.remove(&tool_call.name);
+                    }
 
                     // Dynamic tool supplement: if tool was not found or validation failed
                     // (e.g. lightweight schema had no params), inject full schema and retry.
@@ -1244,9 +1237,35 @@ impl AgentRuntime {
                 }
 
                 if wants_forced_answer && iteration + 1 < max_iterations {
-                    current_messages.push(ChatMessage::user(
-                        "请基于刚才工具返回的结果直接给出最终答案（例如：整理成要点/列表/摘要）。除非结果明显不足，否则不要继续调用 web_search/web_fetch。",
-                    ));
+                    if !web_search_thin_results.is_empty() {
+                        // Thin results: guide LLM to fetch actual page content instead of giving up
+                        let urls_hint = web_search_thin_results.iter().take(3)
+                            .cloned().collect::<Vec<_>>().join("\n- ");
+                        let hint = format!(
+                            "搜索结果只包含链接标题，没有具体内容。**不要直接返回\"未找到\"，请立即改用 `web_fetch` 直接抓取以下页面获取真实数据**：\n- {}\n\n抓取后给出最终答案。",
+                            urls_hint
+                        );
+                        current_messages.push(ChatMessage::user(&hint));
+                    } else {
+                        current_messages.push(ChatMessage::user(
+                            "请基于刚才工具返回的结果直接给出最终答案（例如：整理成要点/列表/摘要）。除非结果明显不足，否则不要继续调用 web_search/web_fetch。",
+                        ));
+                    }
+                }
+
+                // Fallback hint: when a tool has failed 2+ times, tell the LLM to switch
+                // to alternative tools. This prevents infinite retry loops (e.g. qveris without API key).
+                let repeated_failures: Vec<String> = tool_fail_counts.iter()
+                    .filter(|(_, count)| **count >= 2)
+                    .map(|(name, count)| format!("{} ({}x)", name, count))
+                    .collect();
+                if !repeated_failures.is_empty() {
+                    let hint = format!(
+                        "⚠️ 以下工具连续失败: {}。请不要继续重试，改用其他可用工具完成任务。对于金融数据查询失败，可降级使用 `web_search` 搜索相关新闻。",
+                        repeated_failures.join(", ")
+                    );
+                    warn!(failures = ?repeated_failures, "Injecting fallback hint due to repeated tool failures");
+                    current_messages.push(ChatMessage::user(&hint));
                 }
 
                 // Mid-loop compression: if accumulated messages are getting large,

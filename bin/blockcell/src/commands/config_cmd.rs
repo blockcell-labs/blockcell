@@ -1,6 +1,156 @@
 use blockcell_core::{Config, Paths};
 use serde_json::Value;
 
+/// Show the current configuration as pretty-printed JSON.
+pub async fn show() -> anyhow::Result<()> {
+    let paths = Paths::new();
+    let config = Config::load_or_default(&paths)?;
+    let json = serde_json::to_value(&config)?;
+
+    println!();
+    println!("📋 Current Configuration");
+    println!("  File: {}", paths.config_file().display());
+    println!();
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+/// Print the JSON Schema for the configuration file.
+pub async fn schema() -> anyhow::Result<()> {
+    let schema = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "BlockcellConfig",
+        "description": "blockcell configuration file (~/.blockcell/config.json)",
+        "type": "object",
+        "properties": {
+            "providers": {
+                "type": "object",
+                "description": "LLM provider configurations keyed by name (openai, deepseek, kimi, anthropic, gemini, ollama, ...)",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string", "description": "API key for this provider" },
+                        "apiBase": { "type": "string", "description": "Base URL override (e.g. for proxy or self-hosted)" }
+                    }
+                }
+            },
+            "agents": {
+                "type": "object",
+                "properties": {
+                    "defaults": {
+                        "type": "object",
+                        "properties": {
+                            "model": { "type": "string", "description": "Default model name, e.g. deepseek-chat" },
+                            "provider": { "type": "string", "description": "Explicit provider name override" },
+                            "evolutionModel": { "type": "string", "description": "Model for self-evolution pipeline" },
+                            "evolutionProvider": { "type": "string", "description": "Provider for self-evolution pipeline" },
+                            "maxContextTokens": { "type": "integer", "default": 32000 }
+                        }
+                    }
+                }
+            },
+            "channels": {
+                "type": "object",
+                "description": "Messaging channel configurations",
+                "properties": {
+                    "whatsapp": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "bridgeUrl": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "telegram": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "token": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } },
+                            "proxy": { "type": "string" }
+                        }
+                    },
+                    "feishu": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "appId": { "type": "string" },
+                            "appSecret": { "type": "string" },
+                            "encryptKey": { "type": "string" },
+                            "verificationToken": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "lark": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "appId": { "type": "string" },
+                            "appSecret": { "type": "string" },
+                            "encryptKey": { "type": "string" },
+                            "verificationToken": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "slack": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "botToken": { "type": "string" },
+                            "appToken": { "type": "string" },
+                            "channels": { "type": "array", "items": { "type": "string" } },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } },
+                            "pollIntervalSecs": { "type": "integer", "default": 3 }
+                        }
+                    },
+                    "discord": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "botToken": { "type": "string" },
+                            "channels": { "type": "array", "items": { "type": "string" } },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "dingtalk": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "appKey": { "type": "string" },
+                            "appSecret": { "type": "string" },
+                            "robotCode": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "wecom": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "corpId": { "type": "string" },
+                            "corpSecret": { "type": "string" },
+                            "agentId": { "type": "integer" },
+                            "callbackToken": { "type": "string" },
+                            "encodingAesKey": { "type": "string" },
+                            "allowFrom": { "type": "array", "items": { "type": "string" } },
+                            "pollIntervalSecs": { "type": "integer", "default": 10 }
+                        }
+                    }
+                }
+            },
+            "exec": {
+                "type": "object",
+                "properties": {
+                    "timeout": { "type": "integer", "default": 60 },
+                    "restrictToWorkspace": { "type": "boolean", "default": false }
+                }
+            }
+        }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&schema)?);
+    Ok(())
+}
+
 /// Get a config value by dot-separated key path.
 pub async fn get(key: &str) -> anyhow::Result<()> {
     let paths = Paths::new();

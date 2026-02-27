@@ -112,7 +112,7 @@ impl HeartbeatService {
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(e) = self.trigger().await {
-                        error!(error = %e, "Heartbeat trigger failed");
+                        error!(error = %e.to_string(), "Heartbeat trigger failed");
                     }
                 }
                 _ = shutdown.recv() => {

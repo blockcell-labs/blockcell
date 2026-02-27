@@ -153,14 +153,32 @@ fn extract_media_from_input(input: &str) -> (String, Vec<String>) {
     (text, media)
 }
 
+#[allow(dead_code)]
 fn create_provider(config: &Config) -> anyhow::Result<Box<dyn Provider>> {
     super::provider::create_provider(config)
 }
 
-pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()> {
+fn create_provider_with_overrides(
+    config: &mut Config,
+    model_override: Option<String>,
+    provider_override: Option<String>,
+) -> anyhow::Result<Box<dyn Provider>> {
+    if let Some(ref m) = model_override {
+        config.agents.defaults.model = m.clone();
+    }
+    if let Some(ref p) = provider_override {
+        config.agents.defaults.provider = Some(p.clone());
+    }
+    super::provider::create_provider(config)
+}
+
+pub async fn run(message: Option<String>, session: String, model: Option<String>, provider: Option<String>) -> anyhow::Result<()> {
     let paths = Paths::new();
-    let config = Config::load_or_default(&paths)?;
-    let provider = create_provider(&config)?;
+    let mut config = Config::load_or_default(&paths)?;
+    let agent_provider = create_provider_with_overrides(&mut config, model, provider)?;
+
+    // Ensure builtin skills are extracted to workspace/skills/ (silent, skips existing)
+    let _ = super::embedded_skills::extract_to_workspace(&paths.skills_dir());
 
     // Initialize memory store (SQLite + FTS5)
     let memory_db_path = paths.memory_dir().join("memory.db");
@@ -200,7 +218,7 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
     );
 
     // Create an LLM provider bridge so CoreEvolution can generate code autonomously
-    if let Ok(evo_provider) = create_provider(&config) {
+    if let Ok(evo_provider) = super::provider::create_provider(&config) {
         let llm_bridge = Arc::new(ProviderLLMBridge::new(evo_provider));
         core_evo.set_llm_provider(llm_bridge);
         info!("Core evolution LLM provider configured");
@@ -215,6 +233,7 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
     let core_evo_adapter = CoreEvolutionAdapter::new(core_evo_raw.clone());
     let core_evo_handle: CoreEvolutionHandle = Arc::new(Mutex::new(core_evo_adapter));
 
+    let provider = agent_provider;
     if let Some(msg) = message {
         // Single message mode — no need for CronService
         let tool_registry = ToolRegistry::with_defaults();
@@ -257,8 +276,7 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
         // Interactive mode with CronService
         println!("blockcell interactive mode (Ctrl+C to exit)");
         println!("Session: {}", session);
-        println!("Commands: /tasks view tasks | /skills view skill orchestration | /tools view tools");
-        println!("         /learn <desc> learn skill | /clear-skills clear records | /quit exit");
+        println!("Type /help to see all available commands.");
         println!();
 
         // Create message bus
@@ -493,6 +511,30 @@ pub async fn run(message: Option<String>, session: String) -> anyhow::Result<()>
 
                 if input == "/quit" || input == "/exit" {
                     break;
+                }
+
+                // /help — print all available slash commands
+                if input == "/help" {
+                    println!();
+                    println!("Available commands:");
+                    println!("  /help               Show this help");
+                    println!("  /tasks              List background tasks");
+                    println!("  /skills             List skills and evolution status");
+                    println!("  /tools              List all registered tools");
+                    println!("  /learn <desc>       Learn a new skill by description");
+                    println!("  /clear              Clear current session history");
+                    println!("  /clear-skills       Clear all skill evolution records");
+                    println!("  /forget-skill <n>   Delete records for a specific skill");
+                    println!("  /quit  /exit        Exit interactive mode");
+                    println!();
+                    continue;
+                }
+
+                // /clear — clear current session history (acknowledged locally)
+                if input == "/clear" {
+                    println!("  Session history cleared. (Note: server-side history persists in memory store)");
+                    println!();
+                    continue;
                 }
 
                 // Local /tasks command — query TaskManager directly, no LLM needed

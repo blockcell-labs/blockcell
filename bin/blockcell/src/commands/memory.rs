@@ -2,6 +2,130 @@ use blockcell_core::Paths;
 use blockcell_storage::MemoryStore;
 use blockcell_storage::memory::QueryParams;
 
+/// List recent memory items.
+pub async fn list(item_type: Option<String>, limit: usize) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let db_path = paths.workspace().join("memory").join("memory.db");
+
+    if !db_path.exists() {
+        println!("(Memory database not created yet)");
+        return Ok(());
+    }
+
+    let store = MemoryStore::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
+
+    let params = QueryParams {
+        query: None,
+        scope: None,
+        item_type: item_type.clone(),
+        tags: None,
+        time_range_days: None,
+        top_k: limit,
+        include_deleted: false,
+    };
+
+    let results = store.query(&params)
+        .map_err(|e| anyhow::anyhow!("Failed to query: {}", e))?;
+
+    println!();
+    if results.is_empty() {
+        let type_hint = item_type.as_deref().unwrap_or("any");
+        println!("(No memories found, type={})", type_hint);
+    } else {
+        println!("🧠 Memory items ({} found)", results.len());
+        println!();
+        for (i, r) in results.iter().enumerate() {
+            let title = r.item.title.as_deref().unwrap_or("(untitled)");
+            let scope_icon = if r.item.scope == "long_term" { "📌" } else { "💬" };
+            println!("  {}. {} [{}] {} #{}", i + 1, scope_icon, r.item.item_type, title, &r.item.id.chars().take(8).collect::<String>());
+            let preview: String = r.item.content.chars().take(100).collect();
+            if r.item.content.chars().count() > 100 {
+                println!("     {}...", preview);
+            } else {
+                println!("     {}", preview);
+            }
+            if !r.item.tags.is_empty() {
+                let tags: Vec<&str> = r.item.tags.iter().map(|s| s.as_str()).collect();
+                println!("     🏷️  {}", tags.join(", "));
+            }
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// Show a specific memory item by ID.
+pub async fn show(id: &str) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let db_path = paths.workspace().join("memory").join("memory.db");
+
+    if !db_path.exists() {
+        println!("(Memory database not created yet)");
+        return Ok(());
+    }
+
+    let store = MemoryStore::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
+
+    match store.get_by_id(id) {
+        Ok(Some(item)) => {
+            println!();
+            println!("🧠 Memory Item");
+            println!("  ID:    {}", item.id);
+            println!("  Type:  {}", item.item_type);
+            println!("  Scope: {}", item.scope);
+            if let Some(ref title) = item.title {
+                println!("  Title: {}", title);
+            }
+            if !item.tags.is_empty() {
+                println!("  Tags:  {}", item.tags.join(", "));
+            }
+            println!();
+            println!("  Content:");
+            for line in item.content.lines() {
+                println!("    {}", line);
+            }
+            println!();
+        }
+        Ok(None) => {
+            println!("No memory item found with ID: {}", id);
+        }
+        Err(e) => {
+            println!("Failed to lookup memory: {}", e);
+        }
+    }
+    Ok(())
+}
+
+/// Delete (soft-delete) a memory item by ID.
+pub async fn delete(id: &str) -> anyhow::Result<()> {
+    let paths = Paths::default();
+    let db_path = paths.workspace().join("memory").join("memory.db");
+
+    if !db_path.exists() {
+        println!("(Memory database not created yet)");
+        return Ok(());
+    }
+
+    let store = MemoryStore::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
+
+    match store.soft_delete(id) {
+        Ok(true) => {
+            println!("✅ Memory item {} deleted (moved to recycle bin).", id);
+            println!("   Run `blockcell memory maintenance` to permanently purge.");
+        }
+        Ok(false) => {
+            println!("No memory item found with ID: {}", id);
+        }
+        Err(e) => {
+            println!("Failed to delete memory: {}", e);
+        }
+    }
+    Ok(())
+}
+
 /// Show memory statistics.
 pub async fn stats() -> anyhow::Result<()> {
     let paths = Paths::default();

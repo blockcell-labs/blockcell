@@ -1,7 +1,7 @@
 use blockcell_core::Paths;
 
 /// Show recent agent logs.
-pub async fn show(lines: usize, session: Option<String>) -> anyhow::Result<()> {
+pub async fn show(lines: usize, filter: Option<String>, session: Option<String>) -> anyhow::Result<()> {
     let paths = Paths::default();
     let logs_dir = paths.workspace().join("logs");
 
@@ -43,12 +43,12 @@ pub async fn show(lines: usize, session: Option<String>) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(log_file)?;
     let all_lines: Vec<&str> = content.lines().collect();
 
-    // Filter by session if specified
-    let filtered: Vec<&&str> = if let Some(ref sess) = session {
-        all_lines.iter().filter(|line| line.contains(sess.as_str())).collect()
-    } else {
-        all_lines.iter().collect()
-    };
+    // Filter by session and/or keyword
+    let filtered: Vec<&&str> = all_lines.iter().filter(|line| {
+        let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
+        let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
+        sess_ok && filter_ok
+    }).collect();
 
     let start = filtered.len().saturating_sub(lines);
     let tail = &filtered[start..];
@@ -69,7 +69,7 @@ pub async fn show(lines: usize, session: Option<String>) -> anyhow::Result<()> {
 }
 
 /// Follow logs in real-time (tail -f style).
-pub async fn follow(session: Option<String>) -> anyhow::Result<()> {
+pub async fn follow(filter: Option<String>, session: Option<String>) -> anyhow::Result<()> {
     let paths = Paths::default();
     let logs_dir = paths.workspace().join("logs");
 
@@ -117,11 +117,9 @@ pub async fn follow(session: Option<String>) -> anyhow::Result<()> {
     let all_lines: Vec<&str> = content.lines().collect();
     let start = all_lines.len().saturating_sub(10);
     for line in &all_lines[start..] {
-        if let Some(ref sess) = session {
-            if line.contains(sess.as_str()) {
-                println!("{}", line);
-            }
-        } else {
+        let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
+        let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
+        if sess_ok && filter_ok {
             println!("{}", line);
         }
     }
@@ -140,11 +138,9 @@ pub async fn follow(session: Option<String>) -> anyhow::Result<()> {
             file.read_to_string(&mut new_content)?;
 
             for line in new_content.lines() {
-                if let Some(ref sess) = session {
-                    if line.contains(sess.as_str()) {
-                        println!("{}", line);
-                    }
-                } else {
+                let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
+                let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
+                if sess_ok && filter_ok {
                     println!("{}", line);
                 }
             }
