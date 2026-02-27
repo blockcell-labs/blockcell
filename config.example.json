@@ -1,0 +1,58 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.blockcell/workspace",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "evolutionProvider": "openai",
+      "evolutionModel": "gpt-4o-mini",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 20,
+      "llmMaxRetries": 3,
+      "llmRetryDelayMs": 2000,
+      "maxContextTokens": 32000
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "apiKey": "sk-ant-...",
+      "apiBase": "https://api.anthropic.com"
+    },
+    "openai": {
+      "apiKey": "sk-...",
+      "apiBase": "https://api.openai.com/v1"
+    },
+    "gemini": {
+      "apiKey": "AIza...",
+      "apiBase": "https://generativelanguage.googleapis.com"
+    },
+    "ollama": {
+      "apiBase": "http://localhost:11434"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "botToken": "",
+      "allowFrom": []
+    },
+    "discord": {
+      "enabled": false,
+      "botToken": "",
+      "channels": [],
+      "allowFrom": []
+    },
+    "slack": {
+      "enabled": false,
+      "botToken": "",
+      "appToken": "",
+      "channels": [],
+      "allowFrom": [],
+      "pollIntervalSecs": 5
+    }
+  },
+  "ghost": {
+    "enabled": false
+  }
+}
