@@ -553,6 +553,46 @@ fn default_manifest_url() -> String {
     "https://github.com/blockcell-labs/blockcell/releases/latest/download/manifest.json".to_string()
 }
 
+/// MCP (Model Context Protocol) server configuration.
+/// Each entry describes one external MCP server process to launch at startup.
+///
+/// Example config.json:
+/// ```json
+/// "mcpServers": {
+///   "sqlite": {
+///     "command": "uvx",
+///     "args": ["mcp-server-sqlite", "--db-path", "/tmp/test.db"]
+///   },
+///   "github": {
+///     "command": "npx",
+///     "args": ["-y", "@modelcontextprotocol/server-github"],
+///     "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx" }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    /// Executable to launch (e.g. "npx", "uvx", "python")
+    pub command: String,
+    /// Command-line arguments
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the child process
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Working directory for the child process (optional)
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Whether this server is enabled (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -572,6 +612,9 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub auto_upgrade: AutoUpgradeConfig,
+    /// MCP server definitions. Key = server name (used as tool name prefix).
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 impl Default for Config {
@@ -613,6 +656,7 @@ impl Default for Config {
             gateway: GatewayConfig::default(),
             tools: ToolsConfig::default(),
             auto_upgrade: AutoUpgradeConfig::default(),
+            mcp_servers: HashMap::new(),
         }
     }
 }

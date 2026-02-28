@@ -1,0 +1,41 @@
+name: ai_news
+description: "AI新闻聚合技能 — 直接抓取36氪、机器之心、量子位、InfoQ等权威AI科技媒体，无需搜索引擎，按日期去重排序，获取最新AI资讯"
+requires:
+  bins: []
+  env: []
+permissions: []
+always: false
+triggers:
+  - "AI新闻"
+  - "ai新闻"
+  - "人工智能新闻"
+  - "最新AI"
+  - "AI资讯"
+  - "ai资讯"
+  - "人工智能资讯"
+  - "科技新闻"
+  - "AI动态"
+  - "AI进展"
+  - "机器学习新闻"
+  - "大模型新闻"
+  - "大模型动态"
+  - "LLM新闻"
+  - "GPT新闻"
+  - "今日AI"
+  - "今天AI"
+  - "最新大模型"
+  - "AI热点"
+  - "热门AI"
+  - "36氪"
+  - "机器之心"
+  - "量子位"
+  - "AI weekly"
+  - "AI news"
+  - "latest AI"
+  - "artificial intelligence news"
+capabilities:
+  - "web_fetch"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法直接抓取新闻页面，请稍后重试..."

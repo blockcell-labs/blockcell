@@ -141,6 +141,7 @@ impl OpenAIProvider {
                             id: format!("text_call_{}", call_index),
                             name,
                             arguments,
+                            thought_signature: None,
                         });
                         call_index += 1;
                     } else {
@@ -261,6 +262,7 @@ impl OpenAIProvider {
                                 id: format!("text_call_{}", call_index),
                                 name: tool_name,
                                 arguments: serde_json::Value::Object(args),
+                                thought_signature: None,
                             });
                             call_index += 1;
                         }
@@ -343,6 +345,7 @@ impl OpenAIProvider {
                                         id: format!("text_call_{}", call_index),
                                         name: tool_name,
                                         arguments: Value::Object(args),
+                                        thought_signature: None,
                                     });
                                     call_index += 1;
                                 }
@@ -392,6 +395,7 @@ impl OpenAIProvider {
                 id: format!("text_call_{}", index),
                 name,
                 arguments,
+                thought_signature: None,
             });
         }
 
@@ -417,6 +421,7 @@ impl OpenAIProvider {
             id: format!("text_call_{}", index),
             name: tool_name,
             arguments: args,
+            thought_signature: None,
         })
     }
 
@@ -699,6 +704,7 @@ impl Provider for OpenAIProvider {
                         id: tc.id,
                         name: tc.function.name,
                         arguments,
+                        thought_signature: None,
                     }
                 })
                 .collect();

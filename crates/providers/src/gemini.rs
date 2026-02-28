@@ -146,12 +146,16 @@ impl GeminiProvider {
                     // Add function call parts for tool calls
                     if let Some(tool_calls) = &msg.tool_calls {
                         for tc in tool_calls {
-                            parts.push(serde_json::json!({
+                            let mut part = serde_json::json!({
                                 "functionCall": {
                                     "name": tc.name,
                                     "args": tc.arguments,
                                 }
-                            }));
+                            });
+                            if let Some(sig) = &tc.thought_signature {
+                                part["thoughtSignature"] = Value::String(sig.clone());
+                            }
+                            parts.push(part);
                         }
                     }
 
@@ -377,6 +381,7 @@ impl Provider for GeminiProvider {
                         id: format!("gemini_call_{}", i),
                         name: fc.name.clone(),
                         arguments: fc.args.clone().unwrap_or(Value::Object(serde_json::Map::new())),
+                        thought_signature: part.thought_signature.clone(),
                     });
                 }
             }
@@ -454,6 +459,8 @@ struct GeminiPart {
     text: Option<String>,
     #[serde(default)]
     function_call: Option<GeminiFunctionCall>,
+    #[serde(default, rename = "thoughtSignature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,7 +562,7 @@ mod tests {
             "candidates": [{
                 "content": {
                     "parts": [
-                        {"functionCall": {"name": "read_file", "args": {"path": "/tmp/test"}}}
+                        {"functionCall": {"name": "read_file", "args": {"path": "/tmp/test"}}, "thoughtSignature": "sig_123"}
                     ],
                     "role": "model"
                 },
@@ -568,6 +575,26 @@ mod tests {
         let parts = &candidates[0].content.as_ref().unwrap().parts;
         assert!(parts[0].function_call.is_some());
         assert_eq!(parts[0].function_call.as_ref().unwrap().name, "read_file");
+        assert_eq!(parts[0].thought_signature.as_deref(), Some("sig_123"));
+    }
+
+    #[test]
+    fn test_convert_messages_includes_thought_signature_on_function_call_part() {
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(vec![ToolCallRequest {
+            id: "tc_1".to_string(),
+            name: "exec".to_string(),
+            arguments: serde_json::json!({"command": "echo hi"}),
+            thought_signature: Some("sig_abc".to_string()),
+        }]);
+
+        let messages = vec![ChatMessage::user("do it"), assistant];
+        let (_system, contents) = GeminiProvider::convert_messages(&messages);
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[1]["role"], "model");
+        let parts = contents[1]["parts"].as_array().unwrap();
+        assert!(parts[0].get("functionCall").is_some());
+        assert_eq!(parts[0].get("thoughtSignature").and_then(|v| v.as_str()), Some("sig_abc"));
     }
 
     #[test]
@@ -577,6 +604,7 @@ mod tests {
             id: "read_file".to_string(),
             name: "read_file".to_string(),
             arguments: serde_json::json!({"path": "/tmp/test"}),
+            thought_signature: None,
         }]);
 
         let tool_result = ChatMessage::tool_result("read_file", "file contents");

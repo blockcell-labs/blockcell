@@ -389,6 +389,7 @@ impl Provider for AnthropicProvider {
                             id: id.clone(),
                             name: name.clone(),
                             arguments,
+                            thought_signature: None,
                         });
                     }
                 }
@@ -509,6 +510,7 @@ mod tests {
             id: "tc_1".to_string(),
             name: "read_file".to_string(),
             arguments: serde_json::json!({"path": "/tmp/test"}),
+            thought_signature: None,
         }]);
 
         let tool_result = ChatMessage::tool_result("tc_1", "file contents here");

@@ -238,6 +238,7 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
         // Single message mode — no need for CronService
         let tool_registry = ToolRegistry::with_defaults();
         let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+        runtime.mount_mcp_servers().await;
         
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
         if config.agents.defaults.evolution_model.is_some()
@@ -362,6 +363,7 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
         // Create agent runtime with outbound channel (consumes config)
         let tool_registry = ToolRegistry::with_defaults();
         let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+        runtime.mount_mcp_servers().await;
         
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
         if config.agents.defaults.evolution_model.is_some()

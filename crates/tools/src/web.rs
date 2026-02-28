@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
@@ -90,7 +92,7 @@ impl Tool for WebSearchTool {
         }
 
         // Bing with Chinese locale (works globally, zh-CN results)
-        match bing_search(query, count).await {
+        match bing_search(query, count, Some(&ctx.workspace)).await {
             Ok(results) => return Ok(json!({ "query": query, "results": results, "source": "bing" })),
             Err(e) => {
                 tracing::warn!(error = %e, "Bing search failed");
@@ -153,7 +155,7 @@ async fn brave_search(api_key: &str, query: &str, count: usize, freshness: Optio
     Ok(results)
 }
 
-async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
+async fn bing_search(query: &str, count: usize, workspace: Option<&std::path::Path>) -> Result<Vec<Value>> {
     use scraper::{Html, Selector};
 
     let client = Client::builder()
@@ -162,6 +164,7 @@ async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
         .build()
         .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
 
+    // Use mobile Bing — smaller page, faster, simpler DOM than desktop
     let response = client
         .get("https://www.bing.com/search")
         .query(&[
@@ -170,10 +173,11 @@ async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
             ("mkt", "zh-CN"),
             ("setlang", "zh-Hans"),
             ("cc", "CN"),
+            ("FORM", "HDRSC1"),
         ])
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36")
+        .header("Accept-Language", "zh-CN,zh;q=0.9")
+        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Bing search failed: {}", e)))?;
@@ -187,48 +191,221 @@ async fn bing_search(query: &str, count: usize) -> Result<Vec<Value>> {
         .await
         .map_err(|e| Error::Tool(format!("Failed to read Bing response: {}", e)))?;
 
-    let document = Html::parse_document(&html);
+    // If Bing returned a bot-check/captcha page, HTML scraping will fail.
+    // Mark it explicitly so we can fall back to CDP-based search.
+    let looks_blocked = bing_html_looks_blocked(&html);
 
-    // Bing organic results are in <li class="b_algo">
-    let result_sel = Selector::parse("li.b_algo").unwrap();
-    let title_sel = Selector::parse("h2 a").unwrap();
-    let snippet_sel = Selector::parse(".b_caption p, .b_lineclamp2, .b_lineclamp3, .b_lineclamp4").unwrap();
+    // IMPORTANT: Html (scraper) is not Send; keep it in a tight scope so it doesn't live across awaits.
+    let results: Vec<Value> = {
+        let document = Html::parse_document(&html);
 
-    let mut results = Vec::new();
+        // Bing organic results: li.b_algo works on both desktop and mobile Bing
+        // Mobile Bing may also use li.b_ans or div.b_algo as fallback
+        let container_selectors = ["li.b_algo", "li.b_ans", "div.b_algo"];
+        let title_sel = Selector::parse("h2 a, .b_title a").unwrap();
+        let snippet_sel =
+            Selector::parse(".b_caption p, .b_lineclamp2, .b_lineclamp3, .b_lineclamp4, .b_dList")
+                .unwrap();
 
-    for el in document.select(&result_sel) {
-        if results.len() >= count {
-            break;
+        let mut results = Vec::new();
+        let mut seen_urls = std::collections::HashSet::new();
+
+        'outer: for sel_str in &container_selectors {
+            let sel = match Selector::parse(sel_str) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            for el in document.select(&sel) {
+                if results.len() >= count {
+                    break 'outer;
+                }
+
+                let title_el = el.select(&title_sel).next();
+                let title = title_el
+                    .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+                    .unwrap_or_default();
+
+                let url = title_el
+                    .and_then(|e| e.value().attr("href").map(|h| h.to_string()))
+                    .unwrap_or_default();
+
+                if title.is_empty() || url.is_empty() || !url.starts_with("http") {
+                    continue;
+                }
+
+                if !seen_urls.insert(url.clone()) {
+                    continue;
+                }
+
+                let snippet = el
+                    .select(&snippet_sel)
+                    .next()
+                    .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+                    .unwrap_or_default();
+
+                results.push(json!({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet
+                }));
+            }
+
+            if !results.is_empty() {
+                break;
+            }
         }
 
-        let title_el = el.select(&title_sel).next();
-        let title = title_el.map(|e| {
-            e.text().collect::<Vec<_>>().join("").trim().to_string()
-        }).unwrap_or_default();
+        results
+    };
 
-        let url = title_el.and_then(|e| {
-            e.value().attr("href").map(|h| h.to_string())
-        }).unwrap_or_default();
-
-        let snippet = el.select(&snippet_sel).next().map(|e| {
-            e.text().collect::<Vec<_>>().join("").trim().to_string()
-        }).unwrap_or_default();
-
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-
-        results.push(json!({
-            "title": title,
-            "url": url,
-            "snippet": snippet
-        }));
-    }
+    tracing::debug!(count = results.len(), query, "Bing scrape results");
 
     if results.is_empty() {
+        // CDP fallback: execute JS in a real browser to bypass JS challenges / dynamic DOM.
+        if let Some(workspace) = workspace {
+            tracing::debug!(query, looks_blocked, "Bing scrape empty; trying CDP fallback");
+            if let Ok(cdp_results) = bing_search_cdp(query, count, workspace).await {
+                if !cdp_results.is_empty() {
+                    return Ok(cdp_results);
+                }
+            }
+        }
+
+        if looks_blocked {
+            return Err(Error::Tool(
+                "Bing returned a bot-check/captcha page (no parseable results). Consider configuring Brave Search API or try again later.".to_string(),
+            ));
+        }
+
         return Err(Error::Tool("Bing returned no parseable results. Try a different query.".to_string()));
     }
 
+    Ok(results)
+}
+
+fn bing_html_looks_blocked(html: &str) -> bool {
+    let s = html.to_lowercase();
+    // Heuristics for Bing bot/captcha / consent pages.
+    // Keep this conservative to avoid false positives.
+    s.contains("captcha")
+        || s.contains("unusual traffic")
+        || s.contains("our systems have detected unusual traffic")
+        || s.contains("verify")
+        || (s.contains("sorry") && s.contains("bing"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CDP fallback (real browser)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static BING_CDP_MANAGER: once_cell::sync::Lazy<Arc<Mutex<Option<crate::browser::session::SessionManager>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+async fn ensure_bing_manager(
+    workspace: &std::path::Path,
+) -> Arc<Mutex<Option<crate::browser::session::SessionManager>>> {
+    let mgr = BING_CDP_MANAGER.clone();
+    {
+        let mut guard = mgr.lock().await;
+        if guard.is_none() {
+            let base_dir = workspace.join("browser");
+            *guard = Some(crate::browser::session::SessionManager::new(base_dir));
+        }
+    }
+    mgr
+}
+
+async fn bing_search_cdp(query: &str, count: usize, workspace: &std::path::Path) -> Result<Vec<Value>> {
+    use crate::browser::session::BrowserEngine;
+
+    let encoded = urlencoding::encode(query);
+    let url = format!(
+        "https://www.bing.com/search?q={}&mkt=zh-CN&setlang=zh-Hans&cc=CN&FORM=HDRSC1",
+        encoded
+    );
+
+    let mgr_arc = ensure_bing_manager(workspace).await;
+    let mut mgr_guard = mgr_arc.lock().await;
+    let mgr = mgr_guard
+        .as_mut()
+        .ok_or_else(|| Error::Tool("CDP session manager not initialized".to_string()))?;
+
+    let session = mgr
+        .get_or_create_with_engine("web_search_bing", false, None, BrowserEngine::Chrome)
+        .await
+        .map_err(|e| Error::Tool(format!("CDP launch failed: {}", e)))?;
+
+    // Set headers to reduce bot blocking.
+    let headers = json!({
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    });
+    let _ = session.cdp.set_extra_headers(headers).await;
+
+    session
+        .cdp
+        .navigate(&url)
+        .await
+        .map_err(|e| Error::Tool(format!("CDP navigate failed: {}", e)))?;
+
+    // Wait a bit for dynamic content / potential interstitial.
+    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+
+    let js = format!(
+        r#"(() => {{
+  const max = {};
+  const out = [];
+  const nodes = document.querySelectorAll('li.b_algo h2 a, div.b_algo h2 a, .b_algo h2 a');
+  for (const a of nodes) {{
+    if (out.length >= max) break;
+    const title = (a.textContent || '').trim();
+    const href = (a.getAttribute('href') || '').trim();
+    if (!title || !href || !href.startsWith('http')) continue;
+    let snippet = '';
+    const item = a.closest('li.b_algo') || a.closest('div.b_algo') || a.closest('.b_algo');
+    if (item) {{
+      const sn = item.querySelector('.b_caption p, .b_lineclamp2, .b_lineclamp3, .b_lineclamp4, .b_dList');
+      if (sn) snippet = (sn.textContent || '').trim();
+    }}
+    out.push({{ title, url: href, snippet }});
+  }}
+  return out;
+}})()"#,
+        count
+    );
+
+    let eval = session
+        .cdp
+        .evaluate_js(&js)
+        .await
+        .map_err(|e| Error::Tool(format!("CDP evaluate failed: {}", e)))?;
+
+    let arr = eval
+        .get("result")
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let results: Vec<Value> = arr
+        .into_iter()
+        .filter_map(|v| {
+            let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let snippet = v
+                .get("snippet")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            Some(json!({"title": title, "url": url, "snippet": snippet}))
+        })
+        .collect();
+
+    tracing::debug!(count = results.len(), query, "Bing CDP results");
     Ok(results)
 }
 
@@ -242,13 +419,14 @@ async fn baidu_search(query: &str, count: usize) -> Result<Vec<Value>> {
         .build()
         .map_err(|e| Error::Tool(format!("Failed to create HTTP client: {}", e)))?;
 
+    // Use mobile Baidu (m.baidu.com) — smaller page (~50KB vs ~300KB), faster, simpler DOM
     let response = client
-        .get("https://www.baidu.com/s")
-        .query(&[("wd", query), ("rn", &count.to_string())])
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .get("https://m.baidu.com/s")
+        .query(&[("word", query), ("rn", &count.to_string())])
+        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36")
         .header("Accept-Language", "zh-CN,zh;q=0.9")
-        .header("Accept", "text/html,application/xhtml+xml")
-        .header("Referer", "https://www.baidu.com/")
+        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+        .header("Referer", "https://m.baidu.com/")
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Baidu search failed: {}", e)))?;
@@ -264,53 +442,90 @@ async fn baidu_search(query: &str, count: usize) -> Result<Vec<Value>> {
 
     let document = Html::parse_document(&html);
 
-    // Baidu result containers: div.result, div.c-container
-    let result_sel = Selector::parse("div.result, div.c-container").unwrap();
-    let title_sel = Selector::parse("h3 a, .t a").unwrap();
-    let snippet_sel = Selector::parse(".c-abstract, .c-span9, .content-right_8Zs40").unwrap();
+    // Mobile Baidu DOM is simpler and more stable than desktop.
+    // Each result is an <article> or <div class="c-result"> with a title link and summary.
+    // Try multiple selectors from most to least specific.
+    let container_selectors = [
+        "article",
+        "div.c-result",
+        "div[data-log]",
+        "div.result",
+        "#page-bd > div",
+    ];
 
-    let mut results = Vec::new();
+    // Mobile Baidu title link patterns
+    let title_sel = Selector::parse("h3 a, .c-title a, .c-result-title a").unwrap();
+    // Mobile Baidu snippet patterns
+    let snippet_sel = Selector::parse(
+        ".c-abstract, .c-summary, .c-gap-top-small, p[class], [class*='abstract'], [class*='summary']"
+    ).unwrap();
 
-    for el in document.select(&result_sel) {
+    let mut results: Vec<Value> = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
+
+    'outer: for sel_str in &container_selectors {
         if results.len() >= count {
             break;
         }
-
-        let title_el = el.select(&title_sel).next();
-        let title = title_el
-            .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
-            .unwrap_or_default();
-
-        let url = title_el
-            .and_then(|e| e.value().attr("href").map(|h| h.to_string()))
-            .unwrap_or_default();
-
-        let snippet = el
-            .select(&snippet_sel)
-            .next()
-            .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
-            .unwrap_or_default();
-
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-
-        // Skip Baidu's own promotional/ad results that start with /link?url=
-        // but keep actual URLs
-        let display_url = if url.starts_with("http") {
-            url.clone()
-        } else if url.starts_with("/link") {
-            format!("https://www.baidu.com{}", url)
-        } else {
-            continue;
+        let sel = match Selector::parse(sel_str) {
+            Ok(s) => s,
+            Err(_) => continue,
         };
 
-        results.push(json!({
-            "title": title,
-            "url": display_url,
-            "snippet": snippet
-        }));
+        for el in document.select(&sel) {
+            if results.len() >= count {
+                break 'outer;
+            }
+
+            let title_el = el.select(&title_sel).next();
+            let title = match title_el {
+                Some(e) => {
+                    let t = e.text().collect::<Vec<_>>().join("").trim().to_string();
+                    if t.is_empty() { continue; }
+                    t
+                }
+                None => continue,
+            };
+
+            let url = title_el
+                .and_then(|e| e.value().attr("href").map(|h| h.to_string()))
+                .unwrap_or_default();
+
+            if url.is_empty() {
+                continue;
+            }
+
+            let display_url = if url.starts_with("http") {
+                url.clone()
+            } else if url.starts_with("/link") || url.starts_with("/s?") {
+                format!("https://www.baidu.com{}", url)
+            } else {
+                continue;
+            };
+
+            if !seen_urls.insert(display_url.clone()) {
+                continue;
+            }
+
+            let snippet = el
+                .select(&snippet_sel)
+                .next()
+                .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+                .unwrap_or_default();
+
+            results.push(json!({
+                "title": title,
+                "url": display_url,
+                "snippet": snippet
+            }));
+        }
+
+        if !results.is_empty() {
+            break;
+        }
     }
+
+    tracing::debug!(count = results.len(), query, "Baidu scrape results");
 
     Ok(results)
 }
@@ -362,7 +577,7 @@ impl Tool for WebFetchTool {
         Ok(())
     }
 
-    async fn execute(&self, _ctx: ToolContext, params: Value) -> Result<Value> {
+    async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let url = params["url"].as_str().unwrap();
         let extract_mode = params
             .get("extractMode")
@@ -376,14 +591,41 @@ impl Tool for WebFetchTool {
         match extract_mode {
             "raw" => fetch_raw(url, max_chars).await,
             "text" => fetch_text(url, max_chars).await,
-            _ => fetch_markdown(url, max_chars).await,
+            _ => fetch_markdown(url, max_chars, Some(&ctx.workspace)).await,
         }
     }
 }
 
+/// Detect JS challenge / anti-bot waiting pages (Cloudflare, etc.).
+fn html_looks_like_challenge(body: &str) -> bool {
+    let s = body.to_lowercase();
+    // Cloudflare "Just a moment..." / "Please wait" interstitial
+    (s.contains("just a moment") && s.contains("cloudflare"))
+        || s.contains("please wait while we verify")
+        || s.contains("checking if the site connection is secure")
+        || s.contains("enable javascript and cookies to continue")
+        || s.contains("ddos protection by cloudflare")
+        || (s.contains("please wait") && (s.len() < 8192))
+}
+
 /// Fetch with markdown content negotiation (default mode).
-async fn fetch_markdown(url: &str, max_chars: usize) -> Result<Value> {
+/// Falls back to CDP browser fetch if the response looks like a JS challenge page.
+async fn fetch_markdown(url: &str, max_chars: usize, workspace: Option<&std::path::Path>) -> Result<Value> {
     let (content, meta) = crate::html_to_md::fetch_as_markdown(url, max_chars).await?;
+
+    // If the result looks like a JS challenge page, try CDP.
+    let is_challenge = html_looks_like_challenge(&content)
+        || (content.trim().len() < 500 && meta.status == 200);
+
+    if is_challenge {
+        if let Some(ws) = workspace {
+            tracing::debug!(url, "web_fetch: JS challenge detected, trying CDP fallback");
+            match fetch_via_cdp(url, max_chars, ws).await {
+                Ok(cdp_result) => return Ok(cdp_result),
+                Err(e) => tracing::warn!(error = %e, url, "CDP fetch fallback failed"),
+            }
+        }
+    }
 
     let truncated = content.len() >= max_chars;
     let mut result = json!({
@@ -405,6 +647,76 @@ async fn fetch_markdown(url: &str, max_chars: usize) -> Result<Value> {
     }
 
     Ok(result)
+}
+
+/// Fetch a page via CDP (real browser) to bypass JS challenges.
+async fn fetch_via_cdp(url: &str, max_chars: usize, workspace: &std::path::Path) -> Result<Value> {
+    use crate::browser::session::BrowserEngine;
+
+    let mgr_arc = ensure_bing_manager(workspace).await;
+    let mut mgr_guard = mgr_arc.lock().await;
+    let mgr = mgr_guard
+        .as_mut()
+        .ok_or_else(|| Error::Tool("CDP session manager not initialized".to_string()))?;
+
+    let session = mgr
+        .get_or_create_with_engine("web_fetch_cdp", false, None, BrowserEngine::Chrome)
+        .await
+        .map_err(|e| Error::Tool(format!("CDP launch failed: {}", e)))?;
+
+    session
+        .cdp
+        .navigate(url)
+        .await
+        .map_err(|e| Error::Tool(format!("CDP navigate failed: {}", e)))?;
+
+    // Wait for JS challenge to resolve (Cloudflare typically takes ~2s).
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+
+    // Get the rendered HTML via outerHTML.
+    let eval = session
+        .cdp
+        .evaluate_js("document.documentElement.outerHTML")
+        .await
+        .map_err(|e| Error::Tool(format!("CDP evaluate failed: {}", e)))?;
+
+    let html = eval
+        .get("result")
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if html.is_empty() {
+        return Err(Error::Tool("CDP returned empty page".to_string()));
+    }
+
+    let current_url = eval
+        .get("result")
+        .and_then(|_| None::<String>)
+        .unwrap_or_else(|| url.to_string());
+
+    let markdown = crate::html_to_md::html_to_markdown(&html);
+    let markdown = if markdown.len() > max_chars {
+        let mut end = max_chars;
+        while end > 0 && !markdown.is_char_boundary(end) { end -= 1; }
+        markdown[..end].to_string()
+    } else {
+        markdown
+    };
+
+    let truncated = markdown.len() >= max_chars;
+    Ok(json!({
+        "url": url,
+        "finalUrl": current_url,
+        "status": 200,
+        "format": "markdown",
+        "server_markdown": false,
+        "via_cdp": true,
+        "truncated": truncated,
+        "length": markdown.len(),
+        "text": markdown
+    }))
 }
 
 /// Fetch and extract plain text (strip all formatting).

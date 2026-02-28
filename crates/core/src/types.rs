@@ -9,6 +9,7 @@ pub struct ToolCallRequest {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    pub thought_signature: Option<String>,
 }
 
 impl Serialize for ToolCallRequest {
@@ -51,7 +52,17 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
                 Some(v) => v.clone(),
                 None => serde_json::Value::Object(serde_json::Map::new()),
             };
-            return Ok(ToolCallRequest { id, name, arguments });
+            let thought_signature = obj
+                .get("thought_signature")
+                .or_else(|| obj.get("thoughtSignature"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Ok(ToolCallRequest {
+                id,
+                name,
+                arguments,
+                thought_signature,
+            });
         }
 
         // Old flat format: {id, name, arguments}
@@ -63,7 +74,18 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
             .cloned()
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-        Ok(ToolCallRequest { id, name, arguments })
+        let thought_signature = obj
+            .get("thought_signature")
+            .or_else(|| obj.get("thoughtSignature"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Ok(ToolCallRequest {
+            id,
+            name,
+            arguments,
+            thought_signature,
+        })
     }
 }
 

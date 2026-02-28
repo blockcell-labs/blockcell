@@ -3470,6 +3470,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     // ── Create agent runtime with full component wiring ──
     let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), provider, tool_registry)?;
+    runtime.mount_mcp_servers().await;
     
     // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
     if config.agents.defaults.evolution_model.is_some()

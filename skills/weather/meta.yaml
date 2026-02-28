@@ -1,0 +1,46 @@
+name: weather
+description: "天气查询技能 — 直接访问免费天气网站（中国天气网、wttr.in、OpenWeatherMap免费接口），获取实时天气、未来预报、空气质量，无需API Key"
+requires:
+  bins: []
+  env: []
+permissions: []
+always: false
+triggers:
+  - "天气"
+  - "weather"
+  - "今天天气"
+  - "明天天气"
+  - "后天天气"
+  - "天气预报"
+  - "气温"
+  - "温度"
+  - "下雨"
+  - "下雪"
+  - "晴天"
+  - "阴天"
+  - "空气质量"
+  - "AQI"
+  - "PM2.5"
+  - "紫外线"
+  - "湿度"
+  - "风力"
+  - "风速"
+  - "穿什么衣服"
+  - "要带伞吗"
+  - "会下雨吗"
+  - "出行建议"
+  - "今天热吗"
+  - "今天冷吗"
+  - "未来天气"
+  - "一周天气"
+  - "7天天气"
+  - "forecast"
+  - "rain"
+  - "snow"
+  - "temperature"
+capabilities:
+  - "web_fetch"
+output_format: "markdown"
+fallback:
+  strategy: "degrade"
+  message: "无法获取天气数据，请稍后重试..."

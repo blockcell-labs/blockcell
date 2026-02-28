@@ -239,6 +239,16 @@ impl ToolRegistry {
         self.tools.insert(schema.name.to_string(), tool);
     }
 
+    /// Register all tools exposed by an MCP server provider.
+    pub async fn register_mcp_provider(&mut self, provider: &crate::mcp::provider::McpToolProvider) {
+        let tools = provider.tools().await;
+        for tool in tools {
+            let schema = tool.schema();
+            debug!(name = schema.name, server = %provider.server_name, "Registering MCP tool");
+            self.tools.insert(schema.name.to_string(), tool);
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.get(name)
     }

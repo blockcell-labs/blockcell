@@ -332,6 +332,7 @@ pub async fn learn(description: &str) -> anyhow::Result<()> {
     // Create runtime
     let tool_registry = ToolRegistry::with_defaults();
     let mut runtime = AgentRuntime::new(config, paths.clone(), provider, tool_registry)?;
+    runtime.mount_mcp_servers().await;
 
     // Optionally wire up memory store
     let memory_db_path = paths.memory_dir().join("memory.db");

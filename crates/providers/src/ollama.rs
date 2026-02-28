@@ -181,6 +181,7 @@ impl OllamaProvider {
                             id: format!("ollama_call_{}", call_index),
                             name,
                             arguments,
+                            thought_signature: None,
                         });
                         call_index += 1;
                     } else {
@@ -275,6 +276,7 @@ impl OllamaProvider {
                         id: format!("ollama_call_{}", i),
                         name: func.name.clone(),
                         arguments: func.arguments.clone(),
+                        thought_signature: None,
                     });
                 }
             }

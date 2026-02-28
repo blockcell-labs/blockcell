@@ -554,6 +554,36 @@ impl AgentRuntime {
         self.core_evolution = Some(core_evo);
     }
 
+    /// Launch all configured MCP servers and register their tools into the tool registry.
+    /// Call this once after `new()` and before processing messages.
+    pub async fn mount_mcp_servers(&mut self) {
+        use blockcell_tools::mcp::{client::McpClient, provider::McpToolProvider};
+
+        for (name, cfg) in &self.config.mcp_servers {
+            if !cfg.enabled {
+                info!(server = %name, "MCP server disabled, skipping");
+                continue;
+            }
+            info!(server = %name, command = %cfg.command, "Starting MCP server");
+            match McpClient::start(
+                name,
+                &cfg.command,
+                &cfg.args,
+                &cfg.env,
+                cfg.cwd.as_deref(),
+            ).await {
+                Ok(client) => {
+                    let provider = McpToolProvider::new(name.clone(), client);
+                    self.tool_registry.register_mcp_provider(&provider).await;
+                    info!(server = %name, "MCP server mounted successfully");
+                }
+                Err(e) => {
+                    error!(server = %name, error = %e, "Failed to start MCP server");
+                }
+            }
+        }
+    }
+
     /// Create a restricted tool registry for subagents (no spawn, no message, no cron).
     pub(crate) fn subagent_tool_registry() -> ToolRegistry {
         use blockcell_tools::fs::*;
