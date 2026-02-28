@@ -11,7 +11,7 @@ pub enum IntentCategory {
     FileOps,
     /// 网页/搜索 — web_search, web_fetch, browse
     WebSearch,
-    /// 金融/股票/加密货币 — qveris, exchange_api, alert_rule, stream_subscribe, ...
+    /// 金融/股票/加密货币 — exchange_api, alert_rule, stream_subscribe, ...
     Finance,
     /// 区块链/DeFi/NFT — blockchain_rpc, blockchain_tx, contract_security, bridge_api, nft_market, multisig
     Blockchain,
@@ -562,7 +562,6 @@ mod tests {
         assert!(tools.contains(&"finance_api"));
         assert!(tools.contains(&"exchange_api"));
         assert!(tools.contains(&"read_file")); // core tool
-        assert!(!tools.contains(&"qveris")); // qveris removed
     }
 
     #[test]
@@ -570,6 +569,5 @@ mod tests {
         let tools = tools_for_intents(&[IntentCategory::Unknown]);
         assert!(tools.contains(&"read_file"));
         assert!(tools.contains(&"browse"));
-        assert!(!tools.contains(&"qveris"));
     }
 }
