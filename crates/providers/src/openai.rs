@@ -5,8 +5,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+use crate::client::build_http_client;
 use crate::Provider;
 
 /// Find the largest byte index <= `max_bytes` that is a valid char boundary.
@@ -42,13 +44,34 @@ impl OpenAIProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> Self {
+        Self::new_with_proxy(api_key, api_base, model, max_tokens, temperature, None, None, &[])
+    }
+
+    pub fn new_with_proxy(
+        api_key: &str,
+        api_base: Option<&str>,
+        model: &str,
+        max_tokens: u32,
+        temperature: f32,
+        provider_proxy: Option<&str>,
+        global_proxy: Option<&str>,
+        no_proxy: &[String],
+    ) -> Self {
+        let resolved_base = api_base
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+            .to_string();
+        let client = build_http_client(
+            provider_proxy,
+            global_proxy,
+            no_proxy,
+            &resolved_base,
+            Duration::from_secs(120),
+        );
         Self {
-            client: Client::new(),
+            client,
             api_key: api_key.to_string(),
-            api_base: api_base
-                .unwrap_or("https://api.openai.com/v1")
-                .trim_end_matches('/')
-                .to_string(),
+            api_base: resolved_base,
             model: model.to_string(),
             max_tokens,
             temperature,

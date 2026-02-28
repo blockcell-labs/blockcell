@@ -117,46 +117,66 @@ pub fn create_provider(
     let empty_cfg = blockcell_core::config::ProviderConfig::default();
     let resolved_cfg = provider_cfg.unwrap_or(&empty_cfg);
 
+    // 计算代理参数：
+    //   provider_proxy = providers.<name>.proxy（None=未配置，Some("")=强制直连，Some(url)=该provider专用）
+    //   global_proxy   = network.proxy
+    //   no_proxy       = network.no_proxy
+    let provider_proxy = resolved_cfg.proxy.as_deref();
+    let global_proxy = config.network.proxy.as_deref();
+    let no_proxy = &config.network.no_proxy;
+
     match effective_provider {
         "anthropic" => {
-            Ok(Box::new(AnthropicProvider::new(
+            Ok(Box::new(AnthropicProvider::new_with_proxy(
                 &resolved_cfg.api_key,
                 resolved_cfg.api_base.as_deref(),
                 model,
                 max_tokens,
                 temperature,
-            )))
+                provider_proxy,
+                global_proxy,
+                no_proxy,
+            )) as Box<dyn Provider>)
         }
         "gemini" => {
-            Ok(Box::new(GeminiProvider::new(
+            Ok(Box::new(GeminiProvider::new_with_proxy(
                 &resolved_cfg.api_key,
                 resolved_cfg.api_base.as_deref(),
                 model,
                 max_tokens,
                 temperature,
-            )))
+                provider_proxy,
+                global_proxy,
+                no_proxy,
+            )) as Box<dyn Provider>)
         }
         "ollama" => {
             let api_base = resolved_cfg.api_base.as_deref()
                 .or(Some("http://localhost:11434"));
-            Ok(Box::new(OllamaProvider::new(
+            Ok(Box::new(OllamaProvider::new_with_proxy(
                 api_base,
                 model,
                 max_tokens,
                 temperature,
-            )))
+                provider_proxy,
+                global_proxy,
+                no_proxy,
+            )) as Box<dyn Provider>)
         }
         _ => {
             // OpenAI 兼容：openrouter, openai, deepseek, groq, zhipu, vllm, kimi, moonshot 等
             let api_base = resolved_cfg.api_base.as_deref()
                 .unwrap_or_else(|| default_api_base(effective_provider));
-            Ok(Box::new(OpenAIProvider::new(
+            Ok(Box::new(OpenAIProvider::new_with_proxy(
                 &resolved_cfg.api_key,
                 Some(api_base),
                 model,
                 max_tokens,
                 temperature,
-            )))
+                provider_proxy,
+                global_proxy,
+                no_proxy,
+            )) as Box<dyn Provider>)
         }
     }
 }

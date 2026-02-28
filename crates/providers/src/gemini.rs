@@ -4,8 +4,10 @@ use blockcell_core::{Error, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::{debug, error, info};
 
+use crate::client::build_http_client;
 use crate::Provider;
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -27,13 +29,34 @@ impl GeminiProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> Self {
+        Self::new_with_proxy(api_key, api_base, model, max_tokens, temperature, None, None, &[])
+    }
+
+    pub fn new_with_proxy(
+        api_key: &str,
+        api_base: Option<&str>,
+        model: &str,
+        max_tokens: u32,
+        temperature: f32,
+        provider_proxy: Option<&str>,
+        global_proxy: Option<&str>,
+        no_proxy: &[String],
+    ) -> Self {
+        let resolved_base = api_base
+            .unwrap_or(GEMINI_API_BASE)
+            .trim_end_matches('/')
+            .to_string();
+        let client = build_http_client(
+            provider_proxy,
+            global_proxy,
+            no_proxy,
+            &resolved_base,
+            Duration::from_secs(120),
+        );
         Self {
-            client: Client::new(),
+            client,
             api_key: api_key.to_string(),
-            api_base: api_base
-                .unwrap_or(GEMINI_API_BASE)
-                .trim_end_matches('/')
-                .to_string(),
+            api_base: resolved_base,
             model: model.to_string(),
             max_tokens,
             temperature,

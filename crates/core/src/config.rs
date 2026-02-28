@@ -12,6 +12,11 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(default)]
     pub api_base: Option<String>,
+    /// 该 provider 专用代理（可选）。优先级高于全局 network.proxy。
+    /// 设置为空字符串 "" 可强制该 provider 直连（跳过全局代理）。
+    /// 格式："http://host:port" 或 "socks5://host:port"
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +172,21 @@ impl Default for GhostConfig {
             auto_social: default_auto_social(),
         }
     }
+}
+
+/// 全局网络代理配置。
+/// 所有 LLM provider HTTP 请求默认走此代理，可被 providers.<name>.proxy 覆盖。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConfig {
+    /// 全局代理地址，例如 "http://127.0.0.1:7890"
+    /// 留空或不配置则直连。
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// 不走代理的域名/IP 列表，支持前缀通配符 "*.example.com"。
+    /// 常见示例：["localhost", "127.0.0.1", "::1", "*.local"]
+    #[serde(default)]
+    pub no_proxy: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -539,6 +559,8 @@ pub struct Config {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
+    pub network: NetworkConfig,
+    #[serde(default)]
     pub community_hub: CommunityHubConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
@@ -558,6 +580,7 @@ impl Default for Config {
         providers.insert("openrouter".to_string(), ProviderConfig {
             api_key: String::new(),
             api_base: Some("https://openrouter.ai/api/v1".to_string()),
+            proxy: None,
         });
         providers.insert("anthropic".to_string(), ProviderConfig::default());
         providers.insert("openai".to_string(), ProviderConfig::default());
@@ -567,19 +590,23 @@ impl Default for Config {
         providers.insert("vllm".to_string(), ProviderConfig {
             api_key: "dummy".to_string(),
             api_base: Some("http://localhost:8000/v1".to_string()),
+            proxy: None,
         });
         providers.insert("gemini".to_string(), ProviderConfig::default());
         providers.insert("kimi".to_string(), ProviderConfig {
             api_key: String::new(),
             api_base: Some("https://api.moonshot.cn/v1".to_string()),
+            proxy: None,
         });
         providers.insert("ollama".to_string(), ProviderConfig {
             api_key: "ollama".to_string(),
             api_base: Some("http://localhost:11434".to_string()),
+            proxy: None,
         });
 
         Self {
             providers,
+            network: NetworkConfig::default(),
             community_hub: CommunityHubConfig::default(),
             agents: AgentsConfig::default(),
             channels: ChannelsConfig::default(),

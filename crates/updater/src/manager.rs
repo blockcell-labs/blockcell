@@ -76,6 +76,16 @@ impl UpdateManager {
             return Ok(None);
         }
 
+        let current_version = env!("CARGO_PKG_VERSION");
+        if !Self::version_greater(&manifest.version, current_version) {
+            debug!(
+                current = %current_version,
+                manifest = %manifest.version,
+                "Already on latest version or manifest is not newer"
+            );
+            return Ok(None);
+        }
+
         Ok(Some(manifest))
     }
 

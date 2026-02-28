@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod ollama;
 pub mod gemini;
 pub mod factory;
+pub mod client;
 
 use async_trait::async_trait;
 use blockcell_core::types::{ChatMessage, LLMResponse};
