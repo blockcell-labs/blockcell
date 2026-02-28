@@ -366,7 +366,7 @@ impl FeishuChannel {
                                 debug!(method = frame.method, msg_type = %msg_type, payload_len = frame.payload.len(), "Feishu data frame");
                                 match std::str::from_utf8(&frame.payload) {
                                     Ok(text) => {
-                                        info!(payload = %&text[..text.len().min(500)], "Feishu raw event payload");
+                                        info!(payload = %text.chars().take(500).collect::<String>(), "Feishu raw event payload");
                                         // Send ACK frame
                                         let ack = Frame {
                                             seq_id: frame.seq_id,
