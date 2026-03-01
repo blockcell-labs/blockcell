@@ -209,7 +209,7 @@ class WebSocketManager {
     }, delay);
   }
 
-  send(data: { type: string; content?: string; chat_id?: string; media?: string[] }) {
+  send(data: { type: string; content?: string; chat_id?: string; media?: string[]; [key: string]: unknown }) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
@@ -220,7 +220,7 @@ class WebSocketManager {
   }
 
   sendConfirmResponse(requestId: string, approved: boolean) {
-    this.send({ type: 'confirm_response', content: JSON.stringify({ request_id: requestId, approved }) });
+    this.send({ type: 'confirm_response', request_id: requestId, approved });
   }
 
   on(event: string, listener: WsListener) {

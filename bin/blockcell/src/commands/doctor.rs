@@ -145,10 +145,10 @@ pub async fn run() -> anyhow::Result<()> {
     ];
     let chrome_found = chrome_paths.iter().any(|p| std::path::Path::new(p).exists());
     if chrome_found {
-        print_ok("Chrome/Chromium", "browse/chrome_control tools available");
+        print_ok("Chrome/Chromium", "browse tool available");
         ok_count += 1;
     } else {
-        print_warn("Chrome/Chromium not found", "browse/chrome_control features limited");
+        print_warn("Chrome/Chromium not found", "browse tool features limited");
         warn_count += 1;
     }
 

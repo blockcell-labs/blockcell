@@ -25,7 +25,6 @@ const BUILTIN_TOOLS: &[&str] = &[
     "list_skills",
     "system_info", "capability_evolve",
     "camera_capture",
-    "chrome_control",
     "app_control",
     "file_ops",
     "data_process",

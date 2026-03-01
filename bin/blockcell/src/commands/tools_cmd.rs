@@ -216,7 +216,7 @@ fn categorize_tool(name: &str) -> &'static str {
         "read_file" | "write_file" | "edit_file" | "list_dir" | "file_ops" => "Filesystem",
         "exec" => "Execution",
         "web_search" | "web_fetch" | "browse" | "http_request" => "Web/Browser",
-        "chrome_control" | "app_control" => "GUI Automation",
+        "app_control" => "GUI Automation",
         "message" | "spawn" | "list_tasks" | "notification" | "email" => "Communication",
         "cron" => "Scheduling",
         "memory_query" | "memory_upsert" | "memory_forget" => "Memory",

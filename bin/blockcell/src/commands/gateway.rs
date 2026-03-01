@@ -1,5 +1,5 @@
 use blockcell_agent::{
-    AgentRuntime, CapabilityRegistryAdapter, CoreEvolutionAdapter,
+    AgentRuntime, CapabilityRegistryAdapter, ConfirmRequest, CoreEvolutionAdapter,
     MemoryStoreAdapter, MessageBus, ProviderLLMBridge, TaskManager,
 };
 use blockcell_skills::{EvolutionService, EvolutionServiceConfig};
@@ -24,6 +24,7 @@ use blockcell_skills::{new_registry_handle, CoreEvolution};
 use blockcell_storage::{MemoryStore, SessionStore};
 use blockcell_tools::{CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry};
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{info, warn, error, debug};
 
@@ -75,6 +76,8 @@ struct GatewayState {
     api_token: Option<String>,
     /// Broadcast channel for streaming events to WebSocket clients
     ws_broadcast: broadcast::Sender<String>,
+    /// Pending path-confirmation requests waiting for WebUI user response
+    pending_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
     /// Session store for session CRUD
     session_store: Arc<SessionStore>,
     /// Cron service for cron CRUD
@@ -678,8 +681,15 @@ async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
                             }
                         }
                         "confirm_response" => {
-                            // TODO: route confirm responses to runtime
-                            debug!("Received confirm_response via WS");
+                            let request_id = parsed.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let approved = parsed.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if !request_id.is_empty() {
+                                let mut map = state.pending_confirms.lock().await;
+                                if let Some(tx) = map.remove(&request_id) {
+                                    let _ = tx.send(approved);
+                                    debug!(request_id = %request_id, approved, "Confirm response routed");
+                                }
+                            }
                         }
                         "cancel" => {
                             debug!("Received cancel via WS");
@@ -3487,6 +3497,34 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         }
     }
     
+    // ── Set up WebSocket-based path confirmation channel ──
+    let pending_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel::<ConfirmRequest>(16);
+    runtime.set_confirm(confirm_tx);
+
+    // Spawn confirm handler: broadcasts confirm_request events to WS clients
+    // and stores the oneshot sender keyed by request_id for later routing.
+    let pending_confirms_for_handler = Arc::clone(&pending_confirms);
+    let ws_broadcast_for_confirm = ws_broadcast_tx.clone();
+    tokio::spawn(async move {
+        while let Some(req) = confirm_rx.recv().await {
+            let request_id = format!("confirm_{}", chrono::Utc::now().timestamp_millis());
+            {
+                let mut map = pending_confirms_for_handler.lock().await;
+                map.insert(request_id.clone(), req.response_tx);
+            }
+            let event = serde_json::json!({
+                "type": "confirm_request",
+                "request_id": request_id,
+                "tool": req.tool_name,
+                "paths": req.paths,
+            });
+            let _ = ws_broadcast_for_confirm.send(event.to_string());
+            info!(request_id = %request_id, tool = %req.tool_name, "Sent confirm_request to WebUI");
+        }
+    });
+
     runtime.set_outbound(outbound_tx);
     runtime.set_task_manager(task_manager.clone());
     if let Some(ref store) = memory_store_handle {
@@ -3700,6 +3738,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         paths: paths.clone(),
         api_token: api_token.clone(),
         ws_broadcast: ws_broadcast_tx.clone(),
+        pending_confirms: Arc::clone(&pending_confirms),
         session_store,
         cron_service: cron_service.clone(),
         memory_store: memory_store_handle.clone(),

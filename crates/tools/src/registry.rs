@@ -17,7 +17,7 @@ use crate::memory::{MemoryQueryTool, MemoryUpsertTool, MemoryForgetTool};
 use crate::skills::ListSkillsTool;
 use crate::system_info::{SystemInfoTool, CapabilityEvolveTool};
 use crate::camera::CameraCaptureTool;
-use crate::chrome_control::ChromeControlTool;
+
 use crate::app_control::AppControlTool;
 use crate::file_ops::FileOpsTool;
 use crate::data_process::DataProcessTool;
@@ -112,9 +112,6 @@ impl ToolRegistry {
         
         // Camera tools
         registry.register(Arc::new(CameraCaptureTool));
-        
-        // Chrome GUI automation
-        registry.register(Arc::new(ChromeControlTool));
         
         // General app control (any macOS app)
         registry.register(Arc::new(AppControlTool));

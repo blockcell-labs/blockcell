@@ -19,7 +19,7 @@ pub enum IntentCategory {
     DataAnalysis,
     /// 通信/邮件/社交 — email, social_media, notification, message
     Communication,
-    /// 系统/硬件/应用控制/Android — system_info, app_control, chrome_control, camera_capture, termux_api
+    /// 系统/硬件/应用控制/Android — system_info, app_control, camera_capture, termux_api
     SystemControl,
     /// 日程/任务/记忆 — calendar_api, cron, memory_*, knowledge_graph, list_tasks
     Organization,
@@ -415,7 +415,7 @@ fn tools_for_intent(intent: &IntentCategory) -> Vec<&'static str> {
             let mut t = core.clone();
             t.extend([
                 "system_info", "capability_evolve", "app_control",
-                "chrome_control", "camera_capture", "browse",
+                "camera_capture", "browse",
                 "image_understand", "termux_api",
             ]);
             t

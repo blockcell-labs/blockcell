@@ -12,7 +12,6 @@ pub mod memory;
 pub mod skills;
 pub mod system_info;
 pub mod camera;
-pub mod chrome_control;
 pub mod app_control;
 pub mod file_ops;
 pub mod data_process;

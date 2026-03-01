@@ -52,7 +52,7 @@ impl Tool for BrowseTool {
                             "network_intercept", "network_continue", "network_block",
                             "list_browsers"
                         ],
-                        "description": "The browser action to perform"
+                        "description": "Browser action: 'navigate'=open URL (requires url param); 'snapshot'=get accessibility tree of current page (read page structure/links/text); 'get_content'=get full page text as markdown; 'screenshot'=capture page image (requires output_path); 'click'=click element (requires ref or selector); 'fill'=fill input field (requires ref/selector + text); 'type_text'=type into focused element; 'press_key'=press keyboard key; 'scroll'=scroll page; 'wait'=wait for element or time; 'execute_js'=run JavaScript; 'get_url'=get current URL; 'tab_list'=list open tabs; 'tab_new'=open new tab; 'tab_close'=close tab; 'tab_switch'=switch tab; 'back'/'forward'/'reload'=navigation; 'cookies_get'/'cookies_set'/'cookies_clear'=cookie ops; 'session_list'/'session_close'=session management; 'upload_file'=file upload; 'dialog_handle'=handle JS dialogs; 'network_intercept'/'network_continue'/'network_block'=network control; 'pdf'=save page as PDF; 'set_viewport'=set window size; 'set_headers'=set HTTP headers; 'list_browsers'=list available browsers. ALWAYS specify action explicitly."
                     },
                     "url": {
                         "type": "string",
@@ -167,21 +167,19 @@ impl Tool for BrowseTool {
                         "description": "Browser engine to use (default: chrome)"
                     }
                 },
-                "required": ["action"]
+                "required": []
             }),
         }
     }
 
-    fn validate(&self, params: &Value) -> Result<()> {
-        params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| blockcell_core::Error::Tool("Missing required parameter: action".to_string()))?;
+    fn validate(&self, _params: &Value) -> Result<()> {
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params["action"].as_str().unwrap_or("");
+        let action = params["action"].as_str().unwrap_or_else(|| {
+            if params.get("url").and_then(|v| v.as_str()).is_some() { "navigate" } else { "snapshot" }
+        });
         let session_name = params["session"].as_str().unwrap_or("default");
         let headed = params["headed"].as_bool().unwrap_or(false);
         let engine = params["browser"].as_str()
@@ -544,28 +542,54 @@ async fn action_screenshot(
     let full_page = params["full_page"].as_bool().unwrap_or(false);
     let base64_data = session.cdp.screenshot(full_page).await.map_err(cdp_err)?;
 
-    let output_path = if let Some(p) = params["output_path"].as_str() {
-        std::path::PathBuf::from(p)
-    } else {
-        let media_dir = workspace.join("media");
-        std::fs::create_dir_all(&media_dir).ok();
-        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        media_dir.join(format!("screenshot_{}.png", ts))
-    };
+    let media_dir = workspace.join("media");
+    std::fs::create_dir_all(&media_dir).ok();
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let workspace_path = media_dir.join(format!("screenshot_{}.png", ts));
+
+    let user_path = params["output_path"].as_str().map(|p| {
+        let pb = if p.starts_with("~/") {
+            dirs::home_dir().map(|h| h.join(&p[2..])).unwrap_or_else(|| std::path::PathBuf::from(p))
+        } else {
+            std::path::PathBuf::from(p)
+        };
+        pb
+    });
 
     // Decode base64 and write
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&base64_data)
         .map_err(|e| blockcell_core::Error::Tool(format!("base64 decode: {}", e)))?;
-    std::fs::write(&output_path, &bytes)
+
+    // Always write to workspace first (for webui display)
+    std::fs::write(&workspace_path, &bytes)
         .map_err(|e| blockcell_core::Error::Tool(format!("write screenshot: {}", e)))?;
 
-    Ok(json!({
+    // If user specified a path outside workspace, also copy there
+    let extra_path = if let Some(ref up) = user_path {
+        if !up.starts_with(workspace) {
+            if let Some(parent) = up.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::copy(&workspace_path, up).ok();
+            Some(up.display().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut result = json!({
         "status": "screenshot_saved",
-        "path": output_path.display().to_string(),
+        "path": workspace_path.display().to_string(),
         "size_bytes": bytes.len(),
-    }))
+    });
+    if let Some(extra) = extra_path {
+        result["also_saved_to"] = json!(extra);
+    }
+    Ok(result)
 }
 
 async fn action_pdf(
@@ -575,27 +599,52 @@ async fn action_pdf(
 ) -> Result<Value> {
     let base64_data = session.cdp.print_to_pdf().await.map_err(cdp_err)?;
 
-    let output_path = if let Some(p) = params["output_path"].as_str() {
-        std::path::PathBuf::from(p)
-    } else {
-        let media_dir = workspace.join("media");
-        std::fs::create_dir_all(&media_dir).ok();
-        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        media_dir.join(format!("page_{}.pdf", ts))
-    };
+    let media_dir = workspace.join("media");
+    std::fs::create_dir_all(&media_dir).ok();
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let workspace_path = media_dir.join(format!("page_{}.pdf", ts));
+
+    let user_path = params["output_path"].as_str().map(|p| {
+        if p.starts_with("~/") {
+            dirs::home_dir().map(|h| h.join(&p[2..])).unwrap_or_else(|| std::path::PathBuf::from(p))
+        } else {
+            std::path::PathBuf::from(p)
+        }
+    });
 
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&base64_data)
         .map_err(|e| blockcell_core::Error::Tool(format!("base64 decode: {}", e)))?;
-    std::fs::write(&output_path, &bytes)
+
+    // Always write to workspace first
+    std::fs::write(&workspace_path, &bytes)
         .map_err(|e| blockcell_core::Error::Tool(format!("write pdf: {}", e)))?;
 
-    Ok(json!({
+    // If user specified a path outside workspace, also copy there
+    let extra_path = if let Some(ref up) = user_path {
+        if !up.starts_with(workspace) {
+            if let Some(parent) = up.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::copy(&workspace_path, up).ok();
+            Some(up.display().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut result = json!({
         "status": "pdf_saved",
-        "path": output_path.display().to_string(),
+        "path": workspace_path.display().to_string(),
         "size_bytes": bytes.len(),
-    }))
+    });
+    if let Some(extra) = extra_path {
+        result["also_saved_to"] = json!(extra);
+    }
+    Ok(result)
 }
 
 async fn action_execute_js(
@@ -1246,7 +1295,7 @@ mod tests {
     fn test_validate() {
         let tool = BrowseTool;
         assert!(tool.validate(&json!({"action": "navigate"})).is_ok());
-        assert!(tool.validate(&json!({})).is_err());
+        assert!(tool.validate(&json!({})).is_ok());
     }
 
     #[test]

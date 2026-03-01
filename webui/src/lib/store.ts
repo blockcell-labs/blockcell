@@ -97,6 +97,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...m,
             content: event.content || m.content,
             streaming: false,
+            media: event.media && event.media.length > 0
+              ? [...new Set([...(m.media || []), ...event.media])]
+              : m.media,
           }));
         } else {
           // New complete message
@@ -106,6 +109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             content: event.content || '',
             timestamp: Date.now(),
             streaming: false,
+            media: event.media && event.media.length > 0 ? event.media : undefined,
           });
         }
         set({ isLoading: false });

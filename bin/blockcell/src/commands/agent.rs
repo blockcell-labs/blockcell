@@ -48,7 +48,6 @@ const BUILTIN_TOOLS: &[(&str, &[(&str, &str)])] = &[
         ("http_request",   "Generic HTTP/REST API calls"),
     ]),
     ("🖥️ GUI Automation", &[
-        ("chrome_control", "Chrome browser GUI control (AppleScript)"),
         ("app_control",    "macOS app control (System Events)"),
     ]),
     ("🎨 Media", &[
@@ -773,7 +772,7 @@ const SKILL_CATEGORIES: &[(&str, &[&str])] = &[
         "email_report", "email_to_tasks",
     ]),
     ("🖥️ GUI Automation", &[
-        "chrome_control", "app_control", "camera",
+        "app_control", "camera",
     ]),
     ("📅 Productivity", &[
         "daily_digest", "weekly_review", "calendar_manager", "calendar_reminders",

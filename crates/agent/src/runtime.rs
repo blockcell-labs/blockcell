@@ -595,7 +595,6 @@ impl AgentRuntime {
         use blockcell_tools::skills::ListSkillsTool;
         use blockcell_tools::system_info::{SystemInfoTool, CapabilityEvolveTool};
         use blockcell_tools::camera::CameraCaptureTool;
-        use blockcell_tools::chrome_control::ChromeControlTool;
         use blockcell_tools::app_control::AppControlTool;
         use blockcell_tools::file_ops::FileOpsTool;
         use blockcell_tools::data_process::DataProcessTool;
@@ -652,7 +651,6 @@ impl AgentRuntime {
         registry.register(Arc::new(SystemInfoTool));
         registry.register(Arc::new(CapabilityEvolveTool));
         registry.register(Arc::new(CameraCaptureTool));
-        registry.register(Arc::new(ChromeControlTool));
         registry.register(Arc::new(AppControlTool));
         registry.register(Arc::new(FileOpsTool));
         registry.register(Arc::new(DataProcessTool));
@@ -1056,6 +1054,8 @@ impl AgentRuntime {
         let mut final_response = String::new();
         let mut message_tool_sent_media = false;
         let mut tool_fail_counts: HashMap<String, u32> = HashMap::new();
+        // Collect media paths produced by tools (screenshots, generated images, etc.)
+        let mut collected_media: Vec<String> = Vec::new();
 
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
@@ -1168,6 +1168,20 @@ impl AgentRuntime {
                         }
                     }
                     let result = self.execute_tool_call(tool_call, &msg).await;
+
+                    // Collect media paths from tool results for WebUI display
+                    if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
+                        // Look for output_path / path / file_path fields that are image/audio/video
+                        let media_exts = ["png","jpg","jpeg","gif","webp","bmp","svg","mp3","wav","m4a","mp4","webm","mov"];
+                        for key in &["output_path","path","file_path","screenshot_path","image_path"] {
+                            if let Some(p) = rv.get(key).and_then(|v| v.as_str()) {
+                                let ext = p.rsplit('.').next().unwrap_or("").to_lowercase();
+                                if media_exts.contains(&ext.as_str()) {
+                                    collected_media.push(p.to_string());
+                                }
+                            }
+                        }
+                    }
 
                     // Detect thin web_search results (only titles/URLs, no actual content).
                     // When this happens, extract the top URLs so the next hint can suggest web_fetch.
@@ -1392,6 +1406,7 @@ impl AgentRuntime {
                 "content": final_response,
                 "tool_calls": 0,
                 "duration_ms": 0,
+                "media": collected_media,
             });
             let _ = event_tx.send(event.to_string());
         }

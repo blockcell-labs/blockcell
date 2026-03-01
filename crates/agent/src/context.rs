@@ -216,7 +216,9 @@ impl ContextBuilder {
             prompt.push_str("- **金融数据**: `finance_api` 使用东方财富(A股/港股完全免费)、CoinGecko(加密货币免费)、Alpha Vantage(美股,可选key)，**无需用户配置任何 API Key** 即可查询A股/港股/加密货币行情。\n");
             prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
             prompt.push_str("- **Web search**: Use `web_search` for discovery. Chinese queries automatically use Bing for best results. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. **If results are irrelevant**: retry with rephrased query (shorter, different keywords) before concluding no results exist — never give up after just one failed search.\n");
-            prompt.push_str("- **Web content**: `web_fetch` returns markdown by default — uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents). If server supports it, markdown is returned directly with ~80% token savings. Otherwise HTML is converted to markdown locally. Use `browse` for full browser automation (CDP) — `get_content` also returns markdown. Use `web_fetch` extractMode='raw' only when you need the original HTML.\n");
+            prompt.push_str("- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). Use `browse` for JS-heavy sites or interactive automation. **`browse` action选择规则**: 打开网页用 `navigate`+url; 读取页面内容用 `get_content`; 查看页面结构/元素用 `snapshot`; **截图用 `screenshot`（无需指定output_path）**; 点击元素用 `click`+ref/selector; 填写表单用 `fill`; 按键用 `press_key`. **绝对禁止**调用 `browse` 时不带 `action` 参数——必须明确指定 action。\n");
+            prompt.push_str("- **信息充足性原则（避免过度抓取）**: 每次 `web_fetch` 后先评估已有信息是否满足任务需求，**够用就停止**，不要贪婪地抓取所有搜索结果。判断标准：(1) 用户要求[找N篇/N个] -> 已收集到N个独立来源即可停止；(2) 用户要求[总结/汇总] -> 有2-3个高质量来源即可，无需穷举；(3) 用户要求[最新/最全] -> 才需要多源验证。**错误做法**：搜到10条结果就逐一fetch全部。**正确做法**：fetch前几条最相关的，判断内容是否满足需求，满足则直接执行后续任务（写文件/输出等）。\n");
+            prompt.push_str("- **`browse screenshot` 路径规则**: 截图**始终**自动保存在 workspace/media/ 下，返回结果中的 `path` 字段即为可展示的路径，直接用该路径给用户展示即可。**不要**把 `output_path` 设为桌面或其他绝对路径——那样会导致 WebUI 无法显示截图。如果用户要求把截图存到某个特定位置（如桌面），工具会自动 copy 一份过去，你无需额外操作，直接用返回的 `path` 字段展示图片。\n");
             // Media display rule depends on channel type:
             // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
             // - IM channels (wecom/feishu/lark/telegram/slack/discord/dingtalk/whatsapp):
@@ -399,8 +401,8 @@ impl ContextBuilder {
                     || ["crypto", "token", "whale", "defi", "nft", "contract", "wallet", "dao", "treasury"].iter().any(|k| name.contains(k))
                 }
                 IntentCategory::SystemControl => {
-                    caps.iter().any(|c| ["app_control", "chrome_control", "camera_capture", "system_info"].contains(&c.as_str()))
-                    || ["app_control", "chrome", "camera"].iter().any(|k| name.contains(k))
+                    caps.iter().any(|c| ["app_control", "camera_capture", "system_info"].contains(&c.as_str()))
+                    || ["app_control", "camera"].iter().any(|k| name.contains(k))
                 }
                 IntentCategory::Media => {
                     caps.iter().any(|c| ["audio_transcribe", "tts", "ocr", "image_understand", "video_process"].contains(&c.as_str()))
