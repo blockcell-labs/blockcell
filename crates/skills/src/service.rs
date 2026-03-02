@@ -4,7 +4,7 @@ use crate::evolution::{
 };
 use blockcell_core::{Error, Result};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -347,6 +347,92 @@ impl EvolutionService {
         }
     }
 
+    fn truncate_chars(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        s.chars().take(max_chars).collect::<String>()
+    }
+
+    fn first_legacy_python_script(skill_dir: &Path) -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        let scripts_dir = skill_dir.join("scripts");
+        if scripts_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().is_some_and(|e| e == "py") {
+                        candidates.push(path);
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            if let Ok(entries) = std::fs::read_dir(skill_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file()
+                        && path.file_name().and_then(|n| n.to_str()) != Some("SKILL.py")
+                        && path.extension().is_some_and(|e| e == "py")
+                    {
+                        candidates.push(path);
+                    }
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+        candidates.into_iter().next()
+    }
+
+    fn detect_skill_layout(&self, skill_name: &str) -> (SkillType, Option<String>) {
+        let skill_dir = self.evolution.skills_dir().join(skill_name);
+
+        let rhai_path = skill_dir.join("SKILL.rhai");
+        if rhai_path.exists() {
+            return (SkillType::Rhai, std::fs::read_to_string(rhai_path).ok());
+        }
+
+        let py_path = skill_dir.join("SKILL.py");
+        if py_path.exists() {
+            return (SkillType::Python, std::fs::read_to_string(py_path).ok());
+        }
+
+        if let Some(legacy_py_path) = Self::first_legacy_python_script(&skill_dir) {
+            let rel = legacy_py_path
+                .strip_prefix(&skill_dir)
+                .ok()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| legacy_py_path.display().to_string());
+
+            let legacy_code = std::fs::read_to_string(&legacy_py_path)
+                .ok()
+                .map(|s| Self::truncate_chars(&s, 8_000))
+                .unwrap_or_default();
+
+            let skill_md = std::fs::read_to_string(skill_dir.join("SKILL.md"))
+                .ok()
+                .map(|s| Self::truncate_chars(&s, 3_000));
+
+            let mut snippet = format!("# Legacy OpenClaw script: {}\n{}", rel, legacy_code);
+            if let Some(md) = skill_md {
+                snippet.push_str("\n\n# Current SKILL.md\n");
+                snippet.push_str(&md);
+            }
+
+            return (SkillType::Python, Some(snippet));
+        }
+
+        let md_path = skill_dir.join("SKILL.md");
+        if md_path.exists() {
+            return (SkillType::PromptOnly, std::fs::read_to_string(md_path).ok());
+        }
+
+        (SkillType::PromptOnly, None)
+    }
+
     pub fn new(skills_dir: PathBuf, config: EvolutionServiceConfig) -> Self {
         let error_tracker = ErrorTracker::new(
             config.error_threshold,
@@ -464,17 +550,9 @@ impl EvolutionService {
             .get_current_version(skill_name)
             .unwrap_or_else(|_| "unknown".to_string());
 
-        // 检测技能类型
-        let skill_dir = self.evolution.skills_dir().join(skill_name);
-        let skill_type = if skill_dir.join("SKILL.rhai").exists() {
-            SkillType::Rhai
-        } else if skill_dir.join("SKILL.py").exists() {
-            SkillType::Python
-        } else if skill_dir.join("SKILL.md").exists() {
-            SkillType::PromptOnly
-        } else {
-            SkillType::Rhai
-        };
+        // 检测技能类型（支持 OpenClaw scripts/*.py 兼容布局）
+        let (skill_type, inferred_source_snippet) = self.detect_skill_layout(skill_name);
+        let source_snippet = source_snippet.or(inferred_source_snippet);
 
         let context = EvolutionContext {
             skill_name: skill_name.to_string(),
@@ -1252,21 +1330,8 @@ impl EvolutionService {
             .get_current_version(skill_name)
             .unwrap_or_else(|_| "0.0.0".to_string());
 
-        // 检测技能类型：有 SKILL.rhai 就是 Rhai，有 SKILL.py 就是 Python，只有 SKILL.md 就是 PromptOnly
-        let skill_dir = self.evolution.skills_dir().join(skill_name);
-        let rhai_path = skill_dir.join("SKILL.rhai");
-        let py_path = skill_dir.join("SKILL.py");
-        let md_path = skill_dir.join("SKILL.md");
-        let (source_snippet, skill_type) = if rhai_path.exists() {
-            (std::fs::read_to_string(&rhai_path).ok(), SkillType::Rhai)
-        } else if py_path.exists() {
-            (std::fs::read_to_string(&py_path).ok(), SkillType::Python)
-        } else if md_path.exists() {
-            (std::fs::read_to_string(&md_path).ok(), SkillType::PromptOnly)
-        } else {
-            // 新技能，无现有文件 — 默认为 PromptOnly（无脚本框架）
-            (None, SkillType::PromptOnly)
-        };
+        // 检测技能类型：支持 SKILL.rhai / SKILL.py / SKILL.md 以及 OpenClaw scripts/*.py 布局
+        let (skill_type, source_snippet) = self.detect_skill_layout(skill_name);
 
         let context = EvolutionContext {
             skill_name: skill_name.to_string(),
@@ -1634,6 +1699,72 @@ mod tests {
 
         let active = service.active_evolutions().await;
         assert_eq!(active.get("skill_c"), Some(&existing_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn test_trigger_manual_evolution_infers_python_from_legacy_scripts() {
+        let (root, skills_dir) = setup_test_dirs("manual_infer_py");
+        let skill_name = "legacy_py_skill";
+        let skill_dir = skills_dir.join(skill_name);
+        std::fs::create_dir_all(skill_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Legacy skill\nUses scripts/search.py\n",
+        )
+        .expect("write SKILL.md");
+        std::fs::write(
+            skill_dir.join("scripts").join("search.py"),
+            "print('legacy openclaw python')\n",
+        )
+        .expect("write legacy search.py");
+
+        let service = EvolutionService::new(skills_dir, EvolutionServiceConfig::default());
+        let evolution_id = service
+            .trigger_manual_evolution(skill_name, "convert to blockcell python style")
+            .await
+            .expect("trigger manual evolution");
+
+        let record = service
+            .evolution
+            .load_record(&evolution_id)
+            .expect("load evolution record");
+        assert_eq!(record.context.skill_type, SkillType::Python);
+        let snippet = record.context.source_snippet.unwrap_or_default();
+        assert!(snippet.contains("scripts/search.py"));
+        assert!(snippet.contains("legacy openclaw python"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn test_report_error_infers_python_from_legacy_scripts() {
+        let (root, skills_dir) = setup_test_dirs("report_error_infer_py");
+        let skill_name = "legacy_py_error";
+        let skill_dir = skills_dir.join(skill_name);
+        std::fs::create_dir_all(skill_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(skill_dir.join("SKILL.md"), "# Legacy skill\n").expect("write SKILL.md");
+        std::fs::write(
+            skill_dir.join("scripts").join("search.py"),
+            "print('legacy python from error path')\n",
+        )
+        .expect("write search.py");
+
+        let service = EvolutionService::new(skills_dir, EvolutionServiceConfig::default());
+        let report = service
+            .report_error(skill_name, "boom", None, vec![])
+            .await
+            .expect("report error");
+        let evo_id = report
+            .evolution_triggered
+            .expect("should trigger evolution at default threshold=1");
+
+        let record = service
+            .evolution
+            .load_record(&evo_id)
+            .expect("load evolution record");
+        assert_eq!(record.context.skill_type, SkillType::Python);
 
         let _ = std::fs::remove_dir_all(root);
     }

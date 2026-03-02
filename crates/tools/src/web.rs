@@ -112,7 +112,26 @@ impl Tool for WebSearchTool {
             // 4. HTTP scrape fallback: Bing
             match bing_search(query, count, workspace).await {
                 Ok(results) => return Ok(json!({ "query": query, "results": results, "source": "bing" })),
-                Err(e) => return Err(Error::Tool(format!("All search methods failed for query '{}': {}", query, e))),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Bing HTTP scrape failed, trying DuckDuckGo");
+                    match duckduckgo_search(query, count).await {
+                        Ok(results) if !results.is_empty() => {
+                            return Ok(json!({ "query": query, "results": results, "source": "duckduckgo" }));
+                        }
+                        Ok(_) => {
+                            return Err(Error::Tool(format!(
+                                "All search methods failed for query '{}'. Bing error: {}. DuckDuckGo returned empty results.",
+                                query, e
+                            )));
+                        }
+                        Err(ddg_err) => {
+                            return Err(Error::Tool(format!(
+                                "All search methods failed for query '{}'. Bing error: {}. DuckDuckGo error: {}",
+                                query, e, ddg_err
+                            )));
+                        }
+                    }
+                }
             }
         }
 
@@ -125,11 +144,122 @@ impl Tool for WebSearchTool {
                     Ok(results) if !results.is_empty() => {
                         return Ok(json!({ "query": query, "results": results, "source": "bing_cdp" }));
                     }
-                    _ => return Err(e),
+                    _ => {
+                        tracing::warn!(error = %e, "Bing CDP failed, trying DuckDuckGo");
+                        match duckduckgo_search(query, count).await {
+                            Ok(results) if !results.is_empty() => {
+                                return Ok(json!({ "query": query, "results": results, "source": "duckduckgo" }));
+                            }
+                            Ok(_) => return Err(e),
+                            Err(_) => return Err(e),
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+fn first_available_cdp_engine() -> Option<crate::browser::session::BrowserEngine> {
+    use crate::browser::session::{find_browser_binary, BrowserEngine};
+
+    [
+        BrowserEngine::Chrome,
+        BrowserEngine::Edge,
+        BrowserEngine::Firefox,
+    ]
+    .into_iter()
+    .find(|engine| find_browser_binary(*engine).is_some())
+}
+
+async fn duckduckgo_search(query: &str, count: usize) -> Result<Vec<Value>> {
+    use scraper::{Html, Selector};
+
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| Error::Tool(format!("Failed to create DuckDuckGo HTTP client: {}", e)))?;
+
+    let response = client
+        .get("https://duckduckgo.com/html/")
+        .query(&[("q", query), ("kl", "cn-zh")])
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+        .map_err(|e| Error::Tool(format!("DuckDuckGo search failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(Error::Tool(format!(
+            "DuckDuckGo returned status {}",
+            response.status()
+        )));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|e| Error::Tool(format!("Failed to read DuckDuckGo response: {}", e)))?;
+
+    let document = Html::parse_document(&html);
+    let container_sel = Selector::parse(".result, .results_links, .web-result").unwrap();
+    let title_sel = Selector::parse("a.result__a, h2 a").unwrap();
+    let snippet_sel = Selector::parse(".result__snippet, .result__body").unwrap();
+
+    let mut results = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
+
+    for el in document.select(&container_sel) {
+        if results.len() >= count {
+            break;
+        }
+
+        let title_el = match el.select(&title_sel).next() {
+            Some(e) => e,
+            None => continue,
+        };
+
+        let title = title_el
+            .text()
+            .collect::<Vec<_>>()
+            .join("")
+            .trim()
+            .to_string();
+        let url = title_el
+            .value()
+            .attr("href")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if title.is_empty() || url.is_empty() || !url.starts_with("http") {
+            continue;
+        }
+
+        if !seen_urls.insert(url.clone()) {
+            continue;
+        }
+
+        let snippet = el
+            .select(&snippet_sel)
+            .next()
+            .map(|e| e.text().collect::<Vec<_>>().join("").trim().to_string())
+            .unwrap_or_default();
+
+        results.push(json!({
+            "title": title,
+            "url": url,
+            "snippet": snippet
+        }));
+    }
+
+    if results.is_empty() {
+        return Err(Error::Tool(
+            "DuckDuckGo returned no parseable results".to_string(),
+        ));
+    }
+
+    Ok(results)
 }
 
 async fn brave_search(api_key: &str, query: &str, count: usize, freshness: Option<&str>) -> Result<Vec<Value>> {
@@ -338,8 +468,6 @@ async fn ensure_bing_manager(
 }
 
 async fn bing_search_cdp(query: &str, count: usize, workspace: &std::path::Path) -> Result<Vec<Value>> {
-    use crate::browser::session::BrowserEngine;
-
     let encoded = urlencoding::encode(query);
     let url = format!(
         "https://www.bing.com/search?q={}&mkt=zh-CN&setlang=zh-Hans&cc=CN&FORM=HDRSC1",
@@ -352,8 +480,12 @@ async fn bing_search_cdp(query: &str, count: usize, workspace: &std::path::Path)
         .as_mut()
         .ok_or_else(|| Error::Tool("CDP session manager not initialized".to_string()))?;
 
+    let engine = first_available_cdp_engine()
+        .ok_or_else(|| Error::Tool("No CDP browser found (chrome/edge/firefox). Install one, or configure tools.web.search.api_key for Brave Search API.".to_string()))?;
+    let session_name = format!("web_search_bing_{}", engine.name());
+
     let session = mgr
-        .get_or_create_with_engine("web_search_bing", false, None, BrowserEngine::Chrome)
+        .get_or_create_with_engine(&session_name, false, None, engine)
         .await
         .map_err(|e| Error::Tool(format!("CDP launch failed: {}", e)))?;
 
@@ -452,8 +584,6 @@ async fn ensure_baidu_manager(
 }
 
 async fn baidu_search_cdp(query: &str, count: usize, workspace: &std::path::PathBuf) -> Result<Vec<Value>> {
-    use crate::browser::session::BrowserEngine;
-
     let encoded = urlencoding::encode(query);
     let url = format!("https://www.baidu.com/s?wd={}&rn={}", encoded, count.min(50));
 
@@ -463,8 +593,12 @@ async fn baidu_search_cdp(query: &str, count: usize, workspace: &std::path::Path
         .as_mut()
         .ok_or_else(|| Error::Tool("CDP session manager not initialized".to_string()))?;
 
+    let engine = first_available_cdp_engine()
+        .ok_or_else(|| Error::Tool("No CDP browser found (chrome/edge/firefox). Install one, or configure tools.web.search.api_key for Brave Search API.".to_string()))?;
+    let session_name = format!("web_search_baidu_{}", engine.name());
+
     let session = mgr
-        .get_or_create_with_engine("web_search_baidu", false, None, BrowserEngine::Chrome)
+        .get_or_create_with_engine(&session_name, false, None, engine)
         .await
         .map_err(|e| Error::Tool(format!("CDP launch failed: {}", e)))?;
 
@@ -784,16 +918,18 @@ async fn fetch_markdown(url: &str, max_chars: usize, workspace: Option<&std::pat
 
 /// Fetch a page via CDP (real browser) to bypass JS challenges.
 async fn fetch_via_cdp(url: &str, max_chars: usize, workspace: &std::path::Path) -> Result<Value> {
-    use crate::browser::session::BrowserEngine;
-
     let mgr_arc = ensure_bing_manager(workspace).await;
     let mut mgr_guard = mgr_arc.lock().await;
     let mgr = mgr_guard
         .as_mut()
         .ok_or_else(|| Error::Tool("CDP session manager not initialized".to_string()))?;
 
+    let engine = first_available_cdp_engine()
+        .ok_or_else(|| Error::Tool("No CDP browser found (chrome/edge/firefox). Install one, or configure tools.web.search.api_key for Brave Search API.".to_string()))?;
+    let session_name = format!("web_fetch_cdp_{}", engine.name());
+
     let session = mgr
-        .get_or_create_with_engine("web_fetch_cdp", false, None, BrowserEngine::Chrome)
+        .get_or_create_with_engine(&session_name, false, None, engine)
         .await
         .map_err(|e| Error::Tool(format!("CDP launch failed: {}", e)))?;
 

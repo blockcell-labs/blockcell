@@ -1,14 +1,17 @@
-use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
 use blockcell_core::types::{ChatMessage, ToolCallRequest};
-use blockcell_providers::{Provider, ProviderPool, CallResult};
-use blockcell_storage::{SessionStore, AuditLogger};
-use blockcell_tools::{ToolRegistry, TaskManagerHandle, MemoryStoreHandle, SpawnHandle, CapabilityRegistryHandle, CoreEvolutionHandle};
+use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
+use blockcell_providers::{CallResult, Provider, ProviderPool};
+use blockcell_storage::{AuditLogger, SessionStore};
+use blockcell_tools::{
+    CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, SpawnHandle,
+    TaskManagerHandle, ToolRegistry,
+};
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
-use regex::Regex;
 
 use crate::context::ContextBuilder;
 use crate::task_manager::TaskManager;
@@ -24,7 +27,9 @@ struct ProviderLLMAdapter {
 impl blockcell_skills::LLMProvider for ProviderLLMAdapter {
     async fn generate(&self, prompt: &str) -> blockcell_core::Result<String> {
         let messages = vec![
-            ChatMessage::system("You are a skill evolution assistant. Follow instructions precisely."),
+            ChatMessage::system(
+                "You are a skill evolution assistant. Follow instructions precisely.",
+            ),
             ChatMessage::user(prompt),
         ];
         let response = self.provider.chat(&messages, &[]).await?;
@@ -134,9 +139,25 @@ fn is_im_channel(channel: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillScriptKind {
+    Rhai,
+    Python,
+}
+
+impl SkillScriptKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SkillScriptKind::Rhai => "rhai",
+            SkillScriptKind::Python => "python",
+        }
+    }
+}
+
 fn user_wants_send_image(text: &str) -> bool {
     let t = text.to_lowercase();
-    let has_send = t.contains("发") || t.contains("发送") || t.contains("发给") || t.contains("send");
+    let has_send =
+        t.contains("发") || t.contains("发送") || t.contains("发给") || t.contains("send");
     let has_image = t.contains("图片")
         || t.contains("照片")
         || t.contains("相片")
@@ -197,8 +218,15 @@ async fn pick_image_path(paths: &Paths, history: &[ChatMessage]) -> Option<Strin
         if !p.is_file() {
             continue;
         }
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp") {
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if matches!(
+            ext.as_str(),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
+        ) {
             return Some(p.display().to_string());
         }
     }
@@ -268,16 +296,14 @@ fn condense_web_search_result(raw: &str) -> Option<String> {
             continue;
         }
 
-        out.push_str(&format!(
-            "{}. {}\n{}\n{}\n\n",
-            idx,
-            title,
-            url,
-            {
-                let s: String = snippet.chars().take(240).collect();
-                if snippet.chars().count() > 240 { format!("{}...", s) } else { s }
+        out.push_str(&format!("{}. {}\n{}\n{}\n\n", idx, title, url, {
+            let s: String = snippet.chars().take(240).collect();
+            if snippet.chars().count() > 240 {
+                format!("{}...", s)
+            } else {
+                s
             }
-        ));
+        }));
         idx += 1;
     }
 
@@ -304,12 +330,17 @@ fn is_thin_search_result(raw: &str) -> bool {
         return false;
     }
     // Count results that have meaningful snippet content (>30 chars)
-    let rich_count = results.iter().filter(|r| {
-        let snippet = r.get("snippet").and_then(|v| v.as_str())
-            .or_else(|| r.get("description").and_then(|v| v.as_str()))
-            .unwrap_or("");
-        snippet.chars().count() > 30
-    }).count();
+    let rich_count = results
+        .iter()
+        .filter(|r| {
+            let snippet = r
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .or_else(|| r.get("description").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            snippet.chars().count() > 30
+        })
+        .count();
     // Thin if fewer than half the results have meaningful snippets
     rich_count * 2 < results.len()
 }
@@ -324,7 +355,8 @@ fn extract_urls_from_search_result(raw: &str) -> Vec<String> {
         Some(r) => r,
         None => return vec![],
     };
-    results.iter()
+    results
+        .iter()
         .filter_map(|r| r.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .filter(|u| !u.is_empty())
         .take(3)
@@ -349,7 +381,14 @@ fn condense_web_fetch_result(raw: &str) -> Option<String> {
     }
 
     let head: String = content.chars().take(1100).collect();
-    let tail: String = content.chars().rev().take(400).collect::<String>().chars().rev().collect();
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(400)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     Some(format!(
         "{}\n...<trimmed {} chars>...\n{}",
         head.trim(),
@@ -385,7 +424,10 @@ fn is_dangerous_exec_command(command: &str) -> bool {
 fn is_sensitive_filename(path: &str) -> bool {
     let p = path.replace('\\', "/");
     let name = p.rsplit('/').next().unwrap_or("").to_lowercase();
-    matches!(name.as_str(), "config.json" | "config.toml" | "config.yaml" | "config.yml")
+    matches!(
+        name.as_str(),
+        "config.json" | "config.toml" | "config.yaml" | "config.yml"
+    )
 }
 
 fn user_explicitly_confirms_dangerous_op(user_text: &str) -> bool {
@@ -398,10 +440,7 @@ fn user_explicitly_confirms_dangerous_op(user_text: &str) -> bool {
     // require the user to explicitly confirm in text.
     // Keep this simple and language-friendly.
     t.contains("确认")
-        && (t.contains("执行")
-            || t.contains("重启")
-            || t.contains("继续")
-            || t.contains("允许"))
+        && (t.contains("执行") || t.contains("重启") || t.contains("继续") || t.contains("允许"))
 }
 
 fn overwrite_last_assistant_message(history: &mut [ChatMessage], new_text: &str) {
@@ -533,7 +572,9 @@ impl AgentRuntime {
     /// 设置独立的自进化 LLM provider（可选覆盖，不影响主 pool）
     pub fn set_evolution_provider(&mut self, provider: Box<dyn Provider>) {
         let provider_arc: Arc<dyn Provider> = Arc::from(provider);
-        let llm_adapter = Arc::new(ProviderLLMAdapter { provider: provider_arc });
+        let llm_adapter = Arc::new(ProviderLLMAdapter {
+            provider: provider_arc,
+        });
         self.context_builder.set_evolution_llm_provider(llm_adapter);
     }
 
@@ -564,13 +605,9 @@ impl AgentRuntime {
                 continue;
             }
             info!(server = %name, command = %cfg.command, "Starting MCP server");
-            match McpClient::start(
-                name,
-                &cfg.command,
-                &cfg.args,
-                &cfg.env,
-                cfg.cwd.as_deref(),
-            ).await {
+            match McpClient::start(name, &cfg.command, &cfg.args, &cfg.env, cfg.cwd.as_deref())
+                .await
+            {
                 Ok(client) => {
                     let provider = McpToolProvider::new(name.clone(), client);
                     self.tool_registry.register_mcp_provider(&provider).await;
@@ -585,53 +622,53 @@ impl AgentRuntime {
 
     /// Create a restricted tool registry for subagents (no spawn, no message, no cron).
     pub(crate) fn subagent_tool_registry() -> ToolRegistry {
-        use blockcell_tools::fs::*;
-        use blockcell_tools::exec::ExecTool;
-        use blockcell_tools::web::*;
-        use blockcell_tools::tasks::ListTasksTool;
-        use blockcell_tools::browser::BrowseTool;
-        use blockcell_tools::memory::{MemoryQueryTool, MemoryUpsertTool, MemoryForgetTool};
-        use blockcell_tools::skills::ListSkillsTool;
-        use blockcell_tools::system_info::{SystemInfoTool, CapabilityEvolveTool};
-        use blockcell_tools::camera::CameraCaptureTool;
-        use blockcell_tools::app_control::AppControlTool;
-        use blockcell_tools::file_ops::FileOpsTool;
-        use blockcell_tools::data_process::DataProcessTool;
-        use blockcell_tools::http_request::HttpRequestTool;
-        use blockcell_tools::email::EmailTool;
-        use blockcell_tools::audio_transcribe::AudioTranscribeTool;
-        use blockcell_tools::chart_generate::ChartGenerateTool;
-        use blockcell_tools::office_write::OfficeWriteTool;
-        use blockcell_tools::calendar_api::CalendarApiTool;
-        use blockcell_tools::iot_control::IotControlTool;
-        use blockcell_tools::tts::TtsTool;
-        use blockcell_tools::ocr::OcrTool;
-        use blockcell_tools::image_understand::ImageUnderstandTool;
-        use blockcell_tools::social_media::SocialMediaTool;
-        use blockcell_tools::notification::NotificationTool;
-        use blockcell_tools::cloud_api::CloudApiTool;
-        use blockcell_tools::git_api::GitApiTool;
-        use blockcell_tools::finance_api::FinanceApiTool;
-        use blockcell_tools::video_process::VideoProcessTool;
-        use blockcell_tools::health_api::HealthApiTool;
-        use blockcell_tools::map_api::MapApiTool;
-        use blockcell_tools::contacts::ContactsTool;
-        use blockcell_tools::encrypt::EncryptTool;
-        use blockcell_tools::network_monitor::NetworkMonitorTool;
-        use blockcell_tools::knowledge_graph::KnowledgeGraphTool;
-        use blockcell_tools::stream_subscribe::StreamSubscribeTool;
         use blockcell_tools::alert_rule::AlertRuleTool;
+        use blockcell_tools::app_control::AppControlTool;
+        use blockcell_tools::audio_transcribe::AudioTranscribeTool;
         use blockcell_tools::blockchain_rpc::BlockchainRpcTool;
-        use blockcell_tools::exchange_api::ExchangeApiTool;
         use blockcell_tools::blockchain_tx::BlockchainTxTool;
-        use blockcell_tools::contract_security::ContractSecurityTool;
         use blockcell_tools::bridge_api::BridgeApiTool;
-        use blockcell_tools::nft_market::NftMarketTool;
-        use blockcell_tools::multisig::MultisigTool;
+        use blockcell_tools::browser::BrowseTool;
+        use blockcell_tools::calendar_api::CalendarApiTool;
+        use blockcell_tools::camera::CameraCaptureTool;
+        use blockcell_tools::chart_generate::ChartGenerateTool;
+        use blockcell_tools::cloud_api::CloudApiTool;
         use blockcell_tools::community_hub::CommunityHubTool;
+        use blockcell_tools::contacts::ContactsTool;
+        use blockcell_tools::contract_security::ContractSecurityTool;
+        use blockcell_tools::data_process::DataProcessTool;
+        use blockcell_tools::email::EmailTool;
+        use blockcell_tools::encrypt::EncryptTool;
+        use blockcell_tools::exchange_api::ExchangeApiTool;
+        use blockcell_tools::exec::ExecTool;
+        use blockcell_tools::file_ops::FileOpsTool;
+        use blockcell_tools::finance_api::FinanceApiTool;
+        use blockcell_tools::fs::*;
+        use blockcell_tools::git_api::GitApiTool;
+        use blockcell_tools::health_api::HealthApiTool;
+        use blockcell_tools::http_request::HttpRequestTool;
+        use blockcell_tools::image_understand::ImageUnderstandTool;
+        use blockcell_tools::iot_control::IotControlTool;
+        use blockcell_tools::knowledge_graph::KnowledgeGraphTool;
+        use blockcell_tools::map_api::MapApiTool;
+        use blockcell_tools::memory::{MemoryForgetTool, MemoryQueryTool, MemoryUpsertTool};
         use blockcell_tools::memory_maintenance::MemoryMaintenanceTool;
-        use blockcell_tools::toggle_manage::ToggleManageTool;
+        use blockcell_tools::multisig::MultisigTool;
+        use blockcell_tools::network_monitor::NetworkMonitorTool;
+        use blockcell_tools::nft_market::NftMarketTool;
+        use blockcell_tools::notification::NotificationTool;
+        use blockcell_tools::ocr::OcrTool;
+        use blockcell_tools::office_write::OfficeWriteTool;
+        use blockcell_tools::skills::ListSkillsTool;
+        use blockcell_tools::social_media::SocialMediaTool;
+        use blockcell_tools::stream_subscribe::StreamSubscribeTool;
+        use blockcell_tools::system_info::{CapabilityEvolveTool, SystemInfoTool};
+        use blockcell_tools::tasks::ListTasksTool;
         use blockcell_tools::termux_api::TermuxApiTool;
+        use blockcell_tools::toggle_manage::ToggleManageTool;
+        use blockcell_tools::tts::TtsTool;
+        use blockcell_tools::video_process::VideoProcessTool;
+        use blockcell_tools::web::*;
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(ReadFileTool));
@@ -708,7 +745,11 @@ impl AgentRuntime {
                 let user_text = match &msg.content {
                     serde_json::Value::String(s) => {
                         let chars: String = s.chars().take(100).collect();
-                        if s.chars().count() > 100 { format!("{}...", chars) } else { chars }
+                        if s.chars().count() > 100 {
+                            format!("{}...", chars)
+                        } else {
+                            chars
+                        }
                     }
                     _ => "(media)".to_string(),
                 };
@@ -720,7 +761,11 @@ impl AgentRuntime {
                         assistant_text = match &history[j].content {
                             serde_json::Value::String(s) => {
                                 let chars: String = s.chars().take(150).collect();
-                                if s.chars().count() > 150 { format!("{}...", chars) } else { chars }
+                                if s.chars().count() > 150 {
+                                    format!("{}...", chars)
+                                } else {
+                                    chars
+                                }
                             }
                             _ => String::new(),
                         };
@@ -800,7 +845,11 @@ impl AgentRuntime {
                 let text = match &msg.content {
                     serde_json::Value::String(s) => {
                         let chars: String = s.chars().take(150).collect();
-                        if s.chars().count() > 150 { format!("{}...", chars) } else { chars }
+                        if s.chars().count() > 150 {
+                            format!("{}...", chars)
+                        } else {
+                            chars
+                        }
                     }
                     _ => "(media)".to_string(),
                 };
@@ -808,15 +857,15 @@ impl AgentRuntime {
             } else if msg.role == "assistant" {
                 // For assistant messages with tool_calls, summarize to just the tool names
                 if let Some(ref tool_calls) = msg.tool_calls {
-                    let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                    let tool_names: Vec<&str> =
+                        tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                     let summary = format!("[Called: {}]", tool_names.join(", "));
                     let mut compressed_assistant = ChatMessage::assistant(&summary);
                     compressed_assistant.tool_calls = Some(tool_calls.clone());
                     compressed_middle.push(compressed_assistant);
                     // Skip subsequent tool result messages for these calls
-                    let expected_ids: std::collections::HashSet<&str> = tool_calls.iter()
-                        .map(|tc| tc.id.as_str())
-                        .collect();
+                    let expected_ids: std::collections::HashSet<&str> =
+                        tool_calls.iter().map(|tc| tc.id.as_str()).collect();
                     let mut j = i + 1;
                     while j < split_point {
                         if messages[j].role == "tool" {
@@ -827,11 +876,18 @@ impl AgentRuntime {
                                     let result_text = match &messages[j].content {
                                         serde_json::Value::String(s) => {
                                             let chars: String = s.chars().take(80).collect();
-                                            if s.chars().count() > 80 { format!("{}...", chars) } else { chars }
+                                            if s.chars().count() > 80 {
+                                                format!("{}...", chars)
+                                            } else {
+                                                chars
+                                            }
                                         }
                                         _ => "ok".to_string(),
                                     };
-                                    let mut tool_msg = ChatMessage::tool_result(id, &format!("[{}: {}]", tool_name, result_text));
+                                    let mut tool_msg = ChatMessage::tool_result(
+                                        id,
+                                        &format!("[{}: {}]", tool_name, result_text),
+                                    );
                                     tool_msg.name = Some(tool_name.to_string());
                                     compressed_middle.push(tool_msg);
                                     j += 1;
@@ -848,7 +904,11 @@ impl AgentRuntime {
                     let text = match &msg.content {
                         serde_json::Value::String(s) => {
                             let chars: String = s.chars().take(200).collect();
-                            if s.chars().count() > 200 { format!("{}...", chars) } else { chars }
+                            if s.chars().count() > 200 {
+                                format!("{}...", chars)
+                            } else {
+                                chars
+                            }
                         }
                         _ => String::new(),
                     };
@@ -863,21 +923,34 @@ impl AgentRuntime {
                         if tool_name == "web_search" {
                             condense_web_search_result(s).unwrap_or_else(|| {
                                 let chars: String = s.chars().take(800).collect();
-                                if s.chars().count() > 800 { format!("{}...", chars) } else { chars }
+                                if s.chars().count() > 800 {
+                                    format!("{}...", chars)
+                                } else {
+                                    chars
+                                }
                             })
                         } else if tool_name == "web_fetch" {
                             condense_web_fetch_result(s).unwrap_or_else(|| {
                                 let chars: String = s.chars().take(1000).collect();
-                                if s.chars().count() > 1000 { format!("{}...", chars) } else { chars }
+                                if s.chars().count() > 1000 {
+                                    format!("{}...", chars)
+                                } else {
+                                    chars
+                                }
                             })
                         } else {
                             let chars: String = s.chars().take(160).collect();
-                            if s.chars().count() > 160 { format!("{}...", chars) } else { chars }
+                            if s.chars().count() > 160 {
+                                format!("{}...", chars)
+                            } else {
+                                chars
+                            }
                         }
                     }
                     _ => "ok".to_string(),
                 };
-                let mut tool_msg = ChatMessage::tool_result(id, &format!("[{}: {}]", tool_name, result_text));
+                let mut tool_msg =
+                    ChatMessage::tool_result(id, &format!("[{}: {}]", tool_name, result_text));
                 tool_msg.name = Some(tool_name.to_string());
                 compressed_middle.push(tool_msg);
             }
@@ -896,15 +969,55 @@ impl AgentRuntime {
         let session_key = msg.session_key();
         info!(session_key = %session_key, "Processing message");
 
-        // ── skill_rhai fast path: execute SKILL.rhai directly without LLM ──
-        if msg.metadata.get("skill_rhai").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let skill_name = msg.metadata.get("skill_name")
+        // ── skill script fast path: execute SKILL.rhai / SKILL.py directly without LLM ──
+        let scripted_kind = if msg
+            .metadata
+            .get("skill_rhai")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Some(SkillScriptKind::Rhai)
+        } else if msg
+            .metadata
+            .get("skill_python")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Some(SkillScriptKind::Python)
+        } else if msg
+            .metadata
+            .get("skill_script")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            match msg
+                .metadata
+                .get("skill_script_kind")
+                .and_then(|v| v.as_str())
+            {
+                Some("python") => Some(SkillScriptKind::Python),
+                _ => Some(SkillScriptKind::Rhai),
+            }
+        } else {
+            None
+        };
+
+        if let Some(script_kind) = scripted_kind {
+            let skill_name = msg
+                .metadata
+                .get("skill_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            info!(skill = %skill_name, "Cron skill_rhai dispatch");
+            info!(
+                skill = %skill_name,
+                script_kind = %script_kind.as_str(),
+                "Cron skill script dispatch"
+            );
 
-            let result = self.execute_skill_rhai(&skill_name, &msg).await;
+            let result = self
+                .execute_skill_script(&skill_name, &msg, script_kind)
+                .await;
             let final_response = match &result {
                 Ok(output) => format!("[{}] 定时任务执行完成:\n\n{}", skill_name, output),
                 Err(e) => format!("[{}] 定时任务执行失败: {}", skill_name, e),
@@ -933,11 +1046,20 @@ impl AgentRuntime {
         }
 
         // ── Cron reminder fast path: deliver directly without LLM ──
-        if msg.metadata.get("reminder").and_then(|v| v.as_bool()).unwrap_or(false) {
-            let reminder_msg = msg.metadata.get("reminder_message")
+        if msg
+            .metadata
+            .get("reminder")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let reminder_msg = msg
+                .metadata
+                .get("reminder_message")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&msg.content);
-            let job_name = msg.metadata.get("job_name")
+            let job_name = msg
+                .metadata
+                .get("job_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("提醒");
             let final_response = format!("⏰ [{}] {}", job_name, reminder_msg);
@@ -981,12 +1103,23 @@ impl AgentRuntime {
         // Build messages for LLM with intent-filtered system prompt (Methods A+B+C+D+E+F)
         // Note: build_messages_for_intents appends the current user message from user_content,
         // so we pass history WITHOUT the current user message to avoid duplication.
-        let pending_intent = msg.metadata.get("media_pending_intent")
+        let pending_intent = msg
+            .metadata
+            .get("media_pending_intent")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let messages = self.context_builder.build_messages_for_intents_with_channel(
-            &history, &msg.content, &msg.media, &intents, &disabled_skills, &disabled_tools, &msg.channel, pending_intent,
-        );
+        let messages = self
+            .context_builder
+            .build_messages_for_intents_with_channel(
+                &history,
+                &msg.content,
+                &msg.media,
+                &intents,
+                &disabled_skills,
+                &disabled_tools,
+                &msg.channel,
+                pending_intent,
+            );
 
         // Now add user message to history for session persistence
         history.push(ChatMessage::user(&msg.content));
@@ -1023,19 +1156,32 @@ impl AgentRuntime {
         // When the LLM tries to call a lightweight tool, the dynamic supplement mechanism
         // (below in the tool call loop) will inject the full schema and retry.
         const CORE_TOOLS: &[&str] = &[
-            "read_file", "write_file", "edit_file", "list_dir", "exec",
-            "web_search", "web_fetch", "message", "memory_query", "memory_upsert",
-            "spawn", "list_tasks", "cron",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "exec",
+            "web_search",
+            "web_fetch",
+            "message",
+            "memory_query",
+            "memory_upsert",
+            "spawn",
+            "list_tasks",
+            "cron",
         ];
 
         let mut tools = if tool_names.is_empty() {
             // Chat intent: no tools
             vec![]
         } else {
-            let mut schemas = self.tool_registry.get_tiered_schemas(&tool_names, CORE_TOOLS);
+            let mut schemas = self
+                .tool_registry
+                .get_tiered_schemas(&tool_names, CORE_TOOLS);
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
-                    let name = schema.get("function")
+                    let name = schema
+                        .get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
@@ -1044,7 +1190,12 @@ impl AgentRuntime {
             }
             schemas
         };
-        info!(tool_count = tools.len(), disabled_tools = disabled_tools.len(), disabled_skills = disabled_skills.len(), "Tools loaded for intent");
+        info!(
+            tool_count = tools.len(),
+            disabled_tools = disabled_tools.len(),
+            disabled_skills = disabled_skills.len(),
+            "Tools loaded for intent"
+        );
 
         // Main loop with max iterations
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
@@ -1057,7 +1208,12 @@ impl AgentRuntime {
 
         for iteration in 0..max_iterations {
             debug!(iteration, "LLM call iteration");
-            debug!(iteration, current_messages_len = current_messages.len(), tool_schema_count = tools.len(), "LLM loop state");
+            debug!(
+                iteration,
+                current_messages_len = current_messages.len(),
+                tool_schema_count = tools.len(),
+                "LLM loop state"
+            );
 
             // Call LLM with retry on transient errors
             let max_retries = self.config.agents.defaults.llm_max_retries;
@@ -1068,7 +1224,10 @@ impl AgentRuntime {
             for attempt in 0..=max_retries {
                 if attempt > 0 {
                     let delay_ms = base_delay_ms * (1u64 << (attempt - 1).min(4));
-                    warn!(attempt, max_retries, delay_ms, iteration, "Retrying LLM call after transient error");
+                    warn!(
+                        attempt,
+                        max_retries, delay_ms, iteration, "Retrying LLM call after transient error"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 // 从 pool 中选取一个可用 provider（每次可能不同）
@@ -1076,7 +1235,7 @@ impl AgentRuntime {
                     Some(p) => p,
                     None => {
                         last_error = Some(blockcell_core::Error::Config(
-                            "ProviderPool: no healthy providers available".to_string()
+                            "ProviderPool: no healthy providers available".to_string(),
                         ));
                         break;
                     }
@@ -1084,7 +1243,10 @@ impl AgentRuntime {
                 match provider.chat(&current_messages, &tools).await {
                     Ok(r) => {
                         if attempt > 0 {
-                            info!(attempt, iteration, pool_idx, "LLM call succeeded after retry");
+                            info!(
+                                attempt,
+                                iteration, pool_idx, "LLM call succeeded after retry"
+                            );
                         }
                         self.provider_pool.report(pool_idx, CallResult::Success);
                         response_opt = Some(r);
@@ -1093,7 +1255,8 @@ impl AgentRuntime {
                     Err(e) => {
                         let err_str = format!("{}", e);
                         warn!(error = %err_str, attempt, max_retries, iteration, pool_idx, "LLM call failed");
-                        self.provider_pool.report(pool_idx, ProviderPool::classify_error(&err_str));
+                        self.provider_pool
+                            .report(pool_idx, ProviderPool::classify_error(&err_str));
                         last_error = Some(e);
                     }
                 }
@@ -1112,12 +1275,9 @@ impl AgentRuntime {
                     );
                     // 报告错误给进化服务
                     if let Some(evo_service) = self.context_builder.evolution_service() {
-                        let _ = evo_service.report_error(
-                            "__llm_provider__",
-                            &format!("{}", e),
-                            None,
-                            vec![],
-                        ).await;
+                        let _ = evo_service
+                            .report_error("__llm_provider__", &format!("{}", e), None, vec![])
+                            .await;
                     }
                     history.push(ChatMessage::assistant(&final_response));
                     break;
@@ -1143,10 +1303,7 @@ impl AgentRuntime {
                     });
 
                 // Add assistant message with tool calls
-                let assistant_content = response
-                    .content
-                    .as_deref()
-                    .unwrap_or("");
+                let assistant_content = response.content.as_deref().unwrap_or("");
                 let assistant_content = if is_tool_trace_content(assistant_content) {
                     ""
                 } else {
@@ -1183,8 +1340,17 @@ impl AgentRuntime {
                     // Collect media paths from tool results for WebUI display
                     if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
                         // Look for output_path / path / file_path fields that are image/audio/video
-                        let media_exts = ["png","jpg","jpeg","gif","webp","bmp","svg","mp3","wav","m4a","mp4","webm","mov"];
-                        for key in &["output_path","path","file_path","screenshot_path","image_path"] {
+                        let media_exts = [
+                            "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav", "m4a",
+                            "mp4", "webm", "mov",
+                        ];
+                        for key in &[
+                            "output_path",
+                            "path",
+                            "file_path",
+                            "screenshot_path",
+                            "image_path",
+                        ] {
                             if let Some(p) = rv.get(key).and_then(|v| v.as_str()) {
                                 let ext = p.rsplit('.').next().unwrap_or("").to_lowercase();
                                 if media_exts.contains(&ext.as_str()) {
@@ -1228,11 +1394,14 @@ impl AgentRuntime {
                             let already_full = tools.iter().any(|t| {
                                 t.get("function")
                                     .and_then(|f| f.get("name"))
-                                    .and_then(|n| n.as_str()) == Some(&tool_call.name)
+                                    .and_then(|n| n.as_str())
+                                    == Some(&tool_call.name)
                                     && t.get("function")
                                         .and_then(|f| f.get("parameters"))
                                         .and_then(|p| p.get("properties"))
-                                        .map(|props| props.as_object().map_or(false, |o| !o.is_empty()))
+                                        .map(|props| {
+                                            props.as_object().map_or(false, |o| !o.is_empty())
+                                        })
                                         .unwrap_or(false)
                             });
                             if !already_full {
@@ -1248,7 +1417,8 @@ impl AgentRuntime {
                                 tools.retain(|t| {
                                     t.get("function")
                                         .and_then(|f| f.get("name"))
-                                        .and_then(|n| n.as_str()) != Some(&tool_call.name)
+                                        .and_then(|n| n.as_str())
+                                        != Some(&tool_call.name)
                                 });
                                 tools.push(schema_val);
                                 supplemented_tools = true;
@@ -1281,10 +1451,20 @@ impl AgentRuntime {
                         let char_count = s.chars().count();
                         if char_count > 2400 {
                             let head: String = s.chars().take(1600).collect();
-                            let tail: String = s.chars().rev().take(800).collect::<String>().chars().rev().collect();
-                            tool_msg.content = serde_json::Value::String(
-                                format!("{}\n...<trimmed {} chars>...\n{}", head, char_count - 2400, tail)
-                            );
+                            let tail: String = s
+                                .chars()
+                                .rev()
+                                .take(800)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect();
+                            tool_msg.content = serde_json::Value::String(format!(
+                                "{}\n...<trimmed {} chars>...\n{}",
+                                head,
+                                char_count - 2400,
+                                tail
+                            ));
                         }
                     }
                     current_messages.push(tool_msg.clone());
@@ -1294,8 +1474,12 @@ impl AgentRuntime {
                 if wants_forced_answer && iteration + 1 < max_iterations {
                     if !web_search_thin_results.is_empty() {
                         // Thin results: guide LLM to fetch actual page content instead of giving up
-                        let urls_hint = web_search_thin_results.iter().take(3)
-                            .cloned().collect::<Vec<_>>().join("\n- ");
+                        let urls_hint = web_search_thin_results
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n- ");
                         let hint = format!(
                             "搜索结果只包含链接标题，没有具体内容。**不要直接返回\"未找到\"，请立即改用 `web_fetch` 直接抓取以下页面获取真实数据**：\n- {}\n\n抓取后给出最终答案。",
                             urls_hint
@@ -1310,7 +1494,8 @@ impl AgentRuntime {
 
                 // Fallback hint: when a tool has failed 2+ times, tell the LLM to switch
                 // to alternative tools. This prevents infinite retry loops (e.g. qveris without API key).
-                let repeated_failures: Vec<String> = tool_fail_counts.iter()
+                let repeated_failures: Vec<String> = tool_fail_counts
+                    .iter()
                     .filter(|(_, count)| **count >= 2)
                     .map(|(name, count)| format!("{} ({}x)", name, count))
                     .collect();
@@ -1336,7 +1521,10 @@ impl AgentRuntime {
                 }
 
                 if iteration == max_iterations - 1 {
-                    warn!(iteration, max_iterations, "Reached max iterations; forcing a final no-tools answer");
+                    warn!(
+                        iteration,
+                        max_iterations, "Reached max iterations; forcing a final no-tools answer"
+                    );
                     let mut final_messages = current_messages.clone();
                     final_messages.push(ChatMessage::user(
                         "请基于以上工具调用的结果，直接给出最终答案。不要再调用任何工具，也不要输出类似[Called: ...]的过程信息。",
@@ -1346,11 +1534,15 @@ impl AgentRuntime {
                         let r = p.chat(&final_messages, &[]).await;
                         match &r {
                             Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
-                            Err(e) => self.provider_pool.report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+                            Err(e) => self
+                                .provider_pool
+                                .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
                         }
                         r
                     } else {
-                        Err(blockcell_core::Error::Config("ProviderPool: no healthy providers".to_string()))
+                        Err(blockcell_core::Error::Config(
+                            "ProviderPool: no healthy providers".to_string(),
+                        ))
                     };
                     match chat_result {
                         Ok(r) => {
@@ -1359,7 +1551,8 @@ impl AgentRuntime {
                         }
                         Err(e) => {
                             warn!(error = %e, "Final no-tools LLM call failed");
-                            final_response = "I've reached the maximum number of tool iterations.".to_string();
+                            final_response =
+                                "I've reached the maximum number of tool iterations.".to_string();
                             history.push(ChatMessage::assistant(&final_response));
                         }
                     }
@@ -1368,14 +1561,17 @@ impl AgentRuntime {
             } else {
                 // No tool calls, we have the final response
                 final_response = response.content.unwrap_or_default();
-                
+
                 // Add to history
                 history.push(ChatMessage::assistant(&final_response));
                 break;
             }
         }
 
-        if is_im_channel(&msg.channel) && user_wants_send_image(&msg.content) && !message_tool_sent_media {
+        if is_im_channel(&msg.channel)
+            && user_wants_send_image(&msg.content)
+            && !message_tool_sent_media
+        {
             if let Some(image_path) = pick_image_path(&self.paths, &history).await {
                 info!(
                     image_path = %image_path,
@@ -1473,7 +1669,8 @@ impl AgentRuntime {
                     paths.push(p.to_string());
                 }
             }
-            "file_ops" | "data_process" | "audio_transcribe" | "chart_generate" | "office_write" | "video_process" | "health_api" | "encrypt" => {
+            "file_ops" | "data_process" | "audio_transcribe" | "chart_generate"
+            | "office_write" | "video_process" | "health_api" | "encrypt" => {
                 if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                     paths.push(p.to_string());
                 }
@@ -1533,13 +1730,17 @@ impl AgentRuntime {
         let workspace = self.paths.workspace();
         // Canonicalize both if possible, otherwise use starts_with on the raw paths
         let ws = workspace.canonicalize().unwrap_or(workspace);
-        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf());
+        let rp = resolved
+            .canonicalize()
+            .unwrap_or_else(|_| resolved.to_path_buf());
         rp.starts_with(&ws)
     }
 
     /// Check whether a resolved path falls within an already-authorized directory.
     fn is_path_authorized(&self, resolved: &std::path::Path) -> bool {
-        let rp = resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf());
+        let rp = resolved
+            .canonicalize()
+            .unwrap_or_else(|_| resolved.to_path_buf());
         self.authorized_dirs.iter().any(|dir| rp.starts_with(dir))
     }
 
@@ -1548,7 +1749,9 @@ impl AgentRuntime {
         // If the path is a directory, authorize it directly.
         // If it's a file, authorize its parent directory.
         let dir = if resolved.is_dir() {
-            resolved.canonicalize().unwrap_or_else(|_| resolved.to_path_buf())
+            resolved
+                .canonicalize()
+                .unwrap_or_else(|_| resolved.to_path_buf())
         } else {
             resolved
                 .parent()
@@ -1615,7 +1818,10 @@ impl AgentRuntime {
             }
         } else {
             // No confirmation channel available (e.g. single message mode), deny
-            warn!(tool = tool_name, "No confirmation channel, denying access to paths outside workspace");
+            warn!(
+                tool = tool_name,
+                "No confirmation channel, denying access to paths outside workspace"
+            );
             false
         }
     }
@@ -1632,23 +1838,36 @@ impl AgentRuntime {
                 response_tx,
             };
             if confirm_tx.send(request).await.is_err() {
-                warn!(tool = tool_name, "Failed to send dangerous-operation confirmation request, denying");
+                warn!(
+                    tool = tool_name,
+                    "Failed to send dangerous-operation confirmation request, denying"
+                );
                 return false;
             }
             match response_rx.await {
                 Ok(allowed) => allowed,
                 Err(_) => {
-                    warn!(tool = tool_name, "Dangerous-operation confirmation channel closed, denying");
+                    warn!(
+                        tool = tool_name,
+                        "Dangerous-operation confirmation channel closed, denying"
+                    );
                     false
                 }
             }
         } else {
-            warn!(tool = tool_name, "No confirmation channel, denying dangerous operation");
+            warn!(
+                tool = tool_name,
+                "No confirmation channel, denying dangerous operation"
+            );
             false
         }
     }
 
-    async fn execute_tool_call(&mut self, tool_call: &ToolCallRequest, msg: &InboundMessage) -> String {
+    async fn execute_tool_call(
+        &mut self,
+        tool_call: &ToolCallRequest,
+        msg: &InboundMessage,
+    ) -> String {
         // Dangerous-operation gate: require explicit user confirmation before executing
         // self-destructive commands or destructive file operations.
         if tool_call.name == "exec" {
@@ -1675,10 +1894,26 @@ impl AgentRuntime {
         }
 
         if tool_call.name == "file_ops" {
-            let action = tool_call.arguments.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            let path = tool_call.arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let destination = tool_call.arguments.get("destination").and_then(|v| v.as_str()).unwrap_or("");
-            let recursive = tool_call.arguments.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let action = tool_call
+                .arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path = tool_call
+                .arguments
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let destination = tool_call
+                .arguments
+                .get("destination")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let recursive = tool_call
+                .arguments
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             let mut items = Vec::new();
             if action == "delete" && recursive {
@@ -1687,7 +1922,10 @@ impl AgentRuntime {
             if (action == "delete" || action == "rename" || action == "move")
                 && (is_sensitive_filename(path) || is_sensitive_filename(destination))
             {
-                items.push(format!("file_ops {} sensitive file (config*) path={} destination={}", action, path, destination));
+                items.push(format!(
+                    "file_ops {} sensitive file (config*) path={} destination={}",
+                    action, path, destination
+                ));
             }
 
             if !items.is_empty() {
@@ -1710,7 +1948,10 @@ impl AgentRuntime {
         }
 
         // Check path safety before executing filesystem/exec tools
-        if !self.check_path_permission(&tool_call.name, &tool_call.arguments).await {
+        if !self
+            .check_path_permission(&tool_call.name, &tool_call.arguments)
+            .await
+        {
             return serde_json::json!({
                 "error": "Permission denied: user rejected access to paths outside the safe workspace directory.",
                 "tool": tool_call.name,
@@ -1760,7 +2001,10 @@ impl AgentRuntime {
         }
 
         let start = std::time::Instant::now();
-        let result = self.tool_registry.execute(&tool_call.name, ctx, tool_call.arguments.clone()).await;
+        let result = self
+            .tool_registry
+            .execute(&tool_call.name, ctx, tool_call.arguments.clone())
+            .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let is_error = result.is_err();
@@ -1779,7 +2023,10 @@ impl AgentRuntime {
                 let skills_dir = self.paths.skills_dir();
                 let in_skills = resolved.starts_with(&skills_dir)
                     || resolved.canonicalize().ok().is_some_and(|c| {
-                        skills_dir.canonicalize().ok().is_some_and(|sd| c.starts_with(&sd))
+                        skills_dir
+                            .canonicalize()
+                            .ok()
+                            .is_some_and(|sd| c.starts_with(&sd))
                     });
                 if in_skills {
                     info!(path = %path_str, "🔄 Detected write to skills directory, reloading...");
@@ -1811,7 +2058,9 @@ impl AgentRuntime {
                 ));
             } else if let Some(evo_service) = self.context_builder.evolution_service() {
                 // Try to load the current SKILL.rhai source for context
-                let source_snippet = self.context_builder.skill_manager()
+                let source_snippet = self
+                    .context_builder
+                    .skill_manager()
                     .and_then(|sm| sm.get(&tool_call.name))
                     .and_then(|skill| skill.load_rhai());
                 match evo_service
@@ -1848,7 +2097,9 @@ impl AgentRuntime {
                     reported_name = skill.name.clone();
                 }
             }
-            evo_service.report_skill_call(&reported_name, is_error).await;
+            evo_service
+                .report_skill_call(&reported_name, is_error)
+                .await;
         }
 
         // Emit tool_call_result event to WebSocket clients
@@ -1882,30 +2133,65 @@ impl AgentRuntime {
         }
     }
 
-    /// Execute a SKILL.rhai script directly (for cron skill_rhai jobs).
-    /// Loads the script from skills/{skill_name}/SKILL.rhai, executes it via
-    /// SkillDispatcher with a synchronous tool executor, and returns the output.
-    async fn execute_skill_rhai(&mut self, skill_name: &str, msg: &InboundMessage) -> Result<String> {
-        // Locate SKILL.rhai file
-        let skill_dir = self.paths.skills_dir().join(skill_name);
-        let rhai_path = skill_dir.join("SKILL.rhai");
+    /// Execute a skill script directly (for cron skill jobs).
+    async fn execute_skill_script(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+        kind: SkillScriptKind,
+    ) -> Result<String> {
+        match kind {
+            SkillScriptKind::Rhai => self.execute_skill_rhai(skill_name, msg).await,
+            SkillScriptKind::Python => self.execute_skill_python(skill_name, msg).await,
+        }
+    }
 
-        if !rhai_path.exists() {
-            // Try builtin skills dir
-            let builtin_path = self.paths.builtin_skills_dir().join(skill_name).join("SKILL.rhai");
-            if !builtin_path.exists() {
-                return Err(blockcell_core::Error::Skill(format!(
-                    "SKILL.rhai not found for skill '{}' (checked {} and {})",
-                    skill_name,
-                    rhai_path.display(),
-                    builtin_path.display()
-                )));
-            }
-            // Use builtin path
-            return self.run_rhai_script(&builtin_path, skill_name, msg).await;
+    fn resolve_skill_script_path(
+        &self,
+        skill_name: &str,
+        file_name: &str,
+    ) -> Result<std::path::PathBuf> {
+        let user_path = self.paths.skills_dir().join(skill_name).join(file_name);
+        if user_path.exists() {
+            return Ok(user_path);
         }
 
+        let builtin_path = self
+            .paths
+            .builtin_skills_dir()
+            .join(skill_name)
+            .join(file_name);
+        if builtin_path.exists() {
+            return Ok(builtin_path);
+        }
+
+        Err(blockcell_core::Error::Skill(format!(
+            "{} not found for skill '{}' (checked {} and {})",
+            file_name,
+            skill_name,
+            user_path.display(),
+            builtin_path.display()
+        )))
+    }
+
+    /// Execute a SKILL.rhai script directly.
+    async fn execute_skill_rhai(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+    ) -> Result<String> {
+        let rhai_path = self.resolve_skill_script_path(skill_name, "SKILL.rhai")?;
         self.run_rhai_script(&rhai_path, skill_name, msg).await
+    }
+
+    /// Execute a SKILL.py script directly.
+    async fn execute_skill_python(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+    ) -> Result<String> {
+        let py_path = self.resolve_skill_script_path(skill_name, "SKILL.py")?;
+        self.run_python_script(&py_path, skill_name, msg).await
     }
 
     /// Helper: run a single .rhai script file with tool execution support.
@@ -1935,34 +2221,39 @@ impl AgentRuntime {
         let capability_registry = self.capability_registry.clone();
         let core_evolution = self.core_evolution.clone();
 
-        let tool_executor = move |tool_name: &str, params: serde_json::Value| -> Result<serde_json::Value> {
-            let ctx = blockcell_tools::ToolContext {
-                workspace: paths.workspace(),
-                builtin_skills_dir: Some(paths.builtin_skills_dir()),
-                session_key: session_key.clone(),
-                channel: channel.clone(),
-                chat_id: chat_id.clone(),
-                config: config.clone(),
-                permissions: blockcell_core::types::PermissionSet::new(),
-                task_manager: Some(Arc::new(task_manager.clone())),
-                memory_store: memory_store.clone(),
-                outbound_tx: outbound_tx.clone(),
-                spawn_handle: None, // No spawning from cron skill scripts
-                capability_registry: capability_registry.clone(),
-                core_evolution: core_evolution.clone(),
-            };
+        let tool_executor =
+            move |tool_name: &str, params: serde_json::Value| -> Result<serde_json::Value> {
+                let ctx = blockcell_tools::ToolContext {
+                    workspace: paths.workspace(),
+                    builtin_skills_dir: Some(paths.builtin_skills_dir()),
+                    session_key: session_key.clone(),
+                    channel: channel.clone(),
+                    chat_id: chat_id.clone(),
+                    config: config.clone(),
+                    permissions: blockcell_core::types::PermissionSet::new(),
+                    task_manager: Some(Arc::new(task_manager.clone())),
+                    memory_store: memory_store.clone(),
+                    outbound_tx: outbound_tx.clone(),
+                    spawn_handle: None, // No spawning from cron skill scripts
+                    capability_registry: capability_registry.clone(),
+                    core_evolution: core_evolution.clone(),
+                };
 
-            // Execute tool synchronously via a new tokio runtime handle
-            let rt = tokio::runtime::Handle::current();
-            let tool_name_owned = tool_name.to_string();
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    rt.block_on(async {
-                        registry.execute(&tool_name_owned, ctx, params).await
+                // Execute tool synchronously via a new tokio runtime handle
+                let rt = tokio::runtime::Handle::current();
+                let tool_name_owned = tool_name.to_string();
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        rt.block_on(async { registry.execute(&tool_name_owned, ctx, params).await })
                     })
-                }).join().unwrap_or_else(|_| Err(blockcell_core::Error::Tool("Tool execution panicked".into())))
-            })
-        };
+                    .join()
+                    .unwrap_or_else(|_| {
+                        Err(blockcell_core::Error::Tool(
+                            "Tool execution panicked".into(),
+                        ))
+                    })
+                })
+            };
 
         // Context variables for the script
         let mut context_vars = HashMap::new();
@@ -1977,7 +2268,9 @@ impl AgentRuntime {
             dispatcher.execute_sync(&script, &user_input, context_vars, tool_executor)
         })
         .await
-        .map_err(|e| blockcell_core::Error::Skill(format!("Skill execution join error: {}", e)))??;
+        .map_err(|e| {
+            blockcell_core::Error::Skill(format!("Skill execution join error: {}", e))
+        })??;
 
         if result.success {
             // Format output as string
@@ -1998,6 +2291,119 @@ impl AgentRuntime {
         }
     }
 
+    /// Helper: run a single .py script file and return stdout as output.
+    async fn run_python_script(
+        &self,
+        py_path: &std::path::Path,
+        skill_name: &str,
+        msg: &InboundMessage,
+    ) -> Result<String> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+
+        let python_bin = if which::which("python3").is_ok() {
+            "python3"
+        } else if which::which("python").is_ok() {
+            "python"
+        } else {
+            return Err(blockcell_core::Error::Skill(
+                "Python runtime not found (python3/python)".to_string(),
+            ));
+        };
+
+        let timeout_secs = self.config.tools.exec.timeout.clamp(1, 600) as u64;
+        let mut cmd = tokio::process::Command::new(python_bin);
+        cmd.arg(py_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(parent) = py_path.parent() {
+            cmd.current_dir(parent);
+        }
+
+        let context = serde_json::json!({
+            "skill_name": skill_name,
+            "trigger": "cron",
+            "user_input": msg.content,
+            "channel": msg.channel,
+            "chat_id": msg.chat_id,
+            "metadata": msg.metadata,
+        });
+        cmd.env("BLOCKCELL_SKILL_CONTEXT", context.to_string());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            blockcell_core::Error::Skill(format!(
+                "Failed to spawn {} for {}: {}",
+                python_bin,
+                py_path.display(),
+                e
+            ))
+        })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(msg.content.as_bytes()).await.map_err(|e| {
+                blockcell_core::Error::Skill(format!("Failed writing stdin: {}", e))
+            })?;
+        }
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            blockcell_core::Error::Skill(format!(
+                "SKILL.py execution timed out after {}s",
+                timeout_secs
+            ))
+        })?
+        .map_err(|e| blockcell_core::Error::Skill(format!("SKILL.py execution failed: {}", e)))?;
+
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let max_output_chars = 10_000;
+        if stdout.len() > max_output_chars {
+            stdout = format!(
+                "{}\n... (output truncated)",
+                truncate_str(&stdout, max_output_chars)
+            );
+        }
+        if stderr.len() > max_output_chars {
+            stderr = format!(
+                "{}\n... (stderr truncated)",
+                truncate_str(&stderr, max_output_chars)
+            );
+        }
+
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated".to_string());
+            let err = if stderr.trim().is_empty() {
+                format!("SKILL.py exited with status {}", code)
+            } else {
+                format!("SKILL.py exited with status {}: {}", code, stderr.trim())
+            };
+            return Err(blockcell_core::Error::Skill(err));
+        }
+
+        let output_text = if stdout.trim().is_empty() {
+            "Python skill executed successfully (no output)".to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+
+        info!(
+            skill = %skill_name,
+            script = %py_path.display(),
+            "SKILL.py cron execution succeeded"
+        );
+        Ok(output_text)
+    }
+
     pub async fn run_loop(
         &mut self,
         mut inbound_rx: mpsc::Receiver<InboundMessage>,
@@ -2015,6 +2421,9 @@ impl AgentRuntime {
         info!(tick_secs = tick_secs, "Tick interval configured");
         let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
         tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut active_chat_tasks: HashMap<String, String> = HashMap::new();
+        let mut active_message_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+        let (task_done_tx, mut task_done_rx) = mpsc::unbounded_channel::<(String, String)>();
 
         loop {
             tokio::select! {
@@ -2027,9 +2436,45 @@ impl AgentRuntime {
                 } => {
                     break;
                 }
+                done = task_done_rx.recv() => {
+                    if let Some((task_id, chat_id)) = done {
+                        active_message_tasks.remove(&task_id);
+                        if active_chat_tasks.get(&chat_id).is_some_and(|id| id == &task_id) {
+                            active_chat_tasks.remove(&chat_id);
+                        }
+                    }
+                }
                 msg = inbound_rx.recv() => {
                     match msg {
                         Some(msg) => {
+                            if msg.metadata.get("cancel").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                let chat_id = msg.chat_id.clone();
+                                let mut cancelled = false;
+                                if let Some(task_id) = active_chat_tasks.remove(&chat_id) {
+                                    if let Some(handle) = active_message_tasks.remove(&task_id) {
+                                        handle.abort();
+                                        cancelled = true;
+                                        self.task_manager.remove_task(&task_id).await;
+                                        info!(chat_id = %chat_id, task_id = %task_id, "Cancelled running chat task");
+                                    }
+                                }
+                                if cancelled {
+                                    if let Some(ref event_tx) = self.event_tx {
+                                        let _ = event_tx.send(
+                                            serde_json::json!({
+                                                "type": "message_done",
+                                                "chat_id": chat_id,
+                                                "task_id": "",
+                                                "content": "⏹️ 当前对话已终止",
+                                                "tool_calls": 0,
+                                                "duration_ms": 0
+                                            }).to_string()
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Spawn each message as a background task so the loop
                             // stays responsive for new user input.
                             let task_id = format!("msg_{}", uuid::Uuid::new_v4());
@@ -2050,6 +2495,10 @@ impl AgentRuntime {
                             let event_tx = self.event_tx.clone();
                             let task_id_clone = task_id.clone();
                             let provider_pool = Arc::clone(&self.provider_pool);
+                            let chat_id_for_task = msg.chat_id.clone();
+                            let task_done_tx = task_done_tx.clone();
+                            let done_task_id = task_id.clone();
+                            let done_chat_id = chat_id_for_task.clone();
 
                             // Register task
                             task_manager.create_task(
@@ -2060,20 +2509,37 @@ impl AgentRuntime {
                                 &msg.chat_id,
                             ).await;
 
-                            tokio::spawn(run_message_task(
-                                config,
-                                paths,
-                                provider_pool,
-                                task_manager,
-                                outbound_tx,
-                                confirm_tx,
-                                memory_store,
-                                capability_registry,
-                                core_evolution,
-                                event_tx,
-                                msg,
-                                task_id_clone,
-                            ));
+                            if let Some(prev_task_id) = active_chat_tasks.remove(&chat_id_for_task) {
+                                if let Some(prev_handle) = active_message_tasks.remove(&prev_task_id) {
+                                    prev_handle.abort();
+                                    self.task_manager.remove_task(&prev_task_id).await;
+                                    info!(
+                                        chat_id = %chat_id_for_task,
+                                        task_id = %prev_task_id,
+                                        "Cancelled previous running chat task"
+                                    );
+                                }
+                            }
+
+                            active_chat_tasks.insert(chat_id_for_task, task_id.clone());
+                            let handle = tokio::spawn(async move {
+                                run_message_task(
+                                    config,
+                                    paths,
+                                    provider_pool,
+                                    task_manager,
+                                    outbound_tx,
+                                    confirm_tx,
+                                    memory_store,
+                                    capability_registry,
+                                    core_evolution,
+                                    event_tx,
+                                    msg,
+                                    task_id_clone,
+                                ).await;
+                                let _ = task_done_tx.send((done_task_id, done_chat_id));
+                            });
+                            active_message_tasks.insert(task_id, handle);
                         }
                         None => break, // channel closed
                     }
@@ -2210,7 +2676,13 @@ async fn run_message_task(
         Err(e) => {
             task_manager.set_failed(&task_id, &format!("{}", e)).await;
             if let Some(tx) = &outbound_tx {
-                let _ = tx.send(OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("❌ {}", e))).await;
+                let _ = tx
+                    .send(OutboundMessage::new(
+                        &msg.channel,
+                        &msg.chat_id,
+                        &format!("❌ {}", e),
+                    ))
+                    .await;
             }
             return;
         }
@@ -2270,7 +2742,15 @@ async fn run_subagent_task(
 ) {
     // Create the task entry first, then immediately mark it running.
     // This ensures set_running() never operates on a non-existent task ID.
-    task_manager.create_task(&task_id, &label, &task_str, &origin_channel, &origin_chat_id).await;
+    task_manager
+        .create_task(
+            &task_id,
+            &label,
+            &task_str,
+            &origin_channel,
+            &origin_chat_id,
+        )
+        .await;
     task_manager.set_running(&task_id).await;
     task_manager.set_progress(&task_id, "Processing...").await;
 
@@ -2304,11 +2784,7 @@ async fn run_subagent_task(
 
             // Send the sub-agent's result directly to the origin channel.
             if let Some(tx) = &outbound_tx {
-                let notification = OutboundMessage::new(
-                    &origin_channel,
-                    &origin_chat_id,
-                    &result,
-                );
+                let notification = OutboundMessage::new(&origin_channel, &origin_chat_id, &result);
                 let _ = tx.send(notification).await;
             }
         }
@@ -2324,9 +2800,7 @@ async fn run_subagent_task(
                     &origin_chat_id,
                     &format!(
                         "\n❌ 后台任务失败: **{}** (ID: {})\n错误: {}",
-                        label,
-                        short_id,
-                        err_msg
+                        label, short_id, err_msg
                     ),
                 );
                 let _ = tx.send(notification).await;

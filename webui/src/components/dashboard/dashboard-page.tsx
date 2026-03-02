@@ -1,12 +1,13 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Activity, Cpu, Brain, Zap, RefreshCw, Shield, GitBranch } from 'lucide-react';
-import { getHealth, getTools, getSkills, getEvolution, getStats, getToggles, updateToggle } from '@/lib/api';
+import { getHealth, getTools, getSkills, getEvolution, getStats, getToggles, updateToggle, getPoolStatus } from '@/lib/api';
 import { useT } from '@/lib/i18n';
 import { wsManager } from '@/lib/ws';
 
 export function DashboardPage() {
   const t = useT();
   const [health, setHealth] = useState<any>(null);
+  const [poolStatus, setPoolStatus] = useState<any>(null);
   const [tools, setTools] = useState<any[]>([]);
   const [skills, setSkills] = useState<any[]>([]);
   const [evolution, setEvolution] = useState<any[]>([]);
@@ -28,13 +29,14 @@ export function DashboardPage() {
 
   async function fetchAll() {
     try {
-      const [h, c, s, e, st, tg] = await Promise.allSettled([
+      const [h, c, s, e, st, tg, ps] = await Promise.allSettled([
         getHealth(),
         getTools(),
         getSkills(),
         getEvolution(),
         getStats(),
         getToggles(),
+        getPoolStatus(),
       ]);
       if (h.status === 'fulfilled') setHealth(h.value);
       if (c.status === 'fulfilled') setTools(c.value.tools || []);
@@ -42,6 +44,7 @@ export function DashboardPage() {
       if (e.status === 'fulfilled') setEvolution(e.value.records || []);
       if (st.status === 'fulfilled') setStats(st.value);
       if (tg.status === 'fulfilled') setToggles(tg.value);
+      if (ps.status === 'fulfilled') setPoolStatus(ps.value);
     } finally {
       setLoading(false);
     }
@@ -101,7 +104,7 @@ export function DashboardPage() {
           <StatCard
             icon={<Cpu size={20} />}
             label={t('dashboard.model')}
-            value={health?.model || '—'}
+            value={poolStatus?.entries?.length != null ? String(poolStatus.entries.length) : '—'}
           />
           <StatCard
             icon={<Zap size={20} />}

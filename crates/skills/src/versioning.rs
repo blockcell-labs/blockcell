@@ -43,7 +43,7 @@ impl VersionManager {
     /// 获取技能的版本历史
     pub fn get_history(&self, skill_name: &str) -> Result<VersionHistory> {
         let history_file = self.get_history_file_path(skill_name);
-        
+
         if !history_file.exists() {
             // 如果没有历史文件，创建默认历史
             return Ok(VersionHistory {
@@ -74,14 +74,14 @@ impl VersionManager {
         changelog: Option<String>,
     ) -> Result<SkillVersion> {
         let mut history = self.get_history(skill_name)?;
-        
+
         // 计算新版本号
         let version_num = history.versions.len() + 1;
         let version = format!("v{}", version_num);
-        
+
         // 计算当前技能内容的 hash
         let hash = self.compute_skill_hash(skill_name)?;
-        
+
         let new_version = SkillVersion {
             version: version.clone(),
             hash,
@@ -111,7 +111,7 @@ impl VersionManager {
     /// 切换到指定版本
     pub fn switch_to_version(&self, skill_name: &str, version: &str) -> Result<()> {
         let mut history = self.get_history(skill_name)?;
-        
+
         // 检查版本是否存在
         let target_version = history
             .versions
@@ -179,7 +179,7 @@ impl VersionManager {
     /// 删除旧版本（保留最近 N 个）
     pub fn cleanup_old_versions(&self, skill_name: &str, keep_count: usize) -> Result<()> {
         let mut history = self.get_history(skill_name)?;
-        
+
         if history.versions.len() <= keep_count {
             return Ok(());
         }
@@ -222,8 +222,8 @@ impl VersionManager {
         let snapshot1 = self.get_version_snapshot_dir(skill_name, version1);
         let snapshot2 = self.get_version_snapshot_dir(skill_name, version2);
 
-        let content1 = std::fs::read_to_string(snapshot1.join("SKILL.rhai"))?;
-        let content2 = std::fs::read_to_string(snapshot2.join("SKILL.rhai"))?;
+        let content1 = Self::read_snapshot_primary_script(&snapshot1)?;
+        let content2 = Self::read_snapshot_primary_script(&snapshot2)?;
 
         // 简单的行级 diff
         let diff = self.compute_diff(&content1, &content2);
@@ -245,12 +245,31 @@ impl VersionManager {
             .join(version)
     }
 
-    fn compute_skill_hash(&self, skill_name: &str) -> Result<String> {
-        let skill_file = self.skills_dir.join(skill_name).join("SKILL.rhai");
-        
-        if !skill_file.exists() {
-            return Ok("empty".to_string());
+    fn primary_skill_file(skill_dir: &Path) -> Option<PathBuf> {
+        for filename in &["SKILL.rhai", "SKILL.py", "SKILL.md"] {
+            let path = skill_dir.join(filename);
+            if path.exists() {
+                return Some(path);
+            }
         }
+        None
+    }
+
+    fn read_snapshot_primary_script(snapshot_dir: &Path) -> Result<String> {
+        let file_path = Self::primary_skill_file(snapshot_dir).ok_or_else(|| {
+            Error::NotFound(format!(
+                "No skill script found in snapshot: {}",
+                snapshot_dir.display()
+            ))
+        })?;
+        Ok(std::fs::read_to_string(file_path)?)
+    }
+
+    fn compute_skill_hash(&self, skill_name: &str) -> Result<String> {
+        let skill_dir = self.skills_dir.join(skill_name);
+        let Some(skill_file) = Self::primary_skill_file(&skill_dir) else {
+            return Ok("empty".to_string());
+        };
 
         let content = std::fs::read_to_string(&skill_file)?;
         let hash = format!("{:x}", md5::compute(content.as_bytes()));
@@ -267,6 +286,12 @@ impl VersionManager {
         let skill_file = skill_dir.join("SKILL.rhai");
         if skill_file.exists() {
             std::fs::copy(&skill_file, snapshot_dir.join("SKILL.rhai"))?;
+        }
+
+        // 复制 SKILL.py
+        let py_file = skill_dir.join("SKILL.py");
+        if py_file.exists() {
+            std::fs::copy(&py_file, snapshot_dir.join("SKILL.py"))?;
         }
 
         // 复制 meta.yaml 或 meta.json
@@ -295,7 +320,7 @@ impl VersionManager {
 
     fn restore_version_snapshot(&self, skill_name: &str, version: &SkillVersion) -> Result<()> {
         let snapshot_dir = self.get_version_snapshot_dir(skill_name, &version.version);
-        
+
         if !snapshot_dir.exists() {
             return Err(Error::NotFound(format!(
                 "Version snapshot not found: {}",
@@ -305,10 +330,24 @@ impl VersionManager {
 
         let skill_dir = self.skills_dir.join(skill_name);
 
+        // 清理当前目录中的脚本文件，避免恢复后保留旧脚本类型
+        for filename in &["SKILL.rhai", "SKILL.py"] {
+            let path = skill_dir.join(filename);
+            if path.exists() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+
         // 恢复 SKILL.rhai
         let snapshot_skill = snapshot_dir.join("SKILL.rhai");
         if snapshot_skill.exists() {
             std::fs::copy(&snapshot_skill, skill_dir.join("SKILL.rhai"))?;
+        }
+
+        // 恢复 SKILL.py
+        let snapshot_py = snapshot_dir.join("SKILL.py");
+        if snapshot_py.exists() {
+            std::fs::copy(&snapshot_py, skill_dir.join("SKILL.py"))?;
         }
 
         // 恢复 meta 文件
@@ -366,9 +405,14 @@ impl VersionManager {
     }
 
     /// 导出版本到文件
-    pub fn export_version(&self, skill_name: &str, version: &str, output_path: &Path) -> Result<()> {
+    pub fn export_version(
+        &self,
+        skill_name: &str,
+        version: &str,
+        output_path: &Path,
+    ) -> Result<()> {
         let snapshot_dir = self.get_version_snapshot_dir(skill_name, version);
-        
+
         if !snapshot_dir.exists() {
             return Err(Error::NotFound(format!("Version {} not found", version)));
         }
@@ -398,7 +442,8 @@ impl VersionManager {
         let mut archive = tar::Archive::new(dec);
 
         // 解压到临时目录
-        let temp_dir = std::env::temp_dir().join(format!("skill_import_{}", chrono::Utc::now().timestamp()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("skill_import_{}", chrono::Utc::now().timestamp()));
         std::fs::create_dir_all(&temp_dir)?;
         archive.unpack(&temp_dir)?;
 
@@ -417,7 +462,7 @@ impl VersionManager {
         // 复制到版本目录
         let snapshot_dir = self.get_version_snapshot_dir(skill_name, &version.version);
         std::fs::create_dir_all(&snapshot_dir)?;
-        
+
         for entry in std::fs::read_dir(temp_dir.join(skill_name))? {
             let entry = entry?;
             let file_name = entry.file_name();
@@ -444,10 +489,84 @@ impl VersionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_skills_dir(tag: &str) -> PathBuf {
+        let mut root = std::env::temp_dir();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        root.push(format!(
+            "blockcell_versioning_{}_{}_{}",
+            tag,
+            std::process::id(),
+            now_ns
+        ));
+        std::fs::create_dir_all(&root).expect("create temp skills dir");
+        root
+    }
 
     #[test]
     fn test_version_source() {
         let source = VersionSource::Evolution;
         assert_eq!(source, VersionSource::Evolution);
+    }
+
+    #[test]
+    fn test_create_version_hash_and_snapshot_for_python_skill() {
+        let skills_dir = temp_skills_dir("py_hash_snapshot");
+        let skill_name = "py_skill_hash";
+        let skill_dir = skills_dir.join(skill_name);
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.py"),
+            "print('hello from python skill')\n",
+        )
+        .expect("write SKILL.py");
+
+        let vm = VersionManager::new(skills_dir.clone());
+        let version = vm
+            .create_version(skill_name, VersionSource::Manual, None)
+            .expect("create version");
+
+        assert_ne!(version.hash, "empty");
+        assert!(
+            skills_dir
+                .join(skill_name)
+                .join("versions")
+                .join("v1")
+                .join("SKILL.py")
+                .exists(),
+            "python snapshot should exist"
+        );
+
+        let _ = std::fs::remove_dir_all(skills_dir);
+    }
+
+    #[test]
+    fn test_diff_versions_supports_python_skills() {
+        let skills_dir = temp_skills_dir("py_diff");
+        let skill_name = "py_skill_diff";
+        let skill_dir = skills_dir.join(skill_name);
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(skill_dir.join("SKILL.py"), "print('v1')\n").expect("write v1");
+
+        let vm = VersionManager::new(skills_dir.clone());
+        vm.create_version(skill_name, VersionSource::Manual, None)
+            .expect("create v1");
+
+        std::fs::write(skill_dir.join("SKILL.py"), "print('v2')\n").expect("write v2");
+        vm.create_version(skill_name, VersionSource::Manual, None)
+            .expect("create v2");
+
+        let diff = vm
+            .diff_versions(skill_name, "v1", "v2")
+            .expect("diff versions");
+        assert!(diff.contains("print('v1')"));
+        assert!(diff.contains("print('v2')"));
+
+        let _ = std::fs::remove_dir_all(skills_dir);
     }
 }

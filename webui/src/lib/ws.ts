@@ -249,6 +249,10 @@ class WebSocketManager {
     this.send({ type: 'chat', content, chat_id: chatId, media });
   }
 
+  sendCancel(chatId = 'default') {
+    this.send({ type: 'cancel', chat_id: chatId });
+  }
+
   sendConfirmResponse(requestId: string, approved: boolean) {
     this.send({ type: 'confirm_response', request_id: requestId, approved });
   }

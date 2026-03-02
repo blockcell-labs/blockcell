@@ -55,7 +55,7 @@ pub struct JobPayload {
     pub channel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
-    /// For kind="skill_rhai": the skill directory name (e.g. "stock_monitor")
+    /// For kind="skill_rhai" / "skill_python": the skill directory name (e.g. "stock_monitor")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
 }

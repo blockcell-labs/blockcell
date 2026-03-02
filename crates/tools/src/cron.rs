@@ -9,46 +9,97 @@ use crate::{Tool, ToolContext, ToolSchema};
 
 pub struct CronTool;
 
-fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origin_chat_id: &str) -> Result<Value> {
-    let paths = Paths::new();
+fn resolve_skill_payload_kind(paths: &Paths, skill_name: Option<&str>) -> &'static str {
+    let Some(skill_name) = skill_name else {
+        return "agent_turn";
+    };
 
+    let user_dir = paths.skills_dir().join(skill_name);
+    let builtin_dir = paths.builtin_skills_dir().join(skill_name);
+
+    let has_rhai = user_dir.join("SKILL.rhai").exists() || builtin_dir.join("SKILL.rhai").exists();
+    let has_py = user_dir.join("SKILL.py").exists() || builtin_dir.join("SKILL.py").exists();
+
+    if has_rhai {
+        "skill_rhai"
+    } else if has_py {
+        "skill_python"
+    } else {
+        // Backward compatibility: keep legacy behavior when skill script type is unknown.
+        "skill_rhai"
+    }
+}
+
+fn execute_cron_action(
+    action: &str,
+    params: &Value,
+    origin_channel: &str,
+    origin_chat_id: &str,
+) -> Result<Value> {
+    let paths = Paths::new();
+    execute_cron_action_with_paths(&paths, action, params, origin_channel, origin_chat_id)
+}
+
+fn execute_cron_action_with_paths(
+    paths: &Paths,
+    action: &str,
+    params: &Value,
+    origin_channel: &str,
+    origin_chat_id: &str,
+) -> Result<Value> {
     match action {
         "add" => {
-            let mut store = load_store(&paths)?;
+            let mut store = load_store(paths)?;
             let now_ms = Utc::now().timestamp_millis();
             let name = params["name"].as_str().unwrap();
             let message = params["message"].as_str().unwrap();
-            let delete_after_run = params.get("delete_after_run").and_then(|v| v.as_bool()).unwrap_or(false);
+            let delete_after_run = params
+                .get("delete_after_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-            let (kind, schedule) = if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
-                let at_ms = now_ms + delay * 1000;
-                ("at", json!({
-                    "kind": "at",
-                    "atMs": at_ms
-                }))
-            } else if let Some(at_ms) = params.get("at_ms").and_then(|v| v.as_i64()) {
-                ("at", json!({
-                    "kind": "at",
-                    "atMs": at_ms
-                }))
-            } else if let Some(every) = params.get("every_seconds").and_then(|v| v.as_i64()) {
-                ("every", json!({
-                    "kind": "every",
-                    "everyMs": every * 1000
-                }))
-            } else if let Some(expr) = params.get("cron_expr").and_then(|v| v.as_str()) {
-                ("cron", json!({
-                    "kind": "cron",
-                    "expr": expr
-                }))
-            } else {
-                return Err(Error::Validation("No schedule specified".to_string()));
-            };
+            let (kind, schedule) =
+                if let Some(delay) = params.get("delay_seconds").and_then(|v| v.as_i64()) {
+                    let at_ms = now_ms + delay * 1000;
+                    (
+                        "at",
+                        json!({
+                            "kind": "at",
+                            "atMs": at_ms
+                        }),
+                    )
+                } else if let Some(at_ms) = params.get("at_ms").and_then(|v| v.as_i64()) {
+                    (
+                        "at",
+                        json!({
+                            "kind": "at",
+                            "atMs": at_ms
+                        }),
+                    )
+                } else if let Some(every) = params.get("every_seconds").and_then(|v| v.as_i64()) {
+                    (
+                        "every",
+                        json!({
+                            "kind": "every",
+                            "everyMs": every * 1000
+                        }),
+                    )
+                } else if let Some(expr) = params.get("cron_expr").and_then(|v| v.as_str()) {
+                    (
+                        "cron",
+                        json!({
+                            "kind": "cron",
+                            "expr": expr
+                        }),
+                    )
+                } else {
+                    return Err(Error::Validation("No schedule specified".to_string()));
+                };
 
             let job_id = Uuid::new_v4().to_string();
 
             let skill_name = params.get("skill_name").and_then(|v| v.as_str());
-            let payload_kind = if skill_name.is_some() { "skill_rhai" } else { "agent_turn" };
+            let payload_kind = resolve_skill_payload_kind(paths, skill_name);
 
             let deliver = !matches!(origin_channel, "cli" | "cron" | "ghost" | "");
             let mut payload = json!({
@@ -75,7 +126,7 @@ fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origi
             });
 
             store.jobs.push(job);
-            save_store(&paths, &store)?;
+            save_store(paths, &store)?;
 
             let schedule_desc = match kind {
                 "at" => {
@@ -86,11 +137,17 @@ fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origi
                     }
                 }
                 "every" => {
-                    let secs = params.get("every_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let secs = params
+                        .get("every_seconds")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     format!("每{}秒执行", secs)
                 }
                 "cron" => {
-                    let expr = params.get("cron_expr").and_then(|v| v.as_str()).unwrap_or("");
+                    let expr = params
+                        .get("cron_expr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     format!("cron: {}", expr)
                 }
                 _ => "unknown".to_string(),
@@ -105,16 +162,20 @@ fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origi
             }))
         }
         "list" => {
-            let store = load_store(&paths)?;
-            let jobs: Vec<Value> = store.jobs.iter().map(|j| {
-                json!({
-                    "id": j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "name": j.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                    "enabled": j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
-                    "schedule": j.get("schedule"),
-                    "state": j.get("state"),
+            let store = load_store(paths)?;
+            let jobs: Vec<Value> = store
+                .jobs
+                .iter()
+                .map(|j| {
+                    json!({
+                        "id": j.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name": j.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "enabled": j.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "schedule": j.get("schedule"),
+                        "state": j.get("state"),
+                    })
                 })
-            }).collect();
+                .collect();
 
             Ok(json!({
                 "jobs": jobs,
@@ -122,7 +183,7 @@ fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origi
             }))
         }
         "remove" => {
-            let mut store = load_store(&paths)?;
+            let mut store = load_store(paths)?;
             let job_id = params["job_id"].as_str().unwrap();
 
             let before = store.jobs.len();
@@ -133,7 +194,7 @@ fn execute_cron_action(action: &str, params: &Value, origin_channel: &str, origi
             let removed = before - store.jobs.len();
 
             if removed > 0 {
-                save_store(&paths, &store)?;
+                save_store(paths, &store)?;
             }
 
             Ok(json!({
@@ -166,7 +227,10 @@ fn load_store(paths: &Paths) -> Result<JobStore> {
         return Ok(JobStore::default());
     }
     let content = std::fs::read_to_string(&path)?;
-    let store: JobStore = serde_json::from_str(&content)?;
+    let store: JobStore = match serde_json::from_str(&content) {
+        Ok(store) => store,
+        Err(_) => JobStore::default(),
+    };
     Ok(store)
 }
 
@@ -228,7 +292,7 @@ impl Tool for CronTool {
                     },
                     "skill_name": {
                         "type": "string",
-                        "description": "(add) If set, the cron job will directly execute the named skill's SKILL.rhai script instead of going through the LLM. E.g. 'stock_monitor', 'daily_finance_report'."
+                        "description": "(add) If set, the cron job will directly execute the named skill script (SKILL.rhai or SKILL.py) instead of going through the LLM. E.g. 'stock_monitor', 'daily_finance_report'."
                     }
                 },
                 "required": ["action"]
@@ -245,10 +309,14 @@ impl Tool for CronTool {
         match action {
             "add" => {
                 if params.get("name").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter for add: name".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter for add: name".to_string(),
+                    ));
                 }
                 if params.get("message").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter for add: message".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter for add: message".to_string(),
+                    ));
                 }
                 let has_schedule = params.get("at_ms").is_some()
                     || params.get("delay_seconds").is_some()
@@ -256,14 +324,17 @@ impl Tool for CronTool {
                     || params.get("cron_expr").is_some();
                 if !has_schedule {
                     return Err(Error::Validation(
-                        "Must specify one of: at_ms, delay_seconds, every_seconds, or cron_expr".to_string(),
+                        "Must specify one of: at_ms, delay_seconds, every_seconds, or cron_expr"
+                            .to_string(),
                     ));
                 }
             }
             "list" => {}
             "remove" => {
                 if params.get("job_id").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter for remove: job_id".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter for remove: job_id".to_string(),
+                    ));
                 }
             }
             _ => {
@@ -278,9 +349,11 @@ impl Tool for CronTool {
         let action = params["action"].as_str().unwrap().to_string();
         let origin_channel = ctx.channel.clone();
         let origin_chat_id = ctx.chat_id.clone();
-        tokio::task::spawn_blocking(move || execute_cron_action(&action, &params, &origin_channel, &origin_chat_id))
-            .await
-            .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?
+        tokio::task::spawn_blocking(move || {
+            execute_cron_action(&action, &params, &origin_channel, &origin_chat_id)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?
     }
 }
 
@@ -288,6 +361,18 @@ impl Tool for CronTool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_paths(tag: &str) -> Paths {
+        let mut root = std::env::temp_dir();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        root.push(format!("blockcell_cron_tool_{}_{}_{}", tag, std::process::id(), now_ns));
+        std::fs::create_dir_all(&root).expect("create temp cron dir");
+        Paths::with_base(root)
+    }
 
     #[test]
     fn test_cron_schema() {
@@ -299,30 +384,44 @@ mod tests {
     #[test]
     fn test_cron_validate_add() {
         let tool = CronTool;
-        assert!(tool.validate(&json!({
-            "action": "add", "name": "test", "message": "hi", "delay_seconds": 60
-        })).is_ok());
+        assert!(tool
+            .validate(&json!({
+                "action": "add", "name": "test", "message": "hi", "delay_seconds": 60
+            }))
+            .is_ok());
         // Verify execute_cron_action accepts origin params
-        let r = execute_cron_action("add", &json!({
-            "name": "t", "message": "m", "delay_seconds": 60
-        }), "telegram", "12345");
-        assert!(r.is_ok());
+        let paths = temp_paths("add");
+        let r = execute_cron_action_with_paths(
+            &paths,
+            "add",
+            &json!({
+                "name": "t", "message": "m", "delay_seconds": 60
+            }),
+            "telegram",
+            "12345",
+        );
+        assert!(r.is_ok(), "unexpected error: {:?}", r.err());
+        let _ = std::fs::remove_dir_all(paths.base);
     }
 
     #[test]
     fn test_cron_validate_add_missing_schedule() {
         let tool = CronTool;
-        assert!(tool.validate(&json!({
-            "action": "add", "name": "test", "message": "hi"
-        })).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "add", "name": "test", "message": "hi"
+            }))
+            .is_err());
     }
 
     #[test]
     fn test_cron_validate_add_missing_name() {
         let tool = CronTool;
-        assert!(tool.validate(&json!({
-            "action": "add", "message": "hi", "delay_seconds": 60
-        })).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "add", "message": "hi", "delay_seconds": 60
+            }))
+            .is_err());
     }
 
     #[test]
@@ -334,7 +433,9 @@ mod tests {
     #[test]
     fn test_cron_validate_remove() {
         let tool = CronTool;
-        assert!(tool.validate(&json!({"action": "remove", "job_id": "abc"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "remove", "job_id": "abc"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "remove"})).is_err());
     }
 

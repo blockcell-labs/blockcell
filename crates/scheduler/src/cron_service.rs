@@ -1,6 +1,6 @@
 use crate::job::{CronJob, ScheduleKind};
-use chrono::Utc;
 use blockcell_core::{InboundMessage, Paths, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -44,17 +44,17 @@ impl CronService {
 
         let content = tokio::fs::read_to_string(&path).await?;
         let store: JobStore = serde_json::from_str(&content)?;
-        
+
         let mut jobs = self.jobs.write().await;
         *jobs = store.jobs;
-        
+
         debug!(count = jobs.len(), "Loaded cron jobs");
         Ok(())
     }
 
     pub async fn save(&self) -> Result<()> {
         let path = self.paths.cron_jobs_file();
-        
+
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -67,7 +67,7 @@ impl CronService {
 
         let content = serde_json::to_string_pretty(&store)?;
         tokio::fs::write(&path, content).await?;
-        
+
         Ok(())
     }
 
@@ -84,7 +84,7 @@ impl CronService {
         jobs.retain(|j| j.id != id);
         let removed = jobs.len() < len_before;
         drop(jobs);
-        
+
         if removed {
             self.save().await?;
         }
@@ -96,7 +96,11 @@ impl CronService {
     }
 
     /// Update the enabled state of a job by ID prefix. Returns the job name if found.
-    pub async fn update_job_enabled(&self, id_prefix: &str, enabled: bool) -> Result<Option<String>> {
+    pub async fn update_job_enabled(
+        &self,
+        id_prefix: &str,
+        enabled: bool,
+    ) -> Result<Option<String>> {
         let mut jobs = self.jobs.write().await;
         let matching: Vec<usize> = jobs
             .iter()
@@ -118,8 +122,15 @@ impl CronService {
             }
             _ => {
                 // Multiple matches — return Err with disambiguation hint
-                let names: Vec<String> = matching.iter()
-                    .map(|&i| format!("{} ({})", &jobs[i].id.chars().take(8).collect::<String>(), jobs[i].name))
+                let names: Vec<String> = matching
+                    .iter()
+                    .map(|&i| {
+                        format!(
+                            "{} ({})",
+                            &jobs[i].id.chars().take(8).collect::<String>(),
+                            jobs[i].name
+                        )
+                    })
                     .collect();
                 Err(blockcell_core::Error::Other(format!(
                     "Multiple jobs match '{}': {}",
@@ -160,10 +171,10 @@ impl CronService {
 
             if should_run {
                 jobs_to_run.push(job.clone());
-                
+
                 // Update state
                 job.state.last_run_at_ms = Some(now_ms);
-                
+
                 // Calculate next run
                 match job.schedule.kind {
                     ScheduleKind::At => {
@@ -258,23 +269,35 @@ impl CronService {
     async fn execute_job(&self, job: &CronJob) {
         debug!(job_id = %job.id, job_name = %job.name, kind = %job.payload.kind, "Executing cron job");
 
-        let (content, metadata) = if job.payload.kind == "skill_rhai" {
-            // Direct SKILL.rhai execution — send metadata so AgentRuntime dispatches
-            // to SkillDispatcher instead of going through the full LLM loop.
+        let script_kind = match job.payload.kind.as_str() {
+            "skill_rhai" => Some("rhai"),
+            "skill_python" => Some("python"),
+            _ => None,
+        };
+
+        let (content, metadata) = if let Some(kind) = script_kind {
+            // Direct skill script execution — send metadata so AgentRuntime dispatches
+            // to script runtime instead of going through the full LLM loop.
             let skill_name = job.payload.skill_name.as_deref().unwrap_or("unknown");
             let content = format!(
                 "[系统定时任务] 执行技能脚本 {} — {}",
                 skill_name, job.payload.message
             );
-            let metadata = serde_json::json!({
+            let mut metadata = serde_json::json!({
                 "job_id": job.id,
                 "job_name": job.name,
-                "skill_rhai": true,
+                "skill_script": true,
+                "skill_script_kind": kind,
                 "skill_name": skill_name,
                 "deliver": job.payload.deliver,
                 "deliver_channel": job.payload.channel,
                 "deliver_to": job.payload.to,
             });
+            if kind == "python" {
+                metadata["skill_python"] = serde_json::json!(true);
+            } else {
+                metadata["skill_rhai"] = serde_json::json!(true);
+            }
             (content, metadata)
         } else {
             // Standard agent_turn — let the LLM handle it (search, execute skill, etc.)
@@ -297,10 +320,21 @@ impl CronService {
         // For agent_turn jobs, use the deliver target as channel/chat_id so that
         // ToolContext gets the real user channel — the message tool can then send
         // to the correct target without the LLM needing to specify channel/chat_id.
-        // For skill_rhai and simple reminder jobs, keep "cron" as the channel.
-        let (msg_channel, msg_chat_id) = if job.payload.kind == "agent_turn" && job.payload.deliver {
-            let ch = job.payload.channel.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "cron".to_string());
-            let to = job.payload.to.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| job.id.clone());
+        // For direct skill-script jobs and simple reminder jobs, keep "cron" as the channel.
+        let (msg_channel, msg_chat_id) = if job.payload.kind == "agent_turn" && job.payload.deliver
+        {
+            let ch = job
+                .payload
+                .channel
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "cron".to_string());
+            let to = job
+                .payload
+                .to
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| job.id.clone());
             (ch, to)
         } else {
             ("cron".to_string(), job.id.clone())
@@ -323,7 +357,7 @@ impl CronService {
 
     pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
         info!("CronService started");
-        
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
 
         loop {

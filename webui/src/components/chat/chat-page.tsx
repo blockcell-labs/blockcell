@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Send, Loader2, Paperclip, X, FileAudio, Upload } from 'lucide-react';
+import { Send, Loader2, Paperclip, X, FileAudio, Upload, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useChatStore } from '@/lib/store';
 import { wsManager } from '@/lib/ws';
@@ -25,6 +25,7 @@ export function ChatPage() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -49,6 +50,12 @@ export function ChatPage() {
   useEffect(() => {
     inputRef.current?.focus();
   }, [currentSessionId]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setIsCancelling(false);
+    }
+  }, [isLoading]);
 
   async function loadSessionHistory(sessionId: string) {
     try {
@@ -187,6 +194,13 @@ export function ChatPage() {
     setLoading(true);
   }
 
+  function handleCancel() {
+    if (!isLoading || isCancelling) return;
+    const chatId = currentSessionId.replace(/_/g, ':');
+    wsManager.sendCancel(chatId);
+    setIsCancelling(true);
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -298,17 +312,19 @@ export function ChatPage() {
               rows={1}
             />
             <button
-              onClick={handleSend}
-              disabled={(!input.trim() && pendingFiles.length === 0) || isLoading || uploading}
+              onClick={isLoading ? handleCancel : handleSend}
+              disabled={uploading || (!isLoading && !input.trim() && pendingFiles.length === 0) || (isLoading && isCancelling)}
               className={cn(
                 'p-2 rounded-lg transition-colors',
-                (input.trim() || pendingFiles.length > 0) && !isLoading && !uploading
+                isLoading
+                  ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                  : (input.trim() || pendingFiles.length > 0) && !uploading
                   ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                   : 'text-muted-foreground'
               )}
             >
               {uploading ? <Loader2 size={18} className="animate-spin" /> :
-               isLoading ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+               isLoading ? (isCancelling ? <Loader2 size={18} className="animate-spin" /> : <Square size={18} />) : <Send size={18} />}
             </button>
           </div>
         </div>

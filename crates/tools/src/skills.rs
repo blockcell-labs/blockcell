@@ -33,7 +33,8 @@ impl Tool for ListSkillsTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let query = params.get("query")
+        let query = params
+            .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or("all");
 
@@ -48,7 +49,10 @@ impl Tool for ListSkillsTool {
             "learning" => self.get_learning_skills(&evolution_records_dir).await,
             "learned" => self.get_learned_skills(&evolution_records_dir).await,
             "available" => self.get_available_skills(&skills_dir, builtin_dir).await,
-            _ => self.get_all_skills(&skills_dir, builtin_dir, &evolution_records_dir).await,
+            _ => {
+                self.get_all_skills(&skills_dir, builtin_dir, &evolution_records_dir)
+                    .await
+            }
         }
     }
 }
@@ -57,15 +61,30 @@ impl ListSkillsTool {
     /// Get skills currently being evolved (Triggered, Generating, Generated, Auditing, etc.)
     async fn get_learning_skills(&self, records_dir: &std::path::Path) -> Result<Value> {
         let records = self.load_evolution_records(records_dir)?;
-        let learning: Vec<Value> = records.iter()
+        let learning: Vec<Value> = records
+            .iter()
             .filter(|r| {
                 let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                matches!(status, "Triggered" | "Generating" | "Generated" | "Auditing"
-                    | "AuditPassed" | "CompilePassed" | "DryRunPassed" | "Testing" | "TestPassed"
-                    | "Observing" | "RollingOut")
+                matches!(
+                    status,
+                    "Triggered"
+                        | "Generating"
+                        | "Generated"
+                        | "Auditing"
+                        | "AuditPassed"
+                        | "CompilePassed"
+                        | "DryRunPassed"
+                        | "Testing"
+                        | "TestPassed"
+                        | "Observing"
+                        | "RollingOut"
+                )
             })
             .map(|r| {
-                let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                let status = r
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
                 let status_desc = match status {
                     "Triggered" => "已触发，等待开始学习",
                     "Generating" => "正在生成改进方案",
@@ -102,7 +121,8 @@ impl ListSkillsTool {
     /// Get skills that completed evolution successfully
     async fn get_learned_skills(&self, records_dir: &std::path::Path) -> Result<Value> {
         let records = self.load_evolution_records(records_dir)?;
-        let learned: Vec<Value> = records.iter()
+        let learned: Vec<Value> = records
+            .iter()
             .filter(|r| {
                 let status = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 status == "Completed"
@@ -131,7 +151,11 @@ impl ListSkillsTool {
     }
 
     /// Get available loaded skills
-    async fn get_available_skills(&self, skills_dir: &std::path::Path, builtin_dir: Option<&std::path::Path>) -> Result<Value> {
+    async fn get_available_skills(
+        &self,
+        skills_dir: &std::path::Path,
+        builtin_dir: Option<&std::path::Path>,
+    ) -> Result<Value> {
         let mut skills = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
 
@@ -150,7 +174,12 @@ impl ListSkillsTool {
     }
 
     /// Scan a single directory for skill subdirectories.
-    fn scan_skills_dir(&self, dir: &std::path::Path, skills: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>) {
+    fn scan_skills_dir(
+        &self,
+        dir: &std::path::Path,
+        skills: &mut Vec<Value>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
         if !dir.exists() || !dir.is_dir() {
             return;
         }
@@ -158,7 +187,8 @@ impl ListSkillsTool {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name()
+                    let name = path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
                         .to_string();
@@ -169,14 +199,19 @@ impl ListSkillsTool {
                     }
 
                     let meta = self.read_skill_meta(&path);
-                    let has_skill_file = path.join("SKILL.rhai").exists()
-                        || path.join("SKILL.md").exists();
+                    let has_rhai = path.join("SKILL.rhai").exists();
+                    let has_py = path.join("SKILL.py").exists();
+                    let has_md = path.join("SKILL.md").exists();
+                    let has_skill_file = has_rhai || has_py || has_md;
 
                     if has_skill_file {
                         skills.push(json!({
                             "name": name,
                             "description": meta.get("description").unwrap_or(&Value::Null),
                             "always": meta.get("always").unwrap_or(&json!(false)),
+                            "has_rhai": has_rhai,
+                            "has_py": has_py,
+                            "has_md": has_md,
                             "path": path.display().to_string(),
                         }));
                     }
@@ -279,6 +314,7 @@ impl ListSkillsTool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_list_skills_schema() {
@@ -300,5 +336,55 @@ mod tests {
         let meta = tool.read_skill_meta(std::path::Path::new("/nonexistent"));
         assert!(meta.is_object());
         assert!(meta.as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_available_skills_includes_python_skill() {
+        let tool = ListSkillsTool;
+
+        let mut root = std::env::temp_dir();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        root.push(format!(
+            "blockcell_list_skills_py_{}_{}",
+            std::process::id(),
+            now_ns
+        ));
+
+        let py_skill_dir = root.join("py_demo_skill");
+        std::fs::create_dir_all(&py_skill_dir).expect("create py skill dir");
+        std::fs::write(py_skill_dir.join("SKILL.py"), "print('ok')\n").expect("write SKILL.py");
+        std::fs::write(
+            py_skill_dir.join("meta.yaml"),
+            "name: py_demo_skill\ndescription: python skill\n",
+        )
+        .expect("write meta.yaml");
+
+        let result = tool
+            .get_available_skills(&root, None)
+            .await
+            .expect("get available skills");
+
+        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(count, 1);
+
+        let names: Vec<String> = result
+            .get("available_skills")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        v.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(names.iter().any(|n| n == "py_demo_skill"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

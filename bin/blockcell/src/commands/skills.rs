@@ -39,15 +39,20 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
     for r in &records {
         if is_builtin_tool(&r.skill_name) {
             builtin_count += 1;
-            if !all { continue; }
+            if !all {
+                continue;
+            }
         }
-        if !seen.insert(r.skill_name.clone())
-            && !all { continue; }
+        if !seen.insert(r.skill_name.clone()) && !all {
+            continue;
+        }
 
         let status_str = format!("{:?}", r.status);
         match status_str.as_str() {
             "Completed" => learned.push(r),
-            "Failed" | "RolledBack" | "AuditFailed" | "DryRunFailed" | "TestFailed" => failed.push(r),
+            "Failed" | "RolledBack" | "AuditFailed" | "DryRunFailed" | "TestFailed" => {
+                failed.push(r)
+            }
             _ => learning.push(r),
         }
     }
@@ -59,8 +64,16 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                if p.is_dir()
+                    && (p.join("SKILL.rhai").exists()
+                        || p.join("SKILL.py").exists()
+                        || p.join("SKILL.md").exists())
+                {
+                    let name = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     available_skills.push((name, p));
                 }
             }
@@ -77,8 +90,13 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
 
     println!();
     println!("🧠 Skill Status");
-    println!("  📦 Loaded: {}  ✅ Learned: {}  🔄 Learning: {}  ❌ Failed: {}",
-        available_count, learned.len(), learning.len(), failed.len());
+    println!(
+        "  📦 Loaded: {}  ✅ Learned: {}  🔄 Learning: {}  ❌ Failed: {}",
+        available_count,
+        learned.len(),
+        learning.len(),
+        failed.len()
+    );
 
     if !available_skills.is_empty() {
         println!();
@@ -107,7 +125,12 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
         println!("  🔄 Learning in progress:");
         for r in &learning {
             let desc = status_desc(&format!("{:?}", r.status));
-            println!("    • {} [{}] ({})", r.skill_name, desc, format_ts(r.created_at));
+            println!(
+                "    • {} [{}] ({})",
+                r.skill_name,
+                desc,
+                format_ts(r.created_at)
+            );
         }
     }
 
@@ -121,7 +144,10 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
 
     if !all && builtin_count > 0 {
         println!();
-        println!("  ℹ️  {} built-in tool error records hidden (use --all to view, or clear to clean up)", builtin_count);
+        println!(
+            "  ℹ️  {} built-in tool error records hidden (use --all to view, or clear to clean up)",
+            builtin_count
+        );
     }
 
     if learning.is_empty() && learned.is_empty() && failed.is_empty() && builtin_count == 0 {
@@ -148,7 +174,14 @@ pub async fn show(name: &str) -> anyhow::Result<()> {
     println!("  Path: {}", skill_path.display());
 
     let disabled = skill_path.join(".disabled").exists();
-    println!("  Status: {}", if disabled { "⏸  disabled" } else { "✅ enabled" });
+    println!(
+        "  Status: {}",
+        if disabled {
+            "⏸  disabled"
+        } else {
+            "✅ enabled"
+        }
+    );
 
     let meta_path = skill_path.join("meta.yaml");
     if meta_path.exists() {
@@ -163,6 +196,10 @@ pub async fn show(name: &str) -> anyhow::Result<()> {
     if skill_path.join("SKILL.rhai").exists() {
         println!();
         println!("  Script: SKILL.rhai ✓");
+    }
+    if skill_path.join("SKILL.py").exists() {
+        println!();
+        println!("  Script: SKILL.py ✓");
     }
     if skill_path.join("SKILL.md").exists() {
         println!();
@@ -193,7 +230,12 @@ pub async fn show(name: &str) -> anyhow::Result<()> {
         println!();
         println!("  Evolution records ({}):", records.len());
         for r in records.iter().take(5) {
-            println!("    {} {:?} — {}", &r.id.chars().take(12).collect::<String>(), r.status, format_ts(r.created_at));
+            println!(
+                "    {} {:?} — {}",
+                &r.id.chars().take(12).collect::<String>(),
+                r.status,
+                format_ts(r.created_at)
+            );
         }
     }
 
@@ -238,7 +280,11 @@ pub async fn reload() -> anyhow::Result<()> {
     // Re-extract builtin skills (skips existing files)
     match super::embedded_skills::extract_to_workspace(&skills_dir) {
         Ok(new_skills) if !new_skills.is_empty() => {
-            println!("✓ Extracted {} new builtin skill(s): {}", new_skills.len(), new_skills.join(", "));
+            println!(
+                "✓ Extracted {} new builtin skill(s): {}",
+                new_skills.len(),
+                new_skills.join(", ")
+            );
         }
         Ok(_) => {}
         Err(e) => {
@@ -251,14 +297,21 @@ pub async fn reload() -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("SKILL.md").exists()) {
+                if p.is_dir()
+                    && (p.join("SKILL.rhai").exists()
+                        || p.join("SKILL.py").exists()
+                        || p.join("SKILL.md").exists())
+                {
                     count += 1;
                 }
             }
         }
     }
 
-    println!("✅ Skills directory refreshed. {} skill(s) available.", count);
+    println!(
+        "✅ Skills directory refreshed. {} skill(s) available.",
+        count
+    );
     println!("   Note: Running agent processes will pick up changes on their next tick.");
     Ok(())
 }
@@ -274,9 +327,10 @@ pub async fn clear() -> anyhow::Result<()> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "json")
-                    && std::fs::remove_file(&path).is_ok() {
-                        count += 1;
-                    }
+                    && std::fs::remove_file(&path).is_ok()
+                {
+                    count += 1;
+                }
             }
         }
     }
@@ -303,9 +357,10 @@ pub async fn forget(skill_name: &str) -> anyhow::Result<()> {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                             if record.skill_name == skill_name
-                                && std::fs::remove_file(&path).is_ok() {
-                                    count += 1;
-                                }
+                                && std::fs::remove_file(&path).is_ok()
+                            {
+                                count += 1;
+                            }
                         }
                     }
                 }
@@ -314,7 +369,10 @@ pub async fn forget(skill_name: &str) -> anyhow::Result<()> {
     }
 
     if count > 0 {
-        println!("✅ Deleted all records for skill `{}` ({} total)", skill_name, count);
+        println!(
+            "✅ Deleted all records for skill `{}` ({} total)",
+            skill_name, count
+        );
     } else {
         println!("⚠️  No records found for skill `{}`", skill_name);
     }
@@ -372,7 +430,7 @@ pub async fn learn(description: &str) -> anyhow::Result<()> {
 pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> {
     let paths = Paths::default();
     let config = Config::load_or_default(&paths)?;
-    
+
     // Resolve Hub URL
     let hub_url = std::env::var("BLOCKCELL_HUB_URL")
         .ok()
@@ -397,12 +455,12 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     };
 
     println!("🔍 Resolving skill {}@{}...", name, version_str);
-    
+
     let mut req = client.get(&info_url);
     if let Some(key) = &api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
     }
-    
+
     let resp = req.send().await?;
     if !resp.status().is_success() {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -410,7 +468,7 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
         }
         anyhow::bail!("Hub request failed: {}", resp.status());
     }
-    
+
     let info: serde_json::Value = resp.json().await?;
     let dist_url = info.get("dist_url").and_then(|v| v.as_str());
     let source_url = info.get("source_url").and_then(|v| v.as_str());
@@ -438,7 +496,7 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     // 3. Install to workspace/skills/<name>
     let skills_dir = paths.workspace().join("skills");
     let target_dir = skills_dir.join(name);
-    
+
     if target_dir.exists() {
         // Backup existing? Or overwrite? For now, simple overwrite logic (remove then create).
         // Check if it's a directory
@@ -454,7 +512,7 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     // Assuming zip file
     let cursor = std::io::Cursor::new(content);
     let mut archive = zip::ZipArchive::new(cursor)?;
-    
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let outpath = match file.enclosed_name() {
@@ -476,14 +534,20 @@ pub async fn install(name: &str, version: Option<String>) -> anyhow::Result<()> 
     }
 
     println!("✅ Skill '{}' installed successfully!", name);
-    println!("   Version: {}", info.get("version").and_then(|v| v.as_str()).unwrap_or("unknown"));
-    
+    println!(
+        "   Version: {}",
+        info.get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+    );
+
     Ok(())
 }
 
-/// Test a skill directory by validating meta.yaml and dry-running SKILL.rhai with mock tools.
+/// Test a skill directory by validating metadata and checking skill script syntax.
+/// Rhai skills run with mock tools; Python skills run syntax check only.
 pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::Result<()> {
-    use rhai::{Engine, Dynamic, Scope, Map};
+    use rhai::{Dynamic, Engine, Map, Scope};
     use std::sync::{Arc, Mutex};
 
     let skill_path = std::path::Path::new(path);
@@ -510,7 +574,11 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
         let meta_str = std::fs::read_to_string(&meta_path)?;
         // Basic structural check: required keys
         let required = ["name:", "description:", "triggers:", "capabilities:"];
-        let missing: Vec<&str> = required.iter().filter(|k| !meta_str.contains(*k)).copied().collect();
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|k| !meta_str.contains(*k))
+            .copied()
+            .collect();
         if missing.is_empty() {
             println!("✅ OK");
             pass += 1;
@@ -544,10 +612,25 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
 
     // ── Step 3: SKILL.rhai compile + mock run ────────────────────────────────
     let rhai_path = skill_path.join("SKILL.rhai");
+    let py_path = skill_path.join("SKILL.py");
     print!("  [3/3] SKILL.rhai compile ");
     if !rhai_path.exists() {
-        println!("❌ MISSING");
-        fail += 1;
+        if py_path.exists() {
+            print!("\r  [3/3] SKILL.py syntax    ");
+            match python_syntax_check(&py_path) {
+                Ok(_) => {
+                    println!("✅ OK");
+                    pass += 1;
+                }
+                Err(e) => {
+                    println!("❌ {}", e);
+                    fail += 1;
+                }
+            }
+        } else {
+            println!("❌ MISSING");
+            fail += 1;
+        }
         print_result(pass, fail);
         return Ok(());
     }
@@ -570,27 +653,33 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
     engine.set_max_operations(500_000);
 
     // mock call_tool(name, params) -> Map with success:true
-    engine.register_fn("call_tool", move |name: &str, _params: rhai::Map| -> Dynamic {
-        calls_c.lock().unwrap().push((name.to_string(), "{}".to_string()));
-        let mut m = Map::new();
-        m.insert("success".into(), Dynamic::from(true));
-        m.insert("content".into(), Dynamic::from("mock content"));
-        m.insert("results".into(), Dynamic::from(rhai::Array::new()));
-        m.insert("items".into(), Dynamic::from(rhai::Array::new()));
-        m.insert("emails".into(), Dynamic::from(rhai::Array::new()));
-        m.insert("tasks".into(), Dynamic::from(rhai::Array::new()));
-        m.insert("contacts".into(), Dynamic::from(rhai::Array::new()));
-        m.insert("data".into(), Dynamic::from("mock data"));
-        m.insert("error".into(), Dynamic::UNIT);
-        m.insert("text".into(), Dynamic::from("mock text"));
-        m.insert("path".into(), Dynamic::from("/tmp/mock_output"));
-        m.insert("output_path".into(), Dynamic::from("/tmp/mock_output"));
-        m.insert("url".into(), Dynamic::from("https://example.com"));
-        m.insert("id".into(), Dynamic::from("mock-id-001"));
-        m.insert("task_id".into(), Dynamic::from("mock-task-001"));
-        m.insert("total".into(), Dynamic::from(0_i64));
-        Dynamic::from_map(m)
-    });
+    engine.register_fn(
+        "call_tool",
+        move |name: &str, _params: rhai::Map| -> Dynamic {
+            calls_c
+                .lock()
+                .unwrap()
+                .push((name.to_string(), "{}".to_string()));
+            let mut m = Map::new();
+            m.insert("success".into(), Dynamic::from(true));
+            m.insert("content".into(), Dynamic::from("mock content"));
+            m.insert("results".into(), Dynamic::from(rhai::Array::new()));
+            m.insert("items".into(), Dynamic::from(rhai::Array::new()));
+            m.insert("emails".into(), Dynamic::from(rhai::Array::new()));
+            m.insert("tasks".into(), Dynamic::from(rhai::Array::new()));
+            m.insert("contacts".into(), Dynamic::from(rhai::Array::new()));
+            m.insert("data".into(), Dynamic::from("mock data"));
+            m.insert("error".into(), Dynamic::UNIT);
+            m.insert("text".into(), Dynamic::from("mock text"));
+            m.insert("path".into(), Dynamic::from("/tmp/mock_output"));
+            m.insert("output_path".into(), Dynamic::from("/tmp/mock_output"));
+            m.insert("url".into(), Dynamic::from("https://example.com"));
+            m.insert("id".into(), Dynamic::from("mock-id-001"));
+            m.insert("task_id".into(), Dynamic::from("mock-task-001"));
+            m.insert("total".into(), Dynamic::from(0_i64));
+            Dynamic::from_map(m)
+        },
+    );
 
     // mock set_output(map)
     engine.register_fn("set_output", move |val: Dynamic| {
@@ -615,7 +704,9 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
     // Returns empty string for unknown keys to avoid string-concat errors
     engine.register_fn("get_field", |map: Dynamic, key: &str| -> Dynamic {
         if let Some(m) = map.try_cast::<Map>() {
-            m.get(key).cloned().unwrap_or_else(|| Dynamic::from("".to_string()))
+            m.get(key)
+                .cloned()
+                .unwrap_or_else(|| Dynamic::from("".to_string()))
         } else {
             Dynamic::from("".to_string())
         }
@@ -644,39 +735,136 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
             print!("  [4/4] SKILL.rhai run     ");
 
             // Inject dummy variables from meta.yaml (all common ones as ())
-            let user_msg = input.as_deref().unwrap_or("test input from blockcell skills test");
+            let user_msg = input
+                .as_deref()
+                .unwrap_or("test input from blockcell skills test");
             let mut scope = Scope::new();
             scope.push("user_input", Dynamic::from(user_msg.to_string()));
 
             // Inject all common optional variables as ()
             let optional_vars = [
-                "query", "command", "url", "action", "topic", "path",
-                "source", "destination", "service", "platform", "provider",
-                "title", "body", "content", "text", "message",
-                "subject", "to", "from", "limit", "max_results",
-                "max_pages", "timeout", "cwd", "language", "format",
-                "algorithm", "format", "bits", "length", "type",
-                "owner", "repo", "branch", "tag", "version",
-                "entity_id", "domain", "payload", "topic", "host",
-                "ports", "record_type", "region", "bucket",
-                "instance_id", "database_id", "page_id", "event_id",
-                "graph_name", "name", "relation", "from_entity", "to_entity",
-                "voice", "backend", "output_path", "input_path",
-                "image_path", "audio_path", "chart_type",
-                "start", "end", "start_date", "end_date",
-                "task_id", "id", "uid", "contact_id",
-                "origin", "destination", "keyword", "location",
-                "mode", "radius", "recursive", "max_pages",
-                "action_type", "schedule", "task", "number",
-                "address", "query", "filter", "sort_by",
-                "channel", "service", "max_results", "source", "include_symbols",
-                "fetch_top", "watch", "depth", "bidirectional", "top_k",
-                "stats", "export_format", "camera_id", "priority", "count",
-                "include_uppercase", "include_numbers", "session", "browser",
-                "ms", "tab_id", "extract_type", "model", "output_format",
-                "auto_filter", "bold_header", "freeze_panes", "column_widths",
-                "slides", "sections", "sheets", "attachments", "tags",
-                "importance", "scope", "dedup_key", "expires_in_days",
+                "query",
+                "command",
+                "url",
+                "action",
+                "topic",
+                "path",
+                "source",
+                "destination",
+                "service",
+                "platform",
+                "provider",
+                "title",
+                "body",
+                "content",
+                "text",
+                "message",
+                "subject",
+                "to",
+                "from",
+                "limit",
+                "max_results",
+                "max_pages",
+                "timeout",
+                "cwd",
+                "language",
+                "format",
+                "algorithm",
+                "format",
+                "bits",
+                "length",
+                "type",
+                "owner",
+                "repo",
+                "branch",
+                "tag",
+                "version",
+                "entity_id",
+                "domain",
+                "payload",
+                "topic",
+                "host",
+                "ports",
+                "record_type",
+                "region",
+                "bucket",
+                "instance_id",
+                "database_id",
+                "page_id",
+                "event_id",
+                "graph_name",
+                "name",
+                "relation",
+                "from_entity",
+                "to_entity",
+                "voice",
+                "backend",
+                "output_path",
+                "input_path",
+                "image_path",
+                "audio_path",
+                "chart_type",
+                "start",
+                "end",
+                "start_date",
+                "end_date",
+                "task_id",
+                "id",
+                "uid",
+                "contact_id",
+                "origin",
+                "destination",
+                "keyword",
+                "location",
+                "mode",
+                "radius",
+                "recursive",
+                "max_pages",
+                "action_type",
+                "schedule",
+                "task",
+                "number",
+                "address",
+                "query",
+                "filter",
+                "sort_by",
+                "channel",
+                "service",
+                "max_results",
+                "source",
+                "include_symbols",
+                "fetch_top",
+                "watch",
+                "depth",
+                "bidirectional",
+                "top_k",
+                "stats",
+                "export_format",
+                "camera_id",
+                "priority",
+                "count",
+                "include_uppercase",
+                "include_numbers",
+                "session",
+                "browser",
+                "ms",
+                "tab_id",
+                "extract_type",
+                "model",
+                "output_format",
+                "auto_filter",
+                "bold_header",
+                "freeze_panes",
+                "column_widths",
+                "slides",
+                "sections",
+                "sheets",
+                "attachments",
+                "tags",
+                "importance",
+                "scope",
+                "dedup_key",
+                "expires_in_days",
             ];
             for var in &optional_vars {
                 if scope.get_value::<Dynamic>(var).is_none() {
@@ -694,18 +882,25 @@ pub async fn test(path: &str, input: Option<String>, verbose: bool) -> anyhow::R
                     let err_str = e.to_string();
                     if err_str.contains("Variable not found") {
                         // Extract the variable name from the error — Rhai format: Variable 'name' not found
-                        let var_name = err_str
-                            .split('\'').nth(1)
-                            .unwrap_or(&err_str);
-                        println!("⚠️  WARN — undefined variable '{}' (add to optional_vars list)", var_name);
+                        let var_name = err_str.split('\'').nth(1).unwrap_or(&err_str);
+                        println!(
+                            "⚠️  WARN — undefined variable '{}' (add to optional_vars list)",
+                            var_name
+                        );
                         println!("            Full error: {}", err_str);
                         // Treat as warning only — the script compiled and mostly ran fine
                         pass += 1;
-                        errors_c.lock().unwrap().push(format!("Warn (undef var): {}", var_name));
+                        errors_c
+                            .lock()
+                            .unwrap()
+                            .push(format!("Warn (undef var): {}", var_name));
                     } else {
                         println!("❌ Runtime error: {}", e);
                         fail += 1;
-                        errors_c.lock().unwrap().push(format!("Runtime: {}", err_str));
+                        errors_c
+                            .lock()
+                            .unwrap()
+                            .push(format!("Runtime: {}", err_str));
                     }
                 }
             }
@@ -748,9 +943,55 @@ fn print_result(pass: usize, fail: usize) {
     if fail == 0 {
         println!("  ✅ PASS  ({}/{} checks passed)", pass, total);
     } else {
-        println!("  ❌ FAIL  ({}/{} checks passed, {} failed)", pass, total, fail);
+        println!(
+            "  ❌ FAIL  ({}/{} checks passed, {} failed)",
+            pass, total, fail
+        );
     }
     println!();
+}
+
+fn python_syntax_check(py_path: &std::path::Path) -> std::result::Result<(), String> {
+    let candidates = ["python3", "python"];
+    let mut last_output: Option<String> = None;
+    let mut has_runtime = false;
+
+    for bin in candidates {
+        match std::process::Command::new(bin)
+            .arg("-m")
+            .arg("py_compile")
+            .arg(py_path)
+            .output()
+        {
+            Ok(output) => {
+                has_runtime = true;
+                if output.status.success() {
+                    return Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    format!("{} returned non-zero status", bin)
+                };
+                last_output = Some(detail);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(e) => {
+                return Err(format!("failed to run python compiler: {}", e));
+            }
+        }
+    }
+
+    if !has_runtime {
+        return Err("python runtime not found (python3/python)".to_string());
+    }
+    Err(last_output.unwrap_or_else(|| "python syntax check failed".to_string()))
 }
 
 /// Batch-test all skills under a directory.
@@ -764,7 +1005,10 @@ pub async fn test_all(dir: &str, input: Option<String>, verbose: bool) -> anyhow
         .flatten()
         .filter(|e| {
             let p = e.path();
-            p.is_dir() && (p.join("SKILL.rhai").exists() || p.join("meta.yaml").exists())
+            p.is_dir()
+                && (p.join("SKILL.rhai").exists()
+                    || p.join("SKILL.py").exists()
+                    || p.join("meta.yaml").exists())
         })
         .collect();
 
@@ -783,25 +1027,28 @@ pub async fn test_all(dir: &str, input: Option<String>, verbose: bool) -> anyhow
 
     for entry in &entries {
         let skill_path = entry.path();
-        let name = skill_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let name = skill_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
 
         // Run test and capture whether it passed
         let result = test(skill_path.to_str().unwrap_or(""), input.clone(), verbose).await;
         match result {
             Ok(_) => {
-                // Re-check by looking at SKILL.rhai compile status
-                // We rely on the function's own output; for batch we count by whether files exist + compile OK
-                let rhai_ok = {
+                // Re-check by script type (rhai compile / python syntax check).
+                let script_ok = {
                     let rhai_path = skill_path.join("SKILL.rhai");
                     if rhai_path.exists() {
                         let script = std::fs::read_to_string(&rhai_path).unwrap_or_default();
                         let engine = rhai::Engine::new();
                         engine.compile(&script).is_ok()
                     } else {
-                        false
+                        let py_path = skill_path.join("SKILL.py");
+                        py_path.exists() && python_syntax_check(&py_path).is_ok()
                     }
                 };
-                if rhai_ok {
+                if script_ok {
                     passed += 1;
                 } else {
                     failed_names.push(name.to_string());
@@ -863,7 +1110,11 @@ fn read_skill_description(skill_dir: &std::path::Path) -> String {
     if json.exists() {
         if let Ok(content) = std::fs::read_to_string(&json) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                return v.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                return v
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
             }
         }
     }
@@ -871,7 +1122,7 @@ fn read_skill_description(skill_dir: &std::path::Path) -> String {
 }
 
 fn format_ts(ts: i64) -> String {
-    use chrono::{TimeZone, Local};
+    use chrono::{Local, TimeZone};
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
         _ => "unknown".to_string(),

@@ -2,42 +2,50 @@ use blockcell_agent::{
     AgentRuntime, CapabilityRegistryAdapter, ConfirmRequest, CoreEvolutionAdapter,
     MemoryStoreAdapter, MessageBus, ProviderLLMBridge, TaskManager,
 };
-use blockcell_skills::{EvolutionService, EvolutionServiceConfig};
-use blockcell_channels::ChannelManager;
-#[cfg(feature = "telegram")]
-use blockcell_channels::telegram::TelegramChannel;
-#[cfg(feature = "whatsapp")]
-use blockcell_channels::whatsapp::WhatsAppChannel;
+#[cfg(feature = "dingtalk")]
+use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "discord")]
+use blockcell_channels::discord::DiscordChannel;
 #[cfg(feature = "feishu")]
 use blockcell_channels::feishu::FeishuChannel;
 #[cfg(feature = "slack")]
 use blockcell_channels::slack::SlackChannel;
-#[cfg(feature = "discord")]
-use blockcell_channels::discord::DiscordChannel;
-#[cfg(feature = "dingtalk")]
-use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "telegram")]
+use blockcell_channels::telegram::TelegramChannel;
 #[cfg(feature = "wecom")]
 use blockcell_channels::wecom::WeComChannel;
+#[cfg(feature = "whatsapp")]
+use blockcell_channels::whatsapp::WhatsAppChannel;
+use blockcell_channels::ChannelManager;
 use blockcell_core::{Config, InboundMessage, Paths};
-use blockcell_scheduler::{CronService, CronJob, JobSchedule, JobPayload, JobState, ScheduleKind, HeartbeatService, GhostService, GhostServiceConfig};
+use blockcell_scheduler::{
+    CronJob, CronService, GhostService, GhostServiceConfig, HeartbeatService, JobPayload,
+    JobSchedule, JobState, ScheduleKind,
+};
 use blockcell_skills::{new_registry_handle, CoreEvolution};
+use blockcell_skills::{EvolutionService, EvolutionServiceConfig};
 use blockcell_storage::{MemoryStore, SessionStore};
-use blockcell_tools::{CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry};
-use std::sync::Arc;
+use blockcell_tools::{
+    CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use axum::{
-    extract::{State, Path as AxumPath, Query, ws::{Message as WsMessage, WebSocket, WebSocketUpgrade}},
-    http::{Request, StatusCode, header},
+    extract::{
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        Path as AxumPath, Query, State,
+    },
+    http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put, delete},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use rust_embed::Embed;
+use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 // ---------------------------------------------------------------------------
@@ -57,10 +65,7 @@ enum WsEvent {
         duration_ms: u64,
     },
     #[serde(rename = "error")]
-    Error {
-        chat_id: String,
-        message: String,
-    },
+    Error { chat_id: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -147,8 +152,7 @@ fn token_from_query(req: &Request<axum::body::Body>) -> Option<String> {
     let q = req.uri().query()?;
     for pair in q.split('&') {
         let (k, v) = pair.split_once('=')?;
-        
-        
+
         if k == "token" {
             return url_decode(v);
         }
@@ -219,7 +223,11 @@ async fn auth_middleware(
     if authorized {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, "Unauthorized: invalid or missing Bearer token").into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized: invalid or missing Bearer token",
+        )
+            .into_response()
     }
 }
 
@@ -240,9 +248,15 @@ struct ChatRequest {
     media: Vec<String>,
 }
 
-fn default_channel() -> String { "ws".to_string() }
-fn default_sender() -> String { "user".to_string() }
-fn default_chat() -> String { "default".to_string() }
+fn default_channel() -> String {
+    "ws".to_string()
+}
+fn default_sender() -> String {
+    "user".to_string()
+}
+fn default_chat() -> String {
+    "default".to_string()
+}
 
 #[derive(Serialize)]
 struct ChatResponse {
@@ -281,7 +295,11 @@ async fn handle_login(
     Json(req): Json<LoginRequest>,
 ) -> Response {
     if !secure_eq(&req.password, &state.web_password) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Invalid password" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Invalid password" })),
+        )
+            .into_response();
     }
     // Return the api_token as the Bearer token for subsequent API requests
     match &state.api_token {
@@ -290,7 +308,11 @@ async fn handle_login(
         }
         _ => {
             // Should never happen after the defensive guarantee above
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Server token not configured" }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Server token not configured" })),
+            )
+                .into_response()
         }
     }
 }
@@ -417,7 +439,12 @@ async fn handle_sessions_list(
                     .unwrap_or_default();
 
                 let message_count = std::fs::read_to_string(&path)
-                    .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count().saturating_sub(1))
+                    .map(|c| {
+                        c.lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .count()
+                            .saturating_sub(1)
+                    })
                     .unwrap_or(0);
 
                 let name = meta
@@ -476,30 +503,41 @@ async fn handle_session_get(
     let session_key = session_id.replace('_', ":");
     match state.session_store.load(&session_key) {
         Ok(messages) if !messages.is_empty() => {
-            let msgs: Vec<serde_json::Value> = messages.iter().map(|m| {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": m.content,
-                    "tool_calls": m.tool_calls,
-                    "tool_call_id": m.tool_call_id,
-                    "reasoning_content": m.reasoning_content,
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                        "tool_calls": m.tool_calls,
+                        "tool_call_id": m.tool_call_id,
+                        "reasoning_content": m.reasoning_content,
+                    })
                 })
-            }).collect();
-            (StatusCode::OK, Json(serde_json::json!({
-                "session_id": session_id,
-                "messages": msgs,
-            }))).into_response()
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": session_id,
+                    "messages": msgs,
+                })),
+            )
+                .into_response()
         }
-        Ok(_) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "error": "Session not found or empty"
-            }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "error": format!("Session not found: {}", e)
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -551,9 +589,15 @@ async fn handle_session_rename(
             serde_json::Map::new()
         };
 
-        meta.insert(session_id_clone.clone(), serde_json::json!({ "name": name.clone() }));
+        meta.insert(
+            session_id_clone.clone(),
+            serde_json::json!({ "name": name.clone() }),
+        );
 
-        match std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()) {
+        match std::fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+        ) {
             Ok(_) => serde_json::json!({
                 "status": "ok",
                 "session_id": session_id_clone,
@@ -649,15 +693,31 @@ async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
             WsMessage::Text(text) => {
                 // Parse structured message
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("chat");
+                    let msg_type = parsed
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("chat");
 
                     match msg_type {
                         "chat" => {
-                            let content = parsed.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let chat_id = parsed.get("chat_id").and_then(|v| v.as_str()).unwrap_or("default").to_string();
-                            let media: Vec<String> = parsed.get("media")
+                            let content = parsed
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let chat_id = parsed
+                                .get("chat_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("default")
+                                .to_string();
+                            let media: Vec<String> = parsed
+                                .get("media")
                                 .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
                                 .unwrap_or_default();
 
                             let inbound = InboundMessage {
@@ -675,14 +735,22 @@ async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
                                     serde_json::to_string(&WsEvent::Error {
                                         chat_id: "default".to_string(),
                                         message: format!("{}", e),
-                                    }).unwrap_or_default()
+                                    })
+                                    .unwrap_or_default(),
                                 );
                                 break;
                             }
                         }
                         "confirm_response" => {
-                            let request_id = parsed.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let approved = parsed.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let request_id = parsed
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let approved = parsed
+                                .get("approved")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
                             if !request_id.is_empty() {
                                 let mut map = state.pending_confirms.lock().await;
                                 if let Some(tx) = map.remove(&request_id) {
@@ -692,7 +760,34 @@ async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
                             }
                         }
                         "cancel" => {
-                            debug!("Received cancel via WS");
+                            let chat_id = parsed
+                                .get("chat_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("default")
+                                .to_string();
+                            debug!(chat_id = %chat_id, "Received cancel via WS");
+
+                            let inbound = InboundMessage {
+                                channel: "ws".to_string(),
+                                sender_id: "user".to_string(),
+                                chat_id: chat_id.clone(),
+                                content: "[cancel]".to_string(),
+                                media: vec![],
+                                metadata: serde_json::json!({
+                                    "cancel": true,
+                                }),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            };
+
+                            if let Err(e) = inbound_tx.send(inbound).await {
+                                let _ = ws_broadcast.send(
+                                    serde_json::to_string(&WsEvent::Error {
+                                        chat_id,
+                                        message: format!("{}", e),
+                                    })
+                                    .unwrap_or_default(),
+                                );
+                            }
                         }
                         _ => {
                             // Fallback: treat as plain chat
@@ -760,22 +855,22 @@ async fn handle_config_update(
     let config_path = state.paths.config_file();
 
     match serde_json::from_value::<Config>(req.config) {
-        Ok(new_config) => {
-            match new_config.save(&config_path) {
-                Ok(_) => Json(serde_json::json!({ "status": "ok", "message": "Config updated. Restart gateway to apply changes." })),
-                Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
-            }
-        }
-        Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("Invalid config: {}", e) })),
+        Ok(new_config) => match new_config.save(&config_path) {
+            Ok(_) => Json(
+                serde_json::json!({ "status": "ok", "message": "Config updated. Restart gateway to apply changes." }),
+            ),
+            Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
+        },
+        Err(e) => Json(
+            serde_json::json!({ "status": "error", "message": format!("Invalid config: {}", e) }),
+        ),
     }
 }
 
 /// POST /v1/config/reload — reload config from disk (validates JSON format)
-async fn handle_config_reload(
-    State(state): State<GatewayState>,
-) -> impl IntoResponse {
+async fn handle_config_reload(State(state): State<GatewayState>) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    
+
     // 读取并验证配置文件
     match tokio::fs::read_to_string(&config_path).await {
         Ok(content) => {
@@ -784,36 +879,35 @@ async fn handle_config_reload(
                 Ok(json_val) => {
                     // 验证配置结构
                     match serde_json::from_value::<Config>(json_val) {
-                        Ok(_) => {
-                            Json(serde_json::json!({
-                                "status": "ok",
-                                "message": "Config validated successfully. Note: Full reload requires gateway restart for some settings."
-                            }))
-                        }
+                        Ok(_) => Json(serde_json::json!({
+                            "status": "ok",
+                            "message": "Config validated successfully. Note: Full reload requires gateway restart for some settings."
+                        })),
                         Err(e) => Json(serde_json::json!({
                             "status": "error",
                             "message": format!("Invalid config structure: {}", e)
-                        }))
+                        })),
                     }
                 }
                 Err(e) => Json(serde_json::json!({
                     "status": "error",
                     "message": format!("Invalid JSON format: {}", e)
-                }))
+                })),
             }
         }
         Err(e) => Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to read config file: {}", e)
-        }))
+        })),
     }
 }
 
 /// POST /v1/config/test-provider — test a provider connection
-async fn handle_config_test_provider(
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let model = req.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-3.5-turbo");
+async fn handle_config_test_provider(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gpt-3.5-turbo");
     let api_key = req.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
     let api_base = req.get("api_base").and_then(|v| v.as_str());
     let proxy = req.get("proxy").and_then(|v| v.as_str());
@@ -838,7 +932,9 @@ async fn handle_config_test_provider(
     use blockcell_providers::Provider;
     let test_messages = vec![blockcell_core::types::ChatMessage::user("Say 'ok'")];
     match provider.chat(&test_messages, &[]).await {
-        Ok(_) => Json(serde_json::json!({ "status": "ok", "message": "Provider connection successful" })),
+        Ok(_) => {
+            Json(serde_json::json!({ "status": "ok", "message": "Provider connection successful" }))
+        }
         Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
     }
 }
@@ -908,7 +1004,10 @@ async fn handle_ghost_activity(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sessions_dir = state.paths.sessions_dir();
-    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(20);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
 
     let mut activities: Vec<serde_json::Value> = Vec::new();
 
@@ -976,7 +1075,9 @@ async fn handle_ghost_activity(
                                 if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
                                     summary = content.chars().take(500).collect();
                                 }
-                                if let Some(calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                                if let Some(calls) =
+                                    msg.get("tool_calls").and_then(|v| v.as_array())
+                                {
                                     for call in calls {
                                         if let Some(name) = call
                                             .get("function")
@@ -1126,17 +1227,20 @@ async fn handle_memory_stats(State(state): State<GatewayState>) -> impl IntoResp
 /// GET /v1/tools — list all registered tools
 async fn handle_tools(State(state): State<GatewayState>) -> impl IntoResponse {
     let names = state.tool_registry.tool_names();
-    let tools: Vec<serde_json::Value> = names.iter().map(|name| {
-        if let Some(tool) = state.tool_registry.get(name) {
-            let schema = tool.schema();
-            serde_json::json!({
-                "name": schema.name,
-                "description": schema.description,
-            })
-        } else {
-            serde_json::json!({ "name": name })
-        }
-    }).collect();
+    let tools: Vec<serde_json::Value> = names
+        .iter()
+        .map(|name| {
+            if let Some(tool) = state.tool_registry.get(name) {
+                let schema = tool.schema();
+                serde_json::json!({
+                    "name": schema.name,
+                    "description": schema.description,
+                })
+            } else {
+                serde_json::json!({ "name": name })
+            }
+        })
+        .collect();
 
     let count = tools.len();
     Json(serde_json::json!({
@@ -1157,12 +1261,14 @@ async fn handle_skills(State(state): State<GatewayState>) -> impl IntoResponse {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let meta_path = entry.path().join("meta.yaml");
                 let has_rhai = entry.path().join("SKILL.rhai").exists();
+                let has_py = entry.path().join("SKILL.py").exists();
                 let has_md = entry.path().join("SKILL.md").exists();
 
                 let mut skill_info = serde_json::json!({
                     "name": name,
                     "source": "user",
                     "has_rhai": has_rhai,
+                    "has_py": has_py,
                     "has_md": has_md,
                 });
 
@@ -1189,15 +1295,20 @@ async fn handle_skills(State(state): State<GatewayState>) -> impl IntoResponse {
             if entry.path().is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 // Skip if already in user skills
-                if skills.iter().any(|s| s.get("name").and_then(|v| v.as_str()) == Some(&name)) {
+                if skills
+                    .iter()
+                    .any(|s| s.get("name").and_then(|v| v.as_str()) == Some(&name))
+                {
                     continue;
                 }
                 let has_rhai = entry.path().join("SKILL.rhai").exists();
+                let has_py = entry.path().join("SKILL.py").exists();
                 let has_md = entry.path().join("SKILL.md").exists();
                 skills.push(serde_json::json!({
                     "name": name,
                     "source": "builtin",
                     "has_rhai": has_rhai,
+                    "has_py": has_py,
                     "has_md": has_md,
                 }));
             }
@@ -1229,6 +1340,7 @@ async fn handle_skills_search(
         let name = dir.file_name()?.to_string_lossy().to_string();
         let meta_path = dir.join("meta.yaml");
         let has_rhai = dir.join("SKILL.rhai").exists();
+        let has_py = dir.join("SKILL.py").exists();
         let has_md = dir.join("SKILL.md").exists();
 
         let mut score = 0u32;
@@ -1276,8 +1388,14 @@ async fn handle_skills_search(
                     }
                     if in_triggers {
                         if line.starts_with("  - ") || line.starts_with("- ") {
-                            let t = line.trim().trim_start_matches("- ").trim_matches('"').trim_matches('\'');
-                            if !triggers_str.is_empty() { triggers_str.push_str(", "); }
+                            let t = line
+                                .trim()
+                                .trim_start_matches("- ")
+                                .trim_matches('"')
+                                .trim_matches('\'');
+                            if !triggers_str.is_empty() {
+                                triggers_str.push_str(", ");
+                            }
                             triggers_str.push_str(t);
                         } else if !line.starts_with(' ') && !line.is_empty() {
                             in_triggers = false;
@@ -1311,6 +1429,7 @@ async fn handle_skills_search(
             "name": name,
             "source": source,
             "has_rhai": has_rhai,
+            "has_py": has_py,
             "has_md": has_md,
             "description": description,
             "triggers": triggers_str,
@@ -1338,7 +1457,10 @@ async fn handle_skills_search(
         for entry in entries.flatten() {
             if entry.path().is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if results.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name)) {
+                if results
+                    .iter()
+                    .any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name))
+                {
                     continue;
                 }
                 if let Some(result) = check_skill(&entry.path(), "builtin") {
@@ -1457,12 +1579,18 @@ async fn handle_pool_status(State(state): State<GatewayState>) -> impl IntoRespo
 
     // Build pool entries from config for status display
     let entries: Vec<serde_json::Value> = if using_pool {
-        defaults.model_pool.iter().map(|e| serde_json::json!({
-            "model": e.model,
-            "provider": e.provider,
-            "weight": e.weight,
-            "priority": e.priority,
-        })).collect()
+        defaults
+            .model_pool
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "model": e.model,
+                    "provider": e.provider,
+                    "weight": e.weight,
+                    "priority": e.priority,
+                })
+            })
+            .collect()
     } else {
         // Single model legacy mode
         vec![serde_json::json!({
@@ -1551,7 +1679,9 @@ async fn handle_persona_write(
     }
     let path = state.paths.workspace().join(&req.name);
     match std::fs::write(&path, &req.content) {
-        Ok(_) => Json(serde_json::json!({ "status": "ok", "name": req.name, "size": req.content.len() })),
+        Ok(_) => {
+            Json(serde_json::json!({ "status": "ok", "name": req.name, "size": req.content.len() }))
+        }
         Err(e) => Json(serde_json::json!({ "status": "error", "message": format!("{}", e) })),
     }
 }
@@ -1569,7 +1699,10 @@ async fn handle_evolution_trigger(
 ) -> impl IntoResponse {
     // Use EvolutionService so active_evolutions is properly updated and tick() can drive the pipeline
     let evo = state.evolution_service.lock().await;
-    match evo.trigger_manual_evolution(&req.skill_name, &req.description).await {
+    match evo
+        .trigger_manual_evolution(&req.skill_name, &req.description)
+        .await
+    {
         Ok(evolution_id) => {
             // Broadcast WS event so WebUI refreshes immediately without waiting for 10s poll
             let event = serde_json::json!({
@@ -1604,7 +1737,11 @@ async fn handle_evolution_delete(
         let skill_name = std::fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .and_then(|v| v.get("skill_name").and_then(|s| s.as_str()).map(|s| s.to_string()));
+            .and_then(|v| {
+                v.get("skill_name")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            });
 
         return match std::fs::remove_file(&path) {
             Ok(_) => {
@@ -1614,10 +1751,13 @@ async fn handle_evolution_delete(
                     let _ = evo_guard.delete_records_by_skill(sn).await;
                 }
                 // Broadcast WS event for real-time UI refresh
-                let _ = state.ws_broadcast.send(serde_json::json!({
-                    "type": "evolution_deleted",
-                    "id": evolution_id,
-                }).to_string());
+                let _ = state.ws_broadcast.send(
+                    serde_json::json!({
+                        "type": "evolution_deleted",
+                        "id": evolution_id,
+                    })
+                    .to_string(),
+                );
                 Json(serde_json::json!({ "status": "deleted", "id": evolution_id }))
             }
             Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
@@ -1630,10 +1770,13 @@ async fn handle_evolution_delete(
     if cap_path.exists() {
         return match std::fs::remove_file(&cap_path) {
             Ok(_) => {
-                let _ = state.ws_broadcast.send(serde_json::json!({
-                    "type": "evolution_deleted",
-                    "id": evolution_id,
-                }).to_string());
+                let _ = state.ws_broadcast.send(
+                    serde_json::json!({
+                        "type": "evolution_deleted",
+                        "id": evolution_id,
+                    })
+                    .to_string(),
+                );
                 Json(serde_json::json!({ "status": "deleted", "id": evolution_id }))
             }
             Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
@@ -1762,6 +1905,7 @@ async fn handle_evolution_test_suggest(
     let skill_md = std::fs::read_to_string(base_dir.join("SKILL.md")).unwrap_or_default();
     let meta_yaml = std::fs::read_to_string(base_dir.join("meta.yaml")).unwrap_or_default();
     let skill_rhai = std::fs::read_to_string(base_dir.join("SKILL.rhai")).ok();
+    let skill_py = std::fs::read_to_string(base_dir.join("SKILL.py")).ok();
 
     // Build a concise context for the LLM
     let mut context = format!(
@@ -1772,6 +1916,10 @@ async fn handle_evolution_test_suggest(
         // Include first 80 lines of rhai for context (function signatures, comments)
         let rhai_preview: String = rhai.lines().take(80).collect::<Vec<_>>().join("\n");
         context.push_str(&format!("\n\n## SKILL.rhai (preview)\n{}", rhai_preview));
+    }
+    if let Some(py) = &skill_py {
+        let py_preview: String = py.lines().take(80).collect::<Vec<_>>().join("\n");
+        context.push_str(&format!("\n\n## SKILL.py (preview)\n{}", py_preview));
     }
 
     let system_prompt = "You are a test case generation assistant. Based on the provided skill description, generate a specific, ready-to-use test input.\n\
@@ -1808,7 +1956,10 @@ async fn handle_evolution_test_suggest(
         let r = p.chat(&messages, &[]).await;
         match &r {
             Ok(_) => suggestion_pool.report(pidx, blockcell_providers::CallResult::Success),
-            Err(e) => suggestion_pool.report(pidx, blockcell_providers::ProviderPool::classify_error(&format!("{}", e))),
+            Err(e) => suggestion_pool.report(
+                pidx,
+                blockcell_providers::ProviderPool::classify_error(&format!("{}", e)),
+            ),
         }
         r
     } else {
@@ -1834,7 +1985,11 @@ async fn handle_evolution_versions(
     State(state): State<GatewayState>,
     AxumPath(skill_name): AxumPath<String>,
 ) -> impl IntoResponse {
-    let history_file = state.paths.skills_dir().join(&skill_name).join("version_history.json");
+    let history_file = state
+        .paths
+        .skills_dir()
+        .join(&skill_name)
+        .join("version_history.json");
     if !history_file.exists() {
         return Json(serde_json::json!({
             "skill_name": skill_name,
@@ -1844,16 +1999,14 @@ async fn handle_evolution_versions(
     }
 
     match std::fs::read_to_string(&history_file) {
-        Ok(content) => {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(history) => Json(history),
-                Err(_) => Json(serde_json::json!({
-                    "skill_name": skill_name,
-                    "versions": [],
-                    "current_version": "v1",
-                })),
-            }
-        }
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(history) => Json(history),
+            Err(_) => Json(serde_json::json!({
+                "skill_name": skill_name,
+                "versions": [],
+                "current_version": "v1",
+            })),
+        },
         Err(_) => Json(serde_json::json!({
             "skill_name": skill_name,
             "versions": [],
@@ -1868,7 +2021,9 @@ async fn handle_evolution_tool_versions(
     AxumPath(capability_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let safe_id = capability_id.replace('.', "_");
-    let history_file = state.paths.workspace()
+    let history_file = state
+        .paths
+        .workspace()
         .join("tool_versions")
         .join(format!("{}_history.json", safe_id));
 
@@ -1881,16 +2036,14 @@ async fn handle_evolution_tool_versions(
     }
 
     match std::fs::read_to_string(&history_file) {
-        Ok(content) => {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(history) => Json(history),
-                Err(_) => Json(serde_json::json!({
-                    "capability_id": capability_id,
-                    "versions": [],
-                    "current_version": "v0",
-                })),
-            }
-        }
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(history) => Json(history),
+            Err(_) => Json(serde_json::json!({
+                "capability_id": capability_id,
+                "versions": [],
+                "current_version": "v0",
+            })),
+        },
         Err(_) => Json(serde_json::json!({
             "capability_id": capability_id,
             "versions": [],
@@ -1918,7 +2071,8 @@ async fn handle_evolution_summary(State(state): State<GatewayState>) -> impl Int
                         let status = record.get("status").and_then(|s| s.as_str()).unwrap_or("");
                         match status {
                             "Completed" => skill_completed += 1,
-                            "Failed" | "RolledBack" | "AuditFailed" | "CompileFailed" | "DryRunFailed" | "TestFailed" => skill_failed += 1,
+                            "Failed" | "RolledBack" | "AuditFailed" | "CompileFailed"
+                            | "DryRunFailed" | "TestFailed" => skill_failed += 1,
                             _ => skill_active += 1,
                         }
                     }
@@ -1961,12 +2115,16 @@ async fn handle_evolution_summary(State(state): State<GatewayState>) -> impl Int
     let mut builtin_skills = 0usize;
     if let Ok(entries) = std::fs::read_dir(state.paths.skills_dir()) {
         for entry in entries.flatten() {
-            if entry.path().is_dir() { user_skills += 1; }
+            if entry.path().is_dir() {
+                user_skills += 1;
+            }
         }
     }
     if let Ok(entries) = std::fs::read_dir(state.paths.builtin_skills_dir()) {
         for entry in entries.flatten() {
-            if entry.path().is_dir() { builtin_skills += 1; }
+            if entry.path().is_dir() {
+                builtin_skills += 1;
+            }
         }
     }
 
@@ -1999,7 +2157,9 @@ async fn handle_stats(State(state): State<GatewayState>) -> impl IntoResponse {
     let (queued, running, completed, failed) = state.task_manager.summary().await;
 
     // Memory items count
-    let memory_items: i64 = state.memory_store.as_ref()
+    let memory_items: i64 = state
+        .memory_store
+        .as_ref()
         .and_then(|s| s.stats_json().ok())
         .and_then(|v| v.get("total_active").and_then(|n| n.as_i64()))
         .unwrap_or(0);
@@ -2196,7 +2356,8 @@ async fn handle_channel_update(
 
         std::fs::write(&config_path, serde_json::to_string_pretty(&root)?)?;
         Ok(serde_json::json!({ "status": "ok", "channel": ch_key }))
-    })().await;
+    })()
+    .await;
 
     match result {
         Ok(v) => Json(v),
@@ -2239,7 +2400,11 @@ async fn handle_skill_delete(
 async fn handle_hub_skills(State(state): State<GatewayState>) -> impl IntoResponse {
     let hub_url = match state.config.community_hub_url() {
         Some(u) => u,
-        None => return Json(serde_json::json!({ "error": "Community hub not configured", "skills": [] })),
+        None => {
+            return Json(
+                serde_json::json!({ "error": "Community hub not configured", "skills": [] }),
+            )
+        }
     };
     let api_key = state.config.community_hub_api_key();
     let url = format!("{}/v1/skills/trending", hub_url);
@@ -2257,8 +2422,8 @@ async fn handle_hub_skills(State(state): State<GatewayState>) -> impl IntoRespon
     match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             let body = resp.text().await.unwrap_or_default();
-            let val: serde_json::Value = serde_json::from_str(&body)
-                .unwrap_or(serde_json::json!({ "skills": [] }));
+            let val: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::json!({ "skills": [] }));
             Json(val)
         }
         Ok(resp) => {
@@ -2276,7 +2441,11 @@ async fn handle_hub_skill_install(
 ) -> impl IntoResponse {
     let hub_url = match state.config.community_hub_url() {
         Some(u) => u,
-        None => return Json(serde_json::json!({ "status": "error", "message": "Community hub not configured" })),
+        None => {
+            return Json(
+                serde_json::json!({ "status": "error", "message": "Community hub not configured" }),
+            )
+        }
     };
     let api_key = state.config.community_hub_api_key();
     let skills_dir = state.paths.skills_dir();
@@ -2287,7 +2456,11 @@ async fn handle_hub_skill_install(
         .unwrap_or_default();
 
     // Fetch skill metadata
-    let info_url = format!("{}/v1/skills/{}/latest", hub_url, urlencoding::encode(&skill_name));
+    let info_url = format!(
+        "{}/v1/skills/{}/latest",
+        hub_url,
+        urlencoding::encode(&skill_name)
+    );
     let mut req = client.get(&info_url);
     if let Some(k) = &api_key {
         req = req.header("Authorization", format!("Bearer {}", k));
@@ -2298,15 +2471,29 @@ async fn handle_hub_skill_install(
     };
 
     // Resolve download URL
-    let dist_url = info.get("dist_url").and_then(|v| v.as_str())
+    let dist_url = info
+        .get("dist_url")
+        .and_then(|v| v.as_str())
         .or_else(|| info.get("source_url").and_then(|v| v.as_str()));
-    let download_url = dist_url.map(|u| {
-        if u.starts_with("http://") || u.starts_with("https://") {
-            u.to_string()
-        } else {
-            format!("{}/{}", hub_url.trim_end_matches('/'), u.trim_start_matches('/'))
-        }
-    }).unwrap_or_else(|| format!("{}/v1/skills/{}/download", hub_url, urlencoding::encode(&skill_name)));
+    let download_url = dist_url
+        .map(|u| {
+            if u.starts_with("http://") || u.starts_with("https://") {
+                u.to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    hub_url.trim_end_matches('/'),
+                    u.trim_start_matches('/')
+                )
+            }
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "{}/v1/skills/{}/download",
+                hub_url,
+                urlencoding::encode(&skill_name)
+            )
+        });
 
     let mut dl_req = client.get(&download_url);
     if let Some(k) = &api_key {
@@ -2320,7 +2507,9 @@ async fn handle_hub_skill_install(
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        return Json(serde_json::json!({ "status": "error", "message": format!("Download failed: HTTP {}", status) }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": format!("Download failed: HTTP {}", status) }),
+        );
     }
 
     let bytes = match resp.bytes().await {
@@ -2516,7 +2705,10 @@ fn github_html_to_api_url(url: &str) -> Option<String> {
     if !stripped.starts_with("github.com/") {
         return None;
     }
-    let parts: Vec<&str> = stripped.trim_start_matches("github.com/").splitn(5, '/').collect();
+    let parts: Vec<&str> = stripped
+        .trim_start_matches("github.com/")
+        .splitn(5, '/')
+        .collect();
     if parts.len() < 4 || parts[2] != "tree" {
         return None;
     }
@@ -2620,10 +2812,16 @@ async fn fetch_github_directory_recursive(
             continue;
         }
         if *remaining_files == 0 {
-            return Err(format!("Too many files in GitHub directory (max {})", EXTERNAL_MAX_FILES));
+            return Err(format!(
+                "Too many files in GitHub directory (max {})",
+                EXTERNAL_MAX_FILES
+            ));
         }
         if *remaining_bytes == 0 {
-            return Err(format!("Downloaded content too large (max {} bytes)", EXTERNAL_MAX_DOWNLOAD_BYTES));
+            return Err(format!(
+                "Downloaded content too large (max {} bytes)",
+                EXTERNAL_MAX_DOWNLOAD_BYTES
+            ));
         }
 
         let resp = client
@@ -2635,7 +2833,10 @@ async fn fetch_github_directory_recursive(
             .map_err(|e| format!("GitHub API request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            return Err(format!("GitHub API returned HTTP {}", resp.status().as_u16()));
+            return Err(format!(
+                "GitHub API returned HTTP {}",
+                resp.status().as_u16()
+            ));
         }
 
         let entries: serde_json::Value = resp
@@ -2649,10 +2850,16 @@ async fn fetch_github_directory_recursive(
 
         for entry in files_array {
             if *remaining_files == 0 {
-                return Err(format!("Too many files in GitHub directory (max {})", EXTERNAL_MAX_FILES));
+                return Err(format!(
+                    "Too many files in GitHub directory (max {})",
+                    EXTERNAL_MAX_FILES
+                ));
             }
             if *remaining_bytes == 0 {
-                return Err(format!("Downloaded content too large (max {} bytes)", EXTERNAL_MAX_DOWNLOAD_BYTES));
+                return Err(format!(
+                    "Downloaded content too large (max {} bytes)",
+                    EXTERNAL_MAX_DOWNLOAD_BYTES
+                ));
             }
 
             let file_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -2686,7 +2893,16 @@ async fn fetch_github_directory_recursive(
             let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
             let is_text = matches!(
                 ext.as_str(),
-                "md" | "rhai" | "yaml" | "yml" | "json" | "toml" | "sh" | "py" | "ts" | "js" | "txt"
+                "md" | "rhai"
+                    | "yaml"
+                    | "yml"
+                    | "json"
+                    | "toml"
+                    | "sh"
+                    | "py"
+                    | "ts"
+                    | "js"
+                    | "txt"
             ) || file_name == "SKILL.md"
                 || file_name == "SKILL.rhai"
                 || file_name == "meta.yaml";
@@ -2771,10 +2987,16 @@ async fn handle_skill_install_external(
         // zip bundle download
         let resp: reqwest::Response = match client.get(&url).send().await {
             Ok(r) => r,
-            Err(e) => return Json(serde_json::json!({ "status": "error", "message": format!("Download failed: {}", e) })),
+            Err(e) => {
+                return Json(
+                    serde_json::json!({ "status": "error", "message": format!("Download failed: {}", e) }),
+                )
+            }
         };
         if !resp.status().is_success() {
-            return Json(serde_json::json!({ "status": "error", "message": format!("HTTP {}", resp.status().as_u16()) }));
+            return Json(
+                serde_json::json!({ "status": "error", "message": format!("HTTP {}", resp.status().as_u16()) }),
+            );
         }
         if let Some(len) = resp.content_length() {
             if len as usize > EXTERNAL_MAX_DOWNLOAD_BYTES {
@@ -2787,7 +3009,9 @@ async fn handle_skill_install_external(
 
         let bytes = match resp.bytes().await {
             Ok(b) => b,
-            Err(e) => return Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
+            Err(e) => {
+                return Json(serde_json::json!({ "status": "error", "message": e.to_string() }))
+            }
         };
         if bytes.len() > EXTERNAL_MAX_DOWNLOAD_BYTES {
             return Json(serde_json::json!({
@@ -2807,7 +3031,9 @@ async fn handle_skill_install_external(
                     }));
                 }
                 if let Ok(mut file) = archive.by_index(i) {
-                    if file.is_dir() { continue; }
+                    if file.is_dir() {
+                        continue;
+                    }
 
                     let raw_name = file.name();
                     // Skip common junk directories
@@ -2884,10 +3110,16 @@ async fn handle_skill_install_external(
 
         let resp: reqwest::Response = match client.get(&raw_url).send().await {
             Ok(r) => r,
-            Err(e) => return Json(serde_json::json!({ "status": "error", "message": format!("Download failed: {}", e) })),
+            Err(e) => {
+                return Json(
+                    serde_json::json!({ "status": "error", "message": format!("Download failed: {}", e) }),
+                )
+            }
         };
         if !resp.status().is_success() {
-            return Json(serde_json::json!({ "status": "error", "message": format!("HTTP {}", resp.status().as_u16()) }));
+            return Json(
+                serde_json::json!({ "status": "error", "message": format!("HTTP {}", resp.status().as_u16()) }),
+            );
         }
 
         if let Some(len) = resp.content_length() {
@@ -2900,7 +3132,9 @@ async fn handle_skill_install_external(
         }
         let content = match resp.text().await {
             Ok(t) => t,
-            Err(e) => return Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
+            Err(e) => {
+                return Json(serde_json::json!({ "status": "error", "message": e.to_string() }))
+            }
         };
         if content.len() > EXTERNAL_MAX_DOWNLOAD_BYTES {
             return Json(serde_json::json!({
@@ -2909,7 +3143,8 @@ async fn handle_skill_install_external(
             }));
         }
         let fname = raw_url.rsplit('/').next().unwrap_or("SKILL.md").to_string();
-        let rel = normalize_relative_path(&fname).unwrap_or_else(|| std::path::PathBuf::from("SKILL.md"));
+        let rel =
+            normalize_relative_path(&fname).unwrap_or_else(|| std::path::PathBuf::from("SKILL.md"));
         downloaded_files.push(DownloadedFile {
             name: rel.to_string_lossy().to_string(),
             content,
@@ -2917,13 +3152,16 @@ async fn handle_skill_install_external(
     }
 
     if downloaded_files.is_empty() {
-        return Json(serde_json::json!({ "status": "error", "message": "No skill files could be downloaded from the provided URL" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "No skill files could be downloaded from the provided URL" }),
+        );
     }
 
     // ── Step 2: Determine skill name ─────────────────────────────────────────
 
     // Try to parse from SKILL.md frontmatter first
-    let skill_md_content = downloaded_files.iter()
+    let skill_md_content = downloaded_files
+        .iter()
         .find(|f| f.name.eq_ignore_ascii_case("SKILL.md"))
         .map(|f| f.content.as_str())
         .unwrap_or("");
@@ -3013,7 +3251,9 @@ async fn handle_skill_install_external(
         }
     }
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-        return Json(serde_json::json!({ "status": "error", "message": format!("Cannot create skill dir: {}", e) }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": format!("Cannot create skill dir: {}", e) }),
+        );
     }
 
     let mut total_bytes = 0usize;
@@ -3039,7 +3279,9 @@ async fn handle_skill_install_external(
     // even before the evolution pipeline completes.
     if !skill_dir.join("meta.yaml").exists() {
         let display_name = fm_name.as_deref().unwrap_or(&skill_name);
-        let desc = fm_description.as_deref().unwrap_or("External skill (evolving)");
+        let desc = fm_description
+            .as_deref()
+            .unwrap_or("External skill (evolving)");
         let meta_content = format!(
             "name: {}\ndescription: {}\ntriggers:\n  - {}\npermissions: []\n",
             display_name, desc, skill_name
@@ -3056,22 +3298,6 @@ async fn handle_skill_install_external(
         openclaw_content.push_str(&format!("### {}\n```\n{}\n```\n\n", df.name, df.content));
     }
 
-    let description = format!(
-        "Convert the following OpenClaw-compatible skill into a Blockcell SKILL.md document.\n\
-        Skill name: {}\n\
-        {}\n\
-        \n\
-        Generate an improved SKILL.md that describes how the AI agent should handle requests\n\
-        for this skill, including: goal, tools to use, step-by-step scenarios, and fallback strategy.\n\
-        Also generate meta.yaml with name/description/triggers/permissions fields.\n\
-        Base the content on the OpenClaw SKILL.md instructions below.\n\
-        \n\
-        {}",
-        fm_name.as_deref().unwrap_or(&skill_name),
-        fm_description.as_deref().map(|d| format!("Description: {}", d)).unwrap_or_default(),
-        openclaw_content,
-    );
-
     // Detect skill type from downloaded files
     let has_py = downloaded_files.iter().any(|f| f.name.ends_with(".py"));
     let has_rhai = downloaded_files.iter().any(|f| f.name.ends_with(".rhai"));
@@ -3081,6 +3307,67 @@ async fn handle_skill_install_external(
         blockcell_skills::SkillType::Python
     } else {
         blockcell_skills::SkillType::PromptOnly
+    };
+
+    let description = match ext_skill_type {
+        blockcell_skills::SkillType::Python => format!(
+            "Convert the following OpenClaw-compatible skill into a Blockcell SKILL.py script.\n\
+            Skill name: {}\n\
+            {}\n\
+            \n\
+            Generate a COMPLETE SKILL.py and a compatible meta.yaml.\n\
+            Blockcell Python runtime contract:\n\
+            - Script is executed as `python3 SKILL.py`\n\
+            - User input is provided from stdin as plain text\n\
+            - Additional JSON context is available in env `BLOCKCELL_SKILL_CONTEXT`\n\
+            - Output final user-facing result to stdout\n\
+            - Do NOT require command-line JSON arguments\n\
+            \n\
+            Reuse useful logic from legacy OpenClaw scripts (e.g. scripts/*.py),\n\
+            but adapt the entrypoint and output format to Blockcell style.\n\
+            \n\
+            {}",
+            fm_name.as_deref().unwrap_or(&skill_name),
+            fm_description
+                .as_deref()
+                .map(|d| format!("Description: {}", d))
+                .unwrap_or_default(),
+            openclaw_content,
+        ),
+        blockcell_skills::SkillType::Rhai => format!(
+            "Convert the following OpenClaw-compatible skill into a Blockcell SKILL.rhai script.\n\
+            Skill name: {}\n\
+            {}\n\
+            \n\
+            Generate a COMPLETE SKILL.rhai and a compatible meta.yaml.\n\
+            Use Blockcell tool-call style and produce clear user-facing output.\n\
+            \n\
+            {}",
+            fm_name.as_deref().unwrap_or(&skill_name),
+            fm_description
+                .as_deref()
+                .map(|d| format!("Description: {}", d))
+                .unwrap_or_default(),
+            openclaw_content,
+        ),
+        blockcell_skills::SkillType::PromptOnly => format!(
+            "Convert the following OpenClaw-compatible skill into a Blockcell SKILL.md document.\n\
+            Skill name: {}\n\
+            {}\n\
+            \n\
+            Generate an improved SKILL.md that describes how the AI agent should handle requests\n\
+            for this skill, including: goal, tools to use, step-by-step scenarios, and fallback strategy.\n\
+            Also generate meta.yaml with name/description/triggers/permissions fields.\n\
+            Base the content on the OpenClaw SKILL.md instructions below.\n\
+            \n\
+            {}",
+            fm_name.as_deref().unwrap_or(&skill_name),
+            fm_description
+                .as_deref()
+                .map(|d| format!("Description: {}", d))
+                .unwrap_or_default(),
+            openclaw_content,
+        ),
     };
 
     let context = blockcell_skills::EvolutionContext {
@@ -3093,17 +3380,25 @@ async fn handle_skill_install_external(
         timestamp: chrono::Utc::now().timestamp(),
         skill_type: ext_skill_type,
         staged: true,
-        staging_skills_dir: Some(state.paths.import_staging_skills_dir().to_string_lossy().to_string()),
+        staging_skills_dir: Some(
+            state
+                .paths
+                .import_staging_skills_dir()
+                .to_string_lossy()
+                .to_string(),
+        ),
     };
 
     let evolution_id = {
         let svc = state.evolution_service.lock().await;
         match svc.trigger_external_evolution(context).await {
             Ok(id) => id,
-            Err(e) => return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to queue evolution: {}", e)
-            })),
+            Err(e) => {
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Failed to queue evolution: {}", e)
+                }))
+            }
         }
     };
 
@@ -3132,26 +3427,19 @@ async fn handle_skill_install_external(
 /// This endpoint must be publicly accessible. Configure the URL in the Lark Developer Console
 /// under "Event Subscriptions" → "Request URL": https://your-domain/webhook/lark
 #[cfg(feature = "lark")]
-async fn handle_lark_webhook(
-    State(state): State<GatewayState>,
-    body: String,
-) -> impl IntoResponse {
+async fn handle_lark_webhook(State(state): State<GatewayState>, body: String) -> impl IntoResponse {
     use axum::http::StatusCode;
 
     if !state.config.channels.lark.enabled {
         return (StatusCode::OK, axum::Json(serde_json::json!({"code": 0}))).into_response();
     }
 
-    match blockcell_channels::lark::process_webhook(
-        &state.config,
-        &body,
-        Some(&state.inbound_tx),
-    )
-    .await
+    match blockcell_channels::lark::process_webhook(&state.config, &body, Some(&state.inbound_tx))
+        .await
     {
         Ok(resp_json) => {
-            let val: serde_json::Value = serde_json::from_str(&resp_json)
-                .unwrap_or(serde_json::json!({"code": 0}));
+            let val: serde_json::Value =
+                serde_json::from_str(&resp_json).unwrap_or(serde_json::json!({"code": 0}));
             (StatusCode::OK, axum::Json(val)).into_response()
         }
         Err(e) => {
@@ -3210,7 +3498,11 @@ async fn handle_wecom_webhook(
     )
     .await;
 
-    (StatusCode::from_u16(status).unwrap_or(StatusCode::OK), body_str).into_response()
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+        body_str,
+    )
+        .into_response()
 }
 
 #[cfg(not(feature = "wecom"))]
@@ -3231,9 +3523,10 @@ async fn handle_cron_list(State(state): State<GatewayState>) -> impl IntoRespons
     // Reload from disk to get latest
     let _ = state.cron_service.load().await;
     let jobs = state.cron_service.list_jobs().await;
-    let jobs_json: Vec<serde_json::Value> = jobs.iter().map(|j| {
-        serde_json::to_value(j).unwrap_or_default()
-    }).collect();
+    let jobs_json: Vec<serde_json::Value> = jobs
+        .iter()
+        .map(|j| serde_json::to_value(j).unwrap_or_default())
+        .collect();
 
     let count = jobs_json.len();
     Json(serde_json::json!({
@@ -3264,6 +3557,27 @@ struct CronCreateRequest {
     deliver_to: Option<String>,
 }
 
+fn resolve_cron_skill_payload_kind(paths: &Paths, skill_name: Option<&str>) -> &'static str {
+    let Some(skill_name) = skill_name else {
+        return "agent_turn";
+    };
+
+    let user_dir = paths.skills_dir().join(skill_name);
+    let builtin_dir = paths.builtin_skills_dir().join(skill_name);
+
+    let has_rhai = user_dir.join("SKILL.rhai").exists() || builtin_dir.join("SKILL.rhai").exists();
+    let has_py = user_dir.join("SKILL.py").exists() || builtin_dir.join("SKILL.py").exists();
+
+    if has_rhai {
+        "skill_rhai"
+    } else if has_py {
+        "skill_python"
+    } else {
+        // Keep backward-compatible behavior when script type is unknown.
+        "skill_rhai"
+    }
+}
+
 /// POST /v1/cron — create a cron job
 async fn handle_cron_create(
     State(state): State<GatewayState>,
@@ -3272,16 +3586,36 @@ async fn handle_cron_create(
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let schedule = if let Some(at_ms) = req.at_ms {
-        JobSchedule { kind: ScheduleKind::At, at_ms: Some(at_ms), every_ms: None, expr: None, tz: None }
+        JobSchedule {
+            kind: ScheduleKind::At,
+            at_ms: Some(at_ms),
+            every_ms: None,
+            expr: None,
+            tz: None,
+        }
     } else if let Some(every) = req.every_seconds {
-        JobSchedule { kind: ScheduleKind::Every, at_ms: None, every_ms: Some(every * 1000), expr: None, tz: None }
+        JobSchedule {
+            kind: ScheduleKind::Every,
+            at_ms: None,
+            every_ms: Some(every * 1000),
+            expr: None,
+            tz: None,
+        }
     } else if let Some(expr) = req.cron_expr {
-        JobSchedule { kind: ScheduleKind::Cron, at_ms: None, every_ms: None, expr: Some(expr), tz: None }
+        JobSchedule {
+            kind: ScheduleKind::Cron,
+            at_ms: None,
+            every_ms: None,
+            expr: Some(expr),
+            tz: None,
+        }
     } else {
-        return Json(serde_json::json!({ "error": "Must specify at_ms, every_seconds, or cron_expr" }));
+        return Json(
+            serde_json::json!({ "error": "Must specify at_ms, every_seconds, or cron_expr" }),
+        );
     };
 
-    let payload_kind = if req.skill_name.is_some() { "skill_rhai" } else { "agent_turn" };
+    let payload_kind = resolve_cron_skill_payload_kind(&state.paths, req.skill_name.as_deref());
 
     let job = CronJob {
         id: uuid::Uuid::new_v4().to_string(),
@@ -3341,13 +3675,25 @@ async fn handle_cron_run(
                     "reminder_message": job.payload.message,
                 })
             } else {
-                serde_json::json!({
+                let kind = if job.payload.kind == "skill_python" {
+                    "python"
+                } else {
+                    "rhai"
+                };
+                let mut meta = serde_json::json!({
                     "job_id": job.id,
                     "job_name": job.name,
                     "manual_trigger": true,
-                    "skill_rhai": true,
+                    "skill_script": true,
+                    "skill_script_kind": kind,
                     "skill_name": job.payload.skill_name,
-                })
+                });
+                if kind == "python" {
+                    meta["skill_python"] = serde_json::json!(true);
+                } else {
+                    meta["skill_rhai"] = serde_json::json!(true);
+                }
+                meta
             };
             let inbound = InboundMessage {
                 channel: "cron".to_string(),
@@ -3376,19 +3722,17 @@ async fn handle_toggles_get(State(state): State<GatewayState>) -> impl IntoRespo
         return Json(serde_json::json!({ "skills": {}, "tools": {} }));
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(val) => Json(val),
-                Err(_) => Json(serde_json::json!({ "skills": {}, "tools": {} })),
-            }
-        }
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => Json(val),
+            Err(_) => Json(serde_json::json!({ "skills": {}, "tools": {} })),
+        },
         Err(_) => Json(serde_json::json!({ "skills": {}, "tools": {} })),
     }
 }
 
 #[derive(Deserialize)]
 struct ToggleUpdateRequest {
-    category: String,  // "skills" or "tools"
+    category: String, // "skills" or "tools"
     name: String,
     enabled: bool,
 }
@@ -3427,7 +3771,10 @@ async fn handle_toggles_update(
         store[&req.category][&req.name] = serde_json::json!(false);
     }
 
-    match std::fs::write(&path, serde_json::to_string_pretty(&store).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&store).unwrap_or_default(),
+    ) {
         Ok(_) => Json(serde_json::json!({
             "status": "ok",
             "category": req.category,
@@ -3481,8 +3828,12 @@ struct AlertCreateRequest {
     on_trigger: Vec<serde_json::Value>,
 }
 
-fn default_cooldown() -> u64 { 300 }
-fn default_check_interval() -> u64 { 60 }
+fn default_cooldown() -> u64 {
+    300
+}
+fn default_check_interval() -> u64 {
+    60
+}
 
 /// POST /v1/alerts — create an alert rule
 async fn handle_alerts_create(
@@ -3527,7 +3878,10 @@ async fn handle_alerts_create(
         rules.push(new_rule);
     }
 
-    match std::fs::write(&path, serde_json::to_string_pretty(&store).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&store).unwrap_or_default(),
+    ) {
         Ok(_) => Json(serde_json::json!({ "status": "created", "rule_id": rule_id })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -3564,7 +3918,10 @@ async fn handle_alerts_update(
                                 rule_obj.insert(k.clone(), v.clone());
                             }
                         }
-                        rule_obj.insert("updated_at".to_string(), serde_json::json!(chrono::Utc::now().timestamp_millis()));
+                        rule_obj.insert(
+                            "updated_at".to_string(),
+                            serde_json::json!(chrono::Utc::now().timestamp_millis()),
+                        );
                     }
                 }
                 found = true;
@@ -3577,7 +3934,10 @@ async fn handle_alerts_update(
         return Json(serde_json::json!({ "error": "Rule not found" }));
     }
 
-    match std::fs::write(&path, serde_json::to_string_pretty(&store).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&store).unwrap_or_default(),
+    ) {
         Ok(_) => Json(serde_json::json!({ "status": "updated", "rule_id": rule_id })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -3612,7 +3972,10 @@ async fn handle_alerts_delete(
         return Json(serde_json::json!({ "status": "not_found" }));
     }
 
-    match std::fs::write(&path, serde_json::to_string_pretty(&store).unwrap_or_default()) {
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&store).unwrap_or_default(),
+    ) {
         Ok(_) => Json(serde_json::json!({ "status": "deleted", "rule_id": rule_id })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -3637,10 +4000,16 @@ async fn handle_alerts_history(State(state): State<GatewayState>) -> impl IntoRe
     let mut history = Vec::new();
     if let Some(rules) = store.get("rules").and_then(|v| v.as_array()) {
         for rule in rules {
-            let name = rule.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let name = rule
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let rule_id = rule.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let state = rule.get("state").cloned().unwrap_or_default();
-            let trigger_count = state.get("trigger_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let trigger_count = state
+                .get("trigger_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let last_triggered = state.get("last_triggered_at").and_then(|v| v.as_i64());
             let last_value = state.get("last_value").and_then(|v| v.as_f64());
 
@@ -3660,8 +4029,14 @@ async fn handle_alerts_history(State(state): State<GatewayState>) -> impl IntoRe
 
     // Sort by last_triggered_at descending
     history.sort_by(|a, b| {
-        let ta = a.get("last_triggered_at").and_then(|v| v.as_i64()).unwrap_or(0);
-        let tb = b.get("last_triggered_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ta = a
+            .get("last_triggered_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let tb = b
+            .get("last_triggered_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         tb.cmp(&ta)
     });
 
@@ -3684,7 +4059,9 @@ struct StreamDataQuery {
     limit: usize,
 }
 
-fn default_stream_limit() -> usize { 50 }
+fn default_stream_limit() -> usize {
+    50
+}
 
 /// GET /v1/streams/:id/data — get buffered data for a stream
 async fn handle_stream_data(
@@ -3707,7 +4084,9 @@ struct FileListQuery {
     path: String,
 }
 
-fn default_file_path() -> String { ".".to_string() }
+fn default_file_path() -> String {
+    ".".to_string()
+}
 
 /// GET /v1/files — list directory contents
 async fn handle_files_list(
@@ -3731,7 +4110,9 @@ async fn handle_files_list(
             target.clone()
         }
     };
-    let ws_canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let ws_canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
     if !canonical.starts_with(&ws_canonical) {
         return Json(serde_json::json!({ "error": "Access denied: path outside workspace" }));
     }
@@ -3747,20 +4128,21 @@ async fn handle_files_list(
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let modified = meta.as_ref()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    let dt: chrono::DateTime<chrono::Utc> = t.into();
-                    dt.to_rfc3339()
-                });
+            let modified = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| {
+                let dt: chrono::DateTime<chrono::Utc> = t.into();
+                dt.to_rfc3339()
+            });
 
             // Relative path from workspace
-            let rel_path = entry.path()
+            let rel_path = entry
+                .path()
                 .strip_prefix(&workspace)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| name.clone());
 
-            let ext = entry.path().extension()
+            let ext = entry
+                .path()
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase())
                 .unwrap_or_default();
@@ -3774,12 +4156,14 @@ async fn handle_files_list(
                     "mp4" | "mkv" | "webm" | "avi" => "video",
                     "pdf" => "pdf",
                     "json" | "jsonl" => "json",
-                    "md" | "txt" | "log" | "csv" | "yaml" | "yml" | "toml" | "xml" | "html" | "css" | "js" | "ts" | "py" | "rs" | "sh" | "rhai" => "text",
+                    "md" | "txt" | "log" | "csv" | "yaml" | "yml" | "toml" | "xml" | "html"
+                    | "css" | "js" | "ts" | "py" | "rs" | "sh" | "rhai" => "text",
                     "xlsx" | "xls" | "docx" | "pptx" => "office",
                     "zip" | "tar" | "gz" | "tgz" => "archive",
                     "db" | "sqlite" => "database",
                     _ => "file",
-                }.to_string()
+                }
+                .to_string()
             };
 
             entries.push(serde_json::json!({
@@ -3834,7 +4218,9 @@ async fn handle_files_content(
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
     };
-    let ws_canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let ws_canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
     if !canonical.starts_with(&ws_canonical) {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
     }
@@ -3843,17 +4229,38 @@ async fn handle_files_content(
         return (StatusCode::NOT_FOUND, "Not a file").into_response();
     }
 
-    let ext = target.extension()
+    let ext = target
+        .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase())
         .unwrap_or_default();
 
     // For binary files (images, etc.), return base64 encoded
-    let is_binary = matches!(ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" |
-        "mp3" | "wav" | "m4a" | "mp4" | "mkv" | "webm" |
-        "pdf" | "xlsx" | "xls" | "docx" | "pptx" |
-        "zip" | "tar" | "gz" | "db" | "sqlite"
+    let is_binary = matches!(
+        ext.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "svg"
+            | "mp3"
+            | "wav"
+            | "m4a"
+            | "mp4"
+            | "mkv"
+            | "webm"
+            | "pdf"
+            | "xlsx"
+            | "xls"
+            | "docx"
+            | "pptx"
+            | "zip"
+            | "tar"
+            | "gz"
+            | "db"
+            | "sqlite"
     );
 
     let mime_type = match ext.as_str() {
@@ -3868,7 +4275,13 @@ async fn handle_files_content(
         "html" => "text/html",
         "css" => "text/css",
         "js" => "application/javascript",
-        _ => if is_binary { "application/octet-stream" } else { "text/plain" },
+        _ => {
+            if is_binary {
+                "application/octet-stream"
+            } else {
+                "text/plain"
+            }
+        }
     };
 
     if is_binary {
@@ -3882,22 +4295,30 @@ async fn handle_files_content(
                     "mime_type": mime_type,
                     "size": bytes.len(),
                     "content": b64,
-                })).into_response()
+                }))
+                .into_response()
             }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Read error: {}", e),
+            )
+                .into_response(),
         }
     } else {
         match std::fs::read_to_string(&target) {
-            Ok(content) => {
-                Json(serde_json::json!({
-                    "path": params.path,
-                    "encoding": "utf-8",
-                    "mime_type": mime_type,
-                    "size": content.len(),
-                    "content": content,
-                })).into_response()
-            }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)).into_response(),
+            Ok(content) => Json(serde_json::json!({
+                "path": params.path,
+                "encoding": "utf-8",
+                "mime_type": mime_type,
+                "size": content.len(),
+                "content": content,
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Read error: {}", e),
+            )
+                .into_response(),
         }
     }
 }
@@ -3914,23 +4335,33 @@ async fn handle_files_download(
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
     };
-    let ws_canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let ws_canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
     if !canonical.starts_with(&ws_canonical) {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
     }
 
     match std::fs::read(&target) {
         Ok(bytes) => {
-            let filename = target.file_name()
+            let filename = target
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("download");
             let headers = [
                 (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename),
+                ),
             ];
             (headers, bytes).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Read error: {}", e),
+        )
+            .into_response(),
     }
 }
 
@@ -3957,16 +4388,23 @@ async fn handle_files_serve(
     };
 
     // Security: file must be within ~/.blockcell/ base directory
-    let base_canonical = base_dir.canonicalize().unwrap_or_else(|_| base_dir.to_path_buf());
+    let base_canonical = base_dir
+        .canonicalize()
+        .unwrap_or_else(|_| base_dir.to_path_buf());
     if !canonical.starts_with(&base_canonical) {
-        return (StatusCode::FORBIDDEN, "Access denied: file outside allowed directory").into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            "Access denied: file outside allowed directory",
+        )
+            .into_response();
     }
 
     if !target.is_file() {
         return (StatusCode::NOT_FOUND, "Not a file").into_response();
     }
 
-    let ext = target.extension()
+    let ext = target
+        .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase())
         .unwrap_or_default();
@@ -4008,7 +4446,11 @@ async fn handle_files_serve(
             ];
             (headers, bytes).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Read error: {}", e),
+        )
+            .into_response(),
     }
 }
 
@@ -4019,7 +4461,10 @@ async fn handle_files_upload(
 ) -> impl IntoResponse {
     let path = req.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = req.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let encoding = req.get("encoding").and_then(|v| v.as_str()).unwrap_or("utf-8");
+    let encoding = req
+        .get("encoding")
+        .and_then(|v| v.as_str())
+        .unwrap_or("utf-8");
 
     let rel = match validate_workspace_relative_path(path) {
         Ok(p) => p,
@@ -4164,7 +4609,10 @@ async fn handle_webui_static(uri: axum::http::Uri) -> impl IntoResponse {
                         StatusCode::OK,
                         [
                             (header::CONTENT_TYPE, "text/html".to_string()),
-                            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate".to_string()),
+                            (
+                                header::CACHE_CONTROL,
+                                "no-store, no-cache, must-revalidate".to_string(),
+                            ),
                         ],
                         body,
                     )
@@ -4212,8 +4660,14 @@ async fn handle_webui_env_js(config: Config) -> impl IntoResponse {
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=utf-8".to_string()),
-            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate".to_string()),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8".to_string(),
+            ),
+            (
+                header::CACHE_CONTROL,
+                "no-store, no-cache, must-revalidate".to_string(),
+            ),
         ],
         js,
     )
@@ -4234,7 +4688,7 @@ mod ansi {
     pub const WHITE: &str = "\x1b[97m";
     pub const BG_YELLOW: &str = "\x1b[43m";
     // 24-bit true-color matching the Logo.tsx palette
-    pub const ORANGE: &str = "\x1b[38;2;234;88;12m";   // #ea580c
+    pub const ORANGE: &str = "\x1b[38;2;234;88;12m"; // #ea580c
     pub const NEON_GREEN: &str = "\x1b[38;2;0;255;157m"; // #00ff9d
 }
 
@@ -4282,12 +4736,12 @@ fn print_startup_banner(
     eprintln!();
     eprintln!(
         "  {}{}  BLOCKCELL GATEWAY v{}  {}",
-        ansi::BOLD, ansi::CYAN, ver, ansi::RESET
+        ansi::BOLD,
+        ansi::CYAN,
+        ver,
+        ansi::RESET
     );
-    eprintln!(
-        "  {}Model: {}{}",
-        ansi::DIM, model, ansi::RESET
-    );
+    eprintln!("  {}Model: {}{}", ansi::DIM, model, ansi::RESET);
     eprintln!();
 
     // ── WebUI Password box ──
@@ -4300,9 +4754,12 @@ fn print_startup_banner(
         let pw_pad = box_w.saturating_sub(pw_visible);
         eprintln!(
             "  {}│{}  {}{}{}{}{}{}│",
-            ansi::YELLOW, ansi::RESET,
-            ansi::BOLD, ansi::YELLOW,
-            pw_label, web_password,
+            ansi::YELLOW,
+            ansi::RESET,
+            ansi::BOLD,
+            ansi::YELLOW,
+            pw_label,
+            web_password,
             ansi::RESET,
             " ".repeat(pw_pad),
         );
@@ -4310,19 +4767,25 @@ fn print_startup_banner(
         let hint1_pad = box_w.saturating_sub(hint1.len());
         eprintln!(
             "  {}│{}  {}Temporary — changes every restart. Set gateway.webuiPass{}{}{}│{}",
-            ansi::YELLOW, ansi::RESET,
-            ansi::DIM, ansi::RESET,
+            ansi::YELLOW,
+            ansi::RESET,
+            ansi::DIM,
+            ansi::RESET,
             " ".repeat(hint1_pad),
-            ansi::YELLOW, ansi::RESET,
+            ansi::YELLOW,
+            ansi::RESET,
         );
         let hint2 = "  in config.json for a stable password.";
         let hint2_pad = box_w.saturating_sub(hint2.len());
         eprintln!(
             "  {}│{}  {}in config.json for a stable password.{}{}{}│{}",
-            ansi::YELLOW, ansi::RESET,
-            ansi::DIM, ansi::RESET,
+            ansi::YELLOW,
+            ansi::RESET,
+            ansi::DIM,
+            ansi::RESET,
             " ".repeat(hint2_pad),
-            ansi::YELLOW, ansi::RESET,
+            ansi::YELLOW,
+            ansi::RESET,
         );
         eprintln!("  {}└{}┘{}", ansi::YELLOW, "─".repeat(box_w), ansi::RESET);
     } else {
@@ -4333,9 +4796,12 @@ fn print_startup_banner(
         let pw_pad = box_w.saturating_sub(pw_visible);
         eprintln!(
             "  {}│{}  {}{}{}{}{}{}│",
-            ansi::GREEN, ansi::RESET,
-            ansi::BOLD, ansi::GREEN,
-            pw_label, web_password,
+            ansi::GREEN,
+            ansi::RESET,
+            ansi::BOLD,
+            ansi::GREEN,
+            pw_label,
+            web_password,
             ansi::RESET,
             " ".repeat(pw_pad),
         );
@@ -4343,10 +4809,13 @@ fn print_startup_banner(
         let hint_pad = box_w.saturating_sub(hint.len());
         eprintln!(
             "  {}│{}  {}Configured via gateway.webuiPass in config.json{}{}{}│{}",
-            ansi::GREEN, ansi::RESET,
-            ansi::DIM, ansi::RESET,
+            ansi::GREEN,
+            ansi::RESET,
+            ansi::DIM,
+            ansi::RESET,
             " ".repeat(hint_pad),
-            ansi::GREEN, ansi::RESET,
+            ansi::GREEN,
+            ansi::RESET,
         );
         eprintln!("  {}└{}┘{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
     }
@@ -4356,20 +4825,21 @@ fn print_startup_banner(
     if is_exposed && webui_pass_is_temp {
         eprintln!(
             "  {}{}⚠  SECURITY: Binding to {} with an auto-generated token.{}",
-            ansi::BG_YELLOW, ansi::BOLD, host, ansi::RESET
+            ansi::BG_YELLOW,
+            ansi::BOLD,
+            host,
+            ansi::RESET
         );
         eprintln!(
             "  {}   Review gateway.apiToken in config.json before exposing to the network.{}",
-            ansi::YELLOW, ansi::RESET
+            ansi::YELLOW,
+            ansi::RESET
         );
         eprintln!();
     }
 
     // ── Channels status ──
-    eprintln!(
-        "  {}{}Channels{}",
-        ansi::BOLD, ansi::WHITE, ansi::RESET
-    );
+    eprintln!("  {}{}Channels{}", ansi::BOLD, ansi::WHITE, ansi::RESET);
 
     let ch = &config.channels;
 
@@ -4478,7 +4948,10 @@ fn print_startup_banner(
     ];
 
     // Enabled channels box (green)
-    let enabled: Vec<&ChannelInfo> = channels.iter().filter(|c| c.enabled && c.configured).collect();
+    let enabled: Vec<&ChannelInfo> = channels
+        .iter()
+        .filter(|c| c.enabled && c.configured)
+        .collect();
     if !enabled.is_empty() {
         let box_w = 62;
         eprintln!("  {}┌{}┐{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
@@ -4487,20 +4960,26 @@ fn print_startup_banner(
             let pad = box_w.saturating_sub(display_width(&line));
             eprintln!(
                 "  {}│{} {}{}● {}{} {}{}{}│{}",
-                ansi::GREEN, ansi::RESET,
-                ansi::BOLD, ansi::GREEN,
+                ansi::GREEN,
+                ansi::RESET,
+                ansi::BOLD,
+                ansi::GREEN,
                 ch_info.name,
                 ansi::RESET,
                 ch_info.detail,
                 " ".repeat(pad),
-                ansi::GREEN, ansi::RESET,
+                ansi::GREEN,
+                ansi::RESET,
             );
         }
         eprintln!("  {}└{}┘{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
     }
 
     // Disabled/unconfigured channels (dim, no box)
-    let disabled: Vec<&ChannelInfo> = channels.iter().filter(|c| !c.enabled || !c.configured).collect();
+    let disabled: Vec<&ChannelInfo> = channels
+        .iter()
+        .filter(|c| !c.enabled || !c.configured)
+        .collect();
     if !disabled.is_empty() {
         for ch_info in &disabled {
             eprintln!(
@@ -4516,24 +4995,25 @@ fn print_startup_banner(
     if channels.iter().all(|c| !c.enabled) {
         eprintln!(
             "  {}  No channels enabled. WebSocket is the only input.{}",
-            ansi::DIM, ansi::RESET,
+            ansi::DIM,
+            ansi::RESET,
         );
     }
     eprintln!();
 
     // ── Server info ──
-    eprintln!(
-        "  {}{}Server{}",
-        ansi::BOLD, ansi::WHITE, ansi::RESET
-    );
+    eprintln!("  {}{}Server{}", ansi::BOLD, ansi::WHITE, ansi::RESET);
 
     eprintln!(
         "  {}HTTP/WS:{}  http://{}",
-        ansi::CYAN, ansi::RESET, bind_addr,
+        ansi::CYAN,
+        ansi::RESET,
+        bind_addr,
     );
     eprintln!(
         "  {}WebUI:{}   http://{}:{}/",
-        ansi::CYAN, ansi::RESET,
+        ansi::CYAN,
+        ansi::RESET,
         webui_host,
         webui_port,
     );
@@ -4547,15 +5027,22 @@ fn print_startup_banner(
         .unwrap_or_else(|| format!("http://{}", bind_addr));
     eprintln!(
         "  {}API:{}     POST {}/v1/chat  |  GET {}/v1/health  |  GET {}/v1/ws",
-        ansi::CYAN, ansi::RESET, api_base, api_base, api_base,
+        ansi::CYAN,
+        ansi::RESET,
+        api_base,
+        api_base,
+        api_base,
     );
     eprintln!();
 
     // ── Ready ──
     eprintln!(
         "  {}{}✓ Gateway ready.{} Press {}Ctrl+C{} to stop.",
-        ansi::BOLD, ansi::GREEN, ansi::RESET,
-        ansi::BOLD, ansi::RESET,
+        ansi::BOLD,
+        ansi::GREEN,
+        ansi::RESET,
+        ansi::BOLD,
+        ansi::RESET,
     );
     eprintln!();
 }
@@ -4610,7 +5097,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     if let Some(hub_url) = config.community_hub_url() {
         if config.community_hub_api_key().is_none() {
             let register_url = format!("{}/v1/auth/register", hub_url.trim_end_matches('/'));
-            let name = config.community_hub.node_alias.clone()
+            let name = config
+                .community_hub
+                .node_alias
+                .clone()
                 .unwrap_or_else(|| "blockcell-gateway".to_string());
 
             let client = reqwest::Client::builder()
@@ -4658,9 +5148,16 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     // Auto-generate and persist api_token if not configured or empty.
     // This ensures a stable token across restarts without manual setup.
-    let needs_token = config.gateway.api_token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true);
+    let needs_token = config
+        .gateway
+        .api_token
+        .as_deref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true);
     if needs_token {
-        let env_token = std::env::var("BLOCKCELL_API_TOKEN").ok().filter(|t| !t.trim().is_empty());
+        let env_token = std::env::var("BLOCKCELL_API_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty());
         if let Some(token) = env_token {
             // Use env var but don't persist — user manages it externally
             config.gateway.api_token = Some(token);
@@ -4676,7 +5173,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
             let generated = format!("bc_{}", &raw[..61]);
             config.gateway.api_token = Some(generated);
             if let Err(e) = config.save(&paths.config_file()) {
-                warn!("Failed to persist auto-generated apiToken to config.json: {}", e);
+                warn!(
+                    "Failed to persist auto-generated apiToken to config.json: {}",
+                    e
+                );
             } else {
                 info!("Auto-generated apiToken persisted to config.json");
             }
@@ -4699,7 +5199,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
             Some(Arc::new(adapter))
         }
         Err(e) => {
-            warn!("Failed to open memory store: {}. Memory tools will be unavailable.", e);
+            warn!(
+                "Failed to open memory store: {}. Memory tools will be unavailable.",
+                e
+            );
             None
         }
     };
@@ -4753,9 +5256,14 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let tool_registry_shared = Arc::new(tool_registry.clone());
 
     // ── Create agent runtime with full component wiring ──
-    let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), std::sync::Arc::clone(&provider_pool), tool_registry)?;
+    let mut runtime = AgentRuntime::new(
+        config.clone(),
+        paths.clone(),
+        std::sync::Arc::clone(&provider_pool),
+        tool_registry,
+    )?;
     runtime.mount_mcp_servers().await;
-    
+
     // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
     if config.agents.defaults.evolution_model.is_some()
         || config.agents.defaults.evolution_provider.is_some()
@@ -4766,11 +5274,14 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 info!("Evolution provider configured with independent model");
             }
             Err(e) => {
-                warn!("Failed to create evolution provider: {}, using main provider", e);
+                warn!(
+                    "Failed to create evolution provider: {}, using main provider",
+                    e
+                );
             }
         }
     }
-    
+
     // ── Set up WebSocket-based path confirmation channel ──
     let pending_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -4868,7 +5379,9 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     // ── Spawn core tasks ──
     let runtime_shutdown_rx = shutdown_tx.subscribe();
     let runtime_handle = tokio::spawn(async move {
-        runtime.run_loop(inbound_rx, Some(runtime_shutdown_rx)).await;
+        runtime
+            .run_loop(inbound_rx, Some(runtime_shutdown_rx))
+            .await;
     });
 
     // Wrap channel_manager in Arc so it can be shared between the outbound bridge and gateway state
@@ -4879,7 +5392,13 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let outbound_shutdown_rx = shutdown_tx.subscribe();
     let channel_manager_for_bridge = Arc::clone(&channel_manager);
     let outbound_handle = tokio::spawn(async move {
-        outbound_to_ws_bridge(outbound_rx, ws_broadcast_for_bridge, channel_manager_for_bridge, outbound_shutdown_rx).await;
+        outbound_to_ws_bridge(
+            outbound_rx,
+            ws_broadcast_for_bridge,
+            channel_manager_for_bridge,
+            outbound_shutdown_rx,
+        )
+        .await;
     });
 
     let cron_handle = {
@@ -4972,7 +5491,13 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     // ── Build HTTP/WebSocket server ──
     // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above
     // somehow produced None or empty (e.g. env var was whitespace-only).
-    if config.gateway.api_token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+    if config
+        .gateway
+        .api_token
+        .as_deref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true)
+    {
         let raw = format!(
             "{}{}{}{}",
             uuid::Uuid::new_v4().to_string().replace('-', ""),
@@ -5001,9 +5526,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     // Create a shared EvolutionService for the HTTP handlers (trigger, delete, status).
     // This is separate from the one inside AgentRuntime but shares the same disk records.
-    let shared_evo_service = Arc::new(Mutex::new(
-        EvolutionService::new(paths.skills_dir(), EvolutionServiceConfig::default())
-    ));
+    let shared_evo_service = Arc::new(Mutex::new(EvolutionService::new(
+        paths.skills_dir(),
+        EvolutionServiceConfig::default(),
+    )));
 
     let gateway_state = GatewayState {
         inbound_tx: inbound_tx.clone(),
@@ -5032,18 +5558,36 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/ws", get(handle_ws_upgrade))
         // P0: Sessions
         .route("/v1/sessions", get(handle_sessions_list))
-        .route("/v1/sessions/:id", get(handle_session_get).delete(handle_session_delete))
+        .route(
+            "/v1/sessions/:id",
+            get(handle_session_get).delete(handle_session_delete),
+        )
         .route("/v1/sessions/:id/rename", put(handle_session_rename))
         // P1: Config
-        .route("/v1/config", get(handle_config_get).put(handle_config_update))
+        .route(
+            "/v1/config",
+            get(handle_config_get).put(handle_config_update),
+        )
         .route("/v1/config/reload", post(handle_config_reload))
-        .route("/v1/config/test-provider", post(handle_config_test_provider))
+        .route(
+            "/v1/config/test-provider",
+            post(handle_config_test_provider),
+        )
         // Ghost Agent
-        .route("/v1/ghost/config", get(handle_ghost_config_get).put(handle_ghost_config_update))
+        .route(
+            "/v1/ghost/config",
+            get(handle_ghost_config_get).put(handle_ghost_config_update),
+        )
         .route("/v1/ghost/activity", get(handle_ghost_activity))
-        .route("/v1/ghost/model-options", get(handle_ghost_model_options_get))
+        .route(
+            "/v1/ghost/model-options",
+            get(handle_ghost_model_options_get),
+        )
         // P1: Memory
-        .route("/v1/memory", get(handle_memory_list).post(handle_memory_create))
+        .route(
+            "/v1/memory",
+            get(handle_memory_list).post(handle_memory_create),
+        )
         .route("/v1/memory/stats", get(handle_memory_stats))
         .route("/v1/memory/:id", delete(handle_memory_delete))
         // P1: Tools / Skills / Evolution / Stats
@@ -5051,38 +5595,71 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/skills", get(handle_skills))
         .route("/v1/skills/search", post(handle_skills_search))
         .route("/v1/evolution", get(handle_evolution))
-        .route("/v1/evolution/tool-evolutions", get(handle_evolution_tool_evolutions))
+        .route(
+            "/v1/evolution/tool-evolutions",
+            get(handle_evolution_tool_evolutions),
+        )
         .route("/v1/evolution/summary", get(handle_evolution_summary))
         .route("/v1/evolution/trigger", post(handle_evolution_trigger))
         .route("/v1/evolution/test", post(handle_evolution_test))
-        .route("/v1/evolution/test-suggest", post(handle_evolution_test_suggest))
-        .route("/v1/evolution/versions/:skill", get(handle_evolution_versions))
-        .route("/v1/evolution/tool-versions/:id", get(handle_evolution_tool_versions))
-        .route("/v1/evolution/:id", get(handle_evolution_detail).delete(handle_evolution_delete))
+        .route(
+            "/v1/evolution/test-suggest",
+            post(handle_evolution_test_suggest),
+        )
+        .route(
+            "/v1/evolution/versions/:skill",
+            get(handle_evolution_versions),
+        )
+        .route(
+            "/v1/evolution/tool-versions/:id",
+            get(handle_evolution_tool_versions),
+        )
+        .route(
+            "/v1/evolution/:id",
+            get(handle_evolution_detail).delete(handle_evolution_delete),
+        )
         .route("/v1/channels/status", get(handle_channels_status))
         .route("/v1/channels", get(handle_channels_list))
         .route("/v1/channels/:id", put(handle_channel_update))
         .route("/v1/skills/:name", delete(handle_skill_delete))
         .route("/v1/hub/skills", get(handle_hub_skills))
-        .route("/v1/hub/skills/:name/install", post(handle_hub_skill_install))
-        .route("/v1/skills/install-external", post(handle_skill_install_external))
+        .route(
+            "/v1/hub/skills/:name/install",
+            post(handle_hub_skill_install),
+        )
+        .route(
+            "/v1/skills/install-external",
+            post(handle_skill_install_external),
+        )
         .route("/v1/stats", get(handle_stats))
         // P1: Cron
         .route("/v1/cron", get(handle_cron_list).post(handle_cron_create))
         .route("/v1/cron/:id", delete(handle_cron_delete))
         .route("/v1/cron/:id/run", post(handle_cron_run))
         // Toggles
-        .route("/v1/toggles", get(handle_toggles_get).put(handle_toggles_update))
+        .route(
+            "/v1/toggles",
+            get(handle_toggles_get).put(handle_toggles_update),
+        )
         // P2: Alerts
-        .route("/v1/alerts", get(handle_alerts_list).post(handle_alerts_create))
+        .route(
+            "/v1/alerts",
+            get(handle_alerts_list).post(handle_alerts_create),
+        )
         .route("/v1/alerts/history", get(handle_alerts_history))
-        .route("/v1/alerts/:id", put(handle_alerts_update).delete(handle_alerts_delete))
+        .route(
+            "/v1/alerts/:id",
+            put(handle_alerts_update).delete(handle_alerts_delete),
+        )
         // P2: Streams
         .route("/v1/streams", get(handle_streams_list))
         .route("/v1/streams/:id/data", get(handle_stream_data))
         // Persona files (AGENTS.md, SOUL.md, USER.md, etc.)
         .route("/v1/persona/files", get(handle_persona_list))
-        .route("/v1/persona/file", get(handle_persona_read).put(handle_persona_write))
+        .route(
+            "/v1/persona/file",
+            get(handle_persona_read).put(handle_persona_write),
+        )
         // Pool status
         .route("/v1/pool/status", get(handle_pool_status))
         // P2: Files
@@ -5091,11 +5668,17 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/files/download", get(handle_files_download))
         .route("/v1/files/serve", get(handle_files_serve))
         .route("/v1/files/upload", post(handle_files_upload))
-        .layer(middleware::from_fn_with_state(gateway_state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            gateway_state.clone(),
+            auth_middleware,
+        ))
         .layer(build_api_cors_layer(&config))
         // Webhook endpoints — public (no auth), must be outside auth middleware
         .route("/webhook/lark", post(handle_lark_webhook))
-        .route("/webhook/wecom", get(handle_wecom_webhook).post(handle_wecom_webhook))
+        .route(
+            "/webhook/wecom",
+            get(handle_wecom_webhook).post(handle_wecom_webhook),
+        )
         .with_state(gateway_state);
 
     let bind_addr = format!("{}:{}", host, port);
@@ -5140,7 +5723,16 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     });
 
     // ── Print beautiful startup banner ──
-    print_startup_banner(&config, &host, &webui_host, webui_port, &web_password, webui_pass_is_temp, is_exposed, &bind_addr);
+    print_startup_banner(
+        &config,
+        &host,
+        &webui_host,
+        webui_port,
+        &web_password,
+        webui_pass_is_temp,
+        is_exposed,
+        &bind_addr,
+    );
 
     // ── Wait for shutdown signal ──
     tokio::signal::ctrl_c().await?;
@@ -5184,7 +5776,6 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     #[cfg(feature = "wecom")]
     handles.push(("wecom", wecom_handle));
 
-
     let total = handles.len();
     let graceful_timeout = std::time::Duration::from_secs(30);
     let deadline = tokio::time::Instant::now() + graceful_timeout;
@@ -5204,7 +5795,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let mut aborted = 0;
     for (name, handle) in &handles {
         if !handle.is_finished() {
-            warn!(task = *name, "Task did not exit in graceful window, aborting");
+            warn!(
+                task = *name,
+                "Task did not exit in graceful window, aborting"
+            );
             handle.abort();
             aborted += 1;
         }
@@ -5227,7 +5821,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     if failed == 0 {
         info!(total, aborted, "Gateway shutdown complete");
     } else {
-        warn!(failed, total, aborted, "Gateway shutdown completed with task failures");
+        warn!(
+            failed,
+            total, aborted, "Gateway shutdown completed with task failures"
+        );
     }
 
     info!("Gateway stopped");
