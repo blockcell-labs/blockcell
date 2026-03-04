@@ -45,37 +45,64 @@ impl Tool for SpawnTool {
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        let has_skill = params.get("skill_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some();
-        let has_task = params.get("task").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some();
+        let has_skill = params
+            .get("skill_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let has_task = params
+            .get("task")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
         if !has_skill && !has_task {
-            return Err(Error::Validation("Either 'skill_name' or 'task' is required".to_string()));
+            return Err(Error::Validation(
+                "Either 'skill_name' or 'task' is required".to_string(),
+            ));
         }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let spawn_handle = ctx.spawn_handle.as_ref().ok_or_else(|| {
-            Error::Tool("No spawn handle available. Subagent spawning is not configured.".to_string())
+            Error::Tool(
+                "No spawn handle available. Subagent spawning is not configured.".to_string(),
+            )
         })?;
 
-        let skill_name = params.get("skill_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let skill_name = params
+            .get("skill_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
         if let Some(skill) = skill_name {
-            // Skill-based spawn: build a task string that directs the subagent to run the skill
+            // Skill-based spawn: pass skill_name via the task string with a structured prefix
+            // that run_subagent_task will detect and use to trigger the skill script fast path.
             let skill_params = params.get("params").cloned().unwrap_or(json!({}));
-            let label = params.get("label").and_then(|v| v.as_str()).unwrap_or(skill);
-            // Build a structured task instruction for the subagent
+            let label = params
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or(skill);
+            // Structured task: prefix with __SKILL_EXEC__ so subagent can detect and
+            // route to execute_skill_script() instead of LLM processing.
+            let user_query = skill_params
+                .get("user_query")
+                .or_else(|| skill_params.get("query"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let task = format!(
-                "Execute skill '{}' with params: {}. \
-                Call the skill's run_skill tool or execute the skill directly using the skill engine. \
-                Return the skill's output as the final result.",
+                "__SKILL_EXEC__:{}:{}:{}",
                 skill,
-                skill_params
+                serde_json::to_string(&skill_params).unwrap_or_default(),
+                user_query,
             );
             spawn_handle.spawn(&task, label, &ctx.channel, &ctx.chat_id)
         } else {
             let task = params["task"].as_str().unwrap_or("");
-            let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("subagent");
+            let label = params
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("subagent");
             spawn_handle.spawn(task, label, &ctx.channel, &ctx.chat_id)
         }
     }
@@ -99,12 +126,18 @@ mod tests {
         // task only
         assert!(tool.validate(&json!({"task": "do something"})).is_ok());
         // skill_name only
-        assert!(tool.validate(&json!({"skill_name": "stock_analysis"})).is_ok());
+        assert!(tool
+            .validate(&json!({"skill_name": "stock_analysis"}))
+            .is_ok());
         // both
-        assert!(tool.validate(&json!({"skill_name": "stock_analysis", "task": "fallback"})).is_ok());
+        assert!(tool
+            .validate(&json!({"skill_name": "stock_analysis", "task": "fallback"}))
+            .is_ok());
         // neither — error
         assert!(tool.validate(&json!({})).is_err());
         // empty strings — error
-        assert!(tool.validate(&json!({"skill_name": "", "task": ""})).is_err());
+        assert!(tool
+            .validate(&json!({"skill_name": "", "task": ""}))
+            .is_err());
     }
 }

@@ -1626,28 +1626,34 @@ impl AgentRuntime {
             }
         }
 
-        // Emit message_done event to WebSocket clients
-        if let Some(ref event_tx) = self.event_tx {
-            let event = serde_json::json!({
-                "type": "message_done",
-                "chat_id": msg.chat_id,
-                "task_id": "",
-                "content": final_response,
-                "tool_calls": 0,
-                "duration_ms": 0,
-                "media": collected_media,
-            });
-            let _ = event_tx.send(event.to_string());
+        // Emit message_done event to WebSocket clients.
+        // Only for "ws" channel — the bridge's outbound_to_ws_bridge skips ws-channel
+        // messages (to avoid duplicate), so we must emit directly via event_tx.
+        // For all other channels (cron, subagent, cli, etc.), the bridge will create
+        // the WS event from the outbound_tx message, preventing double-send.
+        if msg.channel == "ws" {
+            if let Some(ref event_tx) = self.event_tx {
+                let event = serde_json::json!({
+                    "type": "message_done",
+                    "chat_id": msg.chat_id,
+                    "task_id": "",
+                    "content": final_response,
+                    "tool_calls": 0,
+                    "duration_ms": 0,
+                    "media": collected_media,
+                });
+                let _ = event_tx.send(event.to_string());
+            }
         }
 
         // Send response to outbound for all channels (including CLI and cron).
-        // Skip ghost channel — the event_tx broadcast above already notifies WebSocket
-        // clients, and ghost responses don't need CLI printing or external channel dispatch.
-        // Sending via outbound_tx would cause a duplicate message_done in the gateway's
-        // outbound_to_ws_bridge.
+        // Skip ghost channel — ghost responses don't need CLI printing or external
+        // channel dispatch, and the ws event_tx above already handles ws display.
         if msg.channel != "ghost" {
             if let Some(tx) = &self.outbound_tx {
-                let outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                let mut outbound =
+                    OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                outbound.media = collected_media.clone();
                 let _ = tx.send(outbound).await;
             }
         }
@@ -1880,6 +1886,25 @@ impl AgentRuntime {
         tool_call: &ToolCallRequest,
         msg: &InboundMessage,
     ) -> String {
+        // Hard block: reject disabled tools at execution level (not just prompt filtering)
+        let disabled_tools = load_disabled_toggles(&self.paths, "tools");
+        if disabled_tools.contains(&tool_call.name) {
+            return serde_json::json!({
+                "error": format!("Tool '{}' is currently disabled via toggles.", tool_call.name),
+                "tool": tool_call.name,
+                "hint": "This tool has been disabled by the user. Use toggle_manage to re-enable it, or use an alternative tool."
+            }).to_string();
+        }
+        // Also block disabled skills invoked as tools (skill scripts registered as tools)
+        let disabled_skills = load_disabled_toggles(&self.paths, "skills");
+        if disabled_skills.contains(&tool_call.name) {
+            return serde_json::json!({
+                "error": format!("Skill '{}' is currently disabled via toggles.", tool_call.name),
+                "tool": tool_call.name,
+                "hint": "This skill has been disabled by the user. Use toggle_manage to re-enable it."
+            }).to_string();
+        }
+
         // Dangerous-operation gate: require explicit user confirmation before executing
         // self-destructive commands or destructive file operations.
         if tool_call.name == "exec" {
@@ -2233,39 +2258,99 @@ impl AgentRuntime {
         let capability_registry = self.capability_registry.clone();
         let core_evolution = self.core_evolution.clone();
 
-        let tool_executor =
-            move |tool_name: &str, params: serde_json::Value| -> Result<serde_json::Value> {
-                let ctx = blockcell_tools::ToolContext {
-                    workspace: paths.workspace(),
-                    builtin_skills_dir: Some(paths.builtin_skills_dir()),
-                    session_key: session_key.clone(),
-                    channel: channel.clone(),
-                    chat_id: chat_id.clone(),
-                    config: config.clone(),
-                    permissions: blockcell_core::types::PermissionSet::new(),
-                    task_manager: Some(Arc::new(task_manager.clone())),
-                    memory_store: memory_store.clone(),
-                    outbound_tx: outbound_tx.clone(),
-                    spawn_handle: None, // No spawning from cron skill scripts
-                    capability_registry: capability_registry.clone(),
-                    core_evolution: core_evolution.clone(),
-                };
+        let tool_executor = move |tool_name: &str,
+                                  params: serde_json::Value|
+              -> Result<serde_json::Value> {
+            // Security gate: block disabled tools/skills in skill scripts
+            let disabled_tools = load_disabled_toggles(&paths, "tools");
+            if disabled_tools.contains(tool_name) {
+                return Err(blockcell_core::Error::Tool(format!(
+                    "Tool '{}' is disabled via toggles",
+                    tool_name
+                )));
+            }
+            let disabled_skills = load_disabled_toggles(&paths, "skills");
+            if disabled_skills.contains(tool_name) {
+                return Err(blockcell_core::Error::Tool(format!(
+                    "Skill '{}' is disabled via toggles",
+                    tool_name
+                )));
+            }
 
-                // Execute tool synchronously via a new tokio runtime handle
-                let rt = tokio::runtime::Handle::current();
-                let tool_name_owned = tool_name.to_string();
-                std::thread::scope(|s| {
-                    s.spawn(|| {
-                        rt.block_on(async { registry.execute(&tool_name_owned, ctx, params).await })
-                    })
-                    .join()
-                    .unwrap_or_else(|_| {
-                        Err(blockcell_core::Error::Tool(
-                            "Tool execution panicked".into(),
-                        ))
-                    })
-                })
+            // Security gate: block dangerous exec commands from skill scripts
+            if tool_name == "exec" {
+                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                    if is_dangerous_exec_command(cmd) {
+                        return Err(blockcell_core::Error::Tool(format!(
+                            "Dangerous command blocked in skill script: {}",
+                            cmd
+                        )));
+                    }
+                }
+            }
+
+            // Security gate: validate filesystem paths are within workspace
+            let fs_tools = [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_dir",
+                "file_ops",
+            ];
+            if fs_tools.contains(&tool_name) {
+                let workspace = paths.workspace();
+                for key in &["path", "destination", "output_path"] {
+                    if let Some(p) = params.get(*key).and_then(|v| v.as_str()) {
+                        let resolved = if std::path::Path::new(p).is_absolute() {
+                            std::path::PathBuf::from(p)
+                        } else {
+                            workspace.join(p)
+                        };
+                        if let Ok(canonical) = resolved.canonicalize() {
+                            if let Ok(ws_canonical) = workspace.canonicalize() {
+                                if !canonical.starts_with(&ws_canonical) {
+                                    return Err(blockcell_core::Error::Tool(format!(
+                                        "Path '{}' is outside workspace — blocked in skill script",
+                                        p
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let ctx = blockcell_tools::ToolContext {
+                workspace: paths.workspace(),
+                builtin_skills_dir: Some(paths.builtin_skills_dir()),
+                session_key: session_key.clone(),
+                channel: channel.clone(),
+                chat_id: chat_id.clone(),
+                config: config.clone(),
+                permissions: blockcell_core::types::PermissionSet::new(),
+                task_manager: Some(Arc::new(task_manager.clone())),
+                memory_store: memory_store.clone(),
+                outbound_tx: outbound_tx.clone(),
+                spawn_handle: None, // No spawning from cron skill scripts
+                capability_registry: capability_registry.clone(),
+                core_evolution: core_evolution.clone(),
             };
+
+            // Execute tool synchronously via a new tokio runtime handle
+            let rt = tokio::runtime::Handle::current();
+            let tool_name_owned = tool_name.to_string();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    rt.block_on(async { registry.execute(&tool_name_owned, ctx, params).await })
+                })
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(blockcell_core::Error::Tool(
+                        "Tool execution panicked".into(),
+                    ))
+                })
+            })
+        };
 
         // Context variables for the script
         let mut context_vars = HashMap::new();
@@ -2509,6 +2594,7 @@ impl AgentRuntime {
                             let capability_registry = self.capability_registry.clone();
                             let core_evolution = self.core_evolution.clone();
                             let event_tx = self.event_tx.clone();
+                            let tool_registry = self.tool_registry.clone();
                             let task_id_clone = task_id.clone();
                             let provider_pool = Arc::clone(&self.provider_pool);
                             let chat_id_for_task = msg.chat_id.clone();
@@ -2543,6 +2629,7 @@ impl AgentRuntime {
                                     config,
                                     paths,
                                     provider_pool,
+                                    tool_registry,
                                     task_manager,
                                     outbound_tx,
                                     confirm_tx,
@@ -2674,6 +2761,7 @@ async fn run_message_task(
     config: Config,
     paths: Paths,
     provider_pool: Arc<ProviderPool>,
+    tool_registry: ToolRegistry,
     task_manager: TaskManager,
     outbound_tx: Option<mpsc::Sender<OutboundMessage>>,
     confirm_tx: Option<mpsc::Sender<ConfirmRequest>>,
@@ -2686,7 +2774,6 @@ async fn run_message_task(
 ) {
     task_manager.set_running(&task_id).await;
 
-    let tool_registry = ToolRegistry::with_defaults();
     let mut runtime = match AgentRuntime::new(config, paths, provider_pool, tool_registry) {
         Ok(r) => r,
         Err(e) => {
@@ -2783,17 +2870,43 @@ async fn run_subagent_task(
 
     // Create a unique session key for this subagent
     let session_key = format!("subagent:{}", task_id);
-    let inbound = InboundMessage {
-        channel: "subagent".to_string(),
-        sender_id: "system".to_string(),
-        chat_id: session_key,
-        content: task_str,
-        media: vec![],
-        metadata: serde_json::Value::Null,
-        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+
+    // Detect skill script execution prefix from spawn(skill_name=...)
+    let result = if task_str.starts_with("__SKILL_EXEC__:") {
+        // Parse: __SKILL_EXEC__:<skill_name>:<params_json>:<user_query>
+        let rest = &task_str["__SKILL_EXEC__:".len()..];
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        let skill_name = parts.first().unwrap_or(&"");
+        let user_query = parts.get(2).unwrap_or(&"");
+
+        let inbound = InboundMessage {
+            channel: "subagent".to_string(),
+            sender_id: "system".to_string(),
+            chat_id: session_key,
+            content: user_query.to_string(),
+            media: vec![],
+            metadata: serde_json::json!({
+                "skill_script": true,
+                "skill_name": skill_name,
+            }),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        // process_message will detect skill_script metadata and use the fast path
+        sub_runtime.process_message(inbound).await
+    } else {
+        let inbound = InboundMessage {
+            channel: "subagent".to_string(),
+            sender_id: "system".to_string(),
+            chat_id: session_key,
+            content: task_str,
+            media: vec![],
+            metadata: serde_json::Value::Null,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        sub_runtime.process_message(inbound).await
     };
 
-    match sub_runtime.process_message(inbound).await {
+    match result {
         Ok(result) => {
             task_manager.set_completed(&task_id, &result).await;
             info!(task_id = %task_id, label = %label, "Subagent completed");

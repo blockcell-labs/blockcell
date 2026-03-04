@@ -88,6 +88,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleWsEvent: (event) => {
     const state = get();
 
+    // Filter chat-specific events by chat_id to prevent cross-session leaking.
+    // Normalize both IDs: the server uses ':' separators, the UI uses '_'.
+    const chatEventTypes: string[] = ['message_done', 'token', 'tool_call_start', 'tool_call_result', 'thinking'];
+    if (chatEventTypes.includes(event.type) && event.chat_id) {
+      const normalize = (id: string) => id.replace(/:/g, '_');
+      if (normalize(event.chat_id) !== normalize(state.currentSessionId)) {
+        return; // Event belongs to a different chat session — ignore
+      }
+    }
+
     switch (event.type) {
       case 'message_done': {
         // Check if there's a streaming assistant message to finalize

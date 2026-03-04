@@ -63,6 +63,8 @@ enum WsEvent {
         content: String,
         tool_calls: usize,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<String>,
     },
     #[serde(rename = "error")]
     Error { chat_id: String, message: String },
@@ -185,6 +187,31 @@ fn validate_workspace_relative_path(path: &str) -> Result<std::path::PathBuf, St
         return Err("invalid path".to_string());
     }
     Ok(normalized)
+}
+
+fn primary_pool_entry(config: &Config) -> Option<&blockcell_core::config::ModelEntry> {
+    config
+        .agents
+        .defaults
+        .model_pool
+        .iter()
+        .min_by(|a, b| a.priority.cmp(&b.priority).then(b.weight.cmp(&a.weight)))
+}
+
+fn active_model_and_provider(config: &Config) -> (String, Option<String>, &'static str) {
+    if let Some(entry) = primary_pool_entry(config) {
+        return (
+            entry.model.clone(),
+            Some(entry.provider.clone()),
+            "modelPool",
+        );
+    }
+
+    (
+        config.agents.defaults.model.clone(),
+        config.agents.defaults.provider.clone(),
+        "agents.defaults",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -356,10 +383,11 @@ async fn handle_chat(
 async fn handle_health(State(state): State<GatewayState>) -> impl IntoResponse {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);
+    let (active_model, _, _) = active_model_and_provider(&state.config);
 
     Json(HealthResponse {
         status: "ok".to_string(),
-        model: state.config.agents.defaults.model.clone(),
+        model: active_model,
         uptime_secs: start.elapsed().as_secs(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
@@ -1132,10 +1160,11 @@ async fn handle_ghost_model_options_get(State(state): State<GatewayState>) -> im
         })
         .collect();
     providers.sort();
+    let (default_model, _, _) = active_model_and_provider(&config);
 
     Json(serde_json::json!({
         "providers": providers,
-        "default_model": config.agents.defaults.model,
+        "default_model": default_model,
     }))
 }
 
@@ -1541,15 +1570,20 @@ async fn handle_evolution(State(state): State<GatewayState>) -> impl IntoRespons
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&content) {
                         // Strip heavy fields not needed for the list view
-                        if let Some(patch) = record.get_mut("patch").and_then(|p| p.as_object_mut()) {
+                        if let Some(patch) = record.get_mut("patch").and_then(|p| p.as_object_mut())
+                        {
                             patch.remove("diff");
                         }
-                        if let Some(ctx) = record.get_mut("context").and_then(|c| c.as_object_mut()) {
+                        if let Some(ctx) = record.get_mut("context").and_then(|c| c.as_object_mut())
+                        {
                             ctx.remove("source_snippet");
                             ctx.remove("tool_schemas");
                         }
                         // Strip feedback_history bodies (keep attempt/stage/timestamp only)
-                        if let Some(hist) = record.get_mut("feedback_history").and_then(|h| h.as_array_mut()) {
+                        if let Some(hist) = record
+                            .get_mut("feedback_history")
+                            .and_then(|h| h.as_array_mut())
+                        {
                             for entry in hist.iter_mut() {
                                 if let Some(obj) = entry.as_object_mut() {
                                     obj.remove("previous_code");
@@ -1794,7 +1828,8 @@ async fn handle_evolution_trigger(
                 }
             } else {
                 // toggles file doesn't exist yet — create it with the skill disabled
-                let store = serde_json::json!({ "skills": { &req.skill_name: false }, "tools": {} });
+                let store =
+                    serde_json::json!({ "skills": { &req.skill_name: false }, "tools": {} });
                 if let Some(parent) = toggles_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -1964,10 +1999,7 @@ async fn handle_evolution_test(
             if let Ok(yaml_val) = serde_yaml::from_str::<serde_yaml::Value>(&meta_yaml) {
                 if let Some(params) = yaml_val.get("parameters").and_then(|v| v.as_mapping()) {
                     for (k, v) in params {
-                        if let (Some(key), Some(def)) = (
-                            k.as_str(),
-                            v.get("default"),
-                        ) {
+                        if let (Some(key), Some(def)) = (k.as_str(), v.get("default")) {
                             // convert serde_yaml::Value → serde_json::Value
                             if let Ok(json_val) = serde_json::to_value(def) {
                                 defaults.insert(key.to_string(), json_val);
@@ -2034,7 +2066,10 @@ async fn handle_evolution_test(
                     } else {
                         // LLM 没返回合法 JSON object：用纯默认值 + 原始输入作为 query
                         let mut fallback = param_defaults.clone();
-                        fallback.insert("query".to_string(), serde_json::Value::String(req.input.clone()));
+                        fallback.insert(
+                            "query".to_string(),
+                            serde_json::Value::String(req.input.clone()),
+                        );
                         serde_json::Value::Object(fallback).to_string()
                     }
                 }
@@ -2045,14 +2080,20 @@ async fn handle_evolution_test(
                     );
                     // fallback: defaults + 原始输入作为 query
                     let mut fallback = param_defaults.clone();
-                    fallback.insert("query".to_string(), serde_json::Value::String(req.input.clone()));
+                    fallback.insert(
+                        "query".to_string(),
+                        serde_json::Value::String(req.input.clone()),
+                    );
                     serde_json::Value::Object(fallback).to_string()
                 }
             }
         } else {
             // 无可用 provider：defaults + 原始输入
             let mut fallback = param_defaults.clone();
-            fallback.insert("query".to_string(), serde_json::Value::String(req.input.clone()));
+            fallback.insert(
+                "query".to_string(),
+                serde_json::Value::String(req.input.clone()),
+            );
             serde_json::Value::Object(fallback).to_string()
         };
 
@@ -2446,10 +2487,11 @@ async fn handle_stats(State(state): State<GatewayState>) -> impl IntoResponse {
 
     // Active tasks = queued + running
     let active_tasks = queued + running;
+    let (active_model, _, _) = active_model_and_provider(&state.config);
 
     Json(serde_json::json!({
         "uptime_secs": start.elapsed().as_secs(),
-        "model": state.config.agents.defaults.model,
+        "model": active_model,
         "memory_items": memory_items,
         "active_tasks": active_tasks,
         "tasks": {
@@ -4809,6 +4851,7 @@ async fn outbound_to_ws_bridge(
                         content: msg.content.clone(),
                         tool_calls: 0,
                         duration_ms: 0,
+                        media: msg.media.clone(),
                     };
                     if let Ok(json) = serde_json::to_string(&event) {
                         let _ = ws_broadcast.send(json);
@@ -4992,7 +5035,15 @@ fn print_startup_banner(
     bind_addr: &str,
 ) {
     let ver = env!("CARGO_PKG_VERSION");
-    let model = &config.agents.defaults.model;
+    let (model, provider, source) = active_model_and_provider(config);
+    let model_label = if source == "modelPool" {
+        match provider {
+            Some(p) => format!("{} (modelPool: {})", model, p),
+            None => format!("{} (modelPool)", model),
+        }
+    } else {
+        model
+    };
 
     // ── Logo + Header ──
     eprintln!();
@@ -5021,7 +5072,7 @@ fn print_startup_banner(
         ver,
         ansi::RESET
     );
-    eprintln!("  {}Model: {}{}", ansi::DIM, model, ansi::RESET);
+    eprintln!("  {}Model: {}{}", ansi::DIM, model_label, ansi::RESET);
     eprintln!();
 
     // ── WebUI Password box ──

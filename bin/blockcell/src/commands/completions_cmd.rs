@@ -48,6 +48,7 @@ fn build_cli() -> clap::Command {
     clap::Command::new("blockcell")
         .about("A self-evolving AI agent framework")
         .subcommand(clap::Command::new("onboard").about("Initialize configuration and workspace"))
+        .subcommand(clap::Command::new("setup").about("Interactive setup wizard"))
         .subcommand(clap::Command::new("status").about("Show current configuration status"))
         .subcommand(clap::Command::new("agent").about("Run the agent"))
         .subcommand(clap::Command::new("gateway").about("Start the gateway daemon"))

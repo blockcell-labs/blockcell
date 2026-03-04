@@ -40,6 +40,28 @@ enum Commands {
         channels_only: bool,
     },
 
+    /// Interactive setup wizard (provider + channel)
+    Setup {
+        /// Reset existing config to defaults before setup
+        #[arg(long)]
+        force: bool,
+        /// LLM provider name (deepseek/openai/kimi/anthropic/gemini/zhipu/minimax/ollama)
+        #[arg(long)]
+        provider: Option<String>,
+        /// API key for selected provider
+        #[arg(long, name = "api-key")]
+        api_key: Option<String>,
+        /// Model name override
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional channel to configure (telegram/feishu/wecom/dingtalk/lark/none)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Skip provider config validation after saving config
+        #[arg(long)]
+        skip_provider_test: bool,
+    },
+
     /// Show current configuration status
     Status,
 
@@ -715,13 +737,36 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Onboard { force, interactive: _, provider, api_key, model, channels_only } => {
+        Commands::Onboard {
+            force,
+            interactive: _,
+            provider,
+            api_key,
+            model,
+            channels_only,
+        } => {
             commands::onboard::run(force, provider, api_key, model, channels_only).await?;
+        }
+        Commands::Setup {
+            force,
+            provider,
+            api_key,
+            model,
+            channel,
+            skip_provider_test,
+        } => {
+            commands::setup::run(force, provider, api_key, model, channel, skip_provider_test)
+                .await?;
         }
         Commands::Status => {
             commands::status::run().await?;
         }
-        Commands::Agent { message, session, model, provider } => {
+        Commands::Agent {
+            message,
+            session,
+            model,
+            provider,
+        } => {
             commands::agent::run(message, session, model, provider).await?;
         }
         Commands::Gateway { port, host } => {
@@ -769,7 +814,11 @@ async fn main() -> anyhow::Result<()> {
             ToolsCommands::Test { tool_name, params } => {
                 commands::tools_cmd::test(&tool_name, &params).await?;
             }
-            ToolsCommands::Toggle { tool_name, enable, disable } => {
+            ToolsCommands::Toggle {
+                tool_name,
+                enable,
+                disable,
+            } => {
                 let enabled = if disable { false } else { enable || true };
                 commands::tools_cmd::toggle(&tool_name, enabled).await?;
             }
@@ -890,10 +939,18 @@ async fn main() -> anyhow::Result<()> {
             SkillsCommands::Forget { name } => {
                 commands::skills::forget(&name).await?;
             }
-            SkillsCommands::Test { path, input, verbose } => {
+            SkillsCommands::Test {
+                path,
+                input,
+                verbose,
+            } => {
                 commands::skills::test(&path, input, verbose).await?;
             }
-            SkillsCommands::TestAll { dir, input, verbose } => {
+            SkillsCommands::TestAll {
+                dir,
+                input,
+                verbose,
+            } => {
                 commands::skills::test_all(&dir, input, verbose).await?;
             }
         },
@@ -939,7 +996,12 @@ async fn main() -> anyhow::Result<()> {
             MemoryCommands::Stats => {
                 commands::memory::stats().await?;
             }
-            MemoryCommands::Search { query, scope, item_type, top } => {
+            MemoryCommands::Search {
+                query,
+                scope,
+                item_type,
+                top,
+            } => {
                 commands::memory::search(&query, scope, item_type, top).await?;
             }
             MemoryCommands::Maintenance { recycle_days } => {
@@ -961,7 +1023,13 @@ async fn main() -> anyhow::Result<()> {
             AlertsCommands::Evaluate => {
                 commands::alerts_cmd::evaluate().await?;
             }
-            AlertsCommands::Add { name, source, field, operator, threshold } => {
+            AlertsCommands::Add {
+                name,
+                source,
+                field,
+                operator,
+                threshold,
+            } => {
                 commands::alerts_cmd::add(&name, &source, &field, &operator, &threshold).await?;
             }
             AlertsCommands::Remove { rule_id } => {
@@ -990,10 +1058,18 @@ async fn main() -> anyhow::Result<()> {
             KnowledgeCommands::Stats { graph } => {
                 commands::knowledge_cmd::stats(graph).await?;
             }
-            KnowledgeCommands::Search { query, graph, limit } => {
+            KnowledgeCommands::Search {
+                query,
+                graph,
+                limit,
+            } => {
                 commands::knowledge_cmd::search(&query, graph, limit).await?;
             }
-            KnowledgeCommands::Export { format, graph, output } => {
+            KnowledgeCommands::Export {
+                format,
+                graph,
+                output,
+            } => {
                 commands::knowledge_cmd::export(graph, &format, output).await?;
             }
             KnowledgeCommands::ListGraphs => {
@@ -1008,7 +1084,12 @@ async fn main() -> anyhow::Result<()> {
 
         // ── P2: Logs ────────────────────────────────────────────────────
         Commands::Logs { command } => match command {
-            LogsCommands::Show { lines, filter, last_n, session } => {
+            LogsCommands::Show {
+                lines,
+                filter,
+                last_n,
+                session,
+            } => {
                 let n = last_n.unwrap_or(lines);
                 commands::logs_cmd::show(n, filter, session).await?;
             }

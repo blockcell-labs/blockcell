@@ -127,7 +127,7 @@ fn default_workspace() -> String {
 }
 
 fn default_model() -> String {
-    "anthropic/claude-sonnet-4-20250514".to_string()
+    "".to_string()
 }
 
 fn default_max_tokens() -> u32 {

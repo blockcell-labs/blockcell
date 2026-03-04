@@ -1,12 +1,12 @@
-use blockcell_core::{Config, Paths};
 use blockcell_core::types::ChatMessage;
+use blockcell_core::{Config, Paths};
 use blockcell_skills::{EvolutionService, EvolutionServiceConfig, LLMProvider, SkillManager};
 use blockcell_tools::MemoryStoreHandle;
-use std::sync::Arc;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
-use crate::intent::{IntentCategory, needs_finance_guidelines, needs_skills_list};
+use crate::intent::{needs_finance_guidelines, needs_skills_list, IntentCategory};
 
 /// Lightweight token estimator.
 /// Chinese characters ≈ 1 token each, English words ≈ 1.3 tokens each.
@@ -53,24 +53,28 @@ fn estimate_message_tokens(msg: &ChatMessage) -> usize {
     let content_tokens = match &msg.content {
         serde_json::Value::String(s) => estimate_tokens(s),
         serde_json::Value::Array(parts) => {
-            parts.iter().map(|p| {
-                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
-                    estimate_tokens(text)
-                } else if p.get("image_url").is_some() {
-                    // Base64 images: ~85 tokens for low-detail, ~765 for high-detail
-                    // Use conservative estimate
-                    200
-                } else {
-                    10
-                }
-            }).sum()
+            parts
+                .iter()
+                .map(|p| {
+                    if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
+                        estimate_tokens(text)
+                    } else if p.get("image_url").is_some() {
+                        // Base64 images: ~85 tokens for low-detail, ~765 for high-detail
+                        // Use conservative estimate
+                        200
+                    } else {
+                        10
+                    }
+                })
+                .sum()
         }
         _ => 0,
     };
     let tool_call_tokens = msg.tool_calls.as_ref().map_or(0, |calls| {
-        calls.iter().map(|tc| {
-            estimate_tokens(&tc.name) + estimate_tokens(&tc.arguments.to_string()) + 10
-        }).sum()
+        calls
+            .iter()
+            .map(|tc| estimate_tokens(&tc.name) + estimate_tokens(&tc.arguments.to_string()) + 10)
+            .sum()
     });
     content_tokens + tool_call_tokens + 4 // role overhead
 }
@@ -91,16 +95,16 @@ impl ContextBuilder {
             .with_versioning(skills_dir.clone())
             .with_evolution(skills_dir, EvolutionServiceConfig::default());
         let _ = skill_manager.load_from_paths(&paths);
-        
-        Self { 
-            paths, 
+
+        Self {
+            paths,
             config,
             skill_manager: Some(skill_manager),
             memory_store: None,
             capability_brief: None,
         }
     }
-    
+
     pub fn set_skill_manager(&mut self, manager: SkillManager) {
         self.skill_manager = Some(manager);
     }
@@ -136,7 +140,9 @@ impl ContextBuilder {
     }
 
     pub fn evolution_service(&self) -> Option<&EvolutionService> {
-        self.skill_manager.as_ref().and_then(|m| m.evolution_service())
+        self.skill_manager
+            .as_ref()
+            .and_then(|m| m.evolution_service())
     }
 
     /// Wire an LLM provider into the EvolutionService so that tick() can automatically
@@ -168,16 +174,38 @@ impl ContextBuilder {
 
     /// Build system prompt with all content (legacy, no intent filtering).
     pub fn build_system_prompt(&self) -> String {
-        self.build_system_prompt_for_intents(&[IntentCategory::Unknown], &HashSet::new(), &HashSet::new())
+        self.build_system_prompt_for_intents(
+            &[IntentCategory::Unknown],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
     }
 
     /// Build system prompt filtered by intent categories.
     /// This is the core optimization: only inject relevant rules, tools, and domain knowledge.
-    pub fn build_system_prompt_for_intents(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>) -> String {
-        self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, "", "")
+    pub fn build_system_prompt_for_intents(
+        &self,
+        intents: &[IntentCategory],
+        disabled_skills: &HashSet<String>,
+        disabled_tools: &HashSet<String>,
+    ) -> String {
+        self.build_system_prompt_for_intents_with_channel(
+            intents,
+            disabled_skills,
+            disabled_tools,
+            "",
+            "",
+        )
     }
 
-    pub fn build_system_prompt_for_intents_with_channel(&self, intents: &[IntentCategory], disabled_skills: &HashSet<String>, disabled_tools: &HashSet<String>, channel: &str, user_query: &str) -> String {
+    pub fn build_system_prompt_for_intents_with_channel(
+        &self,
+        intents: &[IntentCategory],
+        disabled_skills: &HashSet<String>,
+        disabled_tools: &HashSet<String>,
+        channel: &str,
+        user_query: &str,
+    ) -> String {
         let mut prompt = String::new();
         let is_chat = intents.len() == 1 && intents[0] == IntentCategory::Chat;
 
@@ -212,7 +240,9 @@ impl ContextBuilder {
             prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
             prompt.push_str("- Validate tool parameters against schema.\n");
             prompt.push_str("- Search `memory_query` before asking the user for information you might already know.\n");
-            prompt.push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
+            prompt.push_str(
+                "- Never hardcode credentials — ask the user or read from config/memory.\n",
+            );
             prompt.push_str("- **金融数据**: `finance_api` 使用东方财富(A股/港股完全免费)、CoinGecko(加密货币免费)、Alpha Vantage(美股,可选key)，**无需用户配置任何 API Key** 即可查询A股/港股/加密货币行情。\n");
             prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
             prompt.push_str("- **Web search**: Use `web_search` for discovery. Chinese queries automatically use Bing for best results. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. **If results are irrelevant**: retry with rephrased query (shorter, different keywords) before concluding no results exist — never give up after just one failed search.\n");
@@ -223,7 +253,17 @@ impl ContextBuilder {
             // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
             // - IM channels (wecom/feishu/lark/telegram/slack/discord/dingtalk/whatsapp):
             //   markdown is NOT rendered; sending media MUST go through notification tool
-            let is_im_channel = matches!(channel, "wecom" | "feishu" | "lark" | "telegram" | "slack" | "discord" | "dingtalk" | "whatsapp");
+            let is_im_channel = matches!(
+                channel,
+                "wecom"
+                    | "feishu"
+                    | "lark"
+                    | "telegram"
+                    | "slack"
+                    | "discord"
+                    | "dingtalk"
+                    | "whatsapp"
+            );
             if is_im_channel {
                 prompt.push_str("- **当前渠道为 IM 聊天（不渲染 Markdown）**: 不要在回复文字中使用 markdown 图片语法（如 `![](path)`），IM 端不会渲染。若需展示图片内容，用文字描述即可。\n");
                 prompt.push_str("- **发送图片/文件给用户（⚠️ 必须调用 message 工具，否则文件不会发出）**: 当用户要求发回图片/文件时，**必须**调用 `message` 工具，参数示例：`{\"media\": [\"/root/.blockcell/workspace/media/xxx.jpg\"], \"content\": \"这是你要的图片\"}`。**绝对禁止**在不调用工具的情况下直接回复\"发送成功\"——那是幻觉，图片根本没有发出去。\n");
@@ -245,8 +285,14 @@ impl ContextBuilder {
 
         // Current time
         let now = chrono::Utc::now();
-        prompt.push_str(&format!("Current time: {}\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
-        prompt.push_str(&format!("Workspace: {}\n\n", self.paths.workspace().display()));
+        prompt.push_str(&format!(
+            "Current time: {}\n",
+            now.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+        prompt.push_str(&format!(
+            "Workspace: {}\n\n",
+            self.paths.workspace().display()
+        ));
 
         // Memory brief — query-based retrieval when possible (P1-1 optimization)
         // For Chat intent: skip memory injection to save tokens
@@ -291,12 +337,26 @@ impl ContextBuilder {
             if !disabled_skills.is_empty() {
                 let mut names: Vec<&String> = disabled_skills.iter().collect();
                 names.sort();
-                prompt.push_str(&format!("Disabled skills: {}\n", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                prompt.push_str(&format!(
+                    "Disabled skills: {}\n",
+                    names
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             if !disabled_tools.is_empty() {
                 let mut names: Vec<&String> = disabled_tools.iter().collect();
                 names.sort();
-                prompt.push_str(&format!("Disabled tools: {}\n", names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+                prompt.push_str(&format!(
+                    "Disabled tools: {}\n",
+                    names
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             prompt.push('\n');
         }
@@ -314,12 +374,15 @@ impl ContextBuilder {
         // Skill trigger match — inject SKILL.md when user input matches a skill's triggers.
         // This is the primary mechanism for user-created skills to be activated.
         // Must run BEFORE the generic skills list so the LLM sees the specific skill first.
+        // Skip disabled skills so they are never injected into the prompt.
         if !is_chat && !user_query.is_empty() {
             if let Some((skill_name, skill_md)) = self.match_skill(user_query) {
-                prompt.push_str(&format!("## Active Skill: {}\n", skill_name));
-                prompt.push_str("The user's input matches this skill. Follow the skill's instructions below:\n\n");
-                prompt.push_str(&skill_md);
-                prompt.push_str("\n\n");
+                if !disabled_skills.contains(&skill_name) {
+                    prompt.push_str(&format!("## Active Skill: {}\n", skill_name));
+                    prompt.push_str("The user's input matches this skill. Follow the skill's instructions below:\n\n");
+                    prompt.push_str(&skill_md);
+                    prompt.push_str("\n\n");
+                }
             }
         }
 
@@ -337,7 +400,12 @@ impl ContextBuilder {
     }
 
     /// Build skills section based on intent (Method D).
-    fn build_skills_section(&self, prompt: &mut String, intents: &[IntentCategory], disabled_skills: &HashSet<String>) {
+    fn build_skills_section(
+        &self,
+        prompt: &mut String,
+        intents: &[IntentCategory],
+        disabled_skills: &HashSet<String>,
+    ) {
         if let Some(ref manager) = self.skill_manager {
             let mut skills = manager.list_available();
             // Filter out disabled skills
@@ -361,7 +429,8 @@ impl ContextBuilder {
                 ));
             } else {
                 // For specific intents: show only relevant skills (max 10)
-                let relevant: Vec<_> = skills.iter()
+                let relevant: Vec<_> = skills
+                    .iter()
                     .filter(|s| !s.meta.triggers.is_empty())
                     .filter(|s| self.skill_matches_intents(s, intents))
                     .take(10)
@@ -371,7 +440,10 @@ impl ContextBuilder {
                     prompt.push_str("## Relevant Skills\n");
                     prompt.push_str("Skills handle complex multi-step workflows. **Prefer calling tools directly** (finance_api, web_search) for simple queries. Only use `spawn` with `skill_name` for background tasks or when you cannot answer directly.\n\n");
                     for skill in &relevant {
-                        let triggers = skill.meta.triggers.iter()
+                        let triggers = skill
+                            .meta
+                            .triggers
+                            .iter()
                             .take(4)
                             .cloned()
                             .collect::<Vec<String>>()
@@ -385,7 +457,11 @@ impl ContextBuilder {
     }
 
     /// Check if a skill is relevant to the given intents based on its dependencies/triggers.
-    fn skill_matches_intents(&self, skill: &blockcell_skills::Skill, intents: &[IntentCategory]) -> bool {
+    fn skill_matches_intents(
+        &self,
+        skill: &blockcell_skills::Skill,
+        intents: &[IntentCategory],
+    ) -> bool {
         let name = &skill.name;
         let caps = &skill.meta.capabilities;
         let triggers = &skill.meta.triggers;
@@ -393,33 +469,86 @@ impl ContextBuilder {
         for intent in intents {
             let matched = match intent {
                 IntentCategory::Finance => {
-                    caps.iter().any(|c| ["finance_api", "exchange_api", "alert_rule", "stream_subscribe"].contains(&c.as_str()))
-                    || ["stock", "bond", "futures", "crypto", "portfolio", "finance", "daily_finance", "macro"].iter().any(|k| name.contains(k))
+                    caps.iter().any(|c| {
+                        [
+                            "finance_api",
+                            "exchange_api",
+                            "alert_rule",
+                            "stream_subscribe",
+                        ]
+                        .contains(&c.as_str())
+                    }) || [
+                        "stock",
+                        "bond",
+                        "futures",
+                        "crypto",
+                        "portfolio",
+                        "finance",
+                        "daily_finance",
+                        "macro",
+                    ]
+                    .iter()
+                    .any(|k| name.contains(k))
                 }
                 IntentCategory::Blockchain => {
-                    caps.iter().any(|c| ["blockchain_rpc", "blockchain_tx", "contract_security", "nft_market", "bridge_api", "multisig"].contains(&c.as_str()))
-                    || ["crypto", "token", "whale", "defi", "nft", "contract", "wallet", "dao", "treasury"].iter().any(|k| name.contains(k))
+                    caps.iter().any(|c| {
+                        [
+                            "blockchain_rpc",
+                            "blockchain_tx",
+                            "contract_security",
+                            "nft_market",
+                            "bridge_api",
+                            "multisig",
+                        ]
+                        .contains(&c.as_str())
+                    }) || [
+                        "crypto", "token", "whale", "defi", "nft", "contract", "wallet", "dao",
+                        "treasury",
+                    ]
+                    .iter()
+                    .any(|k| name.contains(k))
                 }
                 IntentCategory::SystemControl => {
-                    caps.iter().any(|c| ["app_control", "camera_capture", "system_info"].contains(&c.as_str()))
-                    || ["app_control", "camera"].iter().any(|k| name.contains(k))
+                    caps.iter().any(|c| {
+                        ["app_control", "camera_capture", "system_info"].contains(&c.as_str())
+                    }) || ["app_control", "camera"].iter().any(|k| name.contains(k))
                 }
-                IntentCategory::Media => {
-                    caps.iter().any(|c| ["audio_transcribe", "tts", "ocr", "image_understand", "video_process"].contains(&c.as_str()))
-                }
-                IntentCategory::Communication => {
-                    caps.iter().any(|c| ["email", "social_media", "notification"].contains(&c.as_str()))
-                }
+                IntentCategory::Media => caps.iter().any(|c| {
+                    [
+                        "audio_transcribe",
+                        "tts",
+                        "ocr",
+                        "image_understand",
+                        "video_process",
+                    ]
+                    .contains(&c.as_str())
+                }),
+                IntentCategory::Communication => caps
+                    .iter()
+                    .any(|c| ["email", "social_media", "notification"].contains(&c.as_str())),
                 _ => {
                     // For other intents, check if any trigger keyword overlaps with the skill name
                     // or if the skill name contains intent-relevant keywords.
                     let intent_keywords: &[&str] = match intent {
-                        IntentCategory::Organization => &["日程", "任务", "提醒", "记忆", "笔记", "calendar", "task", "reminder", "note", "cron"],
-                        IntentCategory::WebSearch => &["搜索", "网页", "浏览", "search", "web", "browse"],
-                        IntentCategory::FileOps => &["文件", "代码", "脚本", "file", "code", "script"],
-                        IntentCategory::DataAnalysis => &["数据", "图表", "统计", "data", "chart", "analysis"],
-                        IntentCategory::DevOps => &["部署", "服务器", "git", "cloud", "deploy", "server"],
-                        IntentCategory::Lifestyle => &["健康", "地图", "联系人", "health", "map", "contact"],
+                        IntentCategory::Organization => &[
+                            "日程", "任务", "提醒", "记忆", "笔记", "calendar", "task", "reminder",
+                            "note", "cron",
+                        ],
+                        IntentCategory::WebSearch => {
+                            &["搜索", "网页", "浏览", "search", "web", "browse"]
+                        }
+                        IntentCategory::FileOps => {
+                            &["文件", "代码", "脚本", "file", "code", "script"]
+                        }
+                        IntentCategory::DataAnalysis => {
+                            &["数据", "图表", "统计", "data", "chart", "analysis"]
+                        }
+                        IntentCategory::DevOps => {
+                            &["部署", "服务器", "git", "cloud", "deploy", "server"]
+                        }
+                        IntentCategory::Lifestyle => {
+                            &["健康", "地图", "联系人", "health", "map", "contact"]
+                        }
                         IntentCategory::IoT => &["智能家居", "传感器", "iot", "smart", "sensor"],
                         _ => &[],
                     };
@@ -446,26 +575,38 @@ impl ContextBuilder {
         prompt.push_str("### Step 0: Unknown Stock Code? Use stock_search FIRST\n");
         prompt.push_str("**If user gives a company name (not a code), ALWAYS call `finance_api` action='stock_search' query='公司名' first to get the stock code.**\n");
         prompt.push_str("Example: user says '分析摩尔线程' → call stock_search query='摩尔线程' → check if listed.\n");
-        prompt.push_str("- If **found**: use the returned code for stock_quote / stock_history etc.\n");
+        prompt.push_str(
+            "- If **found**: use the returned code for stock_quote / stock_history etc.\n",
+        );
         prompt.push_str("- If **not found / unlisted**: explicitly tell the user the company is not publicly listed, then search for **related concept stocks** using web_search or stock_screen with industry filter. Provide analysis of publicly-traded peers in the same sector.\n\n");
 
         prompt.push_str("### Step 1: web_search Retry Strategy\n");
         prompt.push_str("If `web_search` returns irrelevant results (wrong topic, foreign language), **do NOT give up immediately**. Try these alternatives:\n");
-        prompt.push_str("1. Rephrase query in Chinese: '公司名 公司 行业 融资' or '公司名 A股 概念股'\n");
+        prompt.push_str(
+            "1. Rephrase query in Chinese: '公司名 公司 行业 融资' or '公司名 A股 概念股'\n",
+        );
         prompt.push_str("2. Use shorter, more specific terms: just the company name + key noun\n");
-        prompt.push_str("3. Try web_fetch on a specific known URL (e.g. eastmoney.com, xueqiu.com)\n");
+        prompt.push_str(
+            "3. Try web_fetch on a specific known URL (e.g. eastmoney.com, xueqiu.com)\n",
+        );
         prompt.push_str("4. Only conclude 'no information found' after 2+ failed attempts with different queries.\n\n");
 
         prompt.push_str("### Data Source Priority\n");
         prompt.push_str("1. **`finance_api`** — primary (东方财富 A股/港股 free real-time, CoinGecko crypto free)\n");
-        prompt.push_str("2. **`http_request`** — advanced 东方财富 APIs (资金流向/龙虎榜/北向资金/板块)\n");
-        prompt.push_str("3. **`web_search`** + **`web_fetch`** — news, analysis articles, macro context\n\n");
+        prompt.push_str(
+            "2. **`http_request`** — advanced 东方财富 APIs (资金流向/龙虎榜/北向资金/板块)\n",
+        );
+        prompt.push_str(
+            "3. **`web_search`** + **`web_fetch`** — news, analysis articles, macro context\n\n",
+        );
 
         prompt.push_str("### finance_api Quick Reference\n");
         prompt.push_str("- **搜索股票代码**: action='stock_search' query='公司名' (必须先做！)\n");
         prompt.push_str("- **行情**: action='stock_quote' symbol='601318' (A股 6位) / '00700.HK' (港股) / 'AAPL' (美股)\n");
         prompt.push_str("- **K线**: action='stock_history' symbol='600519' interval='1d'\n");
-        prompt.push_str("- **财务**: action='financial_statement' symbol='600519' report_type='indicator'\n");
+        prompt.push_str(
+            "- **财务**: action='financial_statement' symbol='600519' report_type='indicator'\n",
+        );
         prompt.push_str("- **资金流向**: action='capital_flow' symbol='601318'\n");
         prompt.push_str("- **选股(同行业)**: action='stock_screen' screen_filters={industry:'GPU芯片', board:'科创板'}\n");
         prompt.push_str("- **龙虎榜**: action='top_list' list_type='dragon_tiger'\n");
@@ -517,7 +658,14 @@ impl ContextBuilder {
         user_content: &str,
         media: &[String],
     ) -> Vec<ChatMessage> {
-        self.build_messages_for_intents(history, user_content, media, &[IntentCategory::Unknown], &HashSet::new(), &HashSet::new())
+        self.build_messages_for_intents(
+            history,
+            user_content,
+            media,
+            &[IntentCategory::Unknown],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
     }
 
     /// Build messages with intent-based filtering.
@@ -530,7 +678,16 @@ impl ContextBuilder {
         disabled_skills: &HashSet<String>,
         disabled_tools: &HashSet<String>,
     ) -> Vec<ChatMessage> {
-        self.build_messages_for_intents_with_channel(history, user_content, media, intents, disabled_skills, disabled_tools, "", false)
+        self.build_messages_for_intents_with_channel(
+            history,
+            user_content,
+            media,
+            intents,
+            disabled_skills,
+            disabled_tools,
+            "",
+            false,
+        )
     }
 
     /// Build messages with intent-based filtering and channel context.
@@ -548,10 +705,26 @@ impl ContextBuilder {
         pending_intent: bool,
     ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
-        let is_im_channel = matches!(channel, "wecom" | "feishu" | "lark" | "telegram" | "slack" | "discord" | "dingtalk" | "whatsapp");
+        let is_im_channel = matches!(
+            channel,
+            "wecom"
+                | "feishu"
+                | "lark"
+                | "telegram"
+                | "slack"
+                | "discord"
+                | "dingtalk"
+                | "whatsapp"
+        );
 
         // System prompt (intent-filtered, channel-aware)
-        let system_prompt = self.build_system_prompt_for_intents_with_channel(intents, disabled_skills, disabled_tools, channel, user_content);
+        let system_prompt = self.build_system_prompt_for_intents_with_channel(
+            intents,
+            disabled_skills,
+            disabled_tools,
+            channel,
+            user_content,
+        );
         let system_tokens = estimate_tokens(&system_prompt);
         messages.push(ChatMessage::system(&system_prompt));
 
@@ -561,18 +734,23 @@ impl ContextBuilder {
             ChatMessage::user(&trimmed)
         } else {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            let all_paths: Vec<&str> = media.iter()
+            let all_paths: Vec<&str> = media
+                .iter()
                 .filter(|p| !p.is_empty())
                 .map(|p| p.as_str())
                 .collect();
             let text_with_paths = if all_paths.is_empty() {
                 trimmed
             } else {
-                let paths_str = all_paths.iter()
+                let paths_str = all_paths
+                    .iter()
                     .map(|p| format!("- `{}`", p))
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!("{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}", trimmed, paths_str)
+                format!(
+                    "{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}",
+                    trimmed, paths_str
+                )
             };
             if pending_intent {
                 ChatMessage::user(&text_with_paths)
@@ -663,13 +841,16 @@ impl ContextBuilder {
 
     fn _is_image_path(path: &str) -> bool {
         let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-        matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "tiff" | "ico")
+        matches!(
+            ext.as_str(),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "tiff" | "ico"
+        )
     }
 
     fn encode_image_to_base64(&self, path: &str) -> Option<String> {
-        use std::path::Path;
         use base64::Engine;
-        
+        use std::path::Path;
+
         let path = Path::new(path);
         if !path.exists() {
             return None;
@@ -760,9 +941,10 @@ impl ContextBuilder {
             let round = &rounds[i];
             // Compress: keep user question + final assistant text only
             let user_msg = round.iter().find(|m| m.role == "user");
-            let final_assistant = round.iter().rev().find(|m| {
-                m.role == "assistant" && m.tool_calls.is_none()
-            });
+            let final_assistant = round
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant" && m.tool_calls.is_none());
 
             if let Some(user) = user_msg {
                 let user_text = Self::content_text(user);
@@ -808,12 +990,11 @@ impl ContextBuilder {
     fn content_text(msg: &ChatMessage) -> String {
         match &msg.content {
             serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(parts) => {
-                parts.iter()
-                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" "),
             _ => String::new(),
         }
     }
@@ -845,9 +1026,8 @@ impl ContextBuilder {
                 if let Some(ref tool_calls) = history[i].tool_calls {
                     if !tool_calls.is_empty() {
                         // Collect expected tool_call_ids
-                        let expected_ids: Vec<&str> = tool_calls.iter()
-                            .map(|tc| tc.id.as_str())
-                            .collect();
+                        let expected_ids: Vec<&str> =
+                            tool_calls.iter().map(|tc| tc.id.as_str()).collect();
 
                         // Check that all expected tool responses follow
                         let mut found_ids = std::collections::HashSet::new();
@@ -903,7 +1083,9 @@ impl ContextBuilder {
                                     let mut new_obj = obj.clone();
                                     new_obj.insert(
                                         "text".to_string(),
-                                        serde_json::Value::String(Self::trim_text_head_tail(text, max_chars)),
+                                        serde_json::Value::String(Self::trim_text_head_tail(
+                                            text, max_chars,
+                                        )),
                                     );
                                     new_parts.push(serde_json::Value::Object(new_obj));
                                     continue;
@@ -938,7 +1120,12 @@ impl ContextBuilder {
         let tail = s.chars().rev().take(tail_chars).collect::<String>();
         let tail = tail.chars().rev().collect::<String>();
 
-        format!("{}\n...<trimmed {} chars>...\n{}", head, char_count.saturating_sub(max_chars), tail)
+        format!(
+            "{}\n...<trimmed {} chars>...\n{}",
+            head,
+            char_count.saturating_sub(max_chars),
+            tail
+        )
     }
 
     fn load_file_if_exists<P: AsRef<Path>>(&self, path: P) -> Option<String> {

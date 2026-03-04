@@ -19,24 +19,48 @@ pub async fn run() -> anyhow::Result<()> {
     println!("📋 Configuration");
     let config_exists = paths.config_file().exists();
     if config_exists {
-        print_ok("Config file exists", &paths.config_file().display().to_string());
+        print_ok(
+            "Config file exists",
+            &paths.config_file().display().to_string(),
+        );
         ok_count += 1;
     } else {
-        print_err("Config file not found", "Run `blockcell onboard` to initialize");
+        print_err(
+            "Config file not found",
+            "Run `blockcell onboard` to initialize",
+        );
         err_count += 1;
     }
 
     let config = Config::load_or_default(&paths)?;
 
-    if let Some((name, _)) = config.get_api_key() {
-        print_ok("API key configured", &format!("Active provider: {}", name));
-        ok_count += 1;
+    if let Some((provider, model, source)) = active_provider_and_model(&config) {
+        let ready = provider_ready(&config, &provider);
+        if ready {
+            print_ok(
+                "API key configured",
+                &format!("Active provider: {} ({})", provider, source),
+            );
+            ok_count += 1;
+        } else {
+            print_err(
+                "Active provider credentials incomplete",
+                &format!(
+                    "Provider '{}' selected by {} has no valid API key",
+                    provider, source
+                ),
+            );
+            err_count += 1;
+        }
+        println!("  Model: {} ({})", model, source);
     } else {
-        print_err("No API key configured", "Edit config.json to add a provider API key");
+        print_err(
+            "No API key configured",
+            "Edit config.json to add a provider API key",
+        );
         err_count += 1;
+        println!("  Model: {}", config.agents.defaults.model);
     }
-
-    println!("  Model: {}", config.agents.defaults.model);
     println!();
 
     // --- 2. Workspace ---
@@ -60,7 +84,10 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
     } else {
-        print_err("Workspace directory not found", "Run `blockcell onboard` to initialize");
+        print_err(
+            "Workspace directory not found",
+            "Run `blockcell onboard` to initialize",
+        );
         err_count += 1;
     }
 
@@ -68,10 +95,16 @@ pub async fn run() -> anyhow::Result<()> {
     let memory_db = ws.join("memory").join("memory.db");
     if memory_db.exists() {
         let size = std::fs::metadata(&memory_db).map(|m| m.len()).unwrap_or(0);
-        print_ok("Memory database", &format!("{} ({} KB)", memory_db.display(), size / 1024));
+        print_ok(
+            "Memory database",
+            &format!("{} ({} KB)", memory_db.display(), size / 1024),
+        );
         ok_count += 1;
     } else {
-        print_warn("Memory database not created yet", "Will be created on first agent run");
+        print_warn(
+            "Memory database not created yet",
+            "Will be created on first agent run",
+        );
         warn_count += 1;
     }
     println!();
@@ -88,12 +121,20 @@ pub async fn run() -> anyhow::Result<()> {
     if toggles_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&toggles_path) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                let disabled: usize = val.get("tools")
+                let disabled: usize = val
+                    .get("tools")
                     .and_then(|c| c.as_object())
-                    .map(|obj| obj.values().filter(|v| v == &&serde_json::json!(false)).count())
+                    .map(|obj| {
+                        obj.values()
+                            .filter(|v| v == &&serde_json::json!(false))
+                            .count()
+                    })
                     .unwrap_or(0);
                 if disabled > 0 {
-                    print_warn(&format!("{} tools disabled", disabled), "Use `blockcell tools toggle <name> --enable` to re-enable");
+                    print_warn(
+                        &format!("{} tools disabled", disabled),
+                        "Use `blockcell tools toggle <name> --enable` to re-enable",
+                    );
                     warn_count += 1;
                 }
             }
@@ -124,26 +165,63 @@ pub async fn run() -> anyhow::Result<()> {
     println!("🖥️  External Dependencies");
 
     // Rust compiler
-    check_command("rustc", &["--version"], "Rust compiler", "Required for tool evolution", &mut ok_count, &mut warn_count);
+    check_command(
+        "rustc",
+        &["--version"],
+        "Rust compiler",
+        "Required for tool evolution",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     // Python
-    check_command("python3", &["--version"], "Python3", "Required for chart/office/ocr tools", &mut ok_count, &mut warn_count);
+    check_command(
+        "python3",
+        &["--version"],
+        "Python3",
+        "Required for chart/office/ocr tools",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     // Node
-    check_command("node", &["--version"], "Node.js", "Required for some script tools", &mut ok_count, &mut warn_count);
+    check_command(
+        "node",
+        &["--version"],
+        "Node.js",
+        "Required for some script tools",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     // Git
-    check_command("git", &["--version"], "Git", "Required for git_api tool", &mut ok_count, &mut warn_count);
+    check_command(
+        "git",
+        &["--version"],
+        "Git",
+        "Required for git_api tool",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     // ffmpeg
-    check_command("ffmpeg", &["-version"], "ffmpeg", "Required for audio/video processing", &mut ok_count, &mut warn_count);
+    check_command(
+        "ffmpeg",
+        &["-version"],
+        "ffmpeg",
+        "Required for audio/video processing",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     // Chrome
     let chrome_paths = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ];
-    let chrome_found = chrome_paths.iter().any(|p| std::path::Path::new(p).exists());
+    let chrome_found = chrome_paths
+        .iter()
+        .any(|p| std::path::Path::new(p).exists());
     if chrome_found {
         print_ok("Chrome/Chromium", "browse tool available");
         ok_count += 1;
@@ -153,35 +231,63 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     // Docker
-    check_command("docker", &["--version"], "Docker", "Required for containerized deployment", &mut ok_count, &mut warn_count);
+    check_command(
+        "docker",
+        &["--version"],
+        "Docker",
+        "Required for containerized deployment",
+        &mut ok_count,
+        &mut warn_count,
+    );
 
     println!();
 
     // --- 6. Channels ---
     println!("📡 Channels");
     let ch = &config.channels;
-    check_channel("telegram", ch.telegram.enabled, !ch.telegram.token.is_empty());
+    check_channel(
+        "telegram",
+        ch.telegram.enabled,
+        !ch.telegram.token.is_empty(),
+    );
     check_channel("whatsapp", ch.whatsapp.enabled, true);
     check_channel("feishu", ch.feishu.enabled, !ch.feishu.app_id.is_empty());
     check_channel("slack", ch.slack.enabled, !ch.slack.bot_token.is_empty());
-    check_channel("discord", ch.discord.enabled, !ch.discord.bot_token.is_empty());
-    check_channel("dingtalk", ch.dingtalk.enabled, !ch.dingtalk.app_key.is_empty());
+    check_channel(
+        "discord",
+        ch.discord.enabled,
+        !ch.discord.bot_token.is_empty(),
+    );
+    check_channel(
+        "dingtalk",
+        ch.dingtalk.enabled,
+        !ch.dingtalk.app_key.is_empty(),
+    );
     check_channel("wecom", ch.wecom.enabled, !ch.wecom.corp_id.is_empty());
     println!();
 
     // --- 7. Gateway ---
     println!("🌐 Gateway");
-    println!("  Bind address: {}:{}", config.gateway.host, config.gateway.port);
+    println!(
+        "  Bind address: {}:{}",
+        config.gateway.host, config.gateway.port
+    );
     if let Some(ref token) = config.gateway.api_token {
         if !token.is_empty() {
             print_ok("API token configured", "");
             ok_count += 1;
         } else {
-            print_warn("API token is empty", "Recommended for production: set gateway.apiToken");
+            print_warn(
+                "API token is empty",
+                "Recommended for production: set gateway.apiToken",
+            );
             warn_count += 1;
         }
     } else {
-        print_warn("API token not configured", "Recommended for production: set gateway.apiToken");
+        print_warn(
+            "API token not configured",
+            "Recommended for production: set gateway.apiToken",
+        );
         warn_count += 1;
     }
     println!();
@@ -232,7 +338,14 @@ fn print_err(label: &str, hint: &str) {
     }
 }
 
-fn check_command(cmd: &str, args: &[&str], label: &str, purpose: &str, ok: &mut u32, warn: &mut u32) {
+fn check_command(
+    cmd: &str,
+    args: &[&str],
+    label: &str,
+    purpose: &str,
+    ok: &mut u32,
+    warn: &mut u32,
+) {
     match Command::new(cmd).args(args).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -256,4 +369,46 @@ fn check_channel(name: &str, enabled: bool, configured: bool) {
     } else {
         println!("  ⚪ {:<12} not configured", name);
     }
+}
+
+fn provider_ready(config: &Config, provider: &str) -> bool {
+    if provider == "ollama" {
+        return true;
+    }
+    config
+        .providers
+        .get(provider)
+        .map(|p| {
+            let key = p.api_key.trim();
+            !key.is_empty() && key != "dummy"
+        })
+        .unwrap_or(false)
+}
+
+fn active_provider_and_model(config: &Config) -> Option<(String, String, &'static str)> {
+    if let Some(entry) = config
+        .agents
+        .defaults
+        .model_pool
+        .iter()
+        .min_by(|a, b| a.priority.cmp(&b.priority).then(b.weight.cmp(&a.weight)))
+    {
+        return Some((entry.provider.clone(), entry.model.clone(), "modelPool"));
+    }
+
+    if let Some(provider) = config.agents.defaults.provider.as_ref() {
+        return Some((
+            provider.clone(),
+            config.agents.defaults.model.clone(),
+            "agents.defaults",
+        ));
+    }
+
+    config.get_api_key().map(|(name, _)| {
+        (
+            name.to_string(),
+            config.agents.defaults.model.clone(),
+            "auto-selected",
+        )
+    })
 }
