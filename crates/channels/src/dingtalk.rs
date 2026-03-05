@@ -685,9 +685,9 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
             )));
         }
     } else {
-        // ── 1:1 robot message: new API /v1.0/robot/messageFiles/upload ──
-        let media_id = upload_media_robot_api(
-            &upload_client, &token, app_key, &bytes, &file_name, media_type, mime,
+        // ── 1:1 robot message: upload via /media/upload + oToMessages/batchSend ──
+        let media_id = upload_media_old_api(
+            &upload_client, &token, &bytes, &file_name, media_type, mime,
         ).await?;
         info!(media_id = %media_id, media_type = %media_type, "DingTalk: 1:1 media uploaded");
 
@@ -698,19 +698,19 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
         let (msg_key, msg_param) = match media_type {
             "image" => (
                 "sampleImageMsg",
-                serde_json::json!({ "photoURL": format!("@{}", media_id) }).to_string(),
+                serde_json::json!({ "photoURL": media_id }).to_string(),
             ),
             "voice" => (
                 "sampleAudio",
                 serde_json::json!({
-                    "mediaId": format!("@{}", media_id),
+                    "mediaId": media_id,
                     "duration": "0"
                 }).to_string(),
             ),
             _ => (
                 "sampleFile",
                 serde_json::json!({
-                    "mediaId": format!("@{}", media_id),
+                    "mediaId": media_id,
                     "fileName": file_name,
                     "fileType": ext
                 }).to_string(),
@@ -788,52 +788,6 @@ async fn upload_media_old_api(
         .ok_or_else(|| Error::Channel("DingTalk media/upload: no media_id".to_string()))
 }
 
-/// Upload media via new v1.0 API (`/v1.0/robot/messageFiles/upload`) — for 1:1 robot messages.
-async fn upload_media_robot_api(
-    client: &Client,
-    token: &str,
-    robot_code: &str,
-    bytes: &[u8],
-    file_name: &str,
-    media_type: &str,
-    mime: &str,
-) -> Result<String> {
-    let part = reqwest::multipart::Part::bytes(bytes.to_vec())
-        .file_name(file_name.to_string())
-        .mime_str(mime)
-        .map_err(|e| Error::Channel(format!("Invalid MIME: {}", e)))?;
-    let form = reqwest::multipart::Form::new()
-        .text("robotCode", robot_code.to_string())
-        .text("type", media_type.to_string())
-        .part("file", part);
-
-    let resp = client
-        .post("https://api.dingtalk.com/v1.0/robot/messageFiles/upload")
-        .header("x-acs-dingtalk-access-token", token)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| Error::Channel(format!("DingTalk robot/messageFiles/upload failed: {}", e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!(
-            "DingTalk robot/messageFiles/upload HTTP {}: {}",
-            status, body
-        )));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| Error::Channel(format!("DingTalk robot/messageFiles/upload parse: {}", e)))?;
-
-    body.get("mediaId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| Error::Channel("DingTalk robot/messageFiles/upload: no mediaId".to_string()))
-}
 
 fn dingtalk_media_type_for_ext(ext: &str) -> &'static str {
     match ext {
@@ -1163,4 +1117,5 @@ mod tests {
         assert_eq!(resp.errcode, 40014);
         assert_eq!(resp.errmsg, "invalid access_token");
     }
+
 }

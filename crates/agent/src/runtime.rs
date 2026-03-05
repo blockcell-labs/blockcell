@@ -1452,34 +1452,38 @@ impl AgentRuntime {
                     }
                     let result = self.execute_tool_call(tool_call, &msg).await;
 
-                    // Collect media paths from tool results for WebUI display
-                    if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
-                        let media_exts = [
-                            "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav", "m4a",
-                            "mp4", "webm", "mov",
-                        ];
-                        // Scalar fields: output_path, path, file_path, etc.
-                        for key in &[
-                            "output_path",
-                            "path",
-                            "file_path",
-                            "screenshot_path",
-                            "image_path",
-                        ] {
-                            if let Some(p) = rv.get(key).and_then(|v| v.as_str()) {
-                                let ext = p.rsplit('.').next().unwrap_or("").to_lowercase();
-                                if media_exts.contains(&ext.as_str()) {
-                                    collected_media.push(p.to_string());
-                                }
-                            }
-                        }
-                        // Array field: "media" (returned by message tool after auto-copy)
-                        if let Some(arr) = rv.get("media").and_then(|v| v.as_array()) {
-                            for mv in arr {
-                                if let Some(p) = mv.as_str() {
+                    // Collect media paths from tool results for WebUI display.
+                    // Skip the "message" tool — it already dispatches its own OutboundMessage
+                    // with media; collecting here would cause a duplicate send.
+                    if tool_call.name != "message" {
+                        if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
+                            let media_exts = [
+                                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav", "m4a",
+                                "mp4", "webm", "mov",
+                            ];
+                            // Scalar fields: output_path, path, file_path, etc.
+                            for key in &[
+                                "output_path",
+                                "path",
+                                "file_path",
+                                "screenshot_path",
+                                "image_path",
+                            ] {
+                                if let Some(p) = rv.get(key).and_then(|v| v.as_str()) {
                                     let ext = p.rsplit('.').next().unwrap_or("").to_lowercase();
                                     if media_exts.contains(&ext.as_str()) {
                                         collected_media.push(p.to_string());
+                                    }
+                                }
+                            }
+                            // Array field: "media"
+                            if let Some(arr) = rv.get("media").and_then(|v| v.as_array()) {
+                                for mv in arr {
+                                    if let Some(p) = mv.as_str() {
+                                        let ext = p.rsplit('.').next().unwrap_or("").to_lowercase();
+                                        if media_exts.contains(&ext.as_str()) {
+                                            collected_media.push(p.to_string());
+                                        }
                                     }
                                 }
                             }
