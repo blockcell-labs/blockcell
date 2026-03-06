@@ -1,3 +1,4 @@
+use crate::account::slack_account_id;
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -161,13 +162,17 @@ impl SlackChannel {
                             "hello" => info!("Slack Socket Mode hello received"),
                             "disconnect" => {
                                 info!("Slack Socket Mode disconnect requested");
-                                return Err(Error::Channel("Slack requested disconnect".to_string()));
+                                return Err(Error::Channel(
+                                    "Slack requested disconnect".to_string(),
+                                ));
                             }
                             other => debug!(envelope_type = %other, "Slack: unknown envelope type"),
                         }
                     }
                 }
-                Ok(WsMessage::Ping(data)) => { let _ = write.send(WsMessage::Pong(data)).await; }
+                Ok(WsMessage::Ping(data)) => {
+                    let _ = write.send(WsMessage::Pong(data)).await;
+                }
                 Ok(WsMessage::Close(_)) => {
                     return Err(Error::Channel("Slack Socket Mode closed".to_string()));
                 }
@@ -188,7 +193,9 @@ impl SlackChannel {
         if event.get("type").and_then(|v| v.as_str()).unwrap_or("") != "message" {
             return Ok(());
         }
-        if event.get("bot_id").is_some() { return Ok(()); }
+        if event.get("bot_id").is_some() {
+            return Ok(());
+        }
         let subtype = event.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
         if !subtype.is_empty() && subtype != "file_share" {
             debug!(subtype = %subtype, "Slack: skipping message subtype");
@@ -199,13 +206,23 @@ impl SlackChannel {
             debug!(user = %user, "Slack: user empty or not in allowlist");
             return Ok(());
         }
-        let channel_id = event.get("channel").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let channel_id = event
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let monitored = &self.config.channels.slack.channels;
         if !monitored.is_empty() && !monitored.iter().any(|c| c == &channel_id) {
             return Ok(());
         }
-        let ts = event.get("ts").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let thread_ts = event.get("thread_ts").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let ts = event
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let thread_ts = event
+            .get("thread_ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Download any shared files
         let mut media_paths = vec![];
@@ -213,26 +230,38 @@ impl SlackChannel {
             for file in files {
                 let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let file_name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
-                let url_private = file.get("url_private").and_then(|v| v.as_str()).unwrap_or("");
+                let url_private = file
+                    .get("url_private")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if !url_private.is_empty() && !file_id.is_empty() {
                     match self.download_slack_file(url_private, file_name).await {
                         Ok(p) => media_paths.push(p),
-                        Err(e) => warn!(error = %e, file_id = %file_id, "Slack: failed to download file"),
+                        Err(e) => {
+                            warn!(error = %e, file_id = %file_id, "Slack: failed to download file")
+                        }
                     }
                 }
             }
         }
 
-        let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = event
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let content = if text.is_empty() && !media_paths.is_empty() {
             "[文件，已下载到本地，可用 read_file 读取]".to_string()
         } else {
             text
         };
-        if content.is_empty() && media_paths.is_empty() { return Ok(()); }
+        if content.is_empty() && media_paths.is_empty() {
+            return Ok(());
+        }
 
         let inbound = InboundMessage {
             channel: "slack".to_string(),
+            account_id: slack_account_id(&self.config),
             sender_id: user.to_string(),
             chat_id: channel_id,
             content,
@@ -240,14 +269,17 @@ impl SlackChannel {
             metadata: serde_json::json!({ "ts": ts, "thread_ts": thread_ts, "mode": "socket" }),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
-        self.inbound_tx.send(inbound).await
+        self.inbound_tx
+            .send(inbound)
+            .await
             .map_err(|e| Error::Channel(e.to_string()))
     }
 
     /// Download a Slack file using the private URL (requires bot token auth).
     async fn download_slack_file(&self, url: &str, file_name: &str) -> Result<String> {
         let token = &self.config.channels.slack.bot_token;
-        let resp = self.client
+        let resp = self
+            .client
             .get(url)
             .header("Authorization", format!("Bearer {}", token))
             .send()
@@ -255,7 +287,10 @@ impl SlackChannel {
             .map_err(|e| Error::Channel(format!("Slack file download failed: {}", e)))?;
 
         if !resp.status().is_success() {
-            return Err(Error::Channel(format!("Slack file download HTTP {}", resp.status())));
+            return Err(Error::Channel(format!(
+                "Slack file download HTTP {}",
+                resp.status()
+            )));
         }
 
         let media_dir = dirs::home_dir()
@@ -270,7 +305,9 @@ impl SlackChannel {
         let filename = format!("slack_{}_{}", ts, safe_name);
         let file_path = media_dir.join(&filename);
 
-        let bytes = resp.bytes().await
+        let bytes = resp
+            .bytes()
+            .await
             .map_err(|e| Error::Channel(format!("Slack file read body failed: {}", e)))?;
         tokio::fs::write(&file_path, &bytes)
             .await
@@ -291,11 +328,7 @@ impl SlackChannel {
             .client
             .get(format!("{}/conversations.history", SLACK_API_BASE))
             .header("Authorization", format!("Bearer {}", token))
-            .query(&[
-                ("channel", channel_id),
-                ("oldest", oldest),
-                ("limit", "20"),
-            ])
+            .query(&[("channel", channel_id), ("oldest", oldest), ("limit", "20")])
             .send()
             .await
             .map_err(|e| Error::Channel(format!("Slack request failed: {}", e)))?;
@@ -324,10 +357,12 @@ impl SlackChannel {
         let now = format!("{}.000000", chrono::Utc::now().timestamp());
         let mut latest_ts: std::collections::HashMap<String, String> =
             channels.iter().map(|c| (c.clone(), now.clone())).collect();
-        let poll_interval = Duration::from_secs(
-            self.config.channels.slack.poll_interval_secs.max(2) as u64,
+        let poll_interval =
+            Duration::from_secs(self.config.channels.slack.poll_interval_secs.max(2) as u64);
+        info!(
+            interval_secs = poll_interval.as_secs(),
+            "Slack channel started (polling fallback mode)"
         );
-        info!(interval_secs = poll_interval.as_secs(), "Slack channel started (polling fallback mode)");
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(poll_interval) => {
@@ -353,6 +388,7 @@ impl SlackChannel {
                                     if content.is_empty() { continue; }
                                     let inbound = InboundMessage {
                                         channel: "slack".to_string(),
+            account_id: slack_account_id(&self.config),
                                         sender_id: user.to_string(),
                                         chat_id: channel_id.clone(),
                                         content,
@@ -570,9 +606,11 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
         )));
     }
 
-    let upload_url = url_resp.upload_url
+    let upload_url = url_resp
+        .upload_url
         .ok_or_else(|| Error::Channel("Slack: no upload_url in response".to_string()))?;
-    let file_id = url_resp.file_id
+    let file_id = url_resp
+        .file_id
         .ok_or_else(|| Error::Channel("Slack: no file_id in response".to_string()))?;
 
     // Step 2: PUT file bytes to upload URL
@@ -593,7 +631,11 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 
     // Step 3: Complete upload and share to channel
     #[derive(serde::Deserialize)]
-    struct CompleteResp { ok: bool, #[serde(default)] error: Option<String> }
+    struct CompleteResp {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+    }
 
     let complete_body = serde_json::json!({
         "files": [{ "id": file_id }],
@@ -653,7 +695,8 @@ mod tests {
 
     #[test]
     fn test_slack_history_response_deserialize() {
-        let json = r#"{"ok":true,"messages":[{"user":"U123","text":"hi","ts":"1234567890.000001"}]}"#;
+        let json =
+            r#"{"ok":true,"messages":[{"user":"U123","text":"hi","ts":"1234567890.000001"}]}"#;
         let resp: SlackHistoryResponse = serde_json::from_str(json).unwrap();
         assert!(resp.ok);
         assert_eq!(resp.messages.unwrap().len(), 1);
@@ -684,7 +727,11 @@ mod tests {
         let chunks = split_message(&text, 4000);
         assert!(chunks.len() > 1);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= 4000, "chunk too long: {} chars", chunk.chars().count());
+            assert!(
+                chunk.chars().count() <= 4000,
+                "chunk too long: {} chars",
+                chunk.chars().count()
+            );
         }
     }
 

@@ -10,6 +10,7 @@ pub(super) struct MemoryQueryParams {
     #[serde(rename = "type")]
     mem_type: Option<String>,
     limit: Option<usize>,
+    agent: Option<String>,
 }
 
 /// GET /v1/memory — search/list memories
@@ -17,9 +18,9 @@ pub(super) async fn handle_memory_list(
     State(state): State<GatewayState>,
     Query(params): Query<MemoryQueryParams>,
 ) -> impl IntoResponse {
-    let store = match &state.memory_store {
-        Some(s) => s,
-        None => return Json(serde_json::json!({ "error": "Memory store not available" })),
+    let (_, store) = match memory_store_for_agent(&state, params.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
     };
 
     let query = serde_json::json!({
@@ -38,11 +39,12 @@ pub(super) async fn handle_memory_list(
 /// POST /v1/memory — create/update a memory
 pub(super) async fn handle_memory_create(
     State(state): State<GatewayState>,
+    Query(agent): Query<AgentScopedQuery>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let store = match &state.memory_store {
-        Some(s) => s,
-        None => return Json(serde_json::json!({ "error": "Memory store not available" })),
+    let (_, store) = match memory_store_for_agent(&state, agent.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
     };
 
     match store.upsert_json(req) {
@@ -55,10 +57,11 @@ pub(super) async fn handle_memory_create(
 pub(super) async fn handle_memory_delete(
     State(state): State<GatewayState>,
     AxumPath(id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
 ) -> impl IntoResponse {
-    let store = match &state.memory_store {
-        Some(s) => s,
-        None => return Json(serde_json::json!({ "error": "Memory store not available" })),
+    let (_, store) = match memory_store_for_agent(&state, agent.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
     };
 
     match store.soft_delete(&id) {
@@ -68,10 +71,13 @@ pub(super) async fn handle_memory_delete(
 }
 
 /// GET /v1/memory/stats — memory statistics
-pub(super) async fn handle_memory_stats(State(state): State<GatewayState>) -> impl IntoResponse {
-    let store = match &state.memory_store {
-        Some(s) => s,
-        None => return Json(serde_json::json!({ "error": "Memory store not available" })),
+pub(super) async fn handle_memory_stats(
+    State(state): State<GatewayState>,
+    Query(agent): Query<AgentScopedQuery>,
+) -> impl IntoResponse {
+    let (_, store) = match memory_store_for_agent(&state, agent.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
     };
 
     match store.stats_json() {

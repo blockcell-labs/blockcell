@@ -1,6 +1,6 @@
 use blockcell_core::{
-    CapabilityDescriptor, CapabilityLifecycle, CapabilityStatus, CapabilityType,
-    Error, ProviderKind, Result,
+    CapabilityDescriptor, CapabilityLifecycle, CapabilityStatus, CapabilityType, Error,
+    ProviderKind, Result,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,8 +59,8 @@ impl ProcessProvider {
 #[async_trait::async_trait]
 impl CapabilityExecutor for ProcessProvider {
     async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        use tokio::process::Command;
         use std::process::Stdio;
+        use tokio::process::Command;
 
         let input_str = serde_json::to_string(&input)?;
 
@@ -81,15 +81,17 @@ impl CapabilityExecutor for ProcessProvider {
         // Write input to stdin
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(input_str.as_bytes()).await.map_err(|e| {
-                Error::Tool(format!("Failed to write to process stdin: {}", e))
-            })?;
+            stdin
+                .write_all(input_str.as_bytes())
+                .await
+                .map_err(|e| Error::Tool(format!("Failed to write to process stdin: {}", e)))?;
             drop(stdin);
         }
 
-        let output = child.wait_with_output().await.map_err(|e| {
-            Error::Tool(format!("Process execution failed: {}", e))
-        })?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| Error::Tool(format!("Process execution failed: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -101,9 +103,8 @@ impl CapabilityExecutor for ProcessProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
-            serde_json::json!({ "output": stdout.to_string() })
-        });
+        let result: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|_| serde_json::json!({ "output": stdout.to_string() }));
 
         Ok(result)
     }
@@ -147,8 +148,8 @@ impl ScriptProvider {
 #[async_trait::async_trait]
 impl CapabilityExecutor for ScriptProvider {
     async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value> {
-        use tokio::process::Command;
         use std::process::Stdio;
+        use tokio::process::Command;
 
         let input_str = serde_json::to_string(&input)?;
 
@@ -168,9 +169,8 @@ impl CapabilityExecutor for ScriptProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
-            serde_json::json!({ "output": stdout.to_string() })
-        });
+        let result: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|_| serde_json::json!({ "output": stdout.to_string() }));
 
         Ok(result)
     }
@@ -214,7 +214,11 @@ impl CanaryTracker {
     }
 
     fn error_rate(&self) -> f64 {
-        if self.total_calls == 0 { 0.0 } else { self.error_calls as f64 / self.total_calls as f64 }
+        if self.total_calls == 0 {
+            0.0
+        } else {
+            self.error_calls as f64 / self.total_calls as f64
+        }
     }
 }
 
@@ -256,7 +260,8 @@ impl CapabilityRegistry {
             descriptor.id
         );
         let id = descriptor.id.clone();
-        self.lifecycles.insert(id.clone(), CapabilityLifecycle::Draft);
+        self.lifecycles
+            .insert(id.clone(), CapabilityLifecycle::Draft);
         self.descriptors.insert(id, descriptor);
     }
 
@@ -284,11 +289,14 @@ impl CapabilityRegistry {
 
         if is_builtin {
             // Built-in capabilities skip canary
-            self.lifecycles.insert(id.clone(), CapabilityLifecycle::Active);
+            self.lifecycles
+                .insert(id.clone(), CapabilityLifecycle::Active);
         } else {
             // Evolved capabilities enter canary (Observing) stage
-            self.lifecycles.insert(id.clone(), CapabilityLifecycle::Observing);
-            self.canary_trackers.insert(id.clone(), CanaryTracker::new());
+            self.lifecycles
+                .insert(id.clone(), CapabilityLifecycle::Observing);
+            self.canary_trackers
+                .insert(id.clone(), CanaryTracker::new());
             // Set descriptor status to Available (not Active) until canary passes
             if let Some(desc) = self.descriptors.get_mut(&id) {
                 desc.status = CapabilityStatus::Available;
@@ -310,10 +318,14 @@ impl CapabilityRegistry {
     /// 绑定执行器到已注册的能力
     pub fn bind_executor(&mut self, id: &str, executor: Arc<dyn CapabilityExecutor>) -> Result<()> {
         if !self.descriptors.contains_key(id) {
-            return Err(Error::NotFound(format!("Capability '{}' not registered", id)));
+            return Err(Error::NotFound(format!(
+                "Capability '{}' not registered",
+                id
+            )));
         }
         self.executors.insert(id.to_string(), executor);
-        self.lifecycles.insert(id.to_string(), CapabilityLifecycle::Active);
+        self.lifecycles
+            .insert(id.to_string(), CapabilityLifecycle::Active);
         if let Some(desc) = self.descriptors.get_mut(id) {
             desc.status = CapabilityStatus::Active;
             desc.updated_at = chrono::Utc::now().timestamp();
@@ -327,10 +339,16 @@ impl CapabilityRegistry {
     /// If the capability is in canary stage, execution results are tracked.
     /// After CANARY_MIN_CALLS with error rate < CANARY_MAX_ERROR_RATE, it is promoted.
     /// If error rate exceeds threshold, the capability is marked unavailable.
-    pub async fn execute(&mut self, id: &str, input: serde_json::Value) -> Result<serde_json::Value> {
-        let executor = self.executors.get(id).ok_or_else(|| {
-            Error::NotFound(format!("No executor for capability '{}'", id))
-        })?.clone();
+    pub async fn execute(
+        &mut self,
+        id: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let executor = self
+            .executors
+            .get(id)
+            .ok_or_else(|| Error::NotFound(format!("No executor for capability '{}'", id)))?
+            .clone();
 
         debug!(capability_id = %id, "🔌 [能力] 执行: {}", id);
         let result = executor.execute(input).await;
@@ -357,7 +375,8 @@ impl CapabilityRegistry {
             self.canary_trackers.remove(id);
             if passed {
                 // Promote: Observing → Active
-                self.lifecycles.insert(id.to_string(), CapabilityLifecycle::Active);
+                self.lifecycles
+                    .insert(id.to_string(), CapabilityLifecycle::Active);
                 if let Some(desc) = self.descriptors.get_mut(id) {
                     desc.status = CapabilityStatus::Active;
                     desc.updated_at = chrono::Utc::now().timestamp();
@@ -375,9 +394,16 @@ impl CapabilityRegistry {
                     error_rate = rate,
                     "🔌 [能力] ❌ 灰度验证失败，标记为不可用: {}", id
                 );
-                self.set_status(id, CapabilityStatus::Unavailable {
-                    reason: format!("Canary failed: error rate {:.0}% after {} calls", rate * 100.0, calls),
-                });
+                self.set_status(
+                    id,
+                    CapabilityStatus::Unavailable {
+                        reason: format!(
+                            "Canary failed: error rate {:.0}% after {} calls",
+                            rate * 100.0,
+                            calls
+                        ),
+                    },
+                );
             }
         }
 
@@ -391,21 +417,24 @@ impl CapabilityRegistry {
 
     /// 按类型列出能力
     pub fn list_by_type(&self, cap_type: &CapabilityType) -> Vec<&CapabilityDescriptor> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| &d.capability_type == cap_type)
             .collect()
     }
 
     /// 列出可用能力
     pub fn list_available(&self) -> Vec<&CapabilityDescriptor> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| d.is_available())
             .collect()
     }
 
     /// 按提供者类型列出
     pub fn list_by_provider(&self, kind: &ProviderKind) -> Vec<&CapabilityDescriptor> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| &d.provider_kind == kind)
             .collect()
     }
@@ -421,10 +450,14 @@ impl CapabilityRegistry {
     /// 卸载能力（移除执行器但保留描述符）
     pub fn unload(&mut self, id: &str) {
         self.executors.remove(id);
-        self.lifecycles.insert(id.to_string(), CapabilityLifecycle::Retired);
-        self.set_status(id, CapabilityStatus::Unavailable {
-            reason: "Unloaded".to_string(),
-        });
+        self.lifecycles
+            .insert(id.to_string(), CapabilityLifecycle::Retired);
+        self.set_status(
+            id,
+            CapabilityStatus::Unavailable {
+                reason: "Unloaded".to_string(),
+            },
+        );
         info!(capability_id = %id, "🔌 [能力] 已卸载: {}", id);
     }
 
@@ -436,11 +469,15 @@ impl CapabilityRegistry {
         new_version: &str,
     ) -> Result<()> {
         if !self.descriptors.contains_key(id) {
-            return Err(Error::NotFound(format!("Capability '{}' not registered", id)));
+            return Err(Error::NotFound(format!(
+                "Capability '{}' not registered",
+                id
+            )));
         }
 
         // 先标记为替换中
-        self.lifecycles.insert(id.to_string(), CapabilityLifecycle::Replacing);
+        self.lifecycles
+            .insert(id.to_string(), CapabilityLifecycle::Replacing);
 
         // 替换执行器
         self.executors.insert(id.to_string(), new_executor);
@@ -451,7 +488,8 @@ impl CapabilityRegistry {
             desc.status = CapabilityStatus::Active;
             desc.updated_at = chrono::Utc::now().timestamp();
         }
-        self.lifecycles.insert(id.to_string(), CapabilityLifecycle::Active);
+        self.lifecycles
+            .insert(id.to_string(), CapabilityLifecycle::Active);
 
         info!(
             capability_id = %id,
@@ -479,7 +517,9 @@ impl CapabilityRegistry {
         let by_type: HashMap<CapabilityType, Vec<&CapabilityDescriptor>> = {
             let mut map: HashMap<CapabilityType, Vec<&CapabilityDescriptor>> = HashMap::new();
             for desc in self.descriptors.values() {
-                map.entry(desc.capability_type.clone()).or_default().push(desc);
+                map.entry(desc.capability_type.clone())
+                    .or_default()
+                    .push(desc);
             }
             map
         };
@@ -551,7 +591,9 @@ impl CapabilityRegistry {
             let id = desc.id.clone();
             self.descriptors.insert(id.clone(), desc);
             // Loaded from disk = Draft until executor is bound
-            self.lifecycles.entry(id).or_insert(CapabilityLifecycle::Draft);
+            self.lifecycles
+                .entry(id)
+                .or_insert(CapabilityLifecycle::Draft);
         }
         info!(
             count = self.descriptors.len(),
@@ -566,12 +608,14 @@ impl CapabilityRegistry {
     /// This method rebuilds executors for descriptors that have a `provider_path`.
     pub fn rehydrate_executors(&mut self) -> usize {
         let mut rehydrated = 0;
-        let ids_to_rehydrate: Vec<(String, String, ProviderKind)> = self.descriptors.iter()
+        let ids_to_rehydrate: Vec<(String, String, ProviderKind)> = self
+            .descriptors
+            .iter()
             .filter(|(id, _)| !self.executors.contains_key(*id))
             .filter_map(|(id, desc)| {
-                desc.provider_path.as_ref().map(|path| {
-                    (id.clone(), path.clone(), desc.provider_kind.clone())
-                })
+                desc.provider_path
+                    .as_ref()
+                    .map(|path| (id.clone(), path.clone(), desc.provider_kind.clone()))
             })
             .collect();
 
@@ -597,14 +641,12 @@ impl CapabilityRegistry {
                 (ProviderKind::RhaiScript, _) | (_, "rhai") => {
                     Arc::new(ScriptProvider::new(&id, std::path::PathBuf::from(&path)))
                 }
-                _ => {
-                    Arc::new(ProcessProvider::new(&id, "bash")
-                        .with_args(vec![path.clone()]))
-                }
+                _ => Arc::new(ProcessProvider::new(&id, "bash").with_args(vec![path.clone()])),
             };
 
             self.executors.insert(id.clone(), executor);
-            self.lifecycles.insert(id.clone(), CapabilityLifecycle::Active);
+            self.lifecycles
+                .insert(id.clone(), CapabilityLifecycle::Active);
             if let Some(desc) = self.descriptors.get_mut(&id) {
                 desc.status = CapabilityStatus::Active;
             }
@@ -616,7 +658,10 @@ impl CapabilityRegistry {
         }
 
         if rehydrated > 0 {
-            info!(count = rehydrated, "🔌 [能力] Rehydrated {} executors from disk", rehydrated);
+            info!(
+                count = rehydrated,
+                "🔌 [能力] Rehydrated {} executors from disk", rehydrated
+            );
         }
 
         rehydrated
@@ -625,17 +670,28 @@ impl CapabilityRegistry {
     /// 获取注册表统计
     pub fn stats(&self) -> RegistryStats {
         let total = self.descriptors.len();
-        let active = self.descriptors.values()
+        let active = self
+            .descriptors
+            .values()
             .filter(|d| matches!(d.status, CapabilityStatus::Active))
             .count();
-        let available = self.descriptors.values()
+        let available = self
+            .descriptors
+            .values()
             .filter(|d| d.is_available())
             .count();
-        let evolving = self.descriptors.values()
+        let evolving = self
+            .descriptors
+            .values()
             .filter(|d| matches!(d.status, CapabilityStatus::Evolving))
             .count();
 
-        RegistryStats { total, active, available, evolving }
+        RegistryStats {
+            total,
+            active,
+            available,
+            evolving,
+        }
     }
 }
 
@@ -703,11 +759,15 @@ mod tests {
             "Echo input",
             CapabilityType::Internal,
             ProviderKind::BuiltIn,
-        ).with_status(CapabilityStatus::Available);
+        )
+        .with_status(CapabilityStatus::Available);
 
         registry.register_with_executor(cap, Arc::new(MockExecutor));
 
-        let result = registry.execute("test.echo", serde_json::json!({"msg": "hello"})).await.unwrap();
+        let result = registry
+            .execute("test.echo", serde_json::json!({"msg": "hello"}))
+            .await
+            .unwrap();
         assert_eq!(result["echo"]["msg"], "hello");
     }
 
@@ -722,14 +782,23 @@ mod tests {
             "Test hot replacement",
             CapabilityType::Internal,
             ProviderKind::BuiltIn,
-        ).with_status(CapabilityStatus::Available);
+        )
+        .with_status(CapabilityStatus::Available);
 
         registry.register_with_executor(cap, Arc::new(MockExecutor));
-        assert_eq!(registry.get_descriptor("test.replace").unwrap().version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            registry.get_descriptor("test.replace").unwrap().version,
+            env!("CARGO_PKG_VERSION")
+        );
 
         // Replace with new version
-        registry.replace_executor("test.replace", Arc::new(MockExecutor), "0.2.0").unwrap();
-        assert_eq!(registry.get_descriptor("test.replace").unwrap().version, "0.2.0");
+        registry
+            .replace_executor("test.replace", Arc::new(MockExecutor), "0.2.0")
+            .unwrap();
+        assert_eq!(
+            registry.get_descriptor("test.replace").unwrap().version,
+            "0.2.0"
+        );
     }
 
     #[test]
@@ -737,17 +806,32 @@ mod tests {
         let dir = std::env::temp_dir().join("test_cap_registry_stats");
         let mut registry = CapabilityRegistry::new(dir);
 
-        registry.register(CapabilityDescriptor::new(
-            "a", "A", "a", CapabilityType::Hardware, ProviderKind::BuiltIn,
-        ).with_status(CapabilityStatus::Active));
+        registry.register(
+            CapabilityDescriptor::new(
+                "a",
+                "A",
+                "a",
+                CapabilityType::Hardware,
+                ProviderKind::BuiltIn,
+            )
+            .with_status(CapabilityStatus::Active),
+        );
 
-        registry.register(CapabilityDescriptor::new(
-            "b", "B", "b", CapabilityType::System, ProviderKind::Process,
-        ).with_status(CapabilityStatus::Available));
+        registry.register(
+            CapabilityDescriptor::new("b", "B", "b", CapabilityType::System, ProviderKind::Process)
+                .with_status(CapabilityStatus::Available),
+        );
 
-        registry.register(CapabilityDescriptor::new(
-            "c", "C", "c", CapabilityType::Internal, ProviderKind::BuiltIn,
-        ).with_status(CapabilityStatus::Evolving));
+        registry.register(
+            CapabilityDescriptor::new(
+                "c",
+                "C",
+                "c",
+                CapabilityType::Internal,
+                ProviderKind::BuiltIn,
+            )
+            .with_status(CapabilityStatus::Evolving),
+        );
 
         let stats = registry.stats();
         assert_eq!(stats.total, 3);

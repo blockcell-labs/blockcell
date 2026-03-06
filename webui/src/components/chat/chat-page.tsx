@@ -3,7 +3,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { Send, Loader2, Paperclip, X, FileAudio, Upload, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useChatStore } from '@/lib/store';
+import { useAgentStore, useChatStore } from '@/lib/store';
 import { wsManager } from '@/lib/ws';
 import { getSession, uploadFile } from '@/lib/api';
 import { MessageBubble } from './message-bubble';
@@ -20,6 +20,7 @@ interface PendingFile {
 
 export function ChatPage() {
   const { messages, sessions, currentSessionId, setMessages, addMessage, isLoading, setLoading } = useChatStore();
+  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const t = useT();
   const [input, setInput] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -33,13 +34,12 @@ export function ChatPage() {
   // Load session history when switching sessions
   useEffect(() => {
     if (currentSessionId) {
-      // Check if this session exists in the persisted sessions list
       const isPersistedSession = sessions.some((s) => s.id === currentSessionId);
       if (isPersistedSession) {
         loadSessionHistory(currentSessionId);
       }
     }
-  }, [currentSessionId]);
+  }, [currentSessionId, selectedAgentId, sessions]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -59,7 +59,7 @@ export function ChatPage() {
 
   async function loadSessionHistory(sessionId: string) {
     try {
-      const data = await getSession(sessionId);
+      const data = await getSession(sessionId, selectedAgentId);
       const uiMessages: UiMessage[] = data.messages
         .filter((m) => {
           // Skip system and tool messages
@@ -189,7 +189,7 @@ export function ChatPage() {
     const chatId = currentSessionId.replace(/_/g, ':');
 
     // Send via WebSocket
-    wsManager.sendChat(content, chatId, mediaPaths);
+    wsManager.sendChat(content, chatId, mediaPaths, selectedAgentId);
     setInput('');
     setLoading(true);
   }
@@ -197,7 +197,7 @@ export function ChatPage() {
   function handleCancel() {
     if (!isLoading || isCancelling) return;
     const chatId = currentSessionId.replace(/_/g, ':');
-    wsManager.sendCancel(chatId);
+    wsManager.sendCancel(chatId, selectedAgentId);
     setIsCancelling(true);
   }
 

@@ -30,7 +30,7 @@ impl SessionStore {
 
     pub fn load(&self, session_key: &str) -> Result<Vec<ChatMessage>> {
         let path = self.paths.session_file(session_key);
-        
+
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -63,7 +63,7 @@ impl SessionStore {
 
     pub fn save(&self, session_key: &str, messages: &[ChatMessage]) -> Result<()> {
         let path = self.paths.session_file(session_key);
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -77,7 +77,7 @@ impl SessionStore {
         } else {
             now.clone()
         };
-        
+
         let mut file = File::create(&path)?;
 
         // Write metadata
@@ -111,7 +111,7 @@ impl SessionStore {
 
     pub fn append(&self, session_key: &str, message: &ChatMessage) -> Result<()> {
         let path = self.paths.session_file(session_key);
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -130,7 +130,11 @@ impl SessionStore {
                     metadata: serde_json::Value::Object(serde_json::Map::new()),
                 };
                 // 写入 metadata 行；若失败忽略（后续 append 仍可工作）
-                let _ = writeln!(f, "{}", serde_json::to_string(&metadata).unwrap_or_default());
+                let _ = writeln!(
+                    f,
+                    "{}",
+                    serde_json::to_string(&metadata).unwrap_or_default()
+                );
                 true
             })
             .unwrap_or(false);
@@ -182,16 +186,13 @@ impl SessionStore {
             return None;
         }
 
-        meta.insert(
-            file_key,
-            serde_json::json!({ "name": name.clone() }),
-        );
+        meta.insert(file_key, serde_json::json!({ "name": name.clone() }));
 
         let _ = std::fs::write(
             &meta_path,
             serde_json::to_string_pretty(&meta).unwrap_or_default(),
         );
-        
+
         Some(name)
     }
 }

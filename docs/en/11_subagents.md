@@ -1,7 +1,6 @@
 # Article 11: Subagents and Task Concurrency — Let AI Do Multiple Things at Once
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 11/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 11
 ---
 
 ## The problem: AI can only do one thing at a time

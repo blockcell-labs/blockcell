@@ -1,3 +1,4 @@
+pub mod account;
 pub mod manager;
 pub mod rate_limit;
 

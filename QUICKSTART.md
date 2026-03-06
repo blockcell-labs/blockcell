@@ -27,13 +27,13 @@ The binary will be at `target/release/blockcell`.
 
 ## 2) Create config
 
-Run onboarding once:
+For first-time setup, the recommended flow is:
 
 ```bash
-blockcell onboard
+blockcell setup
 ```
 
-Then edit `~/.blockcell/config.json` and set **one** provider API key (for example `providers.openrouter.apiKey`).
+It creates `~/.blockcell/`, saves provider settings, and auto-fills a default `channelOwners` binding when you enable an external channel. If you later want different accounts of the same channel to route to different agents, add `channelAccountOwners` manually. If you prefer the older manual flow, you can still run `blockcell onboard` and edit `~/.blockcell/config.json` yourself.
 
 ## 3) Run (interactive)
 
@@ -63,7 +63,13 @@ Default ports:
 If `gateway.apiToken` is set, use it as:
 
 - HTTP: `Authorization: Bearer <token>` (or `?token=<token>`)
-- WebUI: login password is the same token
+- WebSocket: `?token=<token>` also works
+
+WebUI authentication is now separate from the API token:
+
+- if `gateway.webuiPass` is set, WebUI uses that stable password
+- otherwise Gateway prints a temporary password at startup
+- if `gateway.apiToken` is empty, Gateway auto-generates and persists one
 
 ## Screenshots
 

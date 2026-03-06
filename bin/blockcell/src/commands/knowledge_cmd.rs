@@ -7,7 +7,9 @@ pub async fn stats(graph_name: Option<String>) -> anyhow::Result<()> {
     let kg_dir = paths.workspace().join("knowledge_graphs");
 
     if !kg_dir.exists() {
-        println!("(No knowledge graphs. Use the knowledge_graph tool via agent chat to create one.)");
+        println!(
+            "(No knowledge graphs. Use the knowledge_graph tool via agent chat to create one.)"
+        );
         return Ok(());
     }
 
@@ -22,13 +24,13 @@ pub async fn stats(graph_name: Option<String>) -> anyhow::Result<()> {
 
     let conn = rusqlite::Connection::open(&db_path)?;
 
-    let entity_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM entities", [], |row| row.get(0)
-    ).unwrap_or(0);
+    let entity_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+        .unwrap_or(0);
 
-    let relation_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM relations", [], |row| row.get(0)
-    ).unwrap_or(0);
+    let relation_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
+        .unwrap_or(0);
 
     println!();
     println!("📊 Knowledge graph: {}", name);
@@ -39,9 +41,12 @@ pub async fn stats(graph_name: Option<String>) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type ORDER BY COUNT(*) DESC LIMIT 10"
     )?;
-    let types: Vec<(String, i64)> = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let types: Vec<(String, i64)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     if !types.is_empty() {
         println!();
@@ -79,31 +84,31 @@ pub async fn search(query: &str, graph_name: Option<String>, limit: usize) -> an
          WHERE name LIKE ?1 ESCAPE '\\' OR description LIKE ?1 ESCAPE '\\' LIMIT ?2";
 
     let limit_i64 = limit as i64;
-    let results: Vec<(String, String, String, String)> =
-        if let Ok(mut stmt) = conn.prepare(fts_sql) {
-            stmt.query_map(rusqlite::params![query, limit_i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2).unwrap_or_default(),
-                    row.get::<_, String>(3).unwrap_or_default(),
-                ))
-            })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-        } else {
-            let mut stmt = conn.prepare(like_sql)?;
-            stmt.query_map(rusqlite::params![like_pattern, limit_i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2).unwrap_or_default(),
-                    row.get::<_, String>(3).unwrap_or_default(),
-                ))
-            })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-        };
+    let results: Vec<(String, String, String, String)> = if let Ok(mut stmt) = conn.prepare(fts_sql)
+    {
+        stmt.query_map(rusqlite::params![query, limit_i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2).unwrap_or_default(),
+                row.get::<_, String>(3).unwrap_or_default(),
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    } else {
+        let mut stmt = conn.prepare(like_sql)?;
+        stmt.query_map(rusqlite::params![like_pattern, limit_i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2).unwrap_or_default(),
+                row.get::<_, String>(3).unwrap_or_default(),
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
 
     if results.is_empty() {
         println!("No entities matching '{}' found.", query);
@@ -127,7 +132,11 @@ pub async fn search(query: &str, graph_name: Option<String>, limit: usize) -> an
 }
 
 /// Export a knowledge graph.
-pub async fn export(graph_name: Option<String>, format: &str, output: Option<String>) -> anyhow::Result<()> {
+pub async fn export(
+    graph_name: Option<String>,
+    format: &str,
+    output: Option<String>,
+) -> anyhow::Result<()> {
     let paths = Paths::default();
     let kg_dir = paths.workspace().join("knowledge_graphs");
     let name = graph_name.as_deref().unwrap_or("default");
@@ -140,40 +149,49 @@ pub async fn export(graph_name: Option<String>, format: &str, output: Option<Str
     let conn = rusqlite::Connection::open(&db_path)?;
 
     // Load entities
-    let mut stmt = conn.prepare("SELECT id, name, entity_type, description, tags, properties FROM entities")?;
-    let entities: Vec<Value> = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "id": row.get::<_, String>(0)?,
-            "name": row.get::<_, String>(1)?,
-            "type": row.get::<_, String>(2).unwrap_or_default(),
-            "description": row.get::<_, String>(3).unwrap_or_default(),
-            "tags": row.get::<_, String>(4).unwrap_or_default(),
-            "properties": row.get::<_, String>(5).unwrap_or_default(),
-        }))
-    })?.filter_map(|r| r.ok()).collect();
+    let mut stmt =
+        conn.prepare("SELECT id, name, entity_type, description, tags, properties FROM entities")?;
+    let entities: Vec<Value> = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "type": row.get::<_, String>(2).unwrap_or_default(),
+                "description": row.get::<_, String>(3).unwrap_or_default(),
+                "tags": row.get::<_, String>(4).unwrap_or_default(),
+                "properties": row.get::<_, String>(5).unwrap_or_default(),
+            }))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Load relations
-    let mut stmt = conn.prepare("SELECT source_id, target_id, relation_type, properties FROM relations")?;
-    let relations: Vec<Value> = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "source": row.get::<_, String>(0)?,
-            "target": row.get::<_, String>(1)?,
-            "type": row.get::<_, String>(2)?,
-            "properties": row.get::<_, String>(3).unwrap_or_default(),
-        }))
-    })?.filter_map(|r| r.ok()).collect();
+    let mut stmt =
+        conn.prepare("SELECT source_id, target_id, relation_type, properties FROM relations")?;
+    let relations: Vec<Value> = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "source": row.get::<_, String>(0)?,
+                "target": row.get::<_, String>(1)?,
+                "type": row.get::<_, String>(2)?,
+                "properties": row.get::<_, String>(3).unwrap_or_default(),
+            }))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     let content = match format {
-        "json" => {
-            serde_json::to_string_pretty(&serde_json::json!({
-                "graph": name,
-                "entities": entities,
-                "relations": relations,
-            }))?
-        }
+        "json" => serde_json::to_string_pretty(&serde_json::json!({
+            "graph": name,
+            "entities": entities,
+            "relations": relations,
+        }))?,
         "dot" => export_dot(&entities, &relations),
         "mermaid" => export_mermaid(&entities, &relations),
-        _ => anyhow::bail!("Unsupported format: {}. Options: json, dot, mermaid", format),
+        _ => anyhow::bail!(
+            "Unsupported format: {}. Options: json, dot, mermaid",
+            format
+        ),
     };
 
     match output {
@@ -231,7 +249,9 @@ pub async fn list_graphs() -> anyhow::Result<()> {
 }
 
 fn export_dot(entities: &[Value], relations: &[Value]) -> String {
-    let mut dot = String::from("digraph KnowledgeGraph {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n\n");
+    let mut dot = String::from(
+        "digraph KnowledgeGraph {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n\n",
+    );
     for e in entities {
         let id = e["id"].as_str().unwrap_or("");
         let name = e["name"].as_str().unwrap_or("");
@@ -244,7 +264,10 @@ fn export_dot(entities: &[Value], relations: &[Value]) -> String {
         let tgt = r["target"].as_str().unwrap_or("");
         let rtype = r["type"].as_str().unwrap_or("");
         let safe_type = rtype.replace('"', "\\\"");
-        dot.push_str(&format!("  \"{}\" -> \"{}\" [label=\"{}\"];\n", src, tgt, safe_type));
+        dot.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            src, tgt, safe_type
+        ));
     }
     dot.push_str("}\n");
     dot

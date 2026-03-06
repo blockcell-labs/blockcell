@@ -75,7 +75,10 @@ pub async fn fetch_as_markdown(url: &str, max_chars: usize) -> Result<(String, M
 }
 
 /// Process an HTTP response, extracting markdown content.
-pub async fn process_response(response: Response, max_chars: usize) -> Result<(String, MarkdownMeta)> {
+pub async fn process_response(
+    response: Response,
+    max_chars: usize,
+) -> Result<(String, MarkdownMeta)> {
     let mut meta = MarkdownMeta {
         final_url: response.url().to_string(),
         status: response.status().as_u16(),
@@ -144,7 +147,9 @@ pub fn html_to_markdown(html: &str) -> String {
 
     // Use htmd with default settings — it handles most cases well
     let converter = HtmlToMarkdown::builder()
-        .skip_tags(vec!["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"])
+        .skip_tags(vec![
+            "script", "style", "nav", "footer", "header", "aside", "noscript", "iframe",
+        ])
         .build();
 
     match converter.convert(html) {
@@ -191,7 +196,14 @@ fn extract_text_fallback(html: &str) -> String {
     let document = Html::parse_document(html);
 
     // Try main content areas first
-    let selectors = ["article", "main", "[role=\"main\"]", ".content", "#content", "body"];
+    let selectors = [
+        "article",
+        "main",
+        "[role=\"main\"]",
+        ".content",
+        "#content",
+        "body",
+    ];
 
     for sel_str in selectors {
         if let Ok(selector) = Selector::parse(sel_str) {

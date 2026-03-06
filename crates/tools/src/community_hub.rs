@@ -51,9 +51,7 @@ fn resolve_hub_url(ctx: &ToolContext, params: &Value) -> Option<String> {
         return Some(url);
     }
     // 1b. Fallback: reload config.json from disk (runtime may have stale config)
-    if let Some(url) = load_config_from_disk(ctx)
-        .and_then(|cfg| cfg.community_hub_url())
-    {
+    if let Some(url) = load_config_from_disk(ctx).and_then(|cfg| cfg.community_hub_url()) {
         return Some(url);
     }
     // 2. Environment variable
@@ -70,9 +68,7 @@ fn resolve_api_key(ctx: &ToolContext, params: &Value) -> Option<String> {
     if let Some(key) = ctx.config.community_hub_api_key() {
         return Some(key);
     }
-    if let Some(key) = load_config_from_disk(ctx)
-        .and_then(|cfg| cfg.community_hub_api_key())
-    {
+    if let Some(key) = load_config_from_disk(ctx).and_then(|cfg| cfg.community_hub_api_key()) {
         return Some(key);
     }
     if let Ok(key) = std::env::var("BLOCKCELL_HUB_API_KEY") {
@@ -97,27 +93,46 @@ async fn hub_get(client: &reqwest::Client, url: &str, api_key: &Option<String>) 
     if let Some(key) = api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
     }
-    let resp = req.send().await.map_err(|e| blockcell_core::Error::Tool(format!("Hub request failed: {}", e)))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| blockcell_core::Error::Tool(format!("Hub request failed: {}", e)))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(blockcell_core::Error::Tool(format!("Hub returned {}: {}", status, body)));
+        return Err(blockcell_core::Error::Tool(format!(
+            "Hub returned {}: {}",
+            status, body
+        )));
     }
-    serde_json::from_str(&body).map_err(|e| blockcell_core::Error::Tool(format!("Invalid JSON from hub: {}", e)))
+    serde_json::from_str(&body)
+        .map_err(|e| blockcell_core::Error::Tool(format!("Invalid JSON from hub: {}", e)))
 }
 
-async fn hub_post(client: &reqwest::Client, url: &str, api_key: &Option<String>, body: Value) -> Result<Value> {
+async fn hub_post(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &Option<String>,
+    body: Value,
+) -> Result<Value> {
     let mut req = client.post(url).json(&body);
     if let Some(key) = api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
     }
-    let resp = req.send().await.map_err(|e| blockcell_core::Error::Tool(format!("Hub request failed: {}", e)))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| blockcell_core::Error::Tool(format!("Hub request failed: {}", e)))?;
     let status = resp.status();
     let resp_body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(blockcell_core::Error::Tool(format!("Hub returned {}: {}", status, resp_body)));
+        return Err(blockcell_core::Error::Tool(format!(
+            "Hub returned {}: {}",
+            status, resp_body
+        )));
     }
-    serde_json::from_str(&resp_body).map_err(|e| blockcell_core::Error::Tool(format!("Invalid JSON from hub: {}", e)))
+    serde_json::from_str(&resp_body)
+        .map_err(|e| blockcell_core::Error::Tool(format!("Invalid JSON from hub: {}", e)))
 }
 
 #[async_trait]
@@ -161,6 +176,10 @@ impl Tool for CommunityHubTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- **Community Hub 技能安装**: 用户说「安装技能」「从Hub安装」「下载技能」「install skill」时，**必须**使用 `community_hub` 工具，流程：①先调用 action='list_installed' 查本地是否已装；②调用 action='skill_info' skill_name='xxx' 查Hub上该技能信息；③调用 action='install_skill' skill_name='xxx' 下载安装。卸载用 action='uninstall_skill'，浏览用 action='trending' 或 action='search_skills'。Hub URL 和 API key 自动从配置读取，无需手动填写。".to_string())
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
         // Security: hub_url/api_key must never be accepted from tool params.
         // These values are resolved internally from config/env only.
@@ -174,44 +193,89 @@ impl Tool for CommunityHubTool {
         match action {
             "heartbeat" | "trending" | "feed" => Ok(()),
             "search_skills" | "node_search" => {
-                if params.get("query").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'query' is required for search actions".into()))
+                if params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'query' is required for search actions".into(),
+                    ))
                 } else {
                     Ok(())
                 }
             }
             "skill_info" | "install_skill" | "uninstall_skill" => {
-                if params.get("skill_name").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'skill_name' is required for this action".into()))
+                if params
+                    .get("skill_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'skill_name' is required for this action".into(),
+                    ))
                 } else {
                     Ok(())
                 }
             }
             "list_installed" => Ok(()),
             "post" => {
-                if params.get("content").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'content' is required for post action".into()))
+                if params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'content' is required for post action".into(),
+                    ))
                 } else {
                     Ok(())
                 }
             }
             "reply" => {
-                if params.get("content").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'content' is required for reply action".into()))
-                } else if params.get("post_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'post_id' is required for reply action".into()))
+                if params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'content' is required for reply action".into(),
+                    ))
+                } else if params
+                    .get("post_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'post_id' is required for reply action".into(),
+                    ))
                 } else {
                     Ok(())
                 }
             }
             "like" | "get_replies" => {
-                if params.get("post_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    Err(blockcell_core::Error::Tool("'post_id' is required for this action".into()))
+                if params
+                    .get("post_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    Err(blockcell_core::Error::Tool(
+                        "'post_id' is required for this action".into(),
+                    ))
                 } else {
                     Ok(())
                 }
             }
-            _ => Err(blockcell_core::Error::Tool(format!("Unknown action: {}", action))),
+            _ => Err(blockcell_core::Error::Tool(format!(
+                "Unknown action: {}",
+                action
+            ))),
         }
     }
 
@@ -229,11 +293,17 @@ impl Tool for CommunityHubTool {
                             let name = entry.file_name().to_string_lossy().to_string();
                             let meta_path = entry.path().join("meta.yaml");
                             let description = if meta_path.exists() {
-                                std::fs::read_to_string(&meta_path).ok()
+                                std::fs::read_to_string(&meta_path)
+                                    .ok()
                                     .and_then(|s| {
                                         for line in s.lines() {
                                             if line.starts_with("description:") {
-                                                return Some(line.trim_start_matches("description:").trim().trim_matches('"').to_string());
+                                                return Some(
+                                                    line.trim_start_matches("description:")
+                                                        .trim()
+                                                        .trim_matches('"')
+                                                        .to_string(),
+                                                );
                                             }
                                         }
                                         None
@@ -255,12 +325,20 @@ impl Tool for CommunityHubTool {
         }
 
         if action == "uninstall_skill" {
-            let name = params.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = params
+                .get("skill_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let skill_dir = ctx.workspace.join("skills").join(name);
             if !skill_dir.exists() {
-                return Err(blockcell_core::Error::Tool(format!("Skill '{}' is not installed", name)));
+                return Err(blockcell_core::Error::Tool(format!(
+                    "Skill '{}' is not installed",
+                    name
+                )));
             }
-            std::fs::remove_dir_all(&skill_dir).map_err(|e| blockcell_core::Error::Tool(format!("Failed to remove skill: {}", e)))?;
+            std::fs::remove_dir_all(&skill_dir).map_err(|e| {
+                blockcell_core::Error::Tool(format!("Failed to remove skill: {}", e))
+            })?;
             info!(skill = %name, "Skill uninstalled");
             return Ok(json!({
                 "status": "uninstalled",
@@ -270,9 +348,7 @@ impl Tool for CommunityHubTool {
 
         // All remaining actions require hub_url
         let hub_url = resolve_hub_url(&ctx, &params)
-            .ok_or_else(|| blockcell_core::Error::Tool(
-                "Community Hub 未启用或未配置。".into()
-            ))?;
+            .ok_or_else(|| blockcell_core::Error::Tool("Community Hub 未启用或未配置。".into()))?;
         let api_key = resolve_api_key(&ctx, &params);
 
         let client = reqwest::Client::builder()
@@ -282,11 +358,15 @@ impl Tool for CommunityHubTool {
 
         match action {
             "heartbeat" => {
-                let tags = params.get("tags")
+                let tags = params
+                    .get("tags")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let tags: Vec<String> = tags.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                let tags: Vec<String> = tags
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
 
                 let body = json!({
                     "tags": tags,
@@ -309,14 +389,21 @@ impl Tool for CommunityHubTool {
 
             "search_skills" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let url = format!("{}/v1/skills/search?q={}", hub_url, urlencoding::encode(query));
+                let url = format!(
+                    "{}/v1/skills/search?q={}",
+                    hub_url,
+                    urlencoding::encode(query)
+                );
                 debug!(hub = %redact_hub_url(&hub_url), "Community Hub: searching skills");
                 let result = hub_get(&client, &url, &api_key).await?;
                 Ok(json!({ "results": result }))
             }
 
             "skill_info" => {
-                let name = params.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = params
+                    .get("skill_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let url = format!("{}/v1/skills/{}/latest", hub_url, urlencoding::encode(name));
                 debug!(hub = %redact_hub_url(&hub_url), "Community Hub: fetching skill info");
                 let result = hub_get(&client, &url, &api_key).await?;
@@ -365,10 +452,17 @@ impl Tool for CommunityHubTool {
             }
 
             "install_skill" => {
-                let name = params.get("skill_name").and_then(|v| v.as_str()).unwrap_or("");
+                let name = params
+                    .get("skill_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 info!(skill = %name, "Community Hub: installing skill");
 
-                let info_url = format!("{}/v1/skills/{}/latest", hub_url.trim_end_matches('/'), urlencoding::encode(name));
+                let info_url = format!(
+                    "{}/v1/skills/{}/latest",
+                    hub_url.trim_end_matches('/'),
+                    urlencoding::encode(name)
+                );
                 debug!(skill = %name, url = %info_url, "Community Hub: resolving skill metadata");
                 let info = hub_get(&client, &info_url, &api_key).await.unwrap_or_else(|e| {
                     warn!(skill = %name, err = %e, "Community Hub: failed to fetch skill metadata; falling back to download endpoint");
@@ -382,27 +476,45 @@ impl Tool for CommunityHubTool {
                 if let Some(ref key) = api_key {
                     req = req.header("Authorization", format!("Bearer {}", key));
                 }
-                let resp = req.send().await.map_err(|e| blockcell_core::Error::Tool(format!("Download failed: {}", e)))?;
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|e| blockcell_core::Error::Tool(format!("Download failed: {}", e)))?;
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(blockcell_core::Error::Tool(format!("Download failed ({}): {}", status, body)));
+                    return Err(blockcell_core::Error::Tool(format!(
+                        "Download failed ({}): {}",
+                        status, body
+                    )));
                 }
-                let zip_bytes = resp.bytes().await.map_err(|e| blockcell_core::Error::Tool(format!("Failed to read response: {}", e)))?;
+                let zip_bytes = resp.bytes().await.map_err(|e| {
+                    blockcell_core::Error::Tool(format!("Failed to read response: {}", e))
+                })?;
 
                 // Extract to workspace/skills/{name}/
                 let skills_dir = ctx.workspace.join("skills");
                 let skill_dir = skills_dir.join(name);
                 if skill_dir.exists() {
-                    std::fs::remove_dir_all(&skill_dir).map_err(|e| blockcell_core::Error::Tool(format!("Failed to remove existing skill dir: {}", e)))?;
+                    std::fs::remove_dir_all(&skill_dir).map_err(|e| {
+                        blockcell_core::Error::Tool(format!(
+                            "Failed to remove existing skill dir: {}",
+                            e
+                        ))
+                    })?;
                 }
-                std::fs::create_dir_all(&skill_dir).map_err(|e| blockcell_core::Error::Tool(format!("Failed to create skill dir: {}", e)))?;
+                std::fs::create_dir_all(&skill_dir).map_err(|e| {
+                    blockcell_core::Error::Tool(format!("Failed to create skill dir: {}", e))
+                })?;
 
                 // Unzip
                 let cursor = std::io::Cursor::new(&zip_bytes);
-                let mut archive = zip::ZipArchive::new(cursor).map_err(|e| blockcell_core::Error::Tool(format!("Invalid zip: {}", e)))?;
+                let mut archive = zip::ZipArchive::new(cursor)
+                    .map_err(|e| blockcell_core::Error::Tool(format!("Invalid zip: {}", e)))?;
                 for i in 0..archive.len() {
-                    let mut file = archive.by_index(i).map_err(|e| blockcell_core::Error::Tool(format!("Zip read error: {}", e)))?;
+                    let mut file = archive.by_index(i).map_err(|e| {
+                        blockcell_core::Error::Tool(format!("Zip read error: {}", e))
+                    })?;
                     let out_path = if let Some(enclosed) = file.enclosed_name() {
                         // Strip the top-level directory if the zip contains one
                         let components: Vec<_> = enclosed.components().collect();
@@ -420,8 +532,12 @@ impl Tool for CommunityHubTool {
                         if let Some(parent) = out_path.parent() {
                             std::fs::create_dir_all(parent).ok();
                         }
-                        let mut outfile = std::fs::File::create(&out_path).map_err(|e| blockcell_core::Error::Tool(format!("Failed to create file: {}", e)))?;
-                        std::io::copy(&mut file, &mut outfile).map_err(|e| blockcell_core::Error::Tool(format!("Failed to write file: {}", e)))?;
+                        let mut outfile = std::fs::File::create(&out_path).map_err(|e| {
+                            blockcell_core::Error::Tool(format!("Failed to create file: {}", e))
+                        })?;
+                        std::io::copy(&mut file, &mut outfile).map_err(|e| {
+                            blockcell_core::Error::Tool(format!("Failed to write file: {}", e))
+                        })?;
                     }
                 }
 
@@ -436,11 +552,22 @@ impl Tool for CommunityHubTool {
 
             "node_search" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let tags = params.get("tags")
+                let tags = params
+                    .get("tags")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
                     .unwrap_or_default();
-                let url = format!("{}/v1/nodes/search?q={}&tags={}", hub_url, urlencoding::encode(query), urlencoding::encode(&tags));
+                let url = format!(
+                    "{}/v1/nodes/search?q={}&tags={}",
+                    hub_url,
+                    urlencoding::encode(query),
+                    urlencoding::encode(&tags)
+                );
                 debug!(url = %url, "Community Hub: searching nodes");
                 let result = hub_get(&client, &url, &api_key).await?;
                 Ok(json!({ "nodes": result }))
@@ -448,7 +575,10 @@ impl Tool for CommunityHubTool {
 
             _ => {
                 warn!(action = %action, "Community Hub: unknown action");
-                Err(blockcell_core::Error::Tool(format!("Unknown action: {}", action)))
+                Err(blockcell_core::Error::Tool(format!(
+                    "Unknown action: {}",
+                    action
+                )))
             }
         }
     }
@@ -475,20 +605,26 @@ mod tests {
     fn test_validate_search_requires_query() {
         let tool = CommunityHubTool;
         assert!(tool.validate(&json!({"action": "search_skills"})).is_err());
-        assert!(tool.validate(&json!({"action": "search_skills", "query": "finance"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "search_skills", "query": "finance"}))
+            .is_ok());
     }
 
     #[test]
     fn test_validate_post_requires_content() {
         let tool = CommunityHubTool;
         assert!(tool.validate(&json!({"action": "post"})).is_err());
-        assert!(tool.validate(&json!({"action": "post", "content": "hello"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "post", "content": "hello"}))
+            .is_ok());
     }
 
     #[test]
     fn test_validate_like_requires_post_id() {
         let tool = CommunityHubTool;
         assert!(tool.validate(&json!({"action": "like"})).is_err());
-        assert!(tool.validate(&json!({"action": "like", "post_id": "abc123"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "like", "post_id": "abc123"}))
+            .is_ok());
     }
 }

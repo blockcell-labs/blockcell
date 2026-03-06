@@ -857,6 +857,7 @@ pub(super) async fn handle_evolution_test(
         };
         let inbound = InboundMessage {
             channel: "webui_test".to_string(),
+            account_id: None,
             sender_id: "webui_test".to_string(),
             chat_id: format!("test_{}", chrono::Utc::now().timestamp_millis()),
             content: parsed_json,
@@ -903,6 +904,7 @@ pub(super) async fn handle_evolution_test(
         );
         let inbound = InboundMessage {
             channel: "webui_test".to_string(),
+            account_id: None,
             sender_id: "webui_test".to_string(),
             chat_id: format!("test_{}", chrono::Utc::now().timestamp_millis()),
             content: prompt,

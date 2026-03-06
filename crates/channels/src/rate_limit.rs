@@ -158,7 +158,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_rate_limiter_acquire() {
         let limiter = ChannelRateLimiter::new(3, 100.0); // high rate so test is fast
-        // Should acquire 3 tokens without sleeping
+                                                         // Should acquire 3 tokens without sleeping
         for _ in 0..3 {
             limiter.acquire().await;
         }

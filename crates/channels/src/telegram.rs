@@ -1,3 +1,4 @@
+use crate::account::telegram_account_id;
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use reqwest::Proxy;
@@ -5,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -133,7 +134,7 @@ impl TelegramChannel {
 
     fn is_allowed(&self, user: &User) -> bool {
         let allow_from = &self.config.channels.telegram.allow_from;
-        
+
         if allow_from.is_empty() {
             return true;
         }
@@ -202,7 +203,7 @@ impl TelegramChannel {
                         Ok(updates) => {
                             for update in updates {
                                 offset = Some(update.update_id + 1);
-                                
+
                                 if let Some(message) = update.message {
                                     if let Err(e) = self.handle_message(message).await {
                                         error!(error = %e, "Failed to handle Telegram message");
@@ -299,22 +300,27 @@ impl TelegramChannel {
             return Ok(());
         }
 
-        let mut content = message
-            .text
-            .or(message.caption)
-            .unwrap_or_default();
+        let mut content = message.text.or(message.caption).unwrap_or_default();
 
         let mut media_files = vec![];
 
         // Handle photos
         if let Some(photos) = &message.photo {
             if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
-                let filename = format!("telegram_photo_{}_{}.jpg", message.message_id, largest.file_unique_id);
+                let filename = format!(
+                    "telegram_photo_{}_{}.jpg",
+                    message.message_id, largest.file_unique_id
+                );
                 match self.download_file(&largest.file_id, &filename).await {
                     Ok(path) => {
                         media_files.push(path);
                         // Send immediate ack
-                        let _ = send_message(&self.config, &message.chat.id.to_string(), "📷 图片已收到，请问您需要我做什么？").await;
+                        let _ = send_message(
+                            &self.config,
+                            &message.chat.id.to_string(),
+                            "📷 图片已收到，请问您需要我做什么？",
+                        )
+                        .await;
                         if content.is_empty() {
                             content = "用户发来了一张图片，请问您需要我做什么？（例如：描述图片内容、识别文字、发回给您等）".to_string();
                         }
@@ -329,7 +335,10 @@ impl TelegramChannel {
 
         // Handle voice messages — download then auto-transcribe
         if let Some(voice) = &message.voice {
-            let filename = format!("telegram_voice_{}_{}.ogg", message.message_id, voice.file_unique_id);
+            let filename = format!(
+                "telegram_voice_{}_{}.ogg",
+                message.message_id, voice.file_unique_id
+            );
             match self.download_file(&voice.file_id, &filename).await {
                 Ok(path) => {
                     media_files.push(path.clone());
@@ -388,6 +397,7 @@ impl TelegramChannel {
 
         let inbound = InboundMessage {
             channel: "telegram".to_string(),
+            account_id: telegram_account_id(&self.config),
             sender_id: user.id.to_string(),
             chat_id: message.chat.id.to_string(),
             content,
@@ -412,7 +422,15 @@ impl TelegramChannel {
     async fn transcribe_voice(&self, path: &str) -> Option<String> {
         // 1. Try local whisper CLI
         if let Ok(output) = tokio::process::Command::new("whisper")
-            .args([path, "--model", "base", "--output_format", "txt", "--output_dir", "/tmp"])
+            .args([
+                path,
+                "--model",
+                "base",
+                "--output_format",
+                "txt",
+                "--output_dir",
+                "/tmp",
+            ])
             .output()
             .await
         {
@@ -441,7 +459,11 @@ impl TelegramChannel {
             .get("openai")
             .map(|p| p.api_key.clone())
             .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()));
+            .or_else(|| {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+            });
 
         let api_key = match api_key {
             Some(k) => k,
@@ -484,7 +506,9 @@ impl TelegramChannel {
         {
             Ok(resp) if resp.status().is_success() => {
                 #[derive(serde::Deserialize)]
-                struct TranscribeResp { text: String }
+                struct TranscribeResp {
+                    text: String,
+                }
                 if let Ok(body) = resp.json::<TranscribeResp>().await {
                     let trimmed = body.text.trim().to_string();
                     if !trimmed.is_empty() {
@@ -643,7 +667,10 @@ async fn do_send_message(
             .map_err(|e| Error::Channel(format!("Failed to send Telegram plain message: {}", e)))?;
         if !retry.status().is_success() {
             let err = retry.text().await.unwrap_or_default();
-            return Err(Error::Channel(format!("Telegram API error (plain): {}", err)));
+            return Err(Error::Channel(format!(
+                "Telegram API error (plain): {}",
+                err
+            )));
         }
         let _ = plain_request; // suppress unused warning (fields used for serde only)
         return Ok(());
@@ -669,15 +696,19 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
         // Find the best split point within the limit.
         let mut split_at = max_len;
-        
+
         // Ensure split_at is a char boundary before we slice
         while split_at > 0 && !remaining.is_char_boundary(split_at) {
             split_at -= 1;
         }
-        
+
         // If we somehow couldn't find a boundary (e.g., max_len too small), fallback to first char
         if split_at == 0 {
-            split_at = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(max_len);
+            split_at = remaining
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(max_len);
         }
 
         // Try to split on a newline within the safe boundary
@@ -742,7 +773,10 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!("Telegram send media error: {}", body)));
+        return Err(Error::Channel(format!(
+            "Telegram send media error: {}",
+            body
+        )));
     }
     Ok(())
 }
@@ -829,6 +863,6 @@ mod tests {
         assert!(String::from_utf8(chunks[0].as_bytes().to_vec()).is_ok());
         assert!(String::from_utf8(chunks[1].as_bytes().to_vec()).is_ok());
         // 4096 / 3 = 1365 with remainder 1. So 1365 * 3 = 4095 is the closest boundary.
-        assert_eq!(chunks[0].len(), 4095); 
+        assert_eq!(chunks[0].len(), 4095);
     }
 }

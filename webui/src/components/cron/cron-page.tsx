@@ -3,6 +3,7 @@ import { Plus, Trash2, Play, RefreshCw, Clock, Loader2, X, CheckCircle2, AlertCi
 import { cn } from '@/lib/utils';
 import { getCronJobs, createCronJob, deleteCronJob, runCronJob } from '@/lib/api';
 import { useT } from '@/lib/i18n';
+import { useAgentStore } from '@/lib/store';
 
 // ── Toast notification ──
 interface Toast {
@@ -86,6 +87,7 @@ function ConfirmDialog({
 
 export function CronPage() {
   const t = useT();
+  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -122,12 +124,12 @@ export function CronPage() {
 
   useEffect(() => {
     fetchJobs();
-  }, []);
+  }, [selectedAgentId]);
 
   async function fetchJobs() {
     setLoading(true);
     try {
-      const data = await getCronJobs();
+      const data = await getCronJobs(selectedAgentId);
       setJobs(data.jobs || []);
     } catch {
       // ignore
@@ -145,7 +147,7 @@ export function CronPage() {
       if (newJob.every_seconds) payload.every_seconds = parseInt(newJob.every_seconds);
       if (newJob.cron_expr) payload.cron_expr = newJob.cron_expr;
       if (newJob.skill_name) payload.skill_name = newJob.skill_name;
-      await createCronJob(payload);
+      await createCronJob(payload, selectedAgentId);
       setShowCreate(false);
       setNewJob({ name: '', message: '', every_seconds: '', cron_expr: '', skill_name: '' });
       fetchJobs();
@@ -165,7 +167,7 @@ export function CronPage() {
       onConfirm: async () => {
         closeConfirm();
         try {
-          await deleteCronJob(id);
+          await deleteCronJob(id, selectedAgentId);
           setJobs((prev) => prev.filter((j) => j.id !== id));
           addToast('success', t('cron.jobDeleted', { name: job?.name || id }));
         } catch (e: any) {
@@ -186,7 +188,7 @@ export function CronPage() {
       onConfirm: async () => {
         closeConfirm();
         try {
-          await runCronJob(id);
+          await runCronJob(id, selectedAgentId);
           addToast('success', t('cron.jobTriggered', { name: job?.name || id }));
         } catch (e: any) {
           addToast('error', e?.message || t('cron.runFailed'));

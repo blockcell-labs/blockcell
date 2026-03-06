@@ -79,10 +79,7 @@ impl CdpClient {
                                 // This is an event
                                 let listeners = events_clone.lock().await;
                                 if let Some(senders) = listeners.get(method) {
-                                    let params = val
-                                        .get("params")
-                                        .cloned()
-                                        .unwrap_or(Value::Null);
+                                    let params = val.get("params").cloned().unwrap_or(Value::Null);
                                     for tx in senders {
                                         let _ = tx.try_send(params.clone());
                                     }
@@ -114,11 +111,7 @@ impl CdpClient {
     }
 
     /// Send a CDP command and wait for the response.
-    pub async fn send_command(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, String> {
+    pub async fn send_command(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let msg = json!({
@@ -241,11 +234,7 @@ impl CdpClient {
         let ids = result
             .get("nodeIds")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_i64())
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
             .unwrap_or_default();
         Ok(ids)
     }
@@ -329,21 +318,13 @@ impl CdpClient {
 
     /// Insert text (bypasses key events, good for filling forms).
     pub async fn insert_text(&self, text: &str) -> Result<(), String> {
-        self.send_command(
-            "Input.insertText",
-            json!({"text": text}),
-        )
-        .await?;
+        self.send_command("Input.insertText", json!({"text": text}))
+            .await?;
         Ok(())
     }
 
     /// Set cookies.
-    pub async fn set_cookie(
-        &self,
-        name: &str,
-        value: &str,
-        domain: &str,
-    ) -> Result<(), String> {
+    pub async fn set_cookie(&self, name: &str, value: &str, domain: &str) -> Result<(), String> {
         self.send_command(
             "Network.setCookie",
             json!({
@@ -369,7 +350,12 @@ impl CdpClient {
     }
 
     /// Set viewport/device metrics.
-    pub async fn set_viewport(&self, width: i32, height: i32, device_scale_factor: f64) -> Result<(), String> {
+    pub async fn set_viewport(
+        &self,
+        width: i32,
+        height: i32,
+        device_scale_factor: f64,
+    ) -> Result<(), String> {
         self.send_command(
             "Emulation.setDeviceMetricsOverride",
             json!({
@@ -486,12 +472,17 @@ impl CdpClient {
     // ─── Dialog handling ──────────────────────────────────────────────
 
     /// Handle a JavaScript dialog (alert/confirm/prompt/beforeunload).
-    pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<(), String> {
+    pub async fn handle_dialog(
+        &self,
+        accept: bool,
+        prompt_text: Option<&str>,
+    ) -> Result<(), String> {
         let mut params = json!({"accept": accept});
         if let Some(text) = prompt_text {
             params["promptText"] = json!(text);
         }
-        self.send_command("Page.handleJavaScriptDialog", params).await?;
+        self.send_command("Page.handleJavaScriptDialog", params)
+            .await?;
         Ok(())
     }
 

@@ -1,7 +1,6 @@
 # Article 07: Browser Automation — Let AI Control the Web for You
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 7/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 7
 ---
 
 ## Why browser automation?

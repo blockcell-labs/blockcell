@@ -25,14 +25,37 @@ pub struct CronService {
     paths: Paths,
     jobs: Arc<RwLock<Vec<CronJob>>>,
     inbound_tx: mpsc::Sender<InboundMessage>,
+    agent_id: Option<String>,
+}
+
+fn apply_route_agent_id(metadata: &mut serde_json::Value, agent_id: Option<&str>) {
+    if let Some(agent_id) = agent_id.map(str::trim).filter(|id| !id.is_empty()) {
+        if !metadata.is_object() {
+            *metadata = serde_json::json!({});
+        }
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("route_agent_id".to_string(), serde_json::json!(agent_id));
+        }
+    }
 }
 
 impl CronService {
     pub fn new(paths: Paths, inbound_tx: mpsc::Sender<InboundMessage>) -> Self {
+        Self::new_with_agent(paths, inbound_tx, None)
+    }
+
+    pub fn new_with_agent(
+        paths: Paths,
+        inbound_tx: mpsc::Sender<InboundMessage>,
+        agent_id: Option<String>,
+    ) -> Self {
         Self {
             paths,
             jobs: Arc::new(RwLock::new(Vec::new())),
             inbound_tx,
+            agent_id: agent_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
         }
     }
 
@@ -340,8 +363,12 @@ impl CronService {
             ("cron".to_string(), job.id.clone())
         };
 
+        let mut metadata = metadata;
+        apply_route_agent_id(&mut metadata, self.agent_id.as_deref());
+
         let msg = InboundMessage {
             channel: msg_channel,
+            account_id: None,
             sender_id: "cron".to_string(),
             chat_id: msg_chat_id,
             content,
@@ -373,5 +400,27 @@ impl CronService {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_route_agent_id_inserts_metadata() {
+        let mut metadata = serde_json::json!({"job_id":"1"});
+        apply_route_agent_id(&mut metadata, Some("ops"));
+        assert_eq!(
+            metadata.get("route_agent_id").and_then(|v| v.as_str()),
+            Some("ops")
+        );
+    }
+
+    #[test]
+    fn test_apply_route_agent_id_skips_empty_agent() {
+        let mut metadata = serde_json::json!({"job_id":"1"});
+        apply_route_agent_id(&mut metadata, Some("   "));
+        assert!(metadata.get("route_agent_id").is_none());
     }
 }

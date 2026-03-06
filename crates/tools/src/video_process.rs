@@ -26,35 +26,96 @@ impl Tool for VideoProcessTool {
         let str_prop = |desc: &str| -> Value { json!({"type": "string", "description": desc}) };
         let num_prop = |desc: &str| -> Value { json!({"type": "number", "description": desc}) };
         let int_prop = |desc: &str| -> Value { json!({"type": "integer", "description": desc}) };
-        let arr_str_prop = |desc: &str| -> Value { json!({"type": "array", "items": {"type": "string"}, "description": desc}) };
-        let arr_num_prop = |desc: &str| -> Value { json!({"type": "array", "items": {"type": "number"}, "description": desc}) };
+        let arr_str_prop = |desc: &str| -> Value {
+            json!({"type": "array", "items": {"type": "string"}, "description": desc})
+        };
+        let arr_num_prop = |desc: &str| -> Value {
+            json!({"type": "array", "items": {"type": "number"}, "description": desc})
+        };
         let bool_prop = |desc: &str| -> Value { json!({"type": "boolean", "description": desc}) };
 
         let mut props = serde_json::Map::new();
         props.insert("action".into(), str_prop("Action: clip|merge|subtitle|thumbnail|convert|extract_audio|resize|info|compress|watermark"));
         props.insert("input".into(), str_prop("Input video file path"));
-        props.insert("inputs".into(), arr_str_prop("(merge) Multiple input file paths to concatenate"));
-        props.insert("output".into(), str_prop("Output file path. Default: auto-generated in workspace/media/"));
-        props.insert("start".into(), str_prop("(clip) Start time in HH:MM:SS or seconds format"));
-        props.insert("end".into(), str_prop("(clip) End time in HH:MM:SS or seconds format"));
-        props.insert("duration".into(), str_prop("(clip) Duration instead of end time"));
-        props.insert("subtitle_file".into(), str_prop("(subtitle) Path to SRT/ASS subtitle file"));
-        props.insert("subtitle_style".into(), str_prop("(subtitle) Style override: 'FontSize=24,PrimaryColour=&HFFFFFF&' etc."));
-        props.insert("times".into(), arr_num_prop("(thumbnail) Timestamps in seconds to extract frames"));
-        props.insert("interval".into(), num_prop("(thumbnail) Extract a frame every N seconds"));
-        props.insert("format".into(), str_prop("(convert/thumbnail) Output format: mp4|webm|avi|mov|mkv|gif|mp3|wav|jpg|png"));
-        props.insert("width".into(), int_prop("(resize) Target width in pixels (-1 for auto-scale)"));
-        props.insert("height".into(), int_prop("(resize) Target height in pixels (-1 for auto-scale)"));
-        props.insert("quality".into(), int_prop("(compress) Quality level 1-51 (lower=better, default: 23 for h264)"));
-        props.insert("bitrate".into(), str_prop("(compress/convert) Target bitrate (e.g. '2M', '500k')"));
+        props.insert(
+            "inputs".into(),
+            arr_str_prop("(merge) Multiple input file paths to concatenate"),
+        );
+        props.insert(
+            "output".into(),
+            str_prop("Output file path. Default: auto-generated in workspace/media/"),
+        );
+        props.insert(
+            "start".into(),
+            str_prop("(clip) Start time in HH:MM:SS or seconds format"),
+        );
+        props.insert(
+            "end".into(),
+            str_prop("(clip) End time in HH:MM:SS or seconds format"),
+        );
+        props.insert(
+            "duration".into(),
+            str_prop("(clip) Duration instead of end time"),
+        );
+        props.insert(
+            "subtitle_file".into(),
+            str_prop("(subtitle) Path to SRT/ASS subtitle file"),
+        );
+        props.insert(
+            "subtitle_style".into(),
+            str_prop("(subtitle) Style override: 'FontSize=24,PrimaryColour=&HFFFFFF&' etc."),
+        );
+        props.insert(
+            "times".into(),
+            arr_num_prop("(thumbnail) Timestamps in seconds to extract frames"),
+        );
+        props.insert(
+            "interval".into(),
+            num_prop("(thumbnail) Extract a frame every N seconds"),
+        );
+        props.insert(
+            "format".into(),
+            str_prop("(convert/thumbnail) Output format: mp4|webm|avi|mov|mkv|gif|mp3|wav|jpg|png"),
+        );
+        props.insert(
+            "width".into(),
+            int_prop("(resize) Target width in pixels (-1 for auto-scale)"),
+        );
+        props.insert(
+            "height".into(),
+            int_prop("(resize) Target height in pixels (-1 for auto-scale)"),
+        );
+        props.insert(
+            "quality".into(),
+            int_prop("(compress) Quality level 1-51 (lower=better, default: 23 for h264)"),
+        );
+        props.insert(
+            "bitrate".into(),
+            str_prop("(compress/convert) Target bitrate (e.g. '2M', '500k')"),
+        );
         props.insert("codec".into(), str_prop("Video codec: h264|h265|vp9|copy"));
-        props.insert("audio_codec".into(), str_prop("Audio codec: aac|mp3|opus|copy|none"));
+        props.insert(
+            "audio_codec".into(),
+            str_prop("Audio codec: aac|mp3|opus|copy|none"),
+        );
         props.insert("fps".into(), num_prop("Target frame rate"));
-        props.insert("watermark_image".into(), str_prop("(watermark) Path to watermark image"));
-        props.insert("watermark_text".into(), str_prop("(watermark) Text to overlay"));
+        props.insert(
+            "watermark_image".into(),
+            str_prop("(watermark) Path to watermark image"),
+        );
+        props.insert(
+            "watermark_text".into(),
+            str_prop("(watermark) Text to overlay"),
+        );
         props.insert("watermark_position".into(), str_prop("(watermark) Position: top-left|top-right|bottom-left|bottom-right|center (default: bottom-right)"));
-        props.insert("no_audio".into(), bool_prop("Strip audio track from output"));
-        props.insert("extra_args".into(), str_prop("Additional ffmpeg arguments (advanced)"));
+        props.insert(
+            "no_audio".into(),
+            bool_prop("Strip audio track from output"),
+        );
+        props.insert(
+            "extra_args".into(),
+            str_prop("Additional ffmpeg arguments (advanced)"),
+        );
 
         ToolSchema {
             name: "video_process",
@@ -69,31 +130,72 @@ impl Tool for VideoProcessTool {
 
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let valid = ["clip", "merge", "subtitle", "thumbnail", "convert", "extract_audio", "resize", "info", "compress", "watermark"];
+        let valid = [
+            "clip",
+            "merge",
+            "subtitle",
+            "thumbnail",
+            "convert",
+            "extract_audio",
+            "resize",
+            "info",
+            "compress",
+            "watermark",
+        ];
         if !valid.contains(&action) {
-            return Err(Error::Tool(format!("Invalid action '{}'. Valid: {}", action, valid.join(", "))));
+            return Err(Error::Tool(format!(
+                "Invalid action '{}'. Valid: {}",
+                action,
+                valid.join(", ")
+            )));
         }
         match action {
             "merge" => {
-                if params.get("inputs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) < 2 {
-                    return Err(Error::Tool("'inputs' must contain at least 2 files for merge".into()));
+                if params
+                    .get("inputs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+                    < 2
+                {
+                    return Err(Error::Tool(
+                        "'inputs' must contain at least 2 files for merge".into(),
+                    ));
                 }
             }
             "subtitle" => {
-                if params.get("subtitle_file").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Tool("'subtitle_file' is required for subtitle action".into()));
+                if params
+                    .get("subtitle_file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Tool(
+                        "'subtitle_file' is required for subtitle action".into(),
+                    ));
                 }
             }
             _ => {
                 if action != "info" || params.get("input").is_some() {
                     // Most actions need input
-                    if params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty() && action != "merge"
-                        && (action != "thumbnail" || params.get("input").and_then(|v| v.as_str()).unwrap_or("").is_empty()) {
-                            // Allow info without input (returns ffmpeg version)
-                            if action != "info" {
-                                return Err(Error::Tool("'input' file path is required".into()));
-                            }
+                    if params
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .is_empty()
+                        && action != "merge"
+                        && (action != "thumbnail"
+                            || params
+                                .get("input")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .is_empty())
+                    {
+                        // Allow info without input (returns ffmpeg version)
+                        if action != "info" {
+                            return Err(Error::Tool("'input' file path is required".into()));
                         }
+                    }
                 }
             }
         }
@@ -107,7 +209,10 @@ impl Tool for VideoProcessTool {
             .output()
             .await;
         if ffmpeg_check.is_err() {
-            return Err(Error::Tool("ffmpeg is not installed or not in PATH. Install it with: brew install ffmpeg".into()));
+            return Err(Error::Tool(
+                "ffmpeg is not installed or not in PATH. Install it with: brew install ffmpeg"
+                    .into(),
+            ));
         }
 
         let action = params["action"].as_str().unwrap_or("");
@@ -142,7 +247,10 @@ impl VideoProcessTool {
         let media_dir = ctx.workspace.join("media");
         let _ = std::fs::create_dir_all(&media_dir);
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        media_dir.join(format!("video_{}.{}", ts, default_ext)).to_string_lossy().to_string()
+        media_dir
+            .join(format!("video_{}.{}", ts, default_ext))
+            .to_string_lossy()
+            .to_string()
     }
 
     async fn run_ffmpeg(args: &[&str]) -> Result<(String, String)> {
@@ -156,7 +264,7 @@ impl VideoProcessTool {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !output.status.success() {
             let err_msg = if stderr.len() > 1000 {
-                format!("{}...", &stderr[stderr.len()-1000..])
+                format!("{}...", &stderr[stderr.len() - 1000..])
             } else {
                 stderr
             };
@@ -168,8 +276,10 @@ impl VideoProcessTool {
     async fn run_ffprobe(input: &str) -> Result<Value> {
         let output = tokio::process::Command::new("ffprobe")
             .args([
-                "-v", "quiet",
-                "-print_format", "json",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
                 input,
@@ -211,17 +321,23 @@ impl VideoProcessTool {
 
         if let Some(streams) = probe.get("streams").and_then(|v| v.as_array()) {
             for stream in streams {
-                let codec_type = stream.get("codec_type").and_then(|v| v.as_str()).unwrap_or("");
+                let codec_type = stream
+                    .get("codec_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 match codec_type {
                     "video" => {
-                        result["video_codec"] = stream.get("codec_name").cloned().unwrap_or(json!(null));
+                        result["video_codec"] =
+                            stream.get("codec_name").cloned().unwrap_or(json!(null));
                         result["width"] = stream.get("width").cloned().unwrap_or(json!(null));
                         result["height"] = stream.get("height").cloned().unwrap_or(json!(null));
                         result["fps"] = stream.get("r_frame_rate").cloned().unwrap_or(json!(null));
                     }
                     "audio" => {
-                        result["audio_codec"] = stream.get("codec_name").cloned().unwrap_or(json!(null));
-                        result["sample_rate"] = stream.get("sample_rate").cloned().unwrap_or(json!(null));
+                        result["audio_codec"] =
+                            stream.get("codec_name").cloned().unwrap_or(json!(null));
+                        result["sample_rate"] =
+                            stream.get("sample_rate").cloned().unwrap_or(json!(null));
                         result["channels"] = stream.get("channels").cloned().unwrap_or(json!(null));
                     }
                     _ => {}
@@ -236,8 +352,14 @@ impl VideoProcessTool {
         let input = Self::resolve_input(ctx, params);
         let output = Self::resolve_output(ctx, params, "mp4");
         let start = params.get("start").and_then(|v| v.as_str()).unwrap_or("0");
-        let codec = params.get("codec").and_then(|v| v.as_str()).unwrap_or("copy");
-        let audio_codec = params.get("audio_codec").and_then(|v| v.as_str()).unwrap_or("copy");
+        let codec = params
+            .get("codec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("copy");
+        let audio_codec = params
+            .get("audio_codec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("copy");
 
         let mut args: Vec<&str> = vec!["-y", "-i", &input, "-ss", start];
 
@@ -252,7 +374,11 @@ impl VideoProcessTool {
         }
 
         args.extend_from_slice(&["-c:v", codec, "-c:a", audio_codec]);
-        if params.get("no_audio").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if params
+            .get("no_audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             args.push("-an");
         }
         args.push(&output);
@@ -262,7 +388,9 @@ impl VideoProcessTool {
     }
 
     async fn action_merge(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
-        let inputs = params.get("inputs").and_then(|v| v.as_array())
+        let inputs = params
+            .get("inputs")
+            .and_then(|v| v.as_array())
             .ok_or_else(|| Error::Tool("'inputs' array is required".into()))?;
         let output = Self::resolve_output(ctx, params, "mp4");
 
@@ -280,7 +408,18 @@ impl VideoProcessTool {
             .map_err(|e| Error::Tool(format!("Failed to write concat list: {}", e)))?;
 
         let concat_str = concat_path.to_string_lossy().to_string();
-        let args = vec!["-y", "-f", "concat", "-safe", "0", "-i", &concat_str, "-c", "copy", &output];
+        let args = vec![
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            &concat_str,
+            "-c",
+            "copy",
+            &output,
+        ];
         Self::run_ffmpeg(&args).await?;
 
         // Cleanup
@@ -291,14 +430,24 @@ impl VideoProcessTool {
     async fn action_subtitle(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
         let input = Self::resolve_input(ctx, params);
         let output = Self::resolve_output(ctx, params, "mp4");
-        let sub_file = params.get("subtitle_file").and_then(|v| v.as_str()).unwrap_or("");
+        let sub_file = params
+            .get("subtitle_file")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let sub_path = resolve_path(ctx, sub_file);
 
-        let style = params.get("subtitle_style").and_then(|v| v.as_str()).unwrap_or("");
+        let style = params
+            .get("subtitle_style")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let filter = if style.is_empty() {
             format!("subtitles='{}'", sub_path.replace('\'', "'\\''"))
         } else {
-            format!("subtitles='{}':force_style='{}'", sub_path.replace('\'', "'\\''"), style)
+            format!(
+                "subtitles='{}':force_style='{}'",
+                sub_path.replace('\'', "'\\''"),
+                style
+            )
         };
 
         let args = vec!["-y", "-i", &input, "-vf", &filter, "-c:a", "copy", &output];
@@ -308,7 +457,10 @@ impl VideoProcessTool {
 
     async fn action_thumbnail(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
         let input = Self::resolve_input(ctx, params);
-        let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("jpg");
+        let format = params
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("jpg");
         let media_dir = ctx.workspace.join("media");
         let _ = std::fs::create_dir_all(&media_dir);
 
@@ -318,9 +470,16 @@ impl VideoProcessTool {
             for (i, t) in times.iter().enumerate() {
                 let ts = t.as_f64().unwrap_or(0.0);
                 let ts_str = format!("{}", ts);
-                let out = media_dir.join(format!("thumb_{}_{}.{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"), i, format));
+                let out = media_dir.join(format!(
+                    "thumb_{}_{}.{}",
+                    chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+                    i,
+                    format
+                ));
                 let out_str = out.to_string_lossy().to_string();
-                let args = vec!["-y", "-i", &input, "-ss", &ts_str, "-vframes", "1", &out_str];
+                let args = vec![
+                    "-y", "-i", &input, "-ss", &ts_str, "-vframes", "1", &out_str,
+                ];
                 Self::run_ffmpeg(&args).await?;
                 outputs.push(out_str);
             }
@@ -334,7 +493,11 @@ impl VideoProcessTool {
             outputs.push(format!("Pattern: {}", out_str));
         } else {
             // Default: extract frame at 0s
-            let out = media_dir.join(format!("thumb_{}.{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"), format));
+            let out = media_dir.join(format!(
+                "thumb_{}.{}",
+                chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+                format
+            ));
             let out_str = out.to_string_lossy().to_string();
             let args = vec!["-y", "-i", &input, "-ss", "0", "-vframes", "1", &out_str];
             Self::run_ffmpeg(&args).await?;
@@ -346,7 +509,10 @@ impl VideoProcessTool {
 
     async fn action_convert(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
         let input = Self::resolve_input(ctx, params);
-        let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("mp4");
+        let format = params
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mp4");
         let output = Self::resolve_output(ctx, params, format);
         let codec = params.get("codec").and_then(|v| v.as_str());
         let audio_codec = params.get("audio_codec").and_then(|v| v.as_str());
@@ -369,7 +535,11 @@ impl VideoProcessTool {
         if let Some(fps) = params.get("fps").and_then(|v| v.as_f64()) {
             args.extend_from_slice(&["-r".into(), format!("{}", fps)]);
         }
-        if params.get("no_audio").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if params
+            .get("no_audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             args.push("-an".into());
         }
         if let Some(extra) = params.get("extra_args").and_then(|v| v.as_str()) {
@@ -386,7 +556,10 @@ impl VideoProcessTool {
 
     async fn action_extract_audio(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
         let input = Self::resolve_input(ctx, params);
-        let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("mp3");
+        let format = params
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mp3");
         let output = Self::resolve_output(ctx, params, format);
 
         let codec = match format {
@@ -410,9 +583,18 @@ impl VideoProcessTool {
         let height = params.get("height").and_then(|v| v.as_i64()).unwrap_or(-1);
 
         // Ensure even dimensions for h264
-        let scale = format!("scale={}:{}", 
-            if width > 0 { format!("{}", width - width % 2) } else { "-2".to_string() },
-            if height > 0 { format!("{}", height - height % 2) } else { "-2".to_string() }
+        let scale = format!(
+            "scale={}:{}",
+            if width > 0 {
+                format!("{}", width - width % 2)
+            } else {
+                "-2".to_string()
+            },
+            if height > 0 {
+                format!("{}", height - height % 2)
+            } else {
+                "-2".to_string()
+            }
         );
 
         let args = vec!["-y", "-i", &input, "-vf", &scale, "-c:a", "copy", &output];
@@ -425,19 +607,41 @@ impl VideoProcessTool {
         let output = Self::resolve_output(ctx, params, "mp4");
         let quality = params.get("quality").and_then(|v| v.as_u64()).unwrap_or(23);
         let quality_str = quality.to_string();
-        let codec = params.get("codec").and_then(|v| v.as_str()).unwrap_or("h264");
+        let codec = params
+            .get("codec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("h264");
 
         let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input.clone()];
 
         match codec {
             "h265" | "hevc" => {
-                args.extend_from_slice(&["-c:v".into(), "libx265".into(), "-crf".into(), quality_str.clone()]);
+                args.extend_from_slice(&[
+                    "-c:v".into(),
+                    "libx265".into(),
+                    "-crf".into(),
+                    quality_str.clone(),
+                ]);
             }
             "vp9" => {
-                args.extend_from_slice(&["-c:v".into(), "libvpx-vp9".into(), "-crf".into(), quality_str.clone(), "-b:v".into(), "0".into()]);
+                args.extend_from_slice(&[
+                    "-c:v".into(),
+                    "libvpx-vp9".into(),
+                    "-crf".into(),
+                    quality_str.clone(),
+                    "-b:v".into(),
+                    "0".into(),
+                ]);
             }
             _ => {
-                args.extend_from_slice(&["-c:v".into(), "libx264".into(), "-crf".into(), quality_str.clone(), "-preset".into(), "medium".into()]);
+                args.extend_from_slice(&[
+                    "-c:v".into(),
+                    "libx264".into(),
+                    "-crf".into(),
+                    quality_str.clone(),
+                    "-preset".into(),
+                    "medium".into(),
+                ]);
             }
         }
 
@@ -446,7 +650,11 @@ impl VideoProcessTool {
         }
 
         args.extend_from_slice(&["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
-        if params.get("no_audio").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if params
+            .get("no_audio")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             args.push("-an".into());
         }
         args.push(output.clone());
@@ -459,7 +667,9 @@ impl VideoProcessTool {
         let output_size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
         let reduction = if input_size > 0 {
             ((1.0 - output_size as f64 / input_size as f64) * 100.0).round()
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         Ok(json!({
             "output": output,
@@ -475,7 +685,10 @@ impl VideoProcessTool {
     async fn action_watermark(&self, ctx: &ToolContext, params: &Value) -> Result<Value> {
         let input = Self::resolve_input(ctx, params);
         let output = Self::resolve_output(ctx, params, "mp4");
-        let position = params.get("watermark_position").and_then(|v| v.as_str()).unwrap_or("bottom-right");
+        let position = params
+            .get("watermark_position")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bottom-right");
 
         if let Some(img) = params.get("watermark_image").and_then(|v| v.as_str()) {
             let img_path = resolve_path(ctx, img);
@@ -486,7 +699,18 @@ impl VideoProcessTool {
                 "center" => "overlay=(W-w)/2:(H-h)/2",
                 _ => "overlay=W-w-10:H-h-10", // bottom-right
             };
-            let args = vec!["-y", "-i", &input, "-i", &img_path, "-filter_complex", overlay, "-c:a", "copy", &output];
+            let args = vec![
+                "-y",
+                "-i",
+                &input,
+                "-i",
+                &img_path,
+                "-filter_complex",
+                overlay,
+                "-c:a",
+                "copy",
+                &output,
+            ];
             Self::run_ffmpeg(&args).await?;
         } else if let Some(text) = params.get("watermark_text").and_then(|v| v.as_str()) {
             let (x, y) = match position {
@@ -500,10 +724,14 @@ impl VideoProcessTool {
                 "drawtext=text='{}':fontsize=24:fontcolor=white:x={}:y={}:shadowcolor=black:shadowx=2:shadowy=2",
                 text.replace('\'', "'\\''"), x, y
             );
-            let args = vec!["-y", "-i", &input, "-vf", &drawtext, "-c:a", "copy", &output];
+            let args = vec![
+                "-y", "-i", &input, "-vf", &drawtext, "-c:a", "copy", &output,
+            ];
             Self::run_ffmpeg(&args).await?;
         } else {
-            return Err(Error::Tool("Either 'watermark_image' or 'watermark_text' is required".into()));
+            return Err(Error::Tool(
+                "Either 'watermark_image' or 'watermark_text' is required".into(),
+            ));
         }
 
         Ok(json!({"output": output, "action": "watermark", "position": position}))
@@ -538,9 +766,15 @@ mod tests {
     fn test_validate_valid() {
         let tool = VideoProcessTool;
         assert!(tool.validate(&json!({"action": "info"})).is_ok());
-        assert!(tool.validate(&json!({"action": "clip", "input": "test.mp4", "start": "0", "end": "10"})).is_ok());
-        assert!(tool.validate(&json!({"action": "convert", "input": "test.mp4", "format": "webm"})).is_ok());
-        assert!(tool.validate(&json!({"action": "merge", "inputs": ["a.mp4", "b.mp4"]})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "clip", "input": "test.mp4", "start": "0", "end": "10"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "convert", "input": "test.mp4", "format": "webm"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "merge", "inputs": ["a.mp4", "b.mp4"]}))
+            .is_ok());
     }
 
     #[test]
@@ -552,14 +786,22 @@ mod tests {
     #[test]
     fn test_validate_merge_needs_two() {
         let tool = VideoProcessTool;
-        assert!(tool.validate(&json!({"action": "merge", "inputs": ["a.mp4"]})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "merge", "inputs": ["a.mp4"]}))
+            .is_err());
     }
 
     #[test]
     fn test_validate_subtitle_needs_file() {
         let tool = VideoProcessTool;
-        assert!(tool.validate(&json!({"action": "subtitle", "input": "test.mp4"})).is_err());
-        assert!(tool.validate(&json!({"action": "subtitle", "input": "test.mp4", "subtitle_file": "sub.srt"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "subtitle", "input": "test.mp4"}))
+            .is_err());
+        assert!(tool
+            .validate(
+                &json!({"action": "subtitle", "input": "test.mp4", "subtitle_file": "sub.srt"})
+            )
+            .is_ok());
     }
 
     #[test]
@@ -569,6 +811,7 @@ mod tests {
             builtin_skills_dir: None,
             session_key: String::new(),
             channel: String::new(),
+            account_id: None,
             chat_id: String::new(),
             config: blockcell_core::Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),
@@ -580,7 +823,13 @@ mod tests {
             core_evolution: None,
             channel_contacts_file: None,
         };
-        assert_eq!(resolve_path(&ctx, "/absolute/path.mp4"), "/absolute/path.mp4");
-        assert_eq!(resolve_path(&ctx, "relative.mp4"), "/tmp/workspace/relative.mp4");
+        assert_eq!(
+            resolve_path(&ctx, "/absolute/path.mp4"),
+            "/absolute/path.mp4"
+        );
+        assert_eq!(
+            resolve_path(&ctx, "relative.mp4"),
+            "/tmp/workspace/relative.mp4"
+        );
     }
 }

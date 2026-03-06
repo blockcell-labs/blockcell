@@ -24,7 +24,10 @@ impl MessageBus {
         self,
     ) -> (
         (mpsc::Sender<InboundMessage>, mpsc::Receiver<InboundMessage>),
-        (mpsc::Sender<OutboundMessage>, mpsc::Receiver<OutboundMessage>),
+        (
+            mpsc::Sender<OutboundMessage>,
+            mpsc::Receiver<OutboundMessage>,
+        ),
     ) {
         (
             (self.inbound_tx, self.inbound_rx),

@@ -1,9 +1,9 @@
+use base64::Engine;
 use blockcell_core::{Error, Result};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tracing::{debug, info};
-use base64::Engine;
 
 /// 签名验证器
 pub struct SignatureVerifier {
@@ -20,16 +20,16 @@ impl SignatureVerifier {
         let key_bytes: [u8; 32] = if decoded.len() == 32 {
             decoded.try_into().unwrap()
         } else if decoded.len() > 32 {
-            decoded[decoded.len() - 32..]
-                .try_into()
-                .map_err(|_| Error::Validation("Failed to extract key bytes from PEM".to_string()))?
+            decoded[decoded.len() - 32..].try_into().map_err(|_| {
+                Error::Validation("Failed to extract key bytes from PEM".to_string())
+            })?
         } else {
             return Err(Error::Validation(format!(
                 "PEM decoded data too short: {} bytes (expected >= 32)",
                 decoded.len()
             )));
         };
-        
+
         let public_key = VerifyingKey::from_bytes(&key_bytes)
             .map_err(|e| Error::Validation(format!("Invalid public key: {}", e)))?;
 
@@ -38,9 +38,10 @@ impl SignatureVerifier {
 
     /// 从十六进制字符串创建验证器
     pub fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = hex::decode(hex)
-            .map_err(|e| Error::Validation(format!("Invalid hex: {}", e)))?;
-        let key_bytes: [u8; 32] = bytes.try_into()
+        let bytes =
+            hex::decode(hex).map_err(|e| Error::Validation(format!("Invalid hex: {}", e)))?;
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
             .map_err(|_| Error::Validation("Public key must be 32 bytes".to_string()))?;
 
         let public_key = VerifyingKey::from_bytes(&key_bytes)
@@ -52,17 +53,25 @@ impl SignatureVerifier {
     /// 验证签名（自动检测 hex 或 base64 格式）
     pub fn verify(&self, message: &[u8], signature_str: &str) -> Result<()> {
         // 自动检测签名编码格式：hex 只含 0-9a-fA-F，否则尝试 base64
-        let sig_bytes = if signature_str.chars().all(|c| c.is_ascii_hexdigit()) && signature_str.len() == 128 {
+        let sig_bytes = if signature_str.chars().all(|c| c.is_ascii_hexdigit())
+            && signature_str.len() == 128
+        {
             hex::decode(signature_str)
                 .map_err(|e| Error::Validation(format!("Invalid signature hex: {}", e)))?
         } else {
             base64::engine::general_purpose::STANDARD
                 .decode(signature_str)
                 .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_str))
-                .map_err(|e| Error::Validation(format!("Invalid signature encoding (not hex or base64): {}", e)))?
+                .map_err(|e| {
+                    Error::Validation(format!(
+                        "Invalid signature encoding (not hex or base64): {}",
+                        e
+                    ))
+                })?
         };
 
-        let sig_array: [u8; 64] = sig_bytes.try_into()
+        let sig_array: [u8; 64] = sig_bytes
+            .try_into()
             .map_err(|_| Error::Validation("Signature must be 64 bytes".to_string()))?;
         let signature = Signature::from_bytes(&sig_array);
 
@@ -78,7 +87,7 @@ impl SignatureVerifier {
         // 简化的 PEM 解析
         let lines: Vec<&str> = pem.lines().collect();
         let mut base64_data = String::new();
-        
+
         for line in lines {
             if line.starts_with("-----") {
                 continue;
@@ -86,7 +95,8 @@ impl SignatureVerifier {
             base64_data.push_str(line.trim());
         }
 
-        base64::engine::general_purpose::STANDARD.decode(&base64_data)
+        base64::engine::general_purpose::STANDARD
+            .decode(&base64_data)
             .map_err(|e| Error::Validation(format!("Failed to decode PEM: {}", e)))
     }
 }
@@ -111,7 +121,7 @@ impl Sha256Verifier {
     /// 验证文件的 SHA256
     pub fn verify_file(path: &Path, expected: &str) -> Result<()> {
         let actual = Self::compute_file(path)?;
-        
+
         if actual != expected {
             return Err(Error::Validation(format!(
                 "SHA256 mismatch: expected {}, got {}",
@@ -249,16 +259,13 @@ impl HealthChecker {
         #[cfg(target_os = "linux")]
         let args = vec![self.binary_path.to_str().unwrap()];
 
-        let result = tokio::process::Command::new(cmd)
-            .args(&args)
-            .output()
-            .await;
+        let result = tokio::process::Command::new(cmd).args(&args).output().await;
 
         match result {
             Ok(output) if output.status.success() => {
                 let deps = String::from_utf8_lossy(&output.stdout);
                 let missing = deps.lines().any(|line| line.contains("not found"));
-                
+
                 Check {
                     name: "dependencies".to_string(),
                     passed: !missing,

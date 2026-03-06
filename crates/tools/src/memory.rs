@@ -15,9 +15,9 @@ pub struct MemoryUpsertTool;
 pub struct MemoryForgetTool;
 
 fn get_memory_store(ctx: &ToolContext) -> Result<&crate::MemoryStoreHandle> {
-    ctx.memory_store.as_ref().ok_or_else(|| {
-        Error::Tool("Memory store not available".to_string())
-    })
+    ctx.memory_store
+        .as_ref()
+        .ok_or_else(|| Error::Tool("Memory store not available".to_string()))
 }
 
 fn looks_like_ghost_maintenance_log(text: &str) -> bool {
@@ -83,6 +83,10 @@ impl Tool for MemoryQueryTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- Search `memory_query` before asking the user for information you might already know.".to_string())
+    }
+
     fn validate(&self, _params: &Value) -> Result<()> {
         Ok(())
     }
@@ -91,7 +95,11 @@ impl Tool for MemoryQueryTool {
         let store = get_memory_store(&ctx)?;
 
         // Stats mode
-        if params.get("stats").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if params
+            .get("stats")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return store.stats_json();
         }
 
@@ -167,7 +175,9 @@ impl Tool for MemoryUpsertTool {
 
     fn validate(&self, params: &Value) -> Result<()> {
         if params.get("content").and_then(|v| v.as_str()).is_none() {
-            return Err(Error::Validation("Missing required parameter: content".to_string()));
+            return Err(Error::Validation(
+                "Missing required parameter: content".to_string(),
+            ));
         }
         Ok(())
     }
@@ -176,12 +186,21 @@ impl Tool for MemoryUpsertTool {
         let store = get_memory_store(&ctx)?;
 
         let content = params["content"].as_str().unwrap();
-        let scope = params.get("scope").and_then(|v| v.as_str()).unwrap_or("short_term");
-        let item_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("note");
+        let scope = params
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("short_term");
+        let item_type = params
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("note");
         let title = params.get("title").and_then(|v| v.as_str());
         let summary = params.get("summary").and_then(|v| v.as_str());
         let tags_str = params.get("tags").and_then(|v| v.as_str()).unwrap_or("");
-        let importance = params.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5);
+        let importance = params
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
         let dedup_key = params.get("dedup_key").and_then(|v| v.as_str());
         let expires_in_days = params.get("expires_in_days").and_then(|v| v.as_i64());
 
@@ -204,7 +223,9 @@ impl Tool for MemoryUpsertTool {
             }
 
             let title_text = title.unwrap_or("");
-            if looks_like_ghost_maintenance_log(title_text) || looks_like_ghost_maintenance_log(content) {
+            if looks_like_ghost_maintenance_log(title_text)
+                || looks_like_ghost_maintenance_log(content)
+            {
                 return Err(Error::Validation(
                     "Refusing to save Ghost maintenance logs into memory.".to_string(),
                 ));
@@ -219,9 +240,8 @@ impl Tool for MemoryUpsertTool {
             expires_in_days
         };
 
-        let expires_at = effective_expires_in_days.map(|days| {
-            (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339()
-        });
+        let expires_at = effective_expires_in_days
+            .map(|days| (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339());
 
         let upsert_params = json!({
             "scope": scope,
@@ -240,7 +260,11 @@ impl Tool for MemoryUpsertTool {
 
         let result = store.upsert_json(upsert_params)?;
 
-        debug!(scope = scope, item_type = item_type, "memory_upsert executed");
+        debug!(
+            scope = scope,
+            item_type = item_type,
+            "memory_upsert executed"
+        );
         Ok(json!({
             "status": "saved",
             "item": result,
@@ -294,12 +318,16 @@ impl Tool for MemoryForgetTool {
         match action {
             Some("delete") | Some("restore") => {
                 if params.get("id").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("'id' is required for delete/restore actions".to_string()));
+                    return Err(Error::Validation(
+                        "'id' is required for delete/restore actions".to_string(),
+                    ));
                 }
             }
             Some("batch_delete") => {}
             _ => {
-                return Err(Error::Validation("'action' must be 'delete', 'batch_delete', or 'restore'".to_string()));
+                return Err(Error::Validation(
+                    "'action' must be 'delete', 'batch_delete', or 'restore'".to_string(),
+                ));
             }
         }
         Ok(())
@@ -392,8 +420,12 @@ mod tests {
     #[test]
     fn test_memory_forget_validate() {
         let tool = MemoryForgetTool;
-        assert!(tool.validate(&json!({"action": "delete", "id": "abc"})).is_ok());
-        assert!(tool.validate(&json!({"action": "restore", "id": "abc"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "delete", "id": "abc"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "restore", "id": "abc"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "batch_delete"})).is_ok());
         assert!(tool.validate(&json!({"action": "delete"})).is_err());
         assert!(tool.validate(&json!({"action": "invalid"})).is_err());

@@ -39,30 +39,57 @@ impl Tool for ToggleManageTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.".to_string())
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list");
-        let action = if action.trim().is_empty() { "list" } else { action };
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
+        let action = if action.trim().is_empty() {
+            "list"
+        } else {
+            action
+        };
         match action {
             "list" => Ok(()),
             "set" => {
                 if params.get("category").and_then(|v| v.as_str()).is_none() {
-                    return Err(blockcell_core::Error::Config("'category' is required for 'set' action".into()));
+                    return Err(blockcell_core::Error::Config(
+                        "'category' is required for 'set' action".into(),
+                    ));
                 }
                 if params.get("name").and_then(|v| v.as_str()).is_none() {
-                    return Err(blockcell_core::Error::Config("'name' is required for 'set' action".into()));
+                    return Err(blockcell_core::Error::Config(
+                        "'name' is required for 'set' action".into(),
+                    ));
                 }
                 if params.get("enabled").and_then(|v| v.as_bool()).is_none() {
-                    return Err(blockcell_core::Error::Config("'enabled' (boolean) is required for 'set' action".into()));
+                    return Err(blockcell_core::Error::Config(
+                        "'enabled' (boolean) is required for 'set' action".into(),
+                    ));
                 }
                 Ok(())
             }
-            _ => Err(blockcell_core::Error::Config(format!("Unknown action: '{}'. Use 'list' or 'set'.", action))),
+            _ => Err(blockcell_core::Error::Config(format!(
+                "Unknown action: '{}'. Use 'list' or 'set'.",
+                action
+            ))),
         }
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list");
-        let action = if action.trim().is_empty() { "list" } else { action };
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
+        let action = if action.trim().is_empty() {
+            "list"
+        } else {
+            action
+        };
         let toggles_path = ctx.workspace.join("toggles.json");
 
         match action {
@@ -71,9 +98,15 @@ impl Tool for ToggleManageTool {
                 Ok(store)
             }
             "set" => {
-                let category = params.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                let category = params
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                let enabled = params
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
 
                 if category != "skills" && category != "tools" {
                     return Ok(json!({ "error": "category must be 'skills' or 'tools'" }));
@@ -98,8 +131,9 @@ impl Tool for ToggleManageTool {
 
                 // Write back
                 let content = serde_json::to_string_pretty(&store).unwrap_or_default();
-                std::fs::write(&toggles_path, &content)
-                    .map_err(|e| blockcell_core::Error::Config(format!("Failed to write toggles: {}", e)))?;
+                std::fs::write(&toggles_path, &content).map_err(|e| {
+                    blockcell_core::Error::Config(format!("Failed to write toggles: {}", e))
+                })?;
 
                 let status_str = if enabled { "enabled" } else { "disabled" };
                 Ok(json!({
@@ -158,17 +192,23 @@ mod tests {
     #[test]
     fn test_toggle_manage_validate_set() {
         let tool = ToggleManageTool;
-        assert!(tool.validate(&json!({
-            "action": "set", "category": "skills", "name": "test", "enabled": false
-        })).is_ok());
+        assert!(tool
+            .validate(&json!({
+                "action": "set", "category": "skills", "name": "test", "enabled": false
+            }))
+            .is_ok());
     }
 
     #[test]
     fn test_toggle_manage_validate_set_missing_fields() {
         let tool = ToggleManageTool;
         assert!(tool.validate(&json!({"action": "set"})).is_err());
-        assert!(tool.validate(&json!({"action": "set", "category": "skills"})).is_err());
-        assert!(tool.validate(&json!({"action": "set", "category": "skills", "name": "x"})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "set", "category": "skills"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "set", "category": "skills", "name": "x"}))
+            .is_err());
     }
 
     #[test]

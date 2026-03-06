@@ -21,6 +21,16 @@ impl Paths {
         self.base.join("config.json")
     }
 
+    pub fn for_agent(&self, agent_id: &str) -> Self {
+        let agent_id = agent_id.trim();
+        if agent_id.is_empty() || agent_id == "default" {
+            return self.clone();
+        }
+        Self {
+            base: self.base.join("agents").join(agent_id),
+        }
+    }
+
     pub fn workspace(&self) -> PathBuf {
         self.base.join("workspace")
     }
@@ -73,10 +83,6 @@ impl Paths {
 
     pub fn user_md(&self) -> PathBuf {
         self.workspace().join("USER.md")
-    }
-
-    pub fn tools_md(&self) -> PathBuf {
-        self.workspace().join("TOOLS.md")
     }
 
     pub fn heartbeat_md(&self) -> PathBuf {
@@ -164,5 +170,50 @@ impl Paths {
 impl Default for Paths {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_for_agent_reuses_root_layout_for_default() {
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+        let default_paths = paths.for_agent("default");
+
+        assert_eq!(default_paths.base, PathBuf::from("/tmp/blockcell"));
+        assert_eq!(
+            default_paths.workspace(),
+            PathBuf::from("/tmp/blockcell/workspace")
+        );
+        assert_eq!(
+            default_paths.sessions_dir(),
+            PathBuf::from("/tmp/blockcell/sessions")
+        );
+        assert_eq!(
+            default_paths.audit_dir(),
+            PathBuf::from("/tmp/blockcell/audit")
+        );
+    }
+
+    #[test]
+    fn test_for_agent_scopes_non_default_under_agents_dir() {
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+        let ops_paths = paths.for_agent("ops");
+
+        assert_eq!(ops_paths.base, PathBuf::from("/tmp/blockcell/agents/ops"));
+        assert_eq!(
+            ops_paths.workspace(),
+            PathBuf::from("/tmp/blockcell/agents/ops/workspace")
+        );
+        assert_eq!(
+            ops_paths.sessions_dir(),
+            PathBuf::from("/tmp/blockcell/agents/ops/sessions")
+        );
+        assert_eq!(
+            ops_paths.audit_dir(),
+            PathBuf::from("/tmp/blockcell/agents/ops/audit")
+        );
     }
 }

@@ -36,10 +36,7 @@ fn extract_result_ids(results: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn prune_ghost_maintenance_logs(
-    store: &crate::MemoryStoreHandle,
-    dry_run: bool,
-) -> Result<Value> {
+fn prune_ghost_maintenance_logs(store: &crate::MemoryStoreHandle, dry_run: bool) -> Result<Value> {
     let query_params = json!({
         "scope": "short_term",
         "time_range_days": 30,
@@ -112,11 +109,7 @@ fn fingerprint_text(text: &str) -> String {
         end = idx;
         chars += 1;
     }
-    let prefix = if chars >= 200 {
-        &t[..end]
-    } else {
-        t
-    };
+    let prefix = if chars >= 200 { &t[..end] } else { t };
     prefix.replace('\n', " ")
 }
 
@@ -125,7 +118,10 @@ fn junk_score(item: &Value) -> f64 {
     let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
     let channel = item.get("channel").and_then(|v| v.as_str()).unwrap_or("");
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let importance = item.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let importance = item
+        .get("importance")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5);
     let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -233,7 +229,11 @@ fn sweep_junk_short_term(
         };
         scanned += 1;
 
-        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if id.is_empty() {
             continue;
         }
@@ -334,22 +334,33 @@ impl Tool for MemoryMaintenanceTool {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         match action {
             "garden" | "cleanup" | "stats" | "compact" => Ok(()),
-            _ => Err(blockcell_core::Error::Tool(format!("Unknown action: {}", action))),
+            _ => Err(blockcell_core::Error::Tool(format!(
+                "Unknown action: {}",
+                action
+            ))),
         }
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let dry_run = params.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dry_run = params
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let store = ctx.memory_store.as_ref().ok_or_else(|| {
-            blockcell_core::Error::Tool("Memory store not available".into())
-        })?;
+        let store = ctx
+            .memory_store
+            .as_ref()
+            .ok_or_else(|| blockcell_core::Error::Tool("Memory store not available".into()))?;
 
         match action {
             "garden" => {
                 let days = params.get("days").and_then(|v| v.as_i64()).unwrap_or(1);
-                info!(days = days, dry_run = dry_run, "Memory garden: scanning recent memories");
+                info!(
+                    days = days,
+                    dry_run = dry_run,
+                    "Memory garden: scanning recent memories"
+                );
 
                 let prune_report = prune_ghost_maintenance_logs(store, dry_run)?;
                 let junk_report = sweep_junk_short_term(store, 30, dry_run)?;
@@ -411,7 +422,10 @@ impl Tool for MemoryMaintenanceTool {
             }
 
             "cleanup" => {
-                info!(dry_run = dry_run, "Memory cleanup: removing expired entries");
+                info!(
+                    dry_run = dry_run,
+                    "Memory cleanup: removing expired entries"
+                );
 
                 let prune_report = prune_ghost_maintenance_logs(store, dry_run)?;
                 let junk_report = sweep_junk_short_term(store, 30, dry_run)?;
@@ -482,7 +496,10 @@ impl Tool for MemoryMaintenanceTool {
                 }))
             }
 
-            _ => Err(blockcell_core::Error::Tool(format!("Unknown action: {}", action))),
+            _ => Err(blockcell_core::Error::Tool(format!(
+                "Unknown action: {}",
+                action
+            ))),
         }
     }
 }

@@ -1,6 +1,60 @@
+use blockcell_agent::intent::IntentToolResolver;
+use blockcell_channels::account::{channel_configured, listener_labels};
 use blockcell_core::{Config, Paths};
 use blockcell_tools::ToolRegistry;
 use std::process::Command;
+
+const EXTERNAL_CHANNELS: [&str; 8] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark",
+];
+
+fn known_account_ids(config: &Config, channel: &str) -> Vec<String> {
+    let mut ids = match channel {
+        "telegram" => config.channels.telegram.accounts.keys().cloned().collect::<Vec<_>>(),
+        "whatsapp" => config.channels.whatsapp.accounts.keys().cloned().collect::<Vec<_>>(),
+        "feishu" => config.channels.feishu.accounts.keys().cloned().collect::<Vec<_>>(),
+        "slack" => config.channels.slack.accounts.keys().cloned().collect::<Vec<_>>(),
+        "discord" => config.channels.discord.accounts.keys().cloned().collect::<Vec<_>>(),
+        "dingtalk" => config.channels.dingtalk.accounts.keys().cloned().collect::<Vec<_>>(),
+        "wecom" => config.channels.wecom.accounts.keys().cloned().collect::<Vec<_>>(),
+        "lark" => config.channels.lark.accounts.keys().cloned().collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids
+}
+
+fn enabled_account_ids(config: &Config, channel: &str) -> Vec<String> {
+    let mut ids = match channel {
+        "telegram" => config.channels.telegram.accounts.iter().filter(|(_, account)| account.enabled && !account.token.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "whatsapp" => config.channels.whatsapp.accounts.iter().filter(|(_, account)| account.enabled && !account.bridge_url.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "feishu" => config.channels.feishu.accounts.iter().filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "slack" => config.channels.slack.accounts.iter().filter(|(_, account)| account.enabled && !account.bot_token.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "discord" => config.channels.discord.accounts.iter().filter(|(_, account)| account.enabled && !account.bot_token.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "dingtalk" => config.channels.dingtalk.accounts.iter().filter(|(_, account)| account.enabled && !account.app_key.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "wecom" => config.channels.wecom.accounts.iter().filter(|(_, account)| account.enabled && !account.corp_id.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        "lark" => config.channels.lark.accounts.iter().filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty()).map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids
+}
+
+fn agent_owner_bindings(config: &Config, agent_id: &str) -> Vec<String> {
+    let mut owners: Vec<String> = config
+        .channel_owners
+        .iter()
+        .filter(|(_, owner)| owner.trim() == agent_id)
+        .map(|(channel, _)| channel.clone())
+        .collect();
+    owners.extend(config.channel_account_owners.iter().flat_map(|(channel, bindings)| {
+        bindings.iter().filter_map(move |(account_id, owner)| {
+            (owner.trim() == agent_id).then(|| format!("{}:{}", channel, account_id))
+        })
+    }));
+    owners.sort();
+    owners
+}
 
 /// Run full environment diagnostics.
 pub async fn run() -> anyhow::Result<()> {
@@ -116,6 +170,47 @@ pub async fn run() -> anyhow::Result<()> {
     print_ok(&format!("{} tools registered", tool_count), "");
     ok_count += 1;
 
+    match config.intent_router.as_ref() {
+        Some(router) if router.enabled => {
+            print_ok(
+                "Intent router enabled",
+                &format!("default profile: {}", router.default_profile),
+            );
+            ok_count += 1;
+            for agent in config.resolved_agents() {
+                let profile = agent
+                    .intent_profile
+                    .clone()
+                    .unwrap_or_else(|| router.default_profile.clone());
+                println!("  Agent {} -> {}", agent.id, profile);
+            }
+            match IntentToolResolver::new(&config).validate(&registry) {
+                Ok(_) => {
+                    print_ok("Intent router validation", "builtin tools ok");
+                    ok_count += 1;
+                }
+                Err(err) => {
+                    print_err("Intent router validation failed", &err.to_string());
+                    err_count += 1;
+                }
+            }
+        }
+        Some(_) => {
+            print_warn(
+                "Intent router disabled",
+                "Using Unknown profile toolset from config",
+            );
+            warn_count += 1;
+        }
+        None => {
+            print_ok(
+                "Intent router defaulted",
+                "Missing config will use built-in default router",
+            );
+            ok_count += 1;
+        }
+    }
+
     // Check toggles
     let toggles_path = ws.join("toggles.json");
     if toggles_path.exists() {
@@ -139,6 +234,43 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+    println!();
+
+    // --- 4. Resolved agents ---
+    println!("🤖 Resolved Agents");
+    let resolved_agents = config.resolved_agents();
+    print_ok(
+        &format!("{} runtime specs resolved", resolved_agents.len()),
+        "",
+    );
+    ok_count += 1;
+    for agent in resolved_agents {
+        let agent_paths = paths.for_agent(&agent.id);
+        let (provider, model, source) = resolved_agent_active_provider_and_model(&config, &agent);
+        let mut owners = agent_owner_bindings(&config, &agent.id);
+        if agent.id == "default" {
+            owners.insert(
+                0,
+                "internal(cli/ws/system/cron/subagent/ghost/heartbeat)".to_string(),
+            );
+        }
+        println!("  Agent {}", agent.id);
+        println!("    root: {}", agent_paths.base.display());
+        println!(
+            "    profile: {}",
+            agent.intent_profile.as_deref().unwrap_or("-")
+        );
+        println!("    model: {} ({})", model, source);
+        println!("    provider: {}", provider);
+        println!(
+            "    owners: {}",
+            if owners.is_empty() {
+                "-".to_string()
+            } else {
+                owners.join(", ")
+            }
+        );
     }
     println!();
 
@@ -199,7 +331,7 @@ pub async fn run() -> anyhow::Result<()> {
         "git",
         &["--version"],
         "Git",
-        "Required for git_api tool",
+        "Required for local Git workflows",
         &mut ok_count,
         &mut warn_count,
     );
@@ -246,24 +378,92 @@ pub async fn run() -> anyhow::Result<()> {
     println!("📡 Channels");
     let ch = &config.channels;
     check_channel(
+        &config,
         "telegram",
         ch.telegram.enabled,
-        !ch.telegram.token.is_empty(),
+        channel_configured(&config, "telegram"),
     );
-    check_channel("whatsapp", ch.whatsapp.enabled, true);
-    check_channel("feishu", ch.feishu.enabled, !ch.feishu.app_id.is_empty());
-    check_channel("slack", ch.slack.enabled, !ch.slack.bot_token.is_empty());
+    check_channel(&config, "whatsapp", ch.whatsapp.enabled, channel_configured(&config, "whatsapp"));
+    check_channel(&config, "feishu", ch.feishu.enabled, channel_configured(&config, "feishu"));
+    check_channel(&config, "slack", ch.slack.enabled, channel_configured(&config, "slack"));
     check_channel(
+        &config,
         "discord",
         ch.discord.enabled,
-        !ch.discord.bot_token.is_empty(),
+        channel_configured(&config, "discord"),
     );
     check_channel(
+        &config,
         "dingtalk",
         ch.dingtalk.enabled,
-        !ch.dingtalk.app_key.is_empty(),
+        channel_configured(&config, "dingtalk"),
     );
-    check_channel("wecom", ch.wecom.enabled, !ch.wecom.corp_id.is_empty());
+    check_channel(&config, "wecom", ch.wecom.enabled, channel_configured(&config, "wecom"));
+    check_channel(&config, "lark", ch.lark.enabled, channel_configured(&config, "lark"));
+    for channel in EXTERNAL_CHANNELS {
+        if let Some(bindings) = config.channel_account_owners.get(channel) {
+            let known_accounts = known_account_ids(&config, channel);
+            for (account_id, owner) in bindings {
+                if !known_accounts.iter().any(|id| id == account_id) {
+                    print_err(
+                        &format!("{}:{} account owner invalid", channel, account_id),
+                        "account_id not found under channels.<channel>.accounts",
+                    );
+                    err_count += 1;
+                } else if !config.agent_exists(owner) {
+                    print_err(
+                        &format!("{}:{} account owner invalid", channel, account_id),
+                        &format!("agent '{}' does not exist", owner),
+                    );
+                    err_count += 1;
+                } else {
+                    print_ok(
+                        &format!("{}:{} account owner", channel, account_id),
+                        &format!("agent: {}", owner),
+                    );
+                    ok_count += 1;
+                }
+            }
+        }
+
+        if config.is_external_channel_enabled(channel) {
+            match config.resolve_channel_owner(channel) {
+                Some(owner) => {
+                    print_ok(
+                        &format!("{} owner binding", channel),
+                        &format!("agent: {}", owner),
+                    );
+                    ok_count += 1;
+                }
+                None => {
+                    let enabled_accounts = enabled_account_ids(&config, channel);
+                    let missing_accounts = enabled_accounts
+                        .iter()
+                        .filter(|account_id| config.resolve_channel_account_owner(channel, account_id).is_none())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if enabled_accounts.is_empty() || !missing_accounts.is_empty() {
+                        let detail = if missing_accounts.is_empty() {
+                            "enabled channel must be bound in channelOwners.<channel> or covered by channelAccountOwners".to_string()
+                        } else {
+                            format!("missing account owners for: {}", missing_accounts.join(", "))
+                        };
+                        print_err(
+                            &format!("{} owner binding missing", channel),
+                            &detail,
+                        );
+                        err_count += 1;
+                    } else {
+                        print_ok(
+                            &format!("{} account owner coverage", channel),
+                            &format!("{} account override(s)", enabled_accounts.len()),
+                        );
+                        ok_count += 1;
+                    }
+                }
+            }
+        }
+    }
     println!();
 
     // --- 7. Gateway ---
@@ -361,11 +561,18 @@ fn check_command(
     }
 }
 
-fn check_channel(name: &str, enabled: bool, configured: bool) {
+fn check_channel(config: &Config, name: &str, enabled: bool, configured: bool) {
+    let listeners = listener_labels(config, name);
+    let detail = if listeners.is_empty() {
+        String::new()
+    } else {
+        format!(" — listeners: {}", listeners.join(", "))
+    };
+
     if enabled && configured {
-        println!("  ✅ {:<12} enabled", name);
+        println!("  ✅ {:<12} enabled{}", name, detail);
     } else if configured {
-        println!("  ⚪ {:<12} configured (not enabled)", name);
+        println!("  ⚪ {:<12} configured (not enabled){}", name, detail);
     } else {
         println!("  ⚪ {:<12} not configured", name);
     }
@@ -383,6 +590,34 @@ fn provider_ready(config: &Config, provider: &str) -> bool {
             !key.is_empty() && key != "dummy"
         })
         .unwrap_or(false)
+}
+
+fn resolved_agent_active_provider_and_model(
+    config: &Config,
+    agent: &blockcell_core::config::ResolvedAgentConfig,
+) -> (String, String, &'static str) {
+    if let Some(entry) = agent
+        .defaults
+        .model_pool
+        .iter()
+        .min_by(|a, b| a.priority.cmp(&b.priority).then(b.weight.cmp(&a.weight)))
+    {
+        return (entry.provider.clone(), entry.model.clone(), "modelPool");
+    }
+
+    if let Some(provider) = agent.defaults.provider.clone() {
+        return (provider, agent.defaults.model.clone(), "agent/defaults");
+    }
+
+    if let Some((provider, _)) = config.get_api_key() {
+        return (
+            provider.to_string(),
+            agent.defaults.model.clone(),
+            "auto-selected",
+        );
+    }
+
+    ("-".to_string(), agent.defaults.model.clone(), "unresolved")
 }
 
 fn active_provider_and_model(config: &Config) -> Option<(String, String, &'static str)> {

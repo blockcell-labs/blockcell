@@ -84,6 +84,16 @@ Edit `~/.blockcell/config.json` and modify the `wecom` section:
 | `encodingAesKey` | For callback mode message encryption/decryption. Can be empty if using polling |
 | `allowFrom` | List of allowed user `UserID`s. If left empty `[]`, anyone within the enterprise's visibility range can interact with the bot |
 
+> If you enable this external channel through `blockcell gateway`, you also need an owner binding in `config.json`, for example:
+>
+> ```json
+> { "channelOwners": { "wecom": "default" } }
+>
+> If you configure multiple accounts / bots for the same channel, you can additionally set `channelAccountOwners.wecom.<accountId> = "ops"` to route one specific account to a different agent.
+> ```
+>
+> Otherwise Gateway refuses to start because the enabled external channel has no owner.
+
 ## 6. Start Gateway
 
 ```bash

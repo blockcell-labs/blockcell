@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, OutboundMessage, Paths, Result};
 use serde_json::{json, Value};
-use tracing::debug;
 use std::path::Path;
+use tracing::debug;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
@@ -44,11 +44,34 @@ impl Tool for MessageTool {
         }
     }
 
+    fn prompt_rule(&self, ctx: &crate::PromptContext) -> Option<String> {
+        let mut rules = String::new();
+        if ctx.is_im_channel() {
+            rules.push_str("- **当前渠道为 IM 聊天（不渲染 Markdown）**: 不要在回复文字中使用 markdown 图片语法（如 `![](path)`），IM 端不会渲染。若需展示图片内容，用文字描述即可。\n");
+            rules.push_str("- **发送图片/文件给用户（⚠️ 必须调用 message 工具，否则文件不会发出）**: 当用户要求发回图片/文件时，**必须**调用 `message` 工具，参数示例：`{\"media\": [\"/root/.blockcell/workspace/media/xxx.jpg\"], \"content\": \"这是你要的图片\"}`。**绝对禁止**在不调用工具的情况下直接回复\"发送成功\"——那是幻觉，图片根本没有发出去。\n");
+        } else {
+            rules.push_str("- **Media display**: The WebUI can render images and play audio inline. To show an image or audio file, include the full file path in your response text (e.g. `/root/.blockcell/workspace/photo.jpg`). The frontend will auto-detect media paths and render them. You can also use markdown image syntax: `![description](file_path)`. NEVER say you cannot display images — you CAN.\n");
+            rules.push_str("- **发送图片/文件给用户（通过聊天渠道）**: 调用 `message` 工具，参数 `media=[\"<本地文件路径>\"]`。仅在回复文字中写 markdown 图片语法无法真正发送文件，必须用工具调用。\n");
+        }
+        rules.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。");
+        Some(rules)
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
-        let has_content = params.get("content").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
-        let has_media = params.get("media").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+        let has_content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let has_media = params
+            .get("media")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
         if !has_content && !has_media {
-            return Err(Error::Validation("At least one of 'content' or 'media' must be provided".to_string()));
+            return Err(Error::Validation(
+                "At least one of 'content' or 'media' must be provided".to_string(),
+            ));
         }
         Ok(())
     }
@@ -110,7 +133,12 @@ impl Tool for MessageTool {
             let in_workspace = p
                 .canonicalize()
                 .ok()
-                .and_then(|abs| ctx.workspace.canonicalize().ok().map(|ws| abs.starts_with(ws)))
+                .and_then(|abs| {
+                    ctx.workspace
+                        .canonicalize()
+                        .ok()
+                        .map(|ws| abs.starts_with(ws))
+                })
                 .unwrap_or(false);
             if in_workspace {
                 final_media_paths.push(path.clone());
@@ -119,12 +147,16 @@ impl Tool for MessageTool {
                 if let Err(e) = std::fs::create_dir_all(&media_dir) {
                     return Err(Error::Tool(format!("Failed to create media dir: {}", e)));
                 }
-                let filename = p.file_name()
+                let filename = p
+                    .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file".to_string());
                 let dest = media_dir.join(&filename);
                 if let Err(e) = std::fs::copy(p, &dest) {
-                    return Err(Error::Tool(format!("Failed to copy media file {}: {}", path, e)));
+                    return Err(Error::Tool(format!(
+                        "Failed to copy media file {}: {}",
+                        path, e
+                    )));
                 }
                 final_media_paths.push(dest.to_string_lossy().into_owned());
             }
@@ -135,20 +167,28 @@ impl Tool for MessageTool {
         let mut rewritten_content = content.to_string();
         for (original, final_path) in resolved_media_paths.iter().zip(final_media_paths.iter()) {
             if original != final_path {
-                rewritten_content = rewritten_content.replace(original.as_str(), final_path.as_str());
+                rewritten_content =
+                    rewritten_content.replace(original.as_str(), final_path.as_str());
             }
         }
 
         // Send through the outbound message bus
         let outbound_tx = ctx.outbound_tx.as_ref().ok_or_else(|| {
-            Error::Tool("No outbound message channel available. Message delivery is not configured.".to_string())
+            Error::Tool(
+                "No outbound message channel available. Message delivery is not configured."
+                    .to_string(),
+            )
         })?;
 
         let mut outbound = OutboundMessage::new(channel, chat_id, &rewritten_content);
+        if channel == ctx.channel {
+            outbound.account_id = ctx.account_id.clone();
+        }
         outbound.media = final_media_paths.clone();
-        outbound_tx.send(outbound).await.map_err(|e| {
-            Error::Tool(format!("Failed to send message: {}", e))
-        })?;
+        outbound_tx
+            .send(outbound)
+            .await
+            .map_err(|e| Error::Tool(format!("Failed to send message: {}", e)))?;
 
         debug!(
             channel = channel,
@@ -172,7 +212,12 @@ impl Tool for MessageTool {
 impl MessageTool {
     /// Look up a contact by name in the channel contacts registry.
     /// Returns the chat_id if exactly one match is found, or an error with hints.
-    fn lookup_contact_by_name(&self, ctx: &ToolContext, channel: &str, name: &str) -> Result<String> {
+    fn lookup_contact_by_name(
+        &self,
+        ctx: &ToolContext,
+        channel: &str,
+        name: &str,
+    ) -> Result<String> {
         let contacts_file = ctx.channel_contacts_file.as_ref().ok_or_else(|| {
             Error::Tool("Channel contacts registry is not configured.".to_string())
         })?;
@@ -191,12 +236,21 @@ impl MessageTool {
                         channel, channel
                     )))
                 } else {
-                    let names: Vec<String> = all.iter().map(|c| {
-                        if c.name.is_empty() { c.chat_id.clone() } else { format!("{} ({})", c.name, c.chat_type) }
-                    }).collect();
+                    let names: Vec<String> = all
+                        .iter()
+                        .map(|c| {
+                            if c.name.is_empty() {
+                                c.chat_id.clone()
+                            } else {
+                                format!("{} ({})", c.name, c.chat_type)
+                            }
+                        })
+                        .collect();
                     Err(Error::Tool(format!(
                         "No contact matching '{}' found on '{}'. Known contacts: {}",
-                        name, channel, names.join(", ")
+                        name,
+                        channel,
+                        names.join(", ")
                     )))
                 }
             }
@@ -210,9 +264,10 @@ impl MessageTool {
                 Ok(matches[0].chat_id.clone())
             }
             _ => {
-                let options: Vec<String> = matches.iter().map(|c| {
-                    format!("{} → chat_id: {} ({})", c.name, c.chat_id, c.chat_type)
-                }).collect();
+                let options: Vec<String> = matches
+                    .iter()
+                    .map(|c| format!("{} → chat_id: {} ({})", c.name, c.chat_id, c.chat_type))
+                    .collect();
                 Err(Error::Tool(format!(
                     "Multiple contacts matching '{}' on '{}'. Please be more specific or use chat_id directly: {}",
                     name, channel, options.join("; ")
@@ -237,16 +292,20 @@ impl MessageTool {
                 channel, channel
             )
         } else {
-            let names: Vec<String> = all.iter().map(|c| {
-                if c.name.is_empty() {
-                    format!("chat_id={} ({})", c.chat_id, c.chat_type)
-                } else {
-                    format!("\"{}\" → chat_id={} ({})", c.name, c.chat_id, c.chat_type)
-                }
-            }).collect();
+            let names: Vec<String> = all
+                .iter()
+                .map(|c| {
+                    if c.name.is_empty() {
+                        format!("chat_id={} ({})", c.chat_id, c.chat_type)
+                    } else {
+                        format!("\"{}\" → chat_id={} ({})", c.name, c.chat_id, c.chat_type)
+                    }
+                })
+                .collect();
             format!(
                 "Known contacts on '{}': {}. You can use 'target_name' to send by name.",
-                channel, names.join(", ")
+                channel,
+                names.join(", ")
             )
         }
     }
@@ -290,7 +349,9 @@ mod tests {
         let tool = MessageTool;
         assert!(tool.validate(&json!({"content": "hello"})).is_ok());
         assert!(tool.validate(&json!({"media": ["/tmp/test.jpg"]})).is_ok());
-        assert!(tool.validate(&json!({"content": "hello", "media": ["/tmp/test.jpg"]})).is_ok());
+        assert!(tool
+            .validate(&json!({"content": "hello", "media": ["/tmp/test.jpg"]}))
+            .is_ok());
         assert!(tool.validate(&json!({})).is_err());
         assert!(tool.validate(&json!({"content": ""})).is_err());
         assert!(tool.validate(&json!({"media": []})).is_err());

@@ -10,13 +10,14 @@
 //!   2. Encrypted events: body is `{"encrypt":"<base64>"}`, decrypt with AES-256-CBC using encrypt_key
 //!   3. Plain events: body is the event JSON directly (when no encrypt_key configured)
 
+use crate::account::{lark_account_id, lark_scoped_configs};
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, Mutex};
@@ -42,10 +43,10 @@ impl CachedToken {
     }
 }
 
-static GLOBAL_TOKEN_CACHE: OnceLock<Mutex<CachedToken>> = OnceLock::new();
+static GLOBAL_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, CachedToken>>> = OnceLock::new();
 
-fn global_token_cache() -> &'static Mutex<CachedToken> {
-    GLOBAL_TOKEN_CACHE.get_or_init(|| Mutex::new(CachedToken::default()))
+fn global_token_cache() -> &'static Mutex<HashMap<String, CachedToken>> {
+    GLOBAL_TOKEN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,10 @@ pub struct WebhookBody {
     /// Present for url_verification.
     #[serde(default)]
     pub challenge: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub app_id: Option<String>,
     /// Present for plain (non-encrypted) events.
     #[serde(default)]
     pub header: Option<EventHeader>,
@@ -185,11 +190,14 @@ fn decrypt_lark(encrypt_key: &str, encrypted_b64: &str) -> Result<String> {
         .map_err(|e| Error::Channel(format!("Lark webhook base64 decode failed: {}", e)))?;
 
     if raw.len() < 16 {
-        return Err(Error::Channel("Lark webhook encrypted payload too short".to_string()));
+        return Err(Error::Channel(
+            "Lark webhook encrypted payload too short".to_string(),
+        ));
     }
 
     let (iv, ciphertext) = raw.split_at(16);
-    let iv: [u8; 16] = iv.try_into()
+    let iv: [u8; 16] = iv
+        .try_into()
         .map_err(|_| Error::Channel("Lark webhook IV length error".to_string()))?;
 
     let mut buf = ciphertext.to_vec();
@@ -232,6 +240,34 @@ async fn is_duplicate(event_id: &str) -> bool {
 
 /// Process a raw webhook body string. Returns the HTTP response body JSON string.
 /// `inbound_tx` is None when called in verification-only mode.
+fn resolve_lark_plain_webhook_config(config: &Config, body: &WebhookBody) -> Config {
+    let listeners = lark_scoped_configs(config);
+    if listeners.is_empty() {
+        return config.clone();
+    }
+    if listeners.len() == 1 {
+        return listeners[0].config.clone();
+    }
+
+    if let Some(token) = body.token.as_deref().filter(|value| !value.is_empty()) {
+        for listener in &listeners {
+            if listener.config.channels.lark.verification_token == token {
+                return listener.config.clone();
+            }
+        }
+    }
+
+    if let Some(app_id) = body.app_id.as_deref().filter(|value| !value.is_empty()) {
+        for listener in &listeners {
+            if listener.config.channels.lark.app_id == app_id {
+                return listener.config.clone();
+            }
+        }
+    }
+
+    config.clone()
+}
+
 pub async fn process_webhook(
     config: &Config,
     raw_body: &str,
@@ -242,18 +278,23 @@ pub async fn process_webhook(
 
     // ── Encrypted body ──────────────────────────────────────────────────────
     if let Some(encrypted) = &body.encrypt {
-        let encrypt_key = &config.channels.lark.encrypt_key;
-        if encrypt_key.is_empty() {
-            return Err(Error::Channel(
-                "Lark webhook received encrypted body but encrypt_key is not configured".to_string(),
-            ));
+        for listener in lark_scoped_configs(config) {
+            let encrypt_key = &listener.config.channels.lark.encrypt_key;
+            if encrypt_key.is_empty() {
+                continue;
+            }
+            if let Ok(plaintext) = decrypt_lark(encrypt_key, encrypted) {
+                debug!(len = plaintext.len(), listener = %listener.label, "Lark webhook decrypted payload");
+                return Box::pin(process_webhook(&listener.config, &plaintext, inbound_tx)).await;
+            }
         }
-        let plaintext = decrypt_lark(encrypt_key, encrypted)?;
-        debug!(len = plaintext.len(), "Lark webhook decrypted payload");
-
-        // Recurse with decrypted JSON (plain mode)
-        return Box::pin(process_webhook(config, &plaintext, inbound_tx)).await;
+        return Err(Error::Channel(
+            "Lark webhook received encrypted body but no matching encrypt_key was found"
+                .to_string(),
+        ));
     }
+
+    let resolved_config = resolve_lark_plain_webhook_config(config, &body);
 
     // ── URL verification ────────────────────────────────────────────────────
     if body.event_type.as_deref() == Some("url_verification") {
@@ -307,7 +348,7 @@ pub async fn process_webhook(
         .map(|id| id.open_id.as_str())
         .unwrap_or("");
 
-    let allow_from = &config.channels.lark.allow_from;
+    let allow_from = &resolved_config.channels.lark.allow_from;
     if !allow_from.is_empty() && !allow_from.iter().any(|a| a == open_id) {
         debug!(open_id = %open_id, "Lark webhook: sender not in allowlist");
         return Ok(serde_json::json!({ "code": 0 }).to_string());
@@ -316,8 +357,8 @@ pub async fn process_webhook(
     // Parse message content and optional media
     let (text, media_paths) = match message.message_type.as_str() {
         "text" => {
-            let content: MessageContent = serde_json::from_str(&message.content)
-                .unwrap_or(MessageContent { text: None });
+            let content: MessageContent =
+                serde_json::from_str(&message.content).unwrap_or(MessageContent { text: None });
             let t = content.text.unwrap_or_default().trim().to_string();
             if t.is_empty() {
                 return Ok(serde_json::json!({ "code": 0 }).to_string());
@@ -325,43 +366,70 @@ pub async fn process_webhook(
             (t, vec![])
         }
         "image" => {
-            let content: ImageContent = serde_json::from_str(&message.content)
-                .unwrap_or(ImageContent { image_key: None });
+            let content: ImageContent =
+                serde_json::from_str(&message.content).unwrap_or(ImageContent { image_key: None });
             let paths = if let Some(key) = content.image_key {
                 info!(image_key = %key, "Lark webhook: received image");
                 match download_lark_resource(config, &key, "image", "jpg").await {
                     Ok(p) => vec![p],
-                    Err(e) => { warn!(error = %e, "Lark: failed to download image"); vec![] }
+                    Err(e) => {
+                        warn!(error = %e, "Lark: failed to download image");
+                        vec![]
+                    }
                 }
-            } else { vec![] };
-            ("[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(), paths)
+            } else {
+                vec![]
+            };
+            (
+                "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(),
+                paths,
+            )
         }
         "audio" => {
-            let content: AudioContent = serde_json::from_str(&message.content)
-                .unwrap_or(AudioContent { file_key: None, duration: None });
+            let content: AudioContent =
+                serde_json::from_str(&message.content).unwrap_or(AudioContent {
+                    file_key: None,
+                    duration: None,
+                });
             let duration_ms = content.duration.unwrap_or(0);
             let paths = if let Some(key) = content.file_key {
                 info!(file_key = %key, "Lark webhook: received audio");
                 match download_lark_resource(config, &key, "file", "opus").await {
                     Ok(p) => vec![p],
-                    Err(e) => { warn!(error = %e, "Lark: failed to download audio"); vec![] }
+                    Err(e) => {
+                        warn!(error = %e, "Lark: failed to download audio");
+                        vec![]
+                    }
                 }
-            } else { vec![] };
-            let desc = format!("[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]", duration_ms);
+            } else {
+                vec![]
+            };
+            let desc = format!(
+                "[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]",
+                duration_ms
+            );
             (desc, paths)
         }
         "file" => {
-            let content: FileContent = serde_json::from_str(&message.content)
-                .unwrap_or(FileContent { file_key: None, file_name: None });
+            let content: FileContent =
+                serde_json::from_str(&message.content).unwrap_or(FileContent {
+                    file_key: None,
+                    file_name: None,
+                });
             let file_name = content.file_name.clone().unwrap_or_default();
             let ext = file_name.rsplit('.').next().unwrap_or("bin").to_string();
             let paths = if let Some(key) = content.file_key {
                 info!(file_key = %key, file_name = %file_name, "Lark webhook: received file");
                 match download_lark_resource(config, &key, "file", &ext).await {
                     Ok(p) => vec![p],
-                    Err(e) => { warn!(error = %e, "Lark: failed to download file"); vec![] }
+                    Err(e) => {
+                        warn!(error = %e, "Lark: failed to download file");
+                        vec![]
+                    }
                 }
-            } else { vec![] };
+            } else {
+                vec![]
+            };
             let desc = if file_name.is_empty() {
                 "[文件，已下载到本地，可用 read_file 读取]".to_string()
             } else {
@@ -370,16 +438,24 @@ pub async fn process_webhook(
             (desc, paths)
         }
         "media" => {
-            let content: FileContent = serde_json::from_str(&message.content)
-                .unwrap_or(FileContent { file_key: None, file_name: None });
+            let content: FileContent =
+                serde_json::from_str(&message.content).unwrap_or(FileContent {
+                    file_key: None,
+                    file_name: None,
+                });
             let file_name = content.file_name.clone().unwrap_or_default();
             let paths = if let Some(key) = content.file_key {
                 info!(file_key = %key, "Lark webhook: received video");
-                match download_lark_resource(config, &key, "file", "mp4").await {
+                match download_lark_resource(&resolved_config, &key, "file", "mp4").await {
                     Ok(p) => vec![p],
-                    Err(e) => { warn!(error = %e, "Lark: failed to download video"); vec![] }
+                    Err(e) => {
+                        warn!(error = %e, "Lark: failed to download video");
+                        vec![]
+                    }
                 }
-            } else { vec![] };
+            } else {
+                vec![]
+            };
             let desc = if file_name.is_empty() {
                 "[视频，已下载到本地]".to_string()
             } else {
@@ -388,34 +464,53 @@ pub async fn process_webhook(
             (desc, paths)
         }
         "sticker" => {
-            let content: StickerContent = serde_json::from_str(&message.content)
-                .unwrap_or(StickerContent { file_key: None });
+            let content: StickerContent =
+                serde_json::from_str(&message.content).unwrap_or(StickerContent { file_key: None });
             let paths = if let Some(key) = content.file_key {
-                match download_lark_resource(config, &key, "image", "png").await {
+                match download_lark_resource(&resolved_config, &key, "image", "png").await {
                     Ok(p) => vec![p],
-                    Err(e) => { warn!(error = %e, "Lark: failed to download sticker"); vec![] }
+                    Err(e) => {
+                        warn!(error = %e, "Lark: failed to download sticker");
+                        vec![]
+                    }
                 }
-            } else { vec![] };
+            } else {
+                vec![]
+            };
             ("[表情包图片，已下载到本地，可直接查看]".to_string(), paths)
         }
         "post" => {
-            let post: PostContent = serde_json::from_str(&message.content)
-                .unwrap_or(PostContent { zh_cn: None, en_us: None });
+            let post: PostContent = serde_json::from_str(&message.content).unwrap_or(PostContent {
+                zh_cn: None,
+                en_us: None,
+            });
             let body = post.zh_cn.or(post.en_us);
             let text = if let Some(b) = body {
                 let title = b.title.unwrap_or_default();
-                let body_text = b.content.unwrap_or_default().into_iter().flatten()
-                    .filter_map(|el| {
-                        match el.tag.as_deref() {
-                            Some("text") => el.text,
-                            Some("a") => Some(format!("{} ({})", el.text.unwrap_or_default(), el.href.unwrap_or_default())),
-                            _ => None,
-                        }
+                let body_text = b
+                    .content
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|el| match el.tag.as_deref() {
+                        Some("text") => el.text,
+                        Some("a") => Some(format!(
+                            "{} ({})",
+                            el.text.unwrap_or_default(),
+                            el.href.unwrap_or_default()
+                        )),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                if title.is_empty() { body_text } else { format!("{}\n{}", title, body_text) }
-            } else { String::new() };
+                if title.is_empty() {
+                    body_text
+                } else {
+                    format!("{}\n{}", title, body_text)
+                }
+            } else {
+                String::new()
+            };
             if text.is_empty() {
                 return Ok(serde_json::json!({ "code": 0 }).to_string());
             }
@@ -437,6 +532,7 @@ pub async fn process_webhook(
     if let Some(tx) = inbound_tx {
         let inbound = InboundMessage {
             channel: "lark".to_string(),
+            account_id: lark_account_id(&resolved_config),
             chat_id: message.chat_id.clone(),
             sender_id: open_id.to_string(),
             content: text,
@@ -506,7 +602,12 @@ async fn download_lark_resource(
         .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
     let safe_key = resource_key.replace(['/', '\\', ':'], "_");
-    let filename = format!("lark_{}_{}.{}", resource_type, &safe_key[..safe_key.len().min(24)], ext);
+    let filename = format!(
+        "lark_{}_{}.{}",
+        resource_type,
+        &safe_key[..safe_key.len().min(24)],
+        ext
+    );
     let file_path = media_dir.join(&filename);
 
     let bytes = resp
@@ -547,7 +648,10 @@ async fn fetch_tenant_access_token(app_id: &str, app_secret: &str) -> Result<Str
         .map_err(|e| Error::Channel(format!("Failed to build HTTP client: {}", e)))?;
 
     let resp = client
-        .post(format!("{}/auth/v3/tenant_access_token/internal", LARK_OPEN_API))
+        .post(format!(
+            "{}/auth/v3/tenant_access_token/internal",
+            LARK_OPEN_API
+        ))
         .json(&TokenRequest { app_id, app_secret })
         .send()
         .await
@@ -567,18 +671,26 @@ async fn fetch_tenant_access_token(app_id: &str, app_secret: &str) -> Result<Str
 }
 
 async fn get_cached_token(config: &Config) -> Result<String> {
+    let app_id = config.channels.lark.app_id.clone();
     let cache = global_token_cache();
     let mut guard = cache.lock().await;
-    if guard.is_valid() {
-        return Ok(guard.token.clone());
+    if let Some(entry) = guard.get(&app_id) {
+        if entry.is_valid() {
+            return Ok(entry.token.clone());
+        }
     }
     let token = fetch_tenant_access_token(
         &config.channels.lark.app_id,
         &config.channels.lark.app_secret,
     )
     .await?;
-    guard.token = token.clone();
-    guard.expires_at = chrono::Utc::now().timestamp() + 7200;
+    guard.insert(
+        app_id,
+        CachedToken {
+            token: token.clone(),
+            expires_at: chrono::Utc::now().timestamp() + 7200,
+        },
+    );
     info!("Lark tenant_access_token refreshed (cached 2h)");
     Ok(token)
 }
@@ -606,7 +718,10 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
 
     let content = serde_json::json!({ "text": text }).to_string();
     let response = client
-        .post(format!("{}/im/v1/messages?receive_id_type=chat_id", LARK_OPEN_API))
+        .post(format!(
+            "{}/im/v1/messages?receive_id_type=chat_id",
+            LARK_OPEN_API
+        ))
         .header("Authorization", format!("Bearer {}", token))
         .json(&SendRequest {
             receive_id: chat_id,
@@ -673,11 +788,7 @@ pub async fn send_reply_message(
 
 /// Upload a local file to Lark and return the `file_key`.
 /// `file_type` must be one of: image / opus / mp4 / pdf / doc / xls / ppt / stream
-pub async fn upload_lark_file(
-    config: &Config,
-    file_path: &str,
-    file_type: &str,
-) -> Result<String> {
+pub async fn upload_lark_file(config: &Config, file_path: &str, file_type: &str) -> Result<String> {
     let token = get_cached_token(config).await?;
 
     let path = std::path::Path::new(file_path);
@@ -873,7 +984,10 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 
     info!(chat_id = %chat_id, msg_type = %msg_type, "Lark: sending media message");
     let response = client
-        .post(format!("{}/im/v1/messages?receive_id_type=chat_id", LARK_OPEN_API))
+        .post(format!(
+            "{}/im/v1/messages?receive_id_type=chat_id",
+            LARK_OPEN_API
+        ))
         .header("Authorization", format!("Bearer {}", token))
         .json(&SendRequest {
             receive_id: chat_id,
@@ -887,7 +1001,10 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!("Lark API send media HTTP error {}: {}", status, body)));
+        return Err(Error::Channel(format!(
+            "Lark API send media HTTP error {}: {}",
+            status, body
+        )));
     }
 
     let body: serde_json::Value = response
@@ -896,8 +1013,14 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
         .map_err(|e| Error::Channel(format!("Lark send media response parse failed: {}", e)))?;
     let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
     if code != 0 {
-        let msg = body.get("msg").and_then(|m| m.as_str()).unwrap_or("unknown");
-        return Err(Error::Channel(format!("Lark API send media error code {}: {}", code, msg)));
+        let msg = body
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+        return Err(Error::Channel(format!(
+            "Lark API send media error code {}: {}",
+            code, msg
+        )));
     }
 
     info!(chat_id = %chat_id, msg_type = %msg_type, "Lark: media message sent");
@@ -911,6 +1034,47 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_lark_plain_webhook_config_matches_verification_token() {
+        let mut config = Config::default();
+        config.channels.lark.accounts.insert(
+            "default".to_string(),
+            blockcell_core::config::LarkAccountConfig {
+                enabled: true,
+                app_id: "cli_default".to_string(),
+                app_secret: "secret-default".to_string(),
+                encrypt_key: "enc-default".to_string(),
+                verification_token: "verify-default".to_string(),
+                allow_from: vec![],
+            },
+        );
+        config.channels.lark.accounts.insert(
+            "intl".to_string(),
+            blockcell_core::config::LarkAccountConfig {
+                enabled: true,
+                app_id: "cli_intl".to_string(),
+                app_secret: "secret-intl".to_string(),
+                encrypt_key: "enc-intl".to_string(),
+                verification_token: "verify-intl".to_string(),
+                allow_from: vec![],
+            },
+        );
+
+        let body = WebhookBody {
+            encrypt: None,
+            event_type: Some("url_verification".to_string()),
+            challenge: Some("ok".to_string()),
+            token: Some("verify-intl".to_string()),
+            app_id: None,
+            header: None,
+            event: None,
+        };
+
+        let resolved = resolve_lark_plain_webhook_config(&config, &body);
+        assert_eq!(resolved.channels.lark.default_account_id.as_deref(), Some("intl"));
+        assert_eq!(resolved.channels.lark.verification_token, "verify-intl");
+    }
 
     #[test]
     fn test_cached_token_invalid_when_empty() {

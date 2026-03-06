@@ -1,7 +1,11 @@
 use blockcell_core::Paths;
 
 /// Show recent agent logs.
-pub async fn show(lines: usize, filter: Option<String>, session: Option<String>) -> anyhow::Result<()> {
+pub async fn show(
+    lines: usize,
+    filter: Option<String>,
+    session: Option<String>,
+) -> anyhow::Result<()> {
     let paths = Paths::default();
     let logs_dir = paths.workspace().join("logs");
 
@@ -44,16 +48,26 @@ pub async fn show(lines: usize, filter: Option<String>, session: Option<String>)
     let all_lines: Vec<&str> = content.lines().collect();
 
     // Filter by session and/or keyword
-    let filtered: Vec<&&str> = all_lines.iter().filter(|line| {
-        let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
-        let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
-        sess_ok && filter_ok
-    }).collect();
+    let filtered: Vec<&&str> = all_lines
+        .iter()
+        .filter(|line| {
+            let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
+            let filter_ok = filter
+                .as_deref()
+                .map(|f| line.to_lowercase().contains(&f.to_lowercase()))
+                .unwrap_or(true);
+            sess_ok && filter_ok
+        })
+        .collect();
 
     let start = filtered.len().saturating_sub(lines);
     let tail = &filtered[start..];
 
-    println!("📋 Logs: {} (last {} lines)", log_file.display(), tail.len());
+    println!(
+        "📋 Logs: {} (last {} lines)",
+        log_file.display(),
+        tail.len()
+    );
     println!();
 
     for line in tail {
@@ -118,7 +132,10 @@ pub async fn follow(filter: Option<String>, session: Option<String>) -> anyhow::
     let start = all_lines.len().saturating_sub(10);
     for line in &all_lines[start..] {
         let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
-        let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
+        let filter_ok = filter
+            .as_deref()
+            .map(|f| line.to_lowercase().contains(&f.to_lowercase()))
+            .unwrap_or(true);
         if sess_ok && filter_ok {
             println!("{}", line);
         }
@@ -139,7 +156,10 @@ pub async fn follow(filter: Option<String>, session: Option<String>) -> anyhow::
 
             for line in new_content.lines() {
                 let sess_ok = session.as_deref().map(|s| line.contains(s)).unwrap_or(true);
-                let filter_ok = filter.as_deref().map(|f| line.to_lowercase().contains(&f.to_lowercase())).unwrap_or(true);
+                let filter_ok = filter
+                    .as_deref()
+                    .map(|f| line.to_lowercase().contains(&f.to_lowercase()))
+                    .unwrap_or(true);
                 if sess_ok && filter_ok {
                     println!("{}", line);
                 }

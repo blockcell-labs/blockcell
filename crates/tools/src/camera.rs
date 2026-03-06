@@ -47,31 +47,40 @@ impl Tool for CameraCaptureTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if !["list", "capture", "info"].contains(&action) {
-            return Err(Error::Tool("action must be 'list', 'capture', or 'info'".to_string()));
+            return Err(Error::Tool(
+                "action must be 'list', 'capture', or 'info'".to_string(),
+            ));
         }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
 
         match action {
             "list" => list_cameras().await,
             "capture" => {
-                let device_index = params.get("device_index")
+                let device_index = params
+                    .get("device_index")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
-                let format = params.get("format")
+                let format = params
+                    .get("format")
                     .and_then(|v| v.as_str())
                     .unwrap_or("jpg");
-                let output_path = params.get("output_path")
+                let output_path = params
+                    .get("output_path")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
                         let media_dir = ctx.workspace.join("media");
                         let _ = std::fs::create_dir_all(&media_dir);
                         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                        media_dir.join(format!("photo_{}.{}", timestamp, format))
+                        media_dir
+                            .join(format!("photo_{}.{}", timestamp, format))
                             .to_string_lossy()
                             .to_string()
                     });
@@ -99,11 +108,16 @@ async fn list_cameras() -> Result<Value> {
             if let Ok(data) = serde_json::from_str::<Value>(&stdout) {
                 if let Some(cam_data) = data.get("SPCameraDataType").and_then(|v| v.as_array()) {
                     for (i, cam) in cam_data.iter().enumerate() {
-                        let name = cam.get("_name").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                        let model_id = cam.get("spcamera_model-id")
+                        let name = cam
+                            .get("_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown");
+                        let model_id = cam
+                            .get("spcamera_model-id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let unique_id = cam.get("spcamera_unique-id")
+                        let unique_id = cam
+                            .get("spcamera_unique-id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         cameras.push(json!({
@@ -211,7 +225,8 @@ async fn capture_photo(device_index: usize, output_path: &str, format: &str) -> 
     Err(Error::Tool(
         "Failed to capture photo. Tried: imagecapture, ffmpeg (avfoundation), screencapture. \
          Make sure a camera is connected and accessible. \
-         Install ffmpeg via 'brew install ffmpeg' for best camera support.".to_string()
+         Install ffmpeg via 'brew install ffmpeg' for best camera support."
+            .to_string(),
     ))
 }
 
@@ -226,9 +241,7 @@ async fn try_imagecapture(output_path: &str) -> Result<Value> {
         .map_err(|e| Error::Tool(format!("imagecapture not available: {}", e)))?;
 
     if output.status.success() {
-        let file_size = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
         info!(path = %output_path, size = file_size, "📷 Photo captured via imagecapture");
         Ok(json!({
             "success": true,
@@ -251,7 +264,7 @@ async fn try_ffmpeg_capture(device_index: usize, output_path: &str, format: &str
 
     // ffmpeg -f avfoundation -framerate 30 -video_size 1280x720 -i "0" -frames:v 1 output.jpg
     let device_str = format!("{}", device_index);
-    
+
     // Determine codec based on format
     let codec_args: Vec<&str> = match format {
         "png" => vec!["-c:v", "png"],
@@ -261,25 +274,30 @@ async fn try_ffmpeg_capture(device_index: usize, output_path: &str, format: &str
 
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.args([
-        "-f", "avfoundation",
-        "-framerate", "30",
-        "-video_size", "1280x720",
-        "-i", &device_str,
-        "-frames:v", "1",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "30",
+        "-video_size",
+        "1280x720",
+        "-i",
+        &device_str,
+        "-frames:v",
+        "1",
     ]);
     for arg in &codec_args {
         cmd.arg(arg);
     }
     cmd.args(["-y", output_path]); // -y to overwrite
 
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("ffmpeg execution failed: {}", e)))?;
 
     if output.status.success() || std::path::Path::new(output_path).exists() {
-        let file_size = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        
+        let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+
         if file_size > 0 {
             info!(path = %output_path, size = file_size, "📷 Photo captured via ffmpeg");
             return Ok(json!({
@@ -293,7 +311,10 @@ async fn try_ffmpeg_capture(device_index: usize, output_path: &str, format: &str
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(Error::Tool(format!("ffmpeg capture failed: {}", stderr.chars().take(500).collect::<String>())))
+    Err(Error::Tool(format!(
+        "ffmpeg capture failed: {}",
+        stderr.chars().take(500).collect::<String>()
+    )))
 }
 
 /// Try screencapture as a last resort (captures screen, not camera).
@@ -307,9 +328,7 @@ async fn try_screencapture(output_path: &str) -> Result<Value> {
         .map_err(|e| Error::Tool(format!("screencapture failed: {}", e)))?;
 
     if output.status.success() {
-        let file_size = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
         warn!(path = %output_path, "📷 Used screencapture (screen, not camera) as fallback");
         Ok(json!({
             "success": true,
@@ -349,7 +368,11 @@ async fn camera_info() -> Result<Value> {
 
     // Check ffmpeg version if available
     if has_ffmpeg {
-        if let Ok(output) = tokio::process::Command::new("ffmpeg").arg("-version").output().await {
+        if let Ok(output) = tokio::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .await
+        {
             let version_line = String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .next()

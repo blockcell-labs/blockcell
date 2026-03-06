@@ -29,17 +29,40 @@ pub struct AXNode {
 
 /// Roles considered interactive (buttons, inputs, links, etc.).
 const INTERACTIVE_ROLES: &[&str] = &[
-    "button", "link", "textbox", "searchbox", "combobox", "listbox",
-    "menuitem", "menuitemcheckbox", "menuitemradio", "option",
-    "radio", "checkbox", "switch", "slider", "spinbutton",
-    "tab", "treeitem", "gridcell", "columnheader", "rowheader",
-    "textField", "TextField", "select",
+    "button",
+    "link",
+    "textbox",
+    "searchbox",
+    "combobox",
+    "listbox",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "checkbox",
+    "switch",
+    "slider",
+    "spinbutton",
+    "tab",
+    "treeitem",
+    "gridcell",
+    "columnheader",
+    "rowheader",
+    "textField",
+    "TextField",
+    "select",
 ];
 
 /// Roles that are structural/container (skip in compact mode if empty).
 const STRUCTURAL_ROLES: &[&str] = &[
-    "generic", "none", "presentation", "group", "region",
-    "GenericContainer", "Section",
+    "generic",
+    "none",
+    "presentation",
+    "group",
+    "region",
+    "GenericContainer",
+    "Section",
 ];
 
 /// Parse the CDP accessibility tree response into our AXNode tree.
@@ -70,11 +93,7 @@ pub fn parse_ax_tree(cdp_response: &Value) -> Vec<AXNode> {
     }
 }
 
-fn build_ax_node(
-    node_id: &str,
-    node_map: &HashMap<String, &Value>,
-    depth: usize,
-) -> AXNode {
+fn build_ax_node(node_id: &str, node_map: &HashMap<String, &Value>, depth: usize) -> AXNode {
     let node = match node_map.get(node_id) {
         Some(n) => *n,
         None => {
@@ -104,11 +123,11 @@ fn build_ax_node(
     let value = get_ax_value(node, "value");
     let description = get_ax_value(node, "description");
 
-    let backend_node_id = node
-        .get("backendDOMNodeId")
-        .and_then(|v| v.as_i64());
+    let backend_node_id = node.get("backendDOMNodeId").and_then(|v| v.as_i64());
 
-    let interactive = INTERACTIVE_ROLES.iter().any(|r| r.eq_ignore_ascii_case(&role));
+    let interactive = INTERACTIVE_ROLES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(&role));
 
     // Parse properties
     let mut properties = HashMap::new();
@@ -121,7 +140,11 @@ fn build_ax_node(
     if let Some(props) = node.get("properties").and_then(|v| v.as_array()) {
         for prop in props {
             let prop_name = prop.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let prop_value = prop.get("value").and_then(|v| v.get("value")).cloned().unwrap_or(Value::Null);
+            let prop_value = prop
+                .get("value")
+                .and_then(|v| v.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null);
             match prop_name {
                 "focused" => focused = prop_value.as_bool().unwrap_or(false),
                 "checked" => checked = prop_value.as_bool().or(Some(false)),
@@ -150,7 +173,10 @@ fn build_ax_node(
         name,
         value,
         description,
-        node_id: node.get("nodeId").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
+        node_id: node
+            .get("nodeId")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok()),
         backend_node_id,
         ref_id: None,
         properties,
@@ -204,7 +230,9 @@ fn assign_refs_recursive(
         // Assign to interactive + any named non-structural element
         node.interactive
             || (!node.name.is_empty()
-                && !STRUCTURAL_ROLES.iter().any(|r| r.eq_ignore_ascii_case(&node.role)))
+                && !STRUCTURAL_ROLES
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(&node.role)))
     };
 
     if should_assign {
@@ -228,11 +256,7 @@ fn assign_refs_recursive(
 }
 
 /// Render the accessibility tree as a compact text representation.
-pub fn render_tree(
-    nodes: &[AXNode],
-    compact: bool,
-    max_depth: Option<usize>,
-) -> String {
+pub fn render_tree(nodes: &[AXNode], compact: bool, max_depth: Option<usize>) -> String {
     let mut output = String::new();
     for node in nodes {
         render_node(&mut output, node, 0, compact, max_depth);
@@ -254,14 +278,19 @@ fn render_node(
     }
 
     // In compact mode, skip empty structural elements
-    if compact && STRUCTURAL_ROLES.iter().any(|r| r.eq_ignore_ascii_case(&node.role))
-        && node.name.is_empty() && node.ref_id.is_none() {
-            // Skip this node but still render children
-            for child in &node.children {
-                render_node(output, child, indent, compact, max_depth);
-            }
-            return;
+    if compact
+        && STRUCTURAL_ROLES
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&node.role))
+        && node.name.is_empty()
+        && node.ref_id.is_none()
+    {
+        // Skip this node but still render children
+        for child in &node.children {
+            render_node(output, child, indent, compact, max_depth);
         }
+        return;
+    }
 
     // Skip nodes with no useful content in compact mode
     if compact && node.role == "StaticText" && node.name.is_empty() {
@@ -301,7 +330,11 @@ fn render_node(
         line.push_str(" [disabled]");
     }
     if let Some(expanded) = node.expanded {
-        line.push_str(if expanded { " [expanded]" } else { " [collapsed]" });
+        line.push_str(if expanded {
+            " [expanded]"
+        } else {
+            " [collapsed]"
+        });
     }
     if !node.value.is_empty() && node.value != node.name {
         let val = if node.value.len() > 60 {
@@ -322,10 +355,7 @@ fn render_node(
 }
 
 /// Build a JSON representation of the snapshot for --json mode.
-pub fn snapshot_to_json(
-    tree_text: &str,
-    refs: &HashMap<String, Value>,
-) -> Value {
+pub fn snapshot_to_json(tree_text: &str, refs: &HashMap<String, Value>) -> Value {
     json!({
         "snapshot": tree_text,
         "refs": refs,

@@ -58,22 +58,45 @@ impl Tool for OfficeWriteTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if !["create_pptx", "create_docx", "create_xlsx", "info"].contains(&action) {
-            return Err(Error::Tool("action must be 'create_pptx', 'create_docx', 'create_xlsx', or 'info'".into()));
+            return Err(Error::Tool(
+                "action must be 'create_pptx', 'create_docx', 'create_xlsx', or 'info'".into(),
+            ));
         }
         match action {
             "create_pptx" => {
-                if params.get("slides").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
-                    return Err(Error::Tool("'slides' array is required for create_pptx".into()));
+                if params
+                    .get("slides")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(Error::Tool(
+                        "'slides' array is required for create_pptx".into(),
+                    ));
                 }
             }
             "create_docx" => {
-                if params.get("sections").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
-                    return Err(Error::Tool("'sections' array is required for create_docx".into()));
+                if params
+                    .get("sections")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(Error::Tool(
+                        "'sections' array is required for create_docx".into(),
+                    ));
                 }
             }
             "create_xlsx" => {
-                if params.get("sheets").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
-                    return Err(Error::Tool("'sheets' array is required for create_xlsx".into()));
+                if params
+                    .get("sheets")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(Error::Tool(
+                        "'sheets' array is required for create_xlsx".into(),
+                    ));
                 }
             }
             _ => {}
@@ -82,7 +105,10 @@ impl Tool for OfficeWriteTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         match action {
             "create_pptx" => action_create_pptx(&ctx, &params).await,
@@ -97,7 +123,11 @@ impl Tool for OfficeWriteTool {
 /// Check available Python libraries for Office generation.
 async fn action_info() -> Result<Value> {
     let has_python = which::which("python3").is_ok() || which::which("python").is_ok();
-    let python_bin = if which::which("python3").is_ok() { "python3" } else { "python" };
+    let python_bin = if which::which("python3").is_ok() {
+        "python3"
+    } else {
+        "python"
+    };
 
     let mut libs = json!({});
 
@@ -108,7 +138,10 @@ async fn action_info() -> Result<Value> {
             ("openpyxl", "openpyxl"),
         ] {
             let check = tokio::process::Command::new(python_bin)
-                .args(["-c", &format!("import {}; print({}.__version__)", import, import)])
+                .args([
+                    "-c",
+                    &format!("import {}; print({}.__version__)", import, import),
+                ])
                 .output()
                 .await;
             let available = check.map(|o| o.status.success()).unwrap_or(false);
@@ -116,9 +149,18 @@ async fn action_info() -> Result<Value> {
         }
     }
 
-    let all_installed = libs.get("python-pptx").and_then(|v| v.as_bool()).unwrap_or(false)
-        && libs.get("python-docx").and_then(|v| v.as_bool()).unwrap_or(false)
-        && libs.get("openpyxl").and_then(|v| v.as_bool()).unwrap_or(false);
+    let all_installed = libs
+        .get("python-pptx")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && libs
+            .get("python-docx")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        && libs
+            .get("openpyxl")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
     let install_hint = if !all_installed {
         "Install: pip install python-pptx python-docx openpyxl"
@@ -137,9 +179,14 @@ async fn action_info() -> Result<Value> {
 
 /// Create a PPTX presentation.
 async fn action_create_pptx(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let slides = params.get("slides").and_then(|v| v.as_array())
+    let slides = params
+        .get("slides")
+        .and_then(|v| v.as_array())
         .ok_or_else(|| Error::Tool("'slides' is required".into()))?;
-    let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("Presentation");
+    let title = params
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Presentation");
     let style = params.get("style").cloned().unwrap_or(json!({}));
 
     let output_path = resolve_output_path(params, ctx, "pptx", "presentation");
@@ -283,7 +330,9 @@ print('OK')
 
 /// Create a DOCX document.
 async fn action_create_docx(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let sections = params.get("sections").and_then(|v| v.as_array())
+    let sections = params
+        .get("sections")
+        .and_then(|v| v.as_array())
         .ok_or_else(|| Error::Tool("'sections' is required".into()))?;
     let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let style = params.get("style").cloned().unwrap_or(json!({}));
@@ -394,7 +443,9 @@ print('OK')
 
 /// Create an XLSX spreadsheet.
 async fn action_create_xlsx(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let sheets = params.get("sheets").and_then(|v| v.as_array())
+    let sheets = params
+        .get("sheets")
+        .and_then(|v| v.as_array())
         .ok_or_else(|| Error::Tool("'sheets' is required".into()))?;
     let style = params.get("style").cloned().unwrap_or(json!({}));
 
@@ -507,7 +558,8 @@ fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &st
     let _ = std::fs::create_dir_all(&dir);
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     dir.join(format!("{}_{}.{}", prefix, timestamp, ext))
-        .to_string_lossy().to_string()
+        .to_string_lossy()
+        .to_string()
 }
 
 fn expand_path(path: &str, ctx: &ToolContext) -> String {
@@ -523,10 +575,22 @@ fn expand_path(path: &str, ctx: &ToolContext) -> String {
 }
 
 /// Run a Python script and return the result.
-async fn run_python_script(script: &str, output_path: &str, format: &str, item_count: usize, ctx: &ToolContext) -> Result<Value> {
-    let python_bin = if which::which("python3").is_ok() { "python3" } else { "python" };
+async fn run_python_script(
+    script: &str,
+    output_path: &str,
+    format: &str,
+    item_count: usize,
+    ctx: &ToolContext,
+) -> Result<Value> {
+    let python_bin = if which::which("python3").is_ok() {
+        "python3"
+    } else {
+        "python"
+    };
     if which::which(python_bin).is_err() {
-        return Err(Error::Tool("Python not found. Install Python 3 to generate Office documents.".into()));
+        return Err(Error::Tool(
+            "Python not found. Install Python 3 to generate Office documents.".into(),
+        ));
     }
 
     // Write script to temp file
@@ -610,32 +674,44 @@ mod tests {
     #[test]
     fn test_validate_pptx() {
         let tool = OfficeWriteTool;
-        assert!(tool.validate(&json!({
-            "action": "create_pptx",
-            "slides": [{"layout": "title", "title": "Hello"}]
-        })).is_ok());
-        assert!(tool.validate(&json!({"action": "create_pptx", "slides": []})).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "create_pptx",
+                "slides": [{"layout": "title", "title": "Hello"}]
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "create_pptx", "slides": []}))
+            .is_err());
         assert!(tool.validate(&json!({"action": "create_pptx"})).is_err());
     }
 
     #[test]
     fn test_validate_docx() {
         let tool = OfficeWriteTool;
-        assert!(tool.validate(&json!({
-            "action": "create_docx",
-            "sections": [{"heading": "Intro", "content": "Hello"}]
-        })).is_ok());
-        assert!(tool.validate(&json!({"action": "create_docx", "sections": []})).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "create_docx",
+                "sections": [{"heading": "Intro", "content": "Hello"}]
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "create_docx", "sections": []}))
+            .is_err());
     }
 
     #[test]
     fn test_validate_xlsx() {
         let tool = OfficeWriteTool;
-        assert!(tool.validate(&json!({
-            "action": "create_xlsx",
-            "sheets": [{"name": "Data", "headers": ["A", "B"], "rows": [[1, 2]]}]
-        })).is_ok());
-        assert!(tool.validate(&json!({"action": "create_xlsx", "sheets": []})).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "create_xlsx",
+                "sheets": [{"name": "Data", "headers": ["A", "B"], "rows": [[1, 2]]}]
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "create_xlsx", "sheets": []}))
+            .is_err());
     }
 
     #[test]

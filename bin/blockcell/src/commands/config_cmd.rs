@@ -46,6 +46,68 @@ pub async fn schema() -> anyhow::Result<()> {
                             "evolutionProvider": { "type": "string", "description": "Provider for self-evolution pipeline" },
                             "maxContextTokens": { "type": "integer", "default": 32000 }
                         }
+                    },
+                    "list": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "enabled": { "type": "boolean", "default": true },
+                                "name": { "type": "string" },
+                                "intentProfile": { "type": "string", "description": "Intent router profile bound to this agent" }
+                            }
+                        }
+                    }
+                }
+            },
+            "intentRouter": {
+                "type": "object",
+                "description": "Config-driven intent to tool routing",
+                "properties": {
+                    "enabled": { "type": "boolean", "default": true },
+                    "defaultProfile": { "type": "string", "default": "default" },
+                    "agentProfiles": {
+                        "type": "object",
+                        "description": "Legacy compatibility map from agent id to profile id",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "profiles": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "coreTools": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "intentTools": {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                        "oneOf": [
+                                            {
+                                                "type": "array",
+                                                "items": { "type": "string" }
+                                            },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "inheritBase": { "type": "boolean", "default": true },
+                                                    "tools": {
+                                                        "type": "array",
+                                                        "items": { "type": "string" }
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                                "denyTools": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -181,7 +243,8 @@ pub async fn set(key: &str, value: &str) -> anyhow::Result<()> {
     let mut json = serde_json::to_value(&config)?;
 
     // Try to parse value as JSON, fall back to string
-    let parsed: Value = serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    let parsed: Value =
+        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
 
     set_json_path(&mut json, key, parsed.clone());
 
@@ -262,7 +325,7 @@ pub async fn providers() -> anyhow::Result<()> {
         let key_display = if has_key {
             let key = &provider.api_key;
             if key.len() > 8 {
-                format!("{}...{}", &key[..4], &key[key.len()-4..])
+                format!("{}...{}", &key[..4], &key[key.len() - 4..])
             } else {
                 "(set)".to_string()
             }
@@ -309,7 +372,10 @@ pub async fn reset(force: bool) -> anyhow::Result<()> {
 
     let config = Config::default();
     config.save(&paths.config_file())?;
-    println!("✓ Config reset to defaults: {}", paths.config_file().display());
+    println!(
+        "✓ Config reset to defaults: {}",
+        paths.config_file().display()
+    );
     Ok(())
 }
 

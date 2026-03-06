@@ -1,7 +1,6 @@
 # Article 12: blockcell Architecture Deep Dive — Why Rust for an AI Framework
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 12/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 12
 ---
 
 ## Opening: a counterintuitive choice
@@ -24,14 +23,14 @@ Not for “showing off”, but for solid engineering reasons. This article analy
                              ↕
 ┌─────────────────────────────────────────────────────────────┐
 │                        Message Routing                        │
-│  InboundMessage → AgentRuntime → OutboundMessage             │
+│  InboundMessage → AgentRouter/RuntimePool → OutboundMessage  │
 │  Channels: Telegram │ Slack │ Discord │ Feishu │ WhatsApp     │
 └─────────────────────────────────────────────────────────────┘
                              ↕
 ┌─────────────────────────────────────────────────────────────┐
 │                     Agent Core (TCB)                          │
-│  ContextBuilder │ IntentClassifier │ TaskManager              │
-│  AgentRuntime   │ EvolutionService │ CapabilityRegistry       │
+│  RuntimePool │ ContextBuilder │ IntentToolResolver           │
+│  AgentRuntime │ TaskManager │ EvolutionService │ Registry    │
 └─────────────────────────────────────────────────────────────┘
                              ↕
 ┌──────────────────────┐    ┌────────────────────────────────┐
@@ -43,7 +42,7 @@ Not for “showing off”, but for solid engineering reasons. This article analy
                              ↕
 ┌─────────────────────────────────────────────────────────────┐
 │                          Storage                              │
-│  SQLite (memory/sessions/audit) │ FS (skills/media/config)    │
+│  SQLite (memory) │ FS (sessions/audit/skills/media/tasks/config) │
 └─────────────────────────────────────────────────────────────┘
                              ↕
 ┌─────────────────────────────────────────────────────────────┐
@@ -51,6 +50,20 @@ Not for “showing off”, but for solid engineering reasons. This article analy
 │  OpenAI │ Anthropic │ Gemini │ Ollama │ DeepSeek │ Kimi        │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Current-version note: multi-agent runtime pool
+
+The current blockcell architecture is no longer “one `AgentRuntime` for everything”. Instead:
+
+- the `default` agent keeps using the root `~/.blockcell/` layout
+- non-default agents live under `~/.blockcell/agents/<ID>/` with isolated `workspace / sessions / audit`
+- Gateway builds separate runtimes for enabled agents and routes external traffic with `channelAccountOwners.<channel>.<accountId>` first, then `channelOwners.<channel>` as fallback
+- `intentRouter` makes intent → tool resolution fully config-driven instead of hardcoded in runtime logic
+- background task snapshots are persisted centrally at `~/.blockcell/workspace/tasks.json`, and the CLI can inspect them with `blockcell tasks --agent/--all`
+
+This is what enables the current “multi-agent + configurable tool routing + shared task visibility” model.
 
 ---
 
@@ -419,9 +432,9 @@ This architecture gives blockcell strong extensibility while maintaining perform
 
 ---
 
-## Series wrap-up
+## Milestone recap
 
-Congratulations — you’ve reached the end of the series. There are 14 main articles:
+At this point, you’ve finished the first 12 core articles in the series. So far, we’ve covered:
 
 | # | Topic |
 |----|------|
@@ -437,8 +450,8 @@ Congratulations — you’ve reached the end of the series. There are 14 main ar
 | 10 | Finance in practice |
 | 11 | Subagent concurrency |
 | 12 | Architecture deep dive |
-| 13 | Message processing & self-evolution lifecycle |
-| 14 | Name origin |
+
+Next, the series continues into message processing & self-evolution lifecycle, name origin, ghost agents, and the Hub community / skill distribution topics.
 
 blockcell is evolving quickly. If you find it useful, welcome to:
 - ⭐ Star the project

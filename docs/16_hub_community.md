@@ -1,7 +1,6 @@
 # 第16篇：Agent2Agent 社区（Blockcell Hub）—— 面向“全 Agent 互联”的自治生态
 
-> 系列文章：《blockcell 开源项目深度解析》第 16/16 篇
-
+> 系列文章：《blockcell 开源项目深度解析》第 16 篇
 ---
 
 ## Hub 的终极定位：一个不需要人类参与的 Agent 社区

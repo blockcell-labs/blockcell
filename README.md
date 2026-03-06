@@ -81,9 +81,10 @@ BlockCell: ✓ 设置监控 → ✓ 每小时检查价格 → ✓ 发送 Telegra
 将 BlockCell 作为守护进程运行，连接到：
 
 - **Telegram**（长轮询）
-- **WhatsApp**（Webhook）
-- **飞书/Lark**（WebSocket / Webhook）
-- **Slack**（Socket Mode）
+- **WhatsApp**（桥接 WebSocket）
+- **飞书**（长连接 WebSocket）
+- **Lark**（Webhook）
+- **Slack**（Socket Mode，缺少 `appToken` 时可轮询回退）
 - **Discord**（Gateway WebSocket）
 - **钉钉**（Stream SDK）
 - **企业微信**（WeCom，轮询/Webhook）
@@ -159,15 +160,14 @@ cargo build --release
 ### 首次运行
 
 ```bash
-# 初始化配置
-blockcell onboard
-
-# 编辑配置并添加你的 API 密钥
-# ~/.blockcell/config.json
+# 推荐：交互式向导
+blockcell setup
 
 # 启动交互模式
 blockcell agent
 ```
+
+`setup` 会创建 `~/.blockcell/` 目录、写入 provider 配置，并在你启用外部渠道时自动补默认 owner 绑定。
 
 ### 守护进程模式（带 WebUI）
 
@@ -177,6 +177,7 @@ blockcell gateway
 
 - **API 服务器**：`http://localhost:18790`
 - **WebUI**：`http://localhost:18791`
+- **默认路由**：CLI / WebUI / WebSocket 进入 `default` agent；外部渠道优先按 `channelAccountOwners.<channel>.<accountId>` 路由，未命中时回退到 `channelOwners.<channel>`
 
 ---
 
@@ -210,6 +211,31 @@ blockcell gateway
     "defaults": {
       "model": "anthropic/claude-sonnet-4-20250514"
     }
+  }
+}
+```
+
+如果要启用多 agent 与外部渠道，可以在此基础上再补充：
+
+```json
+{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true, "intentProfile": "ops" }
+    ]
+  },
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  },
+  "gateway": {
+    "apiToken": "YOUR_STABLE_API_TOKEN",
+    "webuiPass": "YOUR_WEBUI_PASSWORD"
   }
 }
 ```

@@ -65,14 +65,22 @@ impl Tool for OcrTool {
             return Err(Error::Tool("action must be 'recognize' or 'info'".into()));
         }
         if action == "recognize"
-            && params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                return Err(Error::Tool("'path' is required for recognize".into()));
-            }
+            && params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(Error::Tool("'path' is required for recognize".into()));
+        }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         match action {
             "recognize" => action_recognize(&ctx, &params).await,
@@ -112,7 +120,10 @@ async fn action_info() -> Result<Value> {
 
 async fn action_recognize(ctx: &ToolContext, params: &Value) -> Result<Value> {
     let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let backend = params.get("backend").and_then(|v| v.as_str()).unwrap_or("auto");
+    let backend = params
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
     let language = params.get("language").and_then(|v| v.as_str());
     let output_path = params.get("output_path").and_then(|v| v.as_str());
 
@@ -122,18 +133,27 @@ async fn action_recognize(ctx: &ToolContext, params: &Value) -> Result<Value> {
     }
 
     let (text, used_backend) = match backend {
-        "tesseract" => (ocr_tesseract(&resolved_path, language, params).await?, "tesseract"),
+        "tesseract" => (
+            ocr_tesseract(&resolved_path, language, params).await?,
+            "tesseract",
+        ),
         "vision" => (ocr_vision(&resolved_path, language).await?, "vision"),
         "api" => (ocr_api(ctx, &resolved_path).await?, "api"),
         "auto" => {
             if check_command("tesseract").await {
-                (ocr_tesseract(&resolved_path, language, params).await?, "tesseract")
+                (
+                    ocr_tesseract(&resolved_path, language, params).await?,
+                    "tesseract",
+                )
             } else if cfg!(target_os = "macos") {
                 match ocr_vision(&resolved_path, language).await {
                     Ok(t) => (t, "vision"),
                     Err(_) => {
                         if check_command("tesseract").await {
-                            (ocr_tesseract(&resolved_path, language, params).await?, "tesseract")
+                            (
+                                ocr_tesseract(&resolved_path, language, params).await?,
+                                "tesseract",
+                            )
                         } else {
                             (ocr_api(ctx, &resolved_path).await?, "api")
                         }
@@ -184,7 +204,9 @@ async fn ocr_tesseract(path: &str, language: Option<&str>, params: &Value) -> Re
     let psm = params.get("psm").and_then(|v| v.as_i64()).unwrap_or(3);
     cmd.arg("--psm").arg(psm.to_string());
 
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("tesseract failed: {}", e)))?;
 
     if !output.status.success() {
@@ -200,22 +222,31 @@ async fn ocr_tesseract(path: &str, language: Option<&str>, params: &Value) -> Re
 async fn ocr_vision(path: &str, language: Option<&str>) -> Result<String> {
     let lang_array = if let Some(lang) = language {
         let langs: Vec<&str> = lang.split('+').collect();
-        let mapped: Vec<String> = langs.iter().map(|l| {
-            match *l {
+        let mapped: Vec<String> = langs
+            .iter()
+            .map(|l| match *l {
                 "chi_sim" | "zh" => "zh-Hans".to_string(),
                 "chi_tra" => "zh-Hant".to_string(),
                 "eng" | "en" => "en-US".to_string(),
                 "jpn" | "ja" => "ja-JP".to_string(),
                 "kor" | "ko" => "ko-KR".to_string(),
                 other => other.to_string(),
-            }
-        }).collect();
-        format!("[{}]", mapped.iter().map(|l| format!("'{}'", l)).collect::<Vec<_>>().join(","))
+            })
+            .collect();
+        format!(
+            "[{}]",
+            mapped
+                .iter()
+                .map(|l| format!("'{}'", l))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     } else {
         "None".to_string()
     };
 
-    let script = format!(r#"
+    let script = format!(
+        r#"
 import Vision
 import Quartz
 from Foundation import NSURL
@@ -248,7 +279,10 @@ if results:
         candidates = obs.topCandidates_(1)
         if candidates:
             print(candidates[0].string())
-"#, path = path.replace('\'', "\\'"), lang_array = lang_array);
+"#,
+        path = path.replace('\'', "\\'"),
+        lang_array = lang_array
+    );
 
     let output = tokio::process::Command::new("python3")
         .arg("-c")
@@ -274,8 +308,8 @@ async fn ocr_api(ctx: &ToolContext, path: &str) -> Result<String> {
     let api_key = resolve_api_key(ctx)?;
 
     // Read and encode image
-    let bytes = std::fs::read(path)
-        .map_err(|e| Error::Tool(format!("Failed to read image: {}", e)))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Tool(format!("Failed to read image: {}", e)))?;
 
     let ext = std::path::Path::new(path)
         .extension()
@@ -323,10 +357,15 @@ async fn ocr_api(ctx: &ToolContext, path: &str) -> Result<String> {
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(Error::Tool(format!("OpenAI Vision API error {}: {}", status, text)));
+        return Err(Error::Tool(format!(
+            "OpenAI Vision API error {}: {}",
+            status, text
+        )));
     }
 
-    let data: Value = response.json().await
+    let data: Value = response
+        .json()
+        .await
         .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
     let text = data["choices"][0]["message"]["content"]
@@ -348,7 +387,10 @@ fn resolve_api_key(ctx: &ToolContext) -> Result<String> {
             return Ok(key);
         }
     }
-    Err(Error::Tool("OpenAI API key not found. Set config providers.openai.api_key or OPENAI_API_KEY env var.".into()))
+    Err(Error::Tool(
+        "OpenAI API key not found. Set config providers.openai.api_key or OPENAI_API_KEY env var."
+            .into(),
+    ))
 }
 
 async fn get_tesseract_languages() -> Result<Vec<String>> {
@@ -359,7 +401,8 @@ async fn get_tesseract_languages() -> Result<Vec<String>> {
         .map_err(|e| Error::Tool(format!("tesseract --list-langs failed: {}", e)))?;
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let langs: Vec<String> = text.lines()
+    let langs: Vec<String> = text
+        .lines()
         .skip(1) // Skip header line
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -404,9 +447,13 @@ mod tests {
     #[test]
     fn test_ocr_validate_recognize() {
         let tool = OcrTool;
-        assert!(tool.validate(&json!({"action": "recognize", "path": "/tmp/test.png"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "recognize", "path": "/tmp/test.png"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "recognize"})).is_err());
-        assert!(tool.validate(&json!({"action": "recognize", "path": ""})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "recognize", "path": ""}))
+            .is_err());
     }
 
     #[test]

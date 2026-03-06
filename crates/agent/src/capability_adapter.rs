@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use blockcell_core::{Result, ProviderKind};
 use blockcell_core::types::ChatMessage;
+use blockcell_core::{ProviderKind, Result};
 use blockcell_providers::Provider;
 use blockcell_skills::{CapabilityRegistry, CoreEvolution, LLMProvider};
 use blockcell_tools::{CapabilityRegistryOps, CoreEvolutionOps};
@@ -16,7 +16,9 @@ pub struct ProviderLLMBridge {
 
 impl ProviderLLMBridge {
     pub fn new(provider: Box<dyn Provider>) -> Self {
-        Self { provider: Arc::from(provider) }
+        Self {
+            provider: Arc::from(provider),
+        }
     }
 
     pub fn new_arc(provider: Arc<dyn Provider>) -> Self {
@@ -52,17 +54,20 @@ impl CapabilityRegistryOps for CapabilityRegistryAdapter {
     async fn list_all_json(&self) -> Value {
         let registry = self.inner.lock().await;
         let all = registry.list_all();
-        let caps: Vec<Value> = all.iter().map(|c| {
-            json!({
-                "id": c.id,
-                "name": c.name,
-                "description": c.description,
-                "type": format!("{:?}", c.capability_type),
-                "provider": format!("{:?}", c.provider_kind),
-                "status": format!("{:?}", c.status),
-                "version": c.version,
+        let caps: Vec<Value> = all
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "description": c.description,
+                    "type": format!("{:?}", c.capability_type),
+                    "provider": format!("{:?}", c.provider_kind),
+                    "status": format!("{:?}", c.status),
+                    "version": c.version,
+                })
             })
-        }).collect();
+            .collect();
         json!(caps)
     }
 
@@ -105,7 +110,11 @@ impl CapabilityRegistryOps for CapabilityRegistryAdapter {
 
     async fn list_available_ids(&self) -> Vec<String> {
         let registry = self.inner.lock().await;
-        registry.list_available().iter().map(|d| d.id.clone()).collect()
+        registry
+            .list_available()
+            .iter()
+            .map(|d| d.id.clone())
+            .collect()
     }
 }
 
@@ -137,7 +146,9 @@ impl CoreEvolutionOps for CoreEvolutionAdapter {
         };
 
         let core_evo = self.inner.lock().await;
-        let evolution_id = core_evo.request_capability(capability_id, description, provider_kind).await?;
+        let evolution_id = core_evo
+            .request_capability(capability_id, description, provider_kind)
+            .await?;
 
         Ok(json!({
             "status": "requested",
@@ -151,17 +162,20 @@ impl CoreEvolutionOps for CoreEvolutionAdapter {
     async fn list_records_json(&self) -> Result<Value> {
         let core_evo = self.inner.lock().await;
         let records = core_evo.list_records()?;
-        let items: Vec<Value> = records.iter().map(|r| {
-            json!({
-                "id": r.id,
-                "capability_id": r.capability_id,
-                "description": r.description,
-                "status": format!("{:?}", r.status),
-                "attempt": r.attempt,
-                "created_at": r.created_at,
-                "updated_at": r.updated_at,
+        let items: Vec<Value> = records
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "capability_id": r.capability_id,
+                    "description": r.description,
+                    "status": format!("{:?}", r.status),
+                    "attempt": r.attempt,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                })
             })
-        }).collect();
+            .collect();
         Ok(json!(items))
     }
 

@@ -94,15 +94,15 @@ pub async fn status() -> anyhow::Result<()> {
     println!("==============");
     println!();
     println!("Current version: {}", status.current_version);
-    
+
     if let Some(latest) = status.latest_version {
         println!("Latest version:  {}", latest);
     }
-    
+
     if status.update_available {
         println!("Update available: yes");
     }
-    
+
     if let Some(staging) = status.staging_path {
         println!("Staging path:    {}", staging.display());
     }

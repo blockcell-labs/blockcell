@@ -1,7 +1,6 @@
 # Article 09: Self-Evolution — How AI Automatically Writes Code to Upgrade Itself
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 9/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 9
 ---
 
 ## A bold idea

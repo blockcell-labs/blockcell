@@ -25,8 +25,6 @@ pub struct Artifact {
 
 impl Manifest {
     pub fn get_artifact(&self, os: &str, arch: &str) -> Option<&Artifact> {
-        self.artifacts
-            .iter()
-            .find(|a| a.os == os && a.arch == arch)
+        self.artifacts.iter().find(|a| a.os == os && a.arch == arch)
     }
 }

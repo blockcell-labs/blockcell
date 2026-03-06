@@ -70,6 +70,16 @@ In Blockcell's configuration file, modify the `dingtalk` section:
 - `robotCode`: Unique identifier for the bot (usually the same as appKey).
 - `allowFrom`: List of allowed user `staffId`s (string array). If left empty `[]`, anyone within the enterprise's visibility range can interact with the bot.
 
+> If you enable this external channel through `blockcell gateway`, you also need an owner binding in `config.json`, for example:
+>
+> ```json
+> { "channelOwners": { "dingtalk": "default" } }
+>
+> If you configure multiple accounts / bots for the same channel, you can additionally set `channelAccountOwners.dingtalk.<accountId> = "ops"` to route one specific account to a different agent.
+> ```
+>
+> Otherwise Gateway refuses to start because the enabled external channel has no owner.
+
 ## 8. Interaction Methods
 
 - **Private Chat**: Search for your bot name in DingTalk's search box, click to enter the conversation and send messages directly.

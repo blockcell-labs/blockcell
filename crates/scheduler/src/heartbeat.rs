@@ -1,5 +1,5 @@
-use chrono::Utc;
 use blockcell_core::{InboundMessage, Paths, Result};
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -31,7 +31,7 @@ impl HeartbeatService {
 
     fn is_heartbeat_empty(&self) -> bool {
         let path = self.paths.heartbeat_md();
-        
+
         if !path.exists() {
             return true;
         }
@@ -44,27 +44,27 @@ impl HeartbeatService {
         // Check if content is effectively empty
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             // Skip empty lines
             if trimmed.is_empty() {
                 continue;
             }
-            
+
             // Skip markdown headers
             if trimmed.starts_with('#') {
                 continue;
             }
-            
+
             // Skip HTML comments
             if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
                 continue;
             }
-            
+
             // Skip empty checkboxes
             if trimmed == "- [ ]" || trimmed == "- [x]" {
                 continue;
             }
-            
+
             // Found actual content
             return false;
         }
@@ -82,6 +82,7 @@ impl HeartbeatService {
 
         let msg = InboundMessage {
             channel: "heartbeat".to_string(),
+            account_id: None,
             sender_id: "heartbeat".to_string(),
             chat_id: "heartbeat".to_string(),
             content: HEARTBEAT_PROMPT.to_string(),
@@ -99,8 +100,11 @@ impl HeartbeatService {
     }
 
     pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
-        info!(interval_secs = self.interval.as_secs(), "HeartbeatService started");
-        
+        info!(
+            interval_secs = self.interval.as_secs(),
+            "HeartbeatService started"
+        );
+
         let mut interval = tokio::time::interval(self.interval);
         // 修复：设置 Skip 行为，避免服务暂停后积压的 tick 批量触发。
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

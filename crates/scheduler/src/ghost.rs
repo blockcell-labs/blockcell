@@ -135,8 +135,10 @@ impl GhostService {
     /// Run a single ghost routine cycle.
     async fn run_routine(&mut self) -> Result<()> {
         if !self.sync_tracker.can_sync(self.config.max_syncs_per_day) {
-            debug!("Ghost: daily sync limit reached ({}/{}), skipping",
-                self.sync_tracker.count, self.config.max_syncs_per_day);
+            debug!(
+                "Ghost: daily sync limit reached ({}/{}), skipping",
+                self.sync_tracker.count, self.config.max_syncs_per_day
+            );
             return Ok(());
         }
 
@@ -156,6 +158,7 @@ impl GhostService {
 
         let msg = InboundMessage {
             channel: "ghost".to_string(),
+            account_id: None,
             sender_id: "ghost".to_string(),
             chat_id: format!("ghost_{}", Utc::now().format("%Y%m%d_%H%M%S")),
             content,
@@ -216,10 +219,10 @@ impl GhostService {
                     // Hot-reload config
                     if let Ok(new_config) = Config::load_or_default(&config_paths) {
                         let new_ghost = GhostServiceConfig::from_config(&new_config);
-                        
+
                         // Check if relevant fields changed
                         let schedule_changed = new_ghost.schedule != self.config.schedule;
-                        let changed = new_ghost.enabled != self.config.enabled || 
+                        let changed = new_ghost.enabled != self.config.enabled ||
                                      schedule_changed ||
                                      new_ghost.model != self.config.model ||
                                      new_ghost.max_syncs_per_day != self.config.max_syncs_per_day ||
@@ -248,7 +251,7 @@ impl GhostService {
                                 // 避免旧的 last_run 去重逻辑阻止新 schedule 的首次执行。
                                 next_scheduled = schedule.upcoming(Utc).next();
                             }
-                            
+
                             if !self.config.enabled {
                                 info!("👻 GhostService disabled via config");
                             } else {

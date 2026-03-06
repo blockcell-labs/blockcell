@@ -6,9 +6,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::{Tool, ToolContext, ToolSchema};
-use super::session::{SessionManager, BrowserEngine, list_available_browsers};
+use super::session::{list_available_browsers, BrowserEngine, SessionManager};
 use super::snapshot::{assign_refs, parse_ax_tree, render_tree, snapshot_to_json};
+use crate::{Tool, ToolContext, ToolSchema};
 
 /// Global session manager (daemon model — persists across tool calls).
 static SESSION_MANAGER: once_cell::sync::Lazy<Arc<Mutex<Option<SessionManager>>>> =
@@ -172,17 +172,29 @@ impl Tool for BrowseTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some(concat!(
+            "- **`browse` action选择规则**: 打开网页用 `navigate`+url; 读取页面内容用 `get_content`; 查看页面结构/元素用 `snapshot`; **截图用 `screenshot`（无需指定output_path）**; 点击元素用 `click`+ref/selector; 填写表单用 `fill`; 按键用 `press_key`. **绝对禁止**调用 `browse` 时不带 `action` 参数——必须明确指定 action。\n",
+            "- **`browse screenshot` 路径规则**: 截图**始终**自动保存在 workspace/media/ 下，返回结果中的 `path` 字段即为可展示的路径，直接用该路径给用户展示即可。**不要**把 `output_path` 设为桌面或其他绝对路径——那样会导致 WebUI 无法显示截图。如果用户要求把截图存到某个特定位置（如桌面），工具会自动 copy 一份过去，你无需额外操作，直接用返回的 `path` 字段展示图片。"
+        ).to_string())
+    }
+
     fn validate(&self, _params: &Value) -> Result<()> {
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let action = params["action"].as_str().unwrap_or_else(|| {
-            if params.get("url").and_then(|v| v.as_str()).is_some() { "navigate" } else { "snapshot" }
+            if params.get("url").and_then(|v| v.as_str()).is_some() {
+                "navigate"
+            } else {
+                "snapshot"
+            }
         });
         let session_name = params["session"].as_str().unwrap_or("default");
         let headed = params["headed"].as_bool().unwrap_or(false);
-        let engine = params["browser"].as_str()
+        let engine = params["browser"]
+            .as_str()
             .map(BrowserEngine::from_str)
             .unwrap_or(BrowserEngine::Chrome);
 
@@ -201,14 +213,17 @@ impl Tool for BrowseTool {
                 }));
             }
             "session_close" => {
-                mgr.close_session(session_name).await.map_err(|e| {
-                    blockcell_core::Error::Tool(format!("session_close: {}", e))
-                })?;
+                mgr.close_session(session_name)
+                    .await
+                    .map_err(|e| blockcell_core::Error::Tool(format!("session_close: {}", e)))?;
                 return Ok(json!({"status": "closed", "session": session_name}));
             }
             "list_browsers" => {
                 let browsers = list_available_browsers();
-                let list: Vec<Value> = browsers.iter().map(|(e, p)| json!({"engine": e.name(), "path": p})).collect();
+                let list: Vec<Value> = browsers
+                    .iter()
+                    .map(|(e, p)| json!({"engine": e.name(), "path": p}))
+                    .collect();
                 return Ok(json!({"browsers": list, "count": list.len()}));
             }
             _ => {}
@@ -259,15 +274,12 @@ impl Tool for BrowseTool {
     }
 }
 
-use super::session::BrowserSession;
 use super::session::get_target_ws_url;
+use super::session::BrowserSession;
 
 // ─── Action implementations ───────────────────────────────────────────
 
-async fn action_navigate(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_navigate(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let url = params["url"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("navigate requires 'url'".into()))?;
@@ -287,10 +299,22 @@ async fn action_navigate(
             .map_err(|e| blockcell_core::Error::Tool(format!("cdp reconnect: {}", e)))?;
 
         session.cdp.enable_domain("Page").await.map_err(cdp_err)?;
-        session.cdp.enable_domain("Runtime").await.map_err(cdp_err)?;
+        session
+            .cdp
+            .enable_domain("Runtime")
+            .await
+            .map_err(cdp_err)?;
         session.cdp.enable_domain("DOM").await.map_err(cdp_err)?;
-        session.cdp.enable_domain("Network").await.map_err(cdp_err)?;
-        session.cdp.enable_domain("Accessibility").await.map_err(cdp_err)?;
+        session
+            .cdp
+            .enable_domain("Network")
+            .await
+            .map_err(cdp_err)?;
+        session
+            .cdp
+            .enable_domain("Accessibility")
+            .await
+            .map_err(cdp_err)?;
         let _ = session.cdp.enable_domain("Target").await;
 
         session.cdp.navigate(url).await.map_err(cdp_err)?;
@@ -326,25 +350,22 @@ async fn action_navigate(
     }))
 }
 
-async fn action_snapshot(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_snapshot(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let compact = params["compact"].as_bool().unwrap_or(true);
     take_snapshot(session, compact).await
 }
 
-async fn action_click(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_click(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     // Resolve element: by ref or by selector
     let (method, target) = resolve_element_target(params)?;
 
     match method {
         "ref" => {
             let ref_data = session.refs.get(&target).cloned().ok_or_else(|| {
-                blockcell_core::Error::Tool(format!("Ref '{}' not found. Take a snapshot first.", target))
+                blockcell_core::Error::Tool(format!(
+                    "Ref '{}' not found. Take a snapshot first.",
+                    target
+                ))
             })?;
             let backend_node_id = ref_data["backendNodeId"]
                 .as_i64()
@@ -365,10 +386,7 @@ async fn action_click(
     Ok(json!({"status": "clicked", "target": target}))
 }
 
-async fn action_fill(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_fill(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let text = params["text"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("fill requires 'text'".into()))?;
@@ -381,9 +399,9 @@ async fn action_fill(
             let ref_data = session.refs.get(&target).cloned().ok_or_else(|| {
                 blockcell_core::Error::Tool(format!("Ref '{}' not found", target))
             })?;
-            let backend_node_id = ref_data["backendNodeId"].as_i64().ok_or_else(|| {
-                blockcell_core::Error::Tool("Ref has no backendNodeId".into())
-            })?;
+            let backend_node_id = ref_data["backendNodeId"]
+                .as_i64()
+                .ok_or_else(|| blockcell_core::Error::Tool("Ref has no backendNodeId".into()))?;
             focus_by_backend_node(session, backend_node_id).await?;
         }
         "selector" => {
@@ -407,10 +425,7 @@ async fn action_fill(
     Ok(json!({"status": "filled", "target": target, "text": text}))
 }
 
-async fn action_type_text(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_type_text(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let text = params["text"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("type_text requires 'text'".into()))?;
@@ -438,10 +453,7 @@ async fn action_type_text(
     Ok(json!({"status": "typed", "text": text}))
 }
 
-async fn action_press_key(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_press_key(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let key = params["key"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("press_key requires 'key'".into()))?;
@@ -462,10 +474,7 @@ async fn action_press_key(
     Ok(json!({"status": "key_pressed", "key": key}))
 }
 
-async fn action_scroll(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_scroll(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let direction = params["direction"].as_str().unwrap_or("down");
     let amount = params["amount"].as_i64().unwrap_or(400);
 
@@ -494,10 +503,7 @@ async fn action_scroll(
     Ok(json!({"status": "scrolled", "direction": direction, "amount": amount}))
 }
 
-async fn action_wait(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_wait(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let timeout_ms = params["timeout"].as_u64().unwrap_or(5000);
 
     if let Some(selector) = params["wait_for"].as_str().or(params["selector"].as_str()) {
@@ -518,7 +524,11 @@ async fn action_wait(
                 }));
             }
             let result = session.cdp.evaluate_js(&js).await.map_err(cdp_err)?;
-            if let Some(true) = result.get("result").and_then(|r| r.get("value")).and_then(|v| v.as_bool()) {
+            if let Some(true) = result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_bool())
+            {
                 return Ok(json!({
                     "status": "found",
                     "selector": selector,
@@ -549,7 +559,9 @@ async fn action_screenshot(
 
     let user_path = params["output_path"].as_str().map(|p| {
         let pb = if p.starts_with("~/") {
-            dirs::home_dir().map(|h| h.join(&p[2..])).unwrap_or_else(|| std::path::PathBuf::from(p))
+            dirs::home_dir()
+                .map(|h| h.join(&p[2..]))
+                .unwrap_or_else(|| std::path::PathBuf::from(p))
         } else {
             std::path::PathBuf::from(p)
         };
@@ -606,7 +618,9 @@ async fn action_pdf(
 
     let user_path = params["output_path"].as_str().map(|p| {
         if p.starts_with("~/") {
-            dirs::home_dir().map(|h| h.join(&p[2..])).unwrap_or_else(|| std::path::PathBuf::from(p))
+            dirs::home_dir()
+                .map(|h| h.join(&p[2..]))
+                .unwrap_or_else(|| std::path::PathBuf::from(p))
         } else {
             std::path::PathBuf::from(p)
         }
@@ -647,13 +661,10 @@ async fn action_pdf(
     Ok(result)
 }
 
-async fn action_execute_js(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
-    let expression = params["text"]
-        .as_str()
-        .ok_or_else(|| blockcell_core::Error::Tool("execute_js requires 'text' (JS expression)".into()))?;
+async fn action_execute_js(session: &mut BrowserSession, params: &Value) -> Result<Value> {
+    let expression = params["text"].as_str().ok_or_else(|| {
+        blockcell_core::Error::Tool("execute_js requires 'text' (JS expression)".into())
+    })?;
 
     let result = session.cdp.evaluate_js(expression).await.map_err(cdp_err)?;
 
@@ -695,7 +706,11 @@ async fn action_get_content(session: &mut BrowserSession) -> Result<Value> {
         let markdown = crate::html_to_md::html_to_markdown(html);
 
         let truncated = if markdown.len() > 50000 {
-            format!("{}...\n[truncated, {} total chars]", crate::safe_truncate(&markdown, 50000), markdown.len())
+            format!(
+                "{}...\n[truncated, {} total chars]",
+                crate::safe_truncate(&markdown, 50000),
+                markdown.len()
+            )
         } else {
             markdown.clone()
         };
@@ -721,7 +736,11 @@ async fn action_get_content(session: &mut BrowserSession) -> Result<Value> {
         .unwrap_or("");
 
     let truncated = if text.len() > 50000 {
-        format!("{}...\n[truncated, {} total chars]", crate::safe_truncate(text, 50000), text.len())
+        format!(
+            "{}...\n[truncated, {} total chars]",
+            crate::safe_truncate(text, 50000),
+            text.len()
+        )
     } else {
         text.to_string()
     };
@@ -754,21 +773,22 @@ async fn action_cookies_get(session: &mut BrowserSession) -> Result<Value> {
     Ok(json!({"cookies": result.get("cookies").cloned().unwrap_or(Value::Null)}))
 }
 
-async fn action_cookies_set(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_cookies_set(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let name = params["cookie_name"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("cookies_set requires 'cookie_name'".into()))?;
     let value = params["cookie_value"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("cookies_set requires 'cookie_value'".into()))?;
-    let domain = params["cookie_domain"]
-        .as_str()
-        .ok_or_else(|| blockcell_core::Error::Tool("cookies_set requires 'cookie_domain'".into()))?;
+    let domain = params["cookie_domain"].as_str().ok_or_else(|| {
+        blockcell_core::Error::Tool("cookies_set requires 'cookie_domain'".into())
+    })?;
 
-    session.cdp.set_cookie(name, value, domain).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .set_cookie(name, value, domain)
+        .await
+        .map_err(cdp_err)?;
     Ok(json!({"status": "cookie_set", "name": name}))
 }
 
@@ -777,29 +797,28 @@ async fn action_cookies_clear(session: &mut BrowserSession) -> Result<Value> {
     Ok(json!({"status": "cookies_cleared"}))
 }
 
-async fn action_set_viewport(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_set_viewport(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let width = params["width"].as_i64().unwrap_or(1280) as i32;
     let height = params["height"].as_i64().unwrap_or(720) as i32;
-    session.cdp.set_viewport(width, height, 1.0).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .set_viewport(width, height, 1.0)
+        .await
+        .map_err(cdp_err)?;
     Ok(json!({"status": "viewport_set", "width": width, "height": height}))
 }
 
-async fn action_set_headers(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_set_headers(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let headers = params["headers"].clone();
-    session.cdp.set_extra_headers(headers.clone()).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .set_extra_headers(headers.clone())
+        .await
+        .map_err(cdp_err)?;
     Ok(json!({"status": "headers_set", "headers": headers}))
 }
 
-async fn action_history(
-    session: &mut BrowserSession,
-    direction: &str,
-) -> Result<Value> {
+async fn action_history(session: &mut BrowserSession, direction: &str) -> Result<Value> {
     let js = if direction == "back" {
         "history.back()"
     } else {
@@ -840,10 +859,7 @@ async fn action_tab_list(session: &mut BrowserSession) -> Result<Value> {
     Ok(json!({"tabs": pages, "count": pages.len()}))
 }
 
-async fn action_tab_new(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_tab_new(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let url = params["url"].as_str().unwrap_or("about:blank");
     let target_id = session.cdp.create_target(url).await.map_err(cdp_err)?;
     // Brief wait for tab to load
@@ -851,10 +867,7 @@ async fn action_tab_new(
     Ok(json!({"status": "tab_created", "target_id": target_id, "url": url}))
 }
 
-async fn action_tab_close(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_tab_close(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let target_id = if let Some(id) = params["tab_id"].as_str() {
         id.to_string()
     } else if let Some(index) = params["tab_index"].as_u64() {
@@ -867,24 +880,31 @@ async fn action_tab_close(
         let idx = index as usize;
         if idx >= pages.len() {
             return Err(blockcell_core::Error::Tool(format!(
-                "Tab index {} out of range (have {} tabs)", idx, pages.len()
+                "Tab index {} out of range (have {} tabs)",
+                idx,
+                pages.len()
             )));
         }
-        pages[idx].get("targetId").and_then(|v| v.as_str())
+        pages[idx]
+            .get("targetId")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| blockcell_core::Error::Tool("No targetId for tab".into()))?
             .to_string()
     } else {
-        return Err(blockcell_core::Error::Tool("tab_close requires 'tab_id' or 'tab_index'".into()));
+        return Err(blockcell_core::Error::Tool(
+            "tab_close requires 'tab_id' or 'tab_index'".into(),
+        ));
     };
 
-    session.cdp.close_target(&target_id).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .close_target(&target_id)
+        .await
+        .map_err(cdp_err)?;
     Ok(json!({"status": "tab_closed", "target_id": target_id}))
 }
 
-async fn action_tab_switch(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_tab_switch(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let target_id = if let Some(id) = params["tab_id"].as_str() {
         id.to_string()
     } else if let Some(index) = params["tab_index"].as_u64() {
@@ -896,26 +916,33 @@ async fn action_tab_switch(
         let idx = index as usize;
         if idx >= pages.len() {
             return Err(blockcell_core::Error::Tool(format!(
-                "Tab index {} out of range (have {} tabs)", idx, pages.len()
+                "Tab index {} out of range (have {} tabs)",
+                idx,
+                pages.len()
             )));
         }
-        pages[idx].get("targetId").and_then(|v| v.as_str())
+        pages[idx]
+            .get("targetId")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| blockcell_core::Error::Tool("No targetId for tab".into()))?
             .to_string()
     } else {
-        return Err(blockcell_core::Error::Tool("tab_switch requires 'tab_id' or 'tab_index'".into()));
+        return Err(blockcell_core::Error::Tool(
+            "tab_switch requires 'tab_id' or 'tab_index'".into(),
+        ));
     };
 
-    session.cdp.activate_target(&target_id).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .activate_target(&target_id)
+        .await
+        .map_err(cdp_err)?;
     Ok(json!({"status": "tab_switched", "target_id": target_id}))
 }
 
 // ─── File upload ──────────────────────────────────────────────────────
 
-async fn action_upload_file(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_upload_file(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let files: Vec<String> = params["files"]
         .as_array()
         .ok_or_else(|| blockcell_core::Error::Tool("upload_file requires 'files' array".into()))?
@@ -924,13 +951,18 @@ async fn action_upload_file(
         .collect();
 
     if files.is_empty() {
-        return Err(blockcell_core::Error::Tool("upload_file: 'files' array is empty".into()));
+        return Err(blockcell_core::Error::Tool(
+            "upload_file: 'files' array is empty".into(),
+        ));
     }
 
     // Verify files exist
     for f in &files {
         if !std::path::Path::new(f).exists() {
-            return Err(blockcell_core::Error::Tool(format!("File not found: {}", f)));
+            return Err(blockcell_core::Error::Tool(format!(
+                "File not found: {}",
+                f
+            )));
         }
     }
 
@@ -941,24 +973,45 @@ async fn action_upload_file(
             let ref_data = session.refs.get(&target).cloned().ok_or_else(|| {
                 blockcell_core::Error::Tool(format!("Ref '{}' not found", target))
             })?;
-            let backend_node_id = ref_data["backendNodeId"].as_i64().ok_or_else(|| {
-                blockcell_core::Error::Tool("Ref has no backendNodeId".into())
-            })?;
-            session.cdp.set_file_input_files(files.clone(), backend_node_id)
-                .await.map_err(cdp_err)?;
+            let backend_node_id = ref_data["backendNodeId"]
+                .as_i64()
+                .ok_or_else(|| blockcell_core::Error::Tool("Ref has no backendNodeId".into()))?;
+            session
+                .cdp
+                .set_file_input_files(files.clone(), backend_node_id)
+                .await
+                .map_err(cdp_err)?;
         }
         "selector" => {
             // Find the file input element by selector, resolve to backendNodeId
             let doc = session.cdp.get_document().await.map_err(cdp_err)?;
-            let root_id = doc.get("root").and_then(|r| r.get("nodeId")).and_then(|v| v.as_i64()).unwrap_or(1);
-            let node_ids = session.cdp.query_selector_all(root_id, &target).await.map_err(cdp_err)?;
+            let root_id = doc
+                .get("root")
+                .and_then(|r| r.get("nodeId"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
+            let node_ids = session
+                .cdp
+                .query_selector_all(root_id, &target)
+                .await
+                .map_err(cdp_err)?;
             if node_ids.is_empty() {
-                return Err(blockcell_core::Error::Tool(format!("File input not found: {}", target)));
+                return Err(blockcell_core::Error::Tool(format!(
+                    "File input not found: {}",
+                    target
+                )));
             }
             // Resolve nodeId to objectId, then use setFileInputFiles
-            let object_id = session.cdp.resolve_node(node_ids[0]).await.map_err(cdp_err)?;
-            session.cdp.set_file_input_files_by_object(files.clone(), &object_id)
-                .await.map_err(cdp_err)?;
+            let object_id = session
+                .cdp
+                .resolve_node(node_ids[0])
+                .await
+                .map_err(cdp_err)?;
+            session
+                .cdp
+                .set_file_input_files_by_object(files.clone(), &object_id)
+                .await
+                .map_err(cdp_err)?;
         }
         _ => unreachable!(),
     }
@@ -973,14 +1026,15 @@ async fn action_upload_file(
 
 // ─── Dialog handling ──────────────────────────────────────────────────
 
-async fn action_dialog_handle(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_dialog_handle(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let accept = params["accept"].as_bool().unwrap_or(true);
     let prompt_text = params["prompt_text"].as_str();
 
-    session.cdp.handle_dialog(accept, prompt_text).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .handle_dialog(accept, prompt_text)
+        .await
+        .map_err(cdp_err)?;
 
     Ok(json!({
         "status": if accept { "dialog_accepted" } else { "dialog_dismissed" },
@@ -991,10 +1045,7 @@ async fn action_dialog_handle(
 
 // ─── Network interception ─────────────────────────────────────────────
 
-async fn action_network_intercept(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_network_intercept(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let url_pattern = params["url_pattern"].as_str().unwrap_or("*");
 
     let patterns = vec![json!({
@@ -1011,42 +1062,48 @@ async fn action_network_intercept(
     }))
 }
 
-async fn action_network_continue(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
-    let request_id = params["request_id"]
-        .as_str()
-        .ok_or_else(|| blockcell_core::Error::Tool("network_continue requires 'request_id'".into()))?;
+async fn action_network_continue(session: &mut BrowserSession, params: &Value) -> Result<Value> {
+    let request_id = params["request_id"].as_str().ok_or_else(|| {
+        blockcell_core::Error::Tool("network_continue requires 'request_id'".into())
+    })?;
 
     // Check if this is a fulfill (has response_code) or a simple continue
     if let Some(response_code) = params["response_code"].as_i64() {
         let headers = params["headers"].as_array().map(|arr| arr.to_vec());
         let body = params["body"].as_str();
-        session.cdp.fetch_fulfill(request_id, response_code as i32, headers, body)
-            .await.map_err(cdp_err)?;
-        Ok(json!({"status": "request_fulfilled", "request_id": request_id, "response_code": response_code}))
+        session
+            .cdp
+            .fetch_fulfill(request_id, response_code as i32, headers, body)
+            .await
+            .map_err(cdp_err)?;
+        Ok(
+            json!({"status": "request_fulfilled", "request_id": request_id, "response_code": response_code}),
+        )
     } else {
         let url = params["url"].as_str();
         let method = params["method"].as_str();
         let headers = params["headers"].as_array().map(|arr| arr.to_vec());
         let post_data = params["body"].as_str();
-        session.cdp.fetch_continue(request_id, url, method, headers, post_data)
-            .await.map_err(cdp_err)?;
+        session
+            .cdp
+            .fetch_continue(request_id, url, method, headers, post_data)
+            .await
+            .map_err(cdp_err)?;
         Ok(json!({"status": "request_continued", "request_id": request_id}))
     }
 }
 
-async fn action_network_block(
-    session: &mut BrowserSession,
-    params: &Value,
-) -> Result<Value> {
+async fn action_network_block(session: &mut BrowserSession, params: &Value) -> Result<Value> {
     let request_id = params["request_id"]
         .as_str()
         .ok_or_else(|| blockcell_core::Error::Tool("network_block requires 'request_id'".into()))?;
 
     let reason = params["reason"].as_str().unwrap_or("BlockedByClient");
-    session.cdp.fetch_fail(request_id, reason).await.map_err(cdp_err)?;
+    session
+        .cdp
+        .fetch_fail(request_id, reason)
+        .await
+        .map_err(cdp_err)?;
 
     Ok(json!({"status": "request_blocked", "request_id": request_id, "reason": reason}))
 }
@@ -1054,10 +1111,7 @@ async fn action_network_block(
 // ─── Helper functions ─────────────────────────────────────────────────
 
 /// Take an accessibility snapshot, assign refs, return structured result.
-async fn take_snapshot(
-    session: &mut BrowserSession,
-    compact: bool,
-) -> Result<Value> {
+async fn take_snapshot(session: &mut BrowserSession, compact: bool) -> Result<Value> {
     let ax_tree = session
         .cdp
         .get_accessibility_tree()
@@ -1081,7 +1135,9 @@ async fn take_snapshot(
 }
 
 /// Resolve element target from params: either "ref" or "selector".
-fn resolve_element_target(params: &Value) -> std::result::Result<(&'static str, String), blockcell_core::Error> {
+fn resolve_element_target(
+    params: &Value,
+) -> std::result::Result<(&'static str, String), blockcell_core::Error> {
     if let Some(r) = params["ref"].as_str() {
         // Strip leading '@' or 'e' prefix normalization
         let ref_id = r.trim_start_matches('@');
@@ -1096,17 +1152,11 @@ fn resolve_element_target(params: &Value) -> std::result::Result<(&'static str, 
 }
 
 /// Click an element by its backendNodeId.
-async fn click_by_backend_node(
-    session: &mut BrowserSession,
-    backend_node_id: i64,
-) -> Result<()> {
+async fn click_by_backend_node(session: &mut BrowserSession, backend_node_id: i64) -> Result<()> {
     // Resolve to a remote object
     let result = session
         .cdp
-        .send_command(
-            "DOM.resolveNode",
-            json!({"backendNodeId": backend_node_id}),
-        )
+        .send_command("DOM.resolveNode", json!({"backendNodeId": backend_node_id}))
         .await
         .map_err(cdp_err)?;
 
@@ -1119,10 +1169,7 @@ async fn click_by_backend_node(
     // Scroll into view and get coordinates
     let box_result = session
         .cdp
-        .send_command(
-            "DOM.getBoxModel",
-            json!({"backendNodeId": backend_node_id}),
-        )
+        .send_command("DOM.getBoxModel", json!({"backendNodeId": backend_node_id}))
         .await;
 
     let (x, y) = if let Ok(bm) = box_result {
@@ -1156,10 +1203,7 @@ async fn click_by_backend_node(
 }
 
 /// Click an element by CSS selector.
-async fn click_by_selector(
-    session: &mut BrowserSession,
-    selector: &str,
-) -> Result<()> {
+async fn click_by_selector(session: &mut BrowserSession, selector: &str) -> Result<()> {
     let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
     let js = format!(
         concat!(
@@ -1188,10 +1232,7 @@ async fn click_by_selector(
 }
 
 /// Focus an element by backendNodeId.
-async fn focus_by_backend_node(
-    session: &mut BrowserSession,
-    backend_node_id: i64,
-) -> Result<()> {
+async fn focus_by_backend_node(session: &mut BrowserSession, backend_node_id: i64) -> Result<()> {
     session
         .cdp
         .send_command("DOM.focus", json!({"backendNodeId": backend_node_id}))
@@ -1201,10 +1242,7 @@ async fn focus_by_backend_node(
 }
 
 /// Focus an element by CSS selector.
-async fn focus_by_selector(
-    session: &mut BrowserSession,
-    selector: &str,
-) -> Result<()> {
+async fn focus_by_selector(session: &mut BrowserSession, selector: &str) -> Result<()> {
     let js = format!(
         "document.querySelector('{}')?.focus()",
         selector.replace('\'', "\\'")
@@ -1215,7 +1253,11 @@ async fn focus_by_selector(
 
 /// Extract center coordinates from a box model response.
 fn extract_center_from_box_model(bm: &Value) -> (f64, f64) {
-    if let Some(content) = bm.get("model").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+    if let Some(content) = bm
+        .get("model")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    {
         if content.len() >= 8 {
             let x1 = content[0].as_f64().unwrap_or(0.0);
             let y1 = content[1].as_f64().unwrap_or(0.0);
@@ -1264,7 +1306,11 @@ fn parse_key_spec(key: &str) -> (String, String, i32) {
         _ => {
             if main_key.len() == 1 {
                 // Single character
-                return (main_key.clone(), format!("Key{}", main_key.to_uppercase()), modifiers);
+                return (
+                    main_key.clone(),
+                    format!("Key{}", main_key.to_uppercase()),
+                    modifiers,
+                );
             }
             &main_key
         }
@@ -1392,7 +1438,9 @@ mod tests {
         assert!(tool.validate(&json!({"action": "tab_list"})).is_ok());
         assert!(tool.validate(&json!({"action": "upload_file"})).is_ok());
         assert!(tool.validate(&json!({"action": "dialog_handle"})).is_ok());
-        assert!(tool.validate(&json!({"action": "network_intercept"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "network_intercept"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "list_browsers"})).is_ok());
     }
 

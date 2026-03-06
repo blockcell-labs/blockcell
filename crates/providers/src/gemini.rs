@@ -29,7 +29,16 @@ impl GeminiProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> Self {
-        Self::new_with_proxy(api_key, api_base, model, max_tokens, temperature, None, None, &[])
+        Self::new_with_proxy(
+            api_key,
+            api_base,
+            model,
+            max_tokens,
+            temperature,
+            None,
+            None,
+            &[],
+        )
     }
 
     pub fn new_with_proxy(
@@ -89,7 +98,8 @@ impl GeminiProvider {
                     if let Some(arr) = msg.content.as_array() {
                         let mut parts: Vec<Value> = Vec::new();
                         for block in arr {
-                            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let block_type =
+                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             match block_type {
                                 "text" => {
                                     if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
@@ -98,14 +108,17 @@ impl GeminiProvider {
                                 }
                                 "image_url" => {
                                     // Convert data:mime;base64,xxx to Gemini inlineData format
-                                    if let Some(url) = block.get("image_url")
+                                    if let Some(url) = block
+                                        .get("image_url")
                                         .and_then(|v| v.get("url"))
                                         .and_then(|v| v.as_str())
                                     {
                                         if let Some(rest) = url.strip_prefix("data:") {
                                             if let Some(semi) = rest.find(';') {
                                                 let mime = &rest[..semi];
-                                                if let Some(data) = rest[semi..].strip_prefix(";base64,") {
+                                                if let Some(data) =
+                                                    rest[semi..].strip_prefix(";base64,")
+                                                {
                                                     parts.push(serde_json::json!({
                                                         "inlineData": {
                                                             "mimeType": mime,
@@ -193,7 +206,10 @@ impl GeminiProvider {
                         if last.get("role").and_then(|v| v.as_str()) == Some("user") {
                             if let Some(parts) = last.get_mut("parts") {
                                 if let Some(arr) = parts.as_array_mut() {
-                                    if arr.first().and_then(|v| v.get("functionResponse")).is_some()
+                                    if arr
+                                        .first()
+                                        .and_then(|v| v.get("functionResponse"))
+                                        .is_some()
                                     {
                                         arr.push(func_response);
                                         continue;
@@ -265,10 +281,13 @@ impl GeminiProvider {
                     .get("description")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let parameters = func.get("parameters").cloned().unwrap_or(serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }));
+                let parameters = func
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }));
 
                 Some(serde_json::json!({
                     "name": name,
@@ -380,7 +399,10 @@ impl Provider for GeminiProvider {
                     tool_calls.push(ToolCallRequest {
                         id: format!("gemini_call_{}", i),
                         name: fc.name.clone(),
-                        arguments: fc.args.clone().unwrap_or(Value::Object(serde_json::Map::new())),
+                        arguments: fc
+                            .args
+                            .clone()
+                            .unwrap_or(Value::Object(serde_json::Map::new())),
                         thought_signature: part.thought_signature.clone(),
                     });
                 }
@@ -594,7 +616,10 @@ mod tests {
         assert_eq!(contents[1]["role"], "model");
         let parts = contents[1]["parts"].as_array().unwrap();
         assert!(parts[0].get("functionCall").is_some());
-        assert_eq!(parts[0].get("thoughtSignature").and_then(|v| v.as_str()), Some("sig_abc"));
+        assert_eq!(
+            parts[0].get("thoughtSignature").and_then(|v| v.as_str()),
+            Some("sig_abc")
+        );
     }
 
     #[test]
@@ -609,11 +634,7 @@ mod tests {
 
         let tool_result = ChatMessage::tool_result("read_file", "file contents");
 
-        let messages = vec![
-            ChatMessage::user("read /tmp/test"),
-            assistant,
-            tool_result,
-        ];
+        let messages = vec![ChatMessage::user("read /tmp/test"), assistant, tool_result];
 
         let (_system, contents) = GeminiProvider::convert_messages(&messages);
         assert_eq!(contents.len(), 3);

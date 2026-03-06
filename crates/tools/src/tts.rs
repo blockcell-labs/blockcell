@@ -67,17 +67,27 @@ impl Tool for TtsTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if !["speak", "list_voices", "info"].contains(&action) {
-            return Err(Error::Tool("action must be 'speak', 'list_voices', or 'info'".into()));
+            return Err(Error::Tool(
+                "action must be 'speak', 'list_voices', or 'info'".into(),
+            ));
         }
         if action == "speak"
-            && params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                return Err(Error::Tool("'text' is required for speak".into()));
-            }
+            && params
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(Error::Tool("'text' is required for speak".into()));
+        }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         match action {
             "speak" => action_speak(&ctx, &params).await,
@@ -107,7 +117,10 @@ async fn action_info() -> Result<Value> {
 }
 
 async fn action_list_voices(params: &Value) -> Result<Value> {
-    let language = params.get("language").and_then(|v| v.as_str()).unwrap_or("");
+    let language = params
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let mut voices = Vec::new();
 
@@ -124,13 +137,19 @@ async fn action_list_voices(params: &Value) -> Result<Value> {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
                 let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
-                if parts.is_empty() { continue; }
+                if parts.is_empty() {
+                    continue;
+                }
                 let name = parts[0].trim();
                 let lang_part = if parts.len() > 1 {
                     parts[1].trim().split('#').next().unwrap_or("").trim()
-                } else { "" };
+                } else {
+                    ""
+                };
 
-                if !language.is_empty() && !lang_part.to_lowercase().contains(&language.to_lowercase()) {
+                if !language.is_empty()
+                    && !lang_part.to_lowercase().contains(&language.to_lowercase())
+                {
                     continue;
                 }
                 voices.push(json!({
@@ -153,7 +172,9 @@ async fn action_list_voices(params: &Value) -> Result<Value> {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
-                if !line.starts_with("Name:") { continue; }
+                if !line.starts_with("Name:") {
+                    continue;
+                }
                 let name = line.trim_start_matches("Name:").trim();
                 let lang = name.split('-').take(2).collect::<Vec<_>>().join("-");
 
@@ -187,7 +208,10 @@ async fn action_list_voices(params: &Value) -> Result<Value> {
 
 async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
     let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    let backend = params.get("backend").and_then(|v| v.as_str()).unwrap_or("auto");
+    let backend = params
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
     let voice = params.get("voice").and_then(|v| v.as_str());
     let speed = params.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0);
     let format = params.get("format").and_then(|v| v.as_str());
@@ -220,7 +244,9 @@ async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
             ];
             let mut success: Option<String> = None;
             for (name, available) in &backends {
-                if !available { continue; }
+                if !available {
+                    continue;
+                }
                 let is_first_try = last_err.is_none();
                 // On first try, use the user-specified voice; on fallback, use default (None)
                 let try_voice = if is_first_try { voice } else { None };
@@ -232,7 +258,10 @@ async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
                     _ => unreachable!(),
                 };
                 match res {
-                    Ok(backend) => { success = Some(backend); break; }
+                    Ok(backend) => {
+                        success = Some(backend);
+                        break;
+                    }
                     Err(e) => {
                         info!(backend = *name, err = %format!("{}", e), "TTS backend failed, trying next");
                         last_err = Some(e);
@@ -241,7 +270,9 @@ async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
             }
             match success {
                 Some(backend) => Ok(backend),
-                None => Err(last_err.unwrap_or_else(|| Error::Tool("No TTS backend available".into()))),
+                None => {
+                    Err(last_err.unwrap_or_else(|| Error::Tool("No TTS backend available".into())))
+                }
             }
         }
         _ => Err(Error::Tool(format!("Unknown backend: {}", backend))),
@@ -249,7 +280,9 @@ async fn action_speak(ctx: &ToolContext, params: &Value) -> Result<Value> {
 
     match result {
         Ok(used_backend) => {
-            let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+            let file_size = std::fs::metadata(&output_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             info!(
                 backend = %used_backend,
                 output = %output_path.display(),
@@ -286,7 +319,10 @@ async fn speak_say(
     cmd.arg("-r").arg(rate.to_string());
 
     // say outputs AIFF natively; convert to desired format
-    let ext = output_path.extension().and_then(|e| e.to_str()).unwrap_or("aiff");
+    let ext = output_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("aiff");
     if ext == "aiff" || ext == "aif" {
         cmd.arg("-o").arg(output_path);
     } else {
@@ -295,7 +331,9 @@ async fn speak_say(
         cmd.arg("-o").arg(&temp_aiff);
         cmd.arg(text);
 
-        let output = cmd.output().await
+        let output = cmd
+            .output()
+            .await
             .map_err(|e| Error::Tool(format!("say failed: {}", e)))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -320,7 +358,9 @@ async fn speak_say(
     }
 
     cmd.arg(text);
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("say failed: {}", e)))?;
 
     if !output.status.success() {
@@ -354,11 +394,15 @@ async fn speak_piper(
 
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(text.as_bytes()).await
+        stdin
+            .write_all(text.as_bytes())
+            .await
             .map_err(|e| Error::Tool(format!("Failed to write to piper stdin: {}", e)))?;
     }
 
-    let output = child.wait_with_output().await
+    let output = child
+        .wait_with_output()
+        .await
         .map_err(|e| Error::Tool(format!("piper failed: {}", e)))?;
 
     if !output.status.success() {
@@ -398,7 +442,9 @@ async fn speak_edge(
     cmd.arg("--text").arg(text);
     cmd.arg("--write-media").arg(output_path);
 
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("edge-tts failed: {}", e)))?;
 
     if !output.status.success() {
@@ -441,10 +487,15 @@ async fn speak_api(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(Error::Tool(format!("OpenAI TTS API error {}: {}", status, text)));
+        return Err(Error::Tool(format!(
+            "OpenAI TTS API error {}: {}",
+            status, text
+        )));
     }
 
-    let bytes = response.bytes().await
+    let bytes = response
+        .bytes()
+        .await
         .map_err(|e| Error::Tool(format!("Failed to read TTS response: {}", e)))?;
 
     if let Some(parent) = output_path.parent() {
@@ -504,9 +555,13 @@ mod tests {
     #[test]
     fn test_tts_validate_speak() {
         let tool = TtsTool;
-        assert!(tool.validate(&json!({"action": "speak", "text": "hello"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "speak", "text": "hello"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "speak"})).is_err());
-        assert!(tool.validate(&json!({"action": "speak", "text": ""})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "speak", "text": ""}))
+            .is_err());
     }
 
     #[test]

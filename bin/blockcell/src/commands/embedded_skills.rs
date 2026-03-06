@@ -47,4 +47,3 @@ pub fn extract_to_workspace(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
 
     Ok(extracted_skills)
 }
-

@@ -107,7 +107,10 @@ impl Tool for HttpRequestTool {
         if let Some(method) = params.get("method").and_then(|v| v.as_str()) {
             let valid = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
             if !valid.contains(&method) {
-                return Err(Error::Validation(format!("Invalid HTTP method: {}", method)));
+                return Err(Error::Validation(format!(
+                    "Invalid HTTP method: {}",
+                    method
+                )));
             }
         }
 
@@ -116,7 +119,10 @@ impl Tool for HttpRequestTool {
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let url = params["url"].as_str().unwrap();
-        let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        let method = params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
         let timeout_secs = params
             .get("timeout_seconds")
             .and_then(|v| v.as_u64())
@@ -173,30 +179,55 @@ impl Tool for HttpRequestTool {
         if let Some(auth_type) = params.get("auth_type").and_then(|v| v.as_str()) {
             match auth_type {
                 "bearer" => {
-                    let token = params.get("auth_token").and_then(|v| v.as_str())
-                        .ok_or_else(|| Error::Validation("bearer auth requires 'auth_token'".to_string()))?;
+                    let token = params
+                        .get("auth_token")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::Validation("bearer auth requires 'auth_token'".to_string())
+                        })?;
                     request = request.bearer_auth(token);
                 }
                 "basic" => {
-                    let username = params.get("auth_username").and_then(|v| v.as_str())
-                        .ok_or_else(|| Error::Validation("basic auth requires 'auth_username'".to_string()))?;
-                    let password = params.get("auth_password").and_then(|v| v.as_str()).unwrap_or("");
+                    let username = params
+                        .get("auth_username")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::Validation("basic auth requires 'auth_username'".to_string())
+                        })?;
+                    let password = params
+                        .get("auth_password")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     request = request.basic_auth(username, Some(password));
                 }
                 "api_key" => {
-                    let key_name = params.get("auth_key_name").and_then(|v| v.as_str())
-                        .ok_or_else(|| Error::Validation("api_key auth requires 'auth_key_name'".to_string()))?;
-                    let key_value = params.get("auth_key_value").and_then(|v| v.as_str())
-                        .ok_or_else(|| Error::Validation("api_key auth requires 'auth_key_value'".to_string()))?;
+                    let key_name = params
+                        .get("auth_key_name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::Validation("api_key auth requires 'auth_key_name'".to_string())
+                        })?;
+                    let key_value = params
+                        .get("auth_key_value")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            Error::Validation("api_key auth requires 'auth_key_value'".to_string())
+                        })?;
                     request = request.header(key_name, key_value);
                 }
-                _ => return Err(Error::Validation(format!("Unknown auth_type: {}", auth_type))),
+                _ => {
+                    return Err(Error::Validation(format!(
+                        "Unknown auth_type: {}",
+                        auth_type
+                    )))
+                }
             }
         }
 
         // Query parameters
         if let Some(query) = params.get("query_params").and_then(|v| v.as_object()) {
-            let pairs: Vec<(String, String)> = query.iter()
+            let pairs: Vec<(String, String)> = query
+                .iter()
                 .map(|(k, v)| {
                     let val = match v {
                         Value::String(s) => s.clone(),
@@ -216,7 +247,8 @@ impl Tool for HttpRequestTool {
         } else if let Some(body_raw) = params.get("body_raw").and_then(|v| v.as_str()) {
             request = request.body(body_raw.to_string());
         } else if let Some(form) = params.get("form").and_then(|v| v.as_object()) {
-            let form_data: Vec<(String, String)> = form.iter()
+            let form_data: Vec<(String, String)> = form
+                .iter()
                 .map(|(k, v)| {
                     let val = match v {
                         Value::String(s) => s.clone(),
@@ -229,22 +261,23 @@ impl Tool for HttpRequestTool {
         }
 
         // Send request
-        let response = request
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    Error::Timeout(format!("Request timed out after {} seconds", timeout_secs))
-                } else if e.is_connect() {
-                    Error::Tool(format!("Connection failed: {}", e))
-                } else {
-                    Error::Tool(format!("Request failed: {}", e))
-                }
-            })?;
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                Error::Timeout(format!("Request timed out after {} seconds", timeout_secs))
+            } else if e.is_connect() {
+                Error::Tool(format!("Connection failed: {}", e))
+            } else {
+                Error::Tool(format!("Request failed: {}", e))
+            }
+        })?;
 
         // Collect response metadata
         let status = response.status().as_u16();
-        let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+        let status_text = response
+            .status()
+            .canonical_reason()
+            .unwrap_or("")
+            .to_string();
         let final_url = response.url().to_string();
 
         let response_headers: Value = {
@@ -280,7 +313,9 @@ impl Tool for HttpRequestTool {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let bytes = response.bytes().await
+            let bytes = response
+                .bytes()
+                .await
                 .map_err(|e| Error::Tool(format!("Failed to read response body: {}", e)))?;
             let size = bytes.len();
             tokio::fs::write(&path, &bytes).await?;
@@ -296,17 +331,20 @@ impl Tool for HttpRequestTool {
         }
 
         // Read response body
-        let body_bytes = response.bytes().await
+        let body_bytes = response
+            .bytes()
+            .await
             .map_err(|e| Error::Tool(format!("Failed to read response body: {}", e)))?;
 
         let body_text = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Try to parse as JSON
-        let body_json: Option<Value> = if content_type.contains("application/json") || content_type.contains("+json") {
-            serde_json::from_str(&body_text).ok()
-        } else {
-            None
-        };
+        let body_json: Option<Value> =
+            if content_type.contains("application/json") || content_type.contains("+json") {
+                serde_json::from_str(&body_text).ok()
+            } else {
+                None
+            };
 
         // Truncate if needed
         let truncated = body_text.len() > max_response_chars;
@@ -354,18 +392,26 @@ mod tests {
     #[test]
     fn test_validate() {
         let tool = HttpRequestTool;
-        assert!(tool.validate(&json!({"url": "https://api.example.com"})).is_ok());
+        assert!(tool
+            .validate(&json!({"url": "https://api.example.com"}))
+            .is_ok());
         assert!(tool.validate(&json!({"url": "ftp://bad"})).is_err());
         assert!(tool.validate(&json!({})).is_err());
-        assert!(tool.validate(&json!({"url": "https://api.example.com", "method": "POST"})).is_ok());
-        assert!(tool.validate(&json!({"url": "https://api.example.com", "method": "INVALID"})).is_err());
+        assert!(tool
+            .validate(&json!({"url": "https://api.example.com", "method": "POST"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"url": "https://api.example.com", "method": "INVALID"}))
+            .is_err());
     }
 
     #[test]
     fn test_validate_methods() {
         let tool = HttpRequestTool;
         for method in &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
-            assert!(tool.validate(&json!({"url": "https://x.com", "method": method})).is_ok());
+            assert!(tool
+                .validate(&json!({"url": "https://x.com", "method": method}))
+                .is_ok());
         }
     }
 }

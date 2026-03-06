@@ -22,7 +22,10 @@ pub async fn list() -> anyhow::Result<()> {
     println!();
     println!("📡 Stream subscriptions ({} total)", rules.len());
     println!();
-    println!("  {:<10} {:<12} {:<40} Auto-restore", "ID", "Protocol", "URL");
+    println!(
+        "  {:<10} {:<12} {:<40} Auto-restore",
+        "ID", "Protocol", "URL"
+    );
     println!("  {}", "-".repeat(80));
 
     for rule in &rules {
@@ -62,9 +65,9 @@ pub async fn status(sub_id: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&subs_file)?;
     let rules: Vec<Value> = serde_json::from_str(&content).unwrap_or_default();
 
-    let found = rules.iter().find(|r| {
-        r["id"].as_str().is_some_and(|id| id.starts_with(sub_id))
-    });
+    let found = rules
+        .iter()
+        .find(|r| r["id"].as_str().is_some_and(|id| id.starts_with(sub_id)));
 
     match found {
         Some(rule) => {
@@ -126,7 +129,8 @@ pub async fn restore() -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&subs_file)?;
     let rules: Vec<Value> = serde_json::from_str(&content).unwrap_or_default();
 
-    let restorable: Vec<&Value> = rules.iter()
+    let restorable: Vec<&Value> = rules
+        .iter()
         .filter(|r| r["auto_restore"].as_bool().unwrap_or(false))
         .collect();
 

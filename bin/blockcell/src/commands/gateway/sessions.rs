@@ -15,6 +15,7 @@ struct SessionInfo {
 pub(super) struct SessionsListQuery {
     limit: Option<usize>,
     cursor: Option<usize>,
+    agent: Option<String>,
 }
 
 /// GET /v1/sessions — list sessions (supports pagination)
@@ -22,7 +23,11 @@ pub(super) async fn handle_sessions_list(
     State(state): State<GatewayState>,
     Query(params): Query<SessionsListQuery>,
 ) -> impl IntoResponse {
-    let sessions_dir = state.paths.sessions_dir();
+    let agent_id = match resolve_requested_agent_id(&state.config, params.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let sessions_dir = state.paths.for_agent(&agent_id).sessions_dir();
     let limit = params.limit;
     let cursor = params.cursor;
 
@@ -119,9 +124,21 @@ pub(super) async fn handle_sessions_list(
 pub(super) async fn handle_session_get(
     State(state): State<GatewayState>,
     AxumPath(session_id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
 ) -> impl IntoResponse {
+    let agent_id = match resolve_requested_agent_id(&state.config, agent.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response()
+        }
+    };
     let session_key = session_id.replace('_', ":");
-    match state.session_store.load(&session_key) {
+    let session_store = SessionStore::new(state.paths.for_agent(&agent_id));
+    match session_store.load(&session_key) {
         Ok(messages) if !messages.is_empty() => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()
@@ -165,9 +182,14 @@ pub(super) async fn handle_session_get(
 pub(super) async fn handle_session_delete(
     State(state): State<GatewayState>,
     AxumPath(session_id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
 ) -> impl IntoResponse {
+    let agent_id = match resolve_requested_agent_id(&state.config, agent.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => return Json(serde_json::json!({ "status": "error", "message": err })),
+    };
     let session_key = session_id.replace('_', ":");
-    let path = state.paths.session_file(&session_key);
+    let path = state.paths.for_agent(&agent_id).session_file(&session_key);
     let session_id_clone = session_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         if path.exists() {
@@ -194,9 +216,18 @@ pub(super) struct RenameRequest {
 pub(super) async fn handle_session_rename(
     State(state): State<GatewayState>,
     AxumPath(session_id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
     Json(req): Json<RenameRequest>,
 ) -> impl IntoResponse {
-    let meta_path = state.paths.sessions_dir().join("_meta.json");
+    let agent_id = match resolve_requested_agent_id(&state.config, agent.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => return Json(serde_json::json!({ "status": "error", "message": err })),
+    };
+    let meta_path = state
+        .paths
+        .for_agent(&agent_id)
+        .sessions_dir()
+        .join("_meta.json");
     let name = req.name;
     let session_id_clone = session_id.clone();
     let result = tokio::task::spawn_blocking(move || {

@@ -1,7 +1,6 @@
 # Article 05: The Memory System — Letting AI Remember What You Said
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 5/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 5
 ---
 
 ## Why AI needs memory

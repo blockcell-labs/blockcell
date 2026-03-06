@@ -1,7 +1,6 @@
 # Article 03: blockcell’s Tool System — Enabling AI to Really Execute Tasks
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 3/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 3
 ---
 
 ## What is a tool?

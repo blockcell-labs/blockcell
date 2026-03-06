@@ -1,54 +1,44 @@
-# WhatsApp Bot Configuration Guide
+# WhatsApp Bridge Configuration Guide
 
-Blockcell supports interacting with agents through WhatsApp Cloud API. The WhatsApp channel supports **Webhook callback mode** to receive messages.
+Blockcell’s current WhatsApp integration is **not** Meta Cloud API / webhook mode. It connects through a **WhatsApp bridge WebSocket service**.
 
-> **Note**: Since WhatsApp API requires webhook verification and message push via public HTTPS URL, you must have a public domain with a valid SSL certificate, or use intranet penetration tools like `ngrok`/`localtunnel`.
+That means:
 
-## 1. Apply for Meta (Facebook) Developer Account and App
+- Blockcell connects to the bridge (default `ws://localhost:3001`)
+- the bridge maintains the WhatsApp session, emits the login QR code, and forwards inbound messages
+- you do not need to expose a public webhook for Blockcell
+- first-time login is usually completed by scanning the QR code shown by the bridge
 
-1. Log in and visit [Meta for Developers](https://developers.facebook.com/).
-2. Click **My Apps** in the top right.
-3. Click **Create App**.
-4. Select **Other** -> **Business**.
-5. Fill in the app display name, contact email, and select the associated Business Manager Account. If you don't have one, you can choose not to associate.
-6. Click **Create App**.
+## 1. Prepare a WhatsApp bridge
 
-## 2. Add WhatsApp Product
+You need a running WhatsApp bridge service that exposes a WebSocket endpoint.
 
-1. In the app dashboard, scroll down to find the **WhatsApp** product and click **Set up**.
-2. In the left menu, select **WhatsApp** -> **API Setup**.
-3. The system will assign you a **Test Phone Number** and a corresponding **Phone Number ID**.
-4. Copy and save your **Temporary Access Token** (valid for 24 hours) or generate a **Permanent Access Token**.
-   - *(For generating permanent access tokens, refer to Meta's official documentation. Usually requires going to Business Settings -> System Users -> Generate New Token).*
-5. In the **Send and receive messages** section, add the **real phone number** you want to use for testing message reception and complete SMS verification. Only numbers in this list can receive messages from the test account.
+Default address:
 
-## 3. Configure Webhook
+```text
+ws://localhost:3001
+```
 
-WhatsApp uses Webhook to push new messages.
+If your bridge runs elsewhere, set `bridgeUrl` accordingly in config.
 
-1. In the left menu, select **WhatsApp** -> **Configuration**.
-2. Click **Configure Webhook** or **Edit**.
-3. Fill in the **Callback URL**: e.g., `https://your-domain.com/v1/whatsapp/webhook`
-4. Fill in the **Verify Token**: This is a custom string you define (e.g., `my_secret_verify_token_123`) used to verify requests are from Meta.
-5. Click **Verify and Save**. At this point, your server must be running and able to correctly respond to the `hub.challenge` verification request.
-6. After success, in the Webhook fields section under **messages**, click **Subscribe**.
+## 2. Configure Blockcell
 
-## 4. Get User ID (for Allowlist)
-
-WhatsApp's `sender_id` is usually the international format **phone number** (without the `+` sign), e.g., `8613800138000` or `14155552671`.
-
-## 5. Configure Blockcell
-
-In Blockcell's configuration file, modify the `whatsapp` section:
+Edit `~/.blockcell/config.json`:
 
 ```json
 {
+  "channelOwners": {
+    "whatsapp": "default"
+  },
+  "channelAccountOwners": {
+    "whatsapp": {
+      "bot2": "ops"
+    }
+  },
   "channels": {
     "whatsapp": {
       "enabled": true,
-      "phoneNumberId": "123456789012345",
-      "accessToken": "EAAxxx...(your access token)",
-      "verifyToken": "my_secret_verify_token_123",
+      "bridgeUrl": "ws://localhost:3001",
       "allowFrom": ["8613800138000"]
     }
   }
@@ -57,19 +47,46 @@ In Blockcell's configuration file, modify the `whatsapp` section:
 
 ### Configuration Options
 
-- `enabled`: Whether to enable the WhatsApp channel (`true` or `false`).
-- `phoneNumberId`: The sender test phone number ID obtained in API Setup (note this is not your real number, it's a long numeric ID).
-- `accessToken`: Temporary or permanent access token.
-- `verifyToken`: The custom string you defined when configuring Webhook.
-- `allowFrom`: List of allowed user phone numbers (string array). If left empty `[]`, anyone who can send messages to you can interact with the bot.
+- `enabled`: whether to enable the WhatsApp channel
+- `bridgeUrl`: WebSocket address of the WhatsApp bridge; the default is usually `ws://localhost:3001`
+- `allowFrom`: allowlist of sender phone numbers, without the `+` sign, for example `8613800138000`
 
-## 6. Interaction Methods
+> If you enable WhatsApp through `blockcell gateway`, you also need `channelOwners.whatsapp`. If the same channel carries multiple accounts, you can also add `channelAccountOwners.whatsapp.<accountId> = "ops"` to route one account to another agent. Otherwise Gateway refuses to start because the enabled external channel has no owner.
 
-- **Private Chat**: Use your real phone number verified in Meta backend to send messages to the test phone number assigned by Meta.
+## 3. Start and login
 
-## 7. Notes
+Start the bridge first, then start Blockcell gateway:
 
-- WhatsApp Cloud API has strict limitations for test accounts that haven't completed business verification (e.g., can only send messages to verified numbers, 24-hour customer service window restriction).
-- For production use, be sure to bind a real phone number and complete Business verification.
-- Maximum text message length is 4096 characters.
-- If the message receiving interface doesn't respond with `200 OK` within 10 seconds, WhatsApp may retry and consider your server faulty. Ensure your app responds quickly.
+```bash
+blockcell gateway
+```
+
+If you want the CLI reminder for the login flow, run:
+
+```bash
+blockcell channels login whatsapp
+```
+
+The current CLI reminds you of the standard process:
+
+1. make sure the WhatsApp bridge is running
+2. the bridge displays a QR code
+3. scan it with WhatsApp on your phone
+
+If you manage the bridge manually, you can also use the default hint shown by the CLI:
+
+```bash
+cd ~/.blockcell/bridge && npm start
+```
+
+## 4. Interaction model
+
+- **Direct chat**: send messages from an allowed phone number to the linked WhatsApp account
+- **Allowlist first**: keep `allowFrom` configured so not every number behind the bridge can control your agent
+
+## 5. Notes
+
+- entries in `allowFrom` usually use international format, but **without `+`**
+- if `bridgeUrl` is unreachable, Gateway logs will show bridge connection failures or disconnects
+- if the bridge is logged in but messages do not arrive, check the bridge health first, then verify `allowFrom`
+- for multi-account isolation, you can further use `channels.whatsapp.accounts` plus `defaultAccountId`

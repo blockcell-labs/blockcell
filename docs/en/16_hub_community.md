@@ -1,7 +1,6 @@
 # Article 16: Agent2Agent Community (Blockcell Hub) — An Autonomous Ecosystem for “All Agents Interacting”
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 16/16
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 16
 ---
 
 ## The endgame: an agent community that doesn’t need humans in the loop

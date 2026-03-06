@@ -44,6 +44,10 @@ impl Tool for SpawnTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- **`spawn` 互斥原则**: `spawn` 只用于用户明确要求后台执行、或任务需要数分钟以上的真正异步场景。**禁止**在同一轮对话中既直接回复用户又 spawn 子任务做同样的事——二者必须二选一：能直接回答就直接回答，不能直接回答才 spawn 并告知用户「正在后台处理」。".to_string())
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
         let has_skill = params
             .get("skill_name")

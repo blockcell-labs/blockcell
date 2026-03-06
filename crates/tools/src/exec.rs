@@ -19,7 +19,7 @@ const DENY_PATTERNS: &[&str] = &[
     r"\bformat\b",
     r"\bshutdown\b",
     r"\breboot\b",
-    r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  // fork bomb
+    r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;", // fork bomb
     r">\s*/dev/sd",
     r"mkfs\.",
 ];
@@ -111,11 +111,17 @@ impl Tool for ExecTool {
                 // Truncate if too long (use safe_truncate to avoid panic on multi-byte chars)
                 let mut truncated = false;
                 if stdout.len() > max_output_chars {
-                    stdout = format!("{}\n... (output truncated)", crate::safe_truncate(&stdout, max_output_chars));
+                    stdout = format!(
+                        "{}\n... (output truncated)",
+                        crate::safe_truncate(&stdout, max_output_chars)
+                    );
                     truncated = true;
                 }
                 if stderr.len() > max_output_chars {
-                    stderr = format!("{}\n... (output truncated)", crate::safe_truncate(&stderr, max_output_chars));
+                    stderr = format!(
+                        "{}\n... (output truncated)",
+                        crate::safe_truncate(&stderr, max_output_chars)
+                    );
                     truncated = true;
                 }
 
@@ -168,12 +174,16 @@ mod tests {
     #[test]
     fn test_exec_validate_deny_mkfs() {
         let tool = ExecTool;
-        assert!(tool.validate(&json!({"command": "mkfs.ext4 /dev/sda"})).is_err());
+        assert!(tool
+            .validate(&json!({"command": "mkfs.ext4 /dev/sda"}))
+            .is_err());
     }
 
     #[test]
     fn test_exec_validate_deny_dd() {
         let tool = ExecTool;
-        assert!(tool.validate(&json!({"command": "dd if=/dev/zero of=/dev/sda"})).is_err());
+        assert!(tool
+            .validate(&json!({"command": "dd if=/dev/zero of=/dev/sda"}))
+            .is_err());
     }
 }

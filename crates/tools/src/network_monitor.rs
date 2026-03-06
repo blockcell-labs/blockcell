@@ -23,15 +23,30 @@ impl Tool for NetworkMonitorTool {
     fn schema(&self) -> ToolSchema {
         let mut props = serde_json::Map::new();
         props.insert("action".into(), json!({"type": "string", "description": "Action: ping|traceroute|port_scan|ssl_check|dns_lookup|whois|http_check|bandwidth"}));
-        props.insert("host".into(), json!({"type": "string", "description": "Target hostname or IP address"}));
+        props.insert(
+            "host".into(),
+            json!({"type": "string", "description": "Target hostname or IP address"}),
+        );
         props.insert("port".into(), json!({"type": "integer", "description": "(port_scan/ssl_check) Single port number. Default for ssl_check: 443"}));
         props.insert("ports".into(), json!({"type": "string", "description": "(port_scan) Port range or list: '80,443,8080' or '1-1024' or 'common'. Default: common"}));
-        props.insert("count".into(), json!({"type": "integer", "description": "(ping) Number of ping packets. Default: 4"}));
-        props.insert("timeout".into(), json!({"type": "integer", "description": "Timeout in seconds. Default: 10"}));
+        props.insert(
+            "count".into(),
+            json!({"type": "integer", "description": "(ping) Number of ping packets. Default: 4"}),
+        );
+        props.insert(
+            "timeout".into(),
+            json!({"type": "integer", "description": "Timeout in seconds. Default: 10"}),
+        );
         props.insert("record_type".into(), json!({"type": "string", "enum": ["A", "AAAA", "MX", "CNAME", "TXT", "NS", "SOA", "ANY"], "description": "(dns_lookup) DNS record type. Default: A"}));
         props.insert("dns_server".into(), json!({"type": "string", "description": "(dns_lookup) Custom DNS server (e.g. '8.8.8.8', '1.1.1.1')"}));
-        props.insert("url".into(), json!({"type": "string", "description": "(http_check/bandwidth) Full URL to check"}));
-        props.insert("max_hops".into(), json!({"type": "integer", "description": "(traceroute) Maximum hops. Default: 30"}));
+        props.insert(
+            "url".into(),
+            json!({"type": "string", "description": "(http_check/bandwidth) Full URL to check"}),
+        );
+        props.insert(
+            "max_hops".into(),
+            json!({"type": "integer", "description": "(traceroute) Maximum hops. Default: 30"}),
+        );
         props.insert("concurrent".into(), json!({"type": "integer", "description": "(port_scan) Max concurrent connections. Default: 50"}));
 
         ToolSchema {
@@ -47,9 +62,22 @@ impl Tool for NetworkMonitorTool {
 
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let valid = ["ping", "traceroute", "port_scan", "ssl_check", "dns_lookup", "whois", "http_check", "bandwidth"];
+        let valid = [
+            "ping",
+            "traceroute",
+            "port_scan",
+            "ssl_check",
+            "dns_lookup",
+            "whois",
+            "http_check",
+            "bandwidth",
+        ];
         if !valid.contains(&action) {
-            return Err(Error::Tool(format!("Invalid action '{}'. Valid: {}", action, valid.join(", "))));
+            return Err(Error::Tool(format!(
+                "Invalid action '{}'. Valid: {}",
+                action,
+                valid.join(", ")
+            )));
         }
         Ok(())
     }
@@ -75,13 +103,21 @@ impl Tool for NetworkMonitorTool {
 // ─── Ping ───────────────────────────────────────────────────────────────────
 
 async fn action_ping(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for ping".into()))?;
     let count = params.get("count").and_then(|v| v.as_u64()).unwrap_or(4);
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
 
     let output = tokio::process::Command::new("ping")
-        .args(["-c", &count.to_string(), "-W", &(timeout * 1000).to_string(), host])
+        .args([
+            "-c",
+            &count.to_string(),
+            "-W",
+            &(timeout * 1000).to_string(),
+            host,
+        ])
         .output()
         .await
         .map_err(|e| Error::Tool(format!("ping failed: {}", e)))?;
@@ -128,13 +164,24 @@ async fn action_ping(params: &Value) -> Result<Value> {
 // ─── Traceroute ─────────────────────────────────────────────────────────────
 
 async fn action_traceroute(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for traceroute".into()))?;
-    let max_hops = params.get("max_hops").and_then(|v| v.as_u64()).unwrap_or(30);
+    let max_hops = params
+        .get("max_hops")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30);
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(5);
 
     let output = tokio::process::Command::new("traceroute")
-        .args(["-m", &max_hops.to_string(), "-w", &timeout.to_string(), host])
+        .args([
+            "-m",
+            &max_hops.to_string(),
+            "-w",
+            &timeout.to_string(),
+            host,
+        ])
         .output()
         .await
         .map_err(|e| Error::Tool(format!("traceroute failed: {}", e)))?;
@@ -145,7 +192,9 @@ async fn action_traceroute(params: &Value) -> Result<Value> {
     let mut hops = Vec::new();
     for line in stdout.lines().skip(1) {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         let parts: Vec<&str> = line.splitn(2, ' ').collect();
         if parts.len() >= 2 {
             let hop_num = parts[0].trim();
@@ -168,7 +217,9 @@ async fn action_traceroute(params: &Value) -> Result<Value> {
 // ─── Port Scan ──────────────────────────────────────────────────────────────
 
 async fn action_port_scan(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for port_scan".into()))?;
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(3);
 
@@ -179,7 +230,10 @@ async fn action_port_scan(params: &Value) -> Result<Value> {
     let mut closed_ports = Vec::new();
 
     // Scan in batches to limit concurrency
-    let concurrent = params.get("concurrent").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let concurrent = params
+        .get("concurrent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
 
     for chunk in ports.chunks(concurrent) {
         let mut handles = Vec::new();
@@ -190,7 +244,8 @@ async fn action_port_scan(params: &Value) -> Result<Value> {
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs),
                     tokio::net::TcpStream::connect(format!("{}:{}", host, port)),
-                ).await;
+                )
+                .await;
                 match result {
                     Ok(Ok(_)) => (port, true),
                     _ => (port, false),
@@ -229,12 +284,15 @@ fn resolve_ports(params: &Value) -> Result<Vec<u16>> {
         return Ok(vec![port as u16]);
     }
 
-    let ports_str = params.get("ports").and_then(|v| v.as_str()).unwrap_or("common");
+    let ports_str = params
+        .get("ports")
+        .and_then(|v| v.as_str())
+        .unwrap_or("common");
 
     if ports_str == "common" {
         return Ok(vec![
-            21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
-            3306, 3389, 5432, 5900, 6379, 8080, 8443, 8888, 9090, 27017,
+            21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3306, 3389, 5432, 5900,
+            6379, 8080, 8443, 8888, 9090, 27017,
         ]);
     }
 
@@ -244,10 +302,17 @@ fn resolve_ports(params: &Value) -> Result<Vec<u16>> {
         if part.contains('-') {
             let range: Vec<&str> = part.splitn(2, '-').collect();
             if range.len() == 2 {
-                let start: u16 = range[0].parse().map_err(|_| Error::Tool(format!("Invalid port: {}", range[0])))?;
-                let end: u16 = range[1].parse().map_err(|_| Error::Tool(format!("Invalid port: {}", range[1])))?;
+                let start: u16 = range[0]
+                    .parse()
+                    .map_err(|_| Error::Tool(format!("Invalid port: {}", range[0])))?;
+                let end: u16 = range[1]
+                    .parse()
+                    .map_err(|_| Error::Tool(format!("Invalid port: {}", range[1])))?;
                 if end < start {
-                    return Err(Error::Tool(format!("Invalid port range: {}-{}", start, end)));
+                    return Err(Error::Tool(format!(
+                        "Invalid port range: {}-{}",
+                        start, end
+                    )));
                 }
                 if (end - start) > 10000 {
                     return Err(Error::Tool("Port range too large (max 10000 ports)".into()));
@@ -257,7 +322,9 @@ fn resolve_ports(params: &Value) -> Result<Vec<u16>> {
                 }
             }
         } else {
-            let p: u16 = part.parse().map_err(|_| Error::Tool(format!("Invalid port: {}", part)))?;
+            let p: u16 = part
+                .parse()
+                .map_err(|_| Error::Tool(format!("Invalid port: {}", part)))?;
             ports.push(p);
         }
     }
@@ -297,7 +364,9 @@ fn guess_service(port: u16) -> &'static str {
 // ─── SSL Check ──────────────────────────────────────────────────────────────
 
 async fn action_ssl_check(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for ssl_check".into()))?;
     let port = params.get("port").and_then(|v| v.as_u64()).unwrap_or(443);
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
@@ -318,7 +387,10 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
     if stdout.trim().is_empty() {
-        return Err(Error::Tool(format!("Could not connect to {}:{} or no SSL certificate found", host, port)));
+        return Err(Error::Tool(format!(
+            "Could not connect to {}:{} or no SSL certificate found",
+            host, port
+        )));
     }
 
     let mut result = json!({
@@ -339,8 +411,10 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
             let expiry = line.trim_start_matches("notAfter=").trim();
             result["not_after"] = json!(expiry);
             // Calculate days until expiry
-            if let Ok(exp_date) = chrono::NaiveDateTime::parse_from_str(expiry, "%b %d %H:%M:%S %Y GMT")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(expiry, "%b  %d %H:%M:%S %Y GMT"))
+            if let Ok(exp_date) =
+                chrono::NaiveDateTime::parse_from_str(expiry, "%b %d %H:%M:%S %Y GMT").or_else(
+                    |_| chrono::NaiveDateTime::parse_from_str(expiry, "%b  %d %H:%M:%S %Y GMT"),
+                )
             {
                 let now = chrono::Utc::now().naive_utc();
                 let days = (exp_date - now).num_days();
@@ -355,7 +429,8 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
         } else if line.contains("Fingerprint=") {
             result["fingerprint"] = json!(line.trim());
         } else if line.contains("DNS:") {
-            let sans: Vec<&str> = line.split(',')
+            let sans: Vec<&str> = line
+                .split(',')
                 .map(|s| s.trim().trim_start_matches("DNS:"))
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -392,9 +467,14 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
 // ─── DNS Lookup ─────────────────────────────────────────────────────────────
 
 async fn action_dns_lookup(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for dns_lookup".into()))?;
-    let record_type = params.get("record_type").and_then(|v| v.as_str()).unwrap_or("A");
+    let record_type = params
+        .get("record_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("A");
     let dns_server = params.get("dns_server").and_then(|v| v.as_str());
 
     let mut args = vec!["dig".to_string()];
@@ -430,7 +510,9 @@ async fn action_dns_lookup(params: &Value) -> Result<Value> {
             }
             continue;
         }
-        if line.is_empty() || line.starts_with(';') { continue; }
+        if line.is_empty() || line.starts_with(';') {
+            continue;
+        }
 
         // Parse record line: name TTL class type value
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -458,7 +540,9 @@ async fn action_dns_lookup(params: &Value) -> Result<Value> {
 // ─── WHOIS ──────────────────────────────────────────────────────────────────
 
 async fn action_whois(params: &Value) -> Result<Value> {
-    let host = params.get("host").and_then(|v| v.as_str())
+    let host = params
+        .get("host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for whois".into()))?;
 
     let output = tokio::process::Command::new("whois")
@@ -479,7 +563,9 @@ async fn action_whois(params: &Value) -> Result<Value> {
 
     for line in stdout.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('%') || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('%') || line.starts_with('#') {
+            continue;
+        }
         raw_lines.push(line.to_string());
 
         let lower = line.to_lowercase();
@@ -487,29 +573,45 @@ async fn action_whois(params: &Value) -> Result<Value> {
             result["registrar"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("creation date:") || lower.starts_with("registered on:") {
             result["creation_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
-        } else if lower.starts_with("expiry date:") || lower.starts_with("registry expiry date:") || lower.starts_with("expiration date:") {
+        } else if lower.starts_with("expiry date:")
+            || lower.starts_with("registry expiry date:")
+            || lower.starts_with("expiration date:")
+        {
             result["expiry_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("updated date:") || lower.starts_with("last updated:") {
             result["updated_date"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         } else if lower.starts_with("name server:") || lower.starts_with("nserver:") {
             let ns = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
-            let existing = result.get("name_servers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let existing = result
+                .get("name_servers")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             let mut servers = existing;
             servers.push(json!(ns));
             result["name_servers"] = json!(servers);
         } else if lower.starts_with("domain status:") || lower.starts_with("status:") {
             let status = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
-            let existing = result.get("status").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let existing = result
+                .get("status")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             let mut statuses = existing;
             statuses.push(json!(status));
             result["status"] = json!(statuses);
-        } else if lower.starts_with("registrant organization:") || lower.starts_with("registrant:") {
+        } else if lower.starts_with("registrant organization:") || lower.starts_with("registrant:")
+        {
             result["registrant"] = json!(line.split_once(':').map(|x| x.1).unwrap_or("").trim());
         }
     }
 
     // Include truncated raw output
-    let raw_text: String = raw_lines.into_iter().take(50).collect::<Vec<_>>().join("\n");
+    let raw_text: String = raw_lines
+        .into_iter()
+        .take(50)
+        .collect::<Vec<_>>()
+        .join("\n");
     result["raw_excerpt"] = json!(raw_text);
 
     Ok(result)
@@ -518,11 +620,15 @@ async fn action_whois(params: &Value) -> Result<Value> {
 // ─── HTTP Check ─────────────────────────────────────────────────────────────
 
 async fn action_http_check(params: &Value) -> Result<Value> {
-    let url = params.get("url").and_then(|v| v.as_str())
+    let url = params
+        .get("url")
+        .and_then(|v| v.as_str())
         .or_else(|| {
-            params.get("host").and_then(|v| v.as_str()).map(|h| {
-                if h.starts_with("http") { h } else { "" }
-            }).filter(|s| !s.is_empty())
+            params
+                .get("host")
+                .and_then(|v| v.as_str())
+                .map(|h| if h.starts_with("http") { h } else { "" })
+                .filter(|s| !s.is_empty())
         })
         .ok_or_else(|| Error::Tool("url is required for http_check".into()))?;
 
@@ -542,12 +648,16 @@ async fn action_http_check(params: &Value) -> Result<Value> {
     match resp {
         Ok(response) => {
             let status = response.status();
-            let headers: Vec<Value> = response.headers().iter()
+            let headers: Vec<Value> = response
+                .headers()
+                .iter()
                 .take(20)
                 .map(|(k, v)| json!({k.as_str(): v.to_str().unwrap_or("")}))
                 .collect();
             let content_length = response.content_length();
-            let content_type = response.headers().get("content-type")
+            let content_type = response
+                .headers()
+                .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string();
@@ -563,23 +673,23 @@ async fn action_http_check(params: &Value) -> Result<Value> {
                 "headers_sample": headers,
             }))
         }
-        Err(e) => {
-            Ok(json!({
-                "url": url,
-                "healthy": false,
-                "error": format!("{}", e),
-                "response_time_ms": elapsed.as_millis(),
-                "is_timeout": e.is_timeout(),
-                "is_connect": e.is_connect(),
-            }))
-        }
+        Err(e) => Ok(json!({
+            "url": url,
+            "healthy": false,
+            "error": format!("{}", e),
+            "response_time_ms": elapsed.as_millis(),
+            "is_timeout": e.is_timeout(),
+            "is_connect": e.is_connect(),
+        })),
     }
 }
 
 // ─── Bandwidth ──────────────────────────────────────────────────────────────
 
 async fn action_bandwidth(params: &Value) -> Result<Value> {
-    let url = params.get("url").and_then(|v| v.as_str())
+    let url = params
+        .get("url")
+        .and_then(|v| v.as_str())
         .unwrap_or("https://speed.cloudflare.com/__down?bytes=10000000");
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
@@ -589,10 +699,15 @@ async fn action_bandwidth(params: &Value) -> Result<Value> {
         .map_err(|e| Error::Tool(format!("HTTP client error: {}", e)))?;
 
     let start = std::time::Instant::now();
-    let resp = client.get(url).send().await
+    let resp = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| Error::Tool(format!("Download failed: {}", e)))?;
 
-    let bytes = resp.bytes().await
+    let bytes = resp
+        .bytes()
+        .await
         .map_err(|e| Error::Tool(format!("Failed to read response: {}", e)))?;
     let elapsed = start.elapsed();
 
@@ -626,7 +741,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_tool() -> NetworkMonitorTool { NetworkMonitorTool }
+    fn make_tool() -> NetworkMonitorTool {
+        NetworkMonitorTool
+    }
 
     #[test]
     fn test_schema() {
@@ -687,14 +804,26 @@ mod tests {
 
     #[test]
     fn test_extract_between() {
-        assert_eq!(extract_between("loss: 25% packet loss", "loss: ", "% packet loss"), Some("25"));
+        assert_eq!(
+            extract_between("loss: 25% packet loss", "loss: ", "% packet loss"),
+            Some("25")
+        );
         assert_eq!(extract_between("no match here", "x", "y"), None);
     }
 
     #[test]
     fn test_validate_all_actions() {
         let tool = make_tool();
-        for action in &["ping", "traceroute", "port_scan", "ssl_check", "dns_lookup", "whois", "http_check", "bandwidth"] {
+        for action in &[
+            "ping",
+            "traceroute",
+            "port_scan",
+            "ssl_check",
+            "dns_lookup",
+            "whois",
+            "http_check",
+            "bandwidth",
+        ] {
             assert!(tool.validate(&json!({"action": action})).is_ok());
         }
     }

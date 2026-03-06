@@ -2,27 +2,29 @@ use blockcell_agent::{
     AgentRuntime, CapabilityRegistryAdapter, ConfirmRequest, CoreEvolutionAdapter,
     MemoryStoreAdapter, MessageBus, ProviderLLMBridge, TaskManager,
 };
-use blockcell_channels::ChannelManager;
-#[cfg(feature = "telegram")]
-use blockcell_channels::telegram::TelegramChannel;
-#[cfg(feature = "whatsapp")]
-use blockcell_channels::whatsapp::WhatsAppChannel;
+#[cfg(feature = "dingtalk")]
+use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "discord")]
+use blockcell_channels::discord::DiscordChannel;
 #[cfg(feature = "feishu")]
 use blockcell_channels::feishu::FeishuChannel;
 #[cfg(feature = "slack")]
 use blockcell_channels::slack::SlackChannel;
-#[cfg(feature = "discord")]
-use blockcell_channels::discord::DiscordChannel;
-#[cfg(feature = "dingtalk")]
-use blockcell_channels::dingtalk::DingTalkChannel;
+#[cfg(feature = "telegram")]
+use blockcell_channels::telegram::TelegramChannel;
 #[cfg(feature = "wecom")]
 use blockcell_channels::wecom::WeComChannel;
+#[cfg(feature = "whatsapp")]
+use blockcell_channels::whatsapp::WhatsAppChannel;
+use blockcell_channels::ChannelManager;
 use blockcell_core::{Config, InboundMessage, Paths};
 use blockcell_providers::{Provider, ProviderPool};
 use blockcell_scheduler::CronService;
 use blockcell_skills::{is_builtin_tool, new_registry_handle, CoreEvolution};
 use blockcell_storage::MemoryStore;
-use blockcell_tools::{CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry};
+use blockcell_tools::{
+    CapabilityRegistryHandle, CoreEvolutionHandle, MemoryStoreHandle, ToolRegistry,
+};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{info, warn};
@@ -30,85 +32,124 @@ use tracing::{info, warn};
 /// Built-in tools grouped by category for /tools display.
 /// This must include ALL tools registered in ToolRegistry::with_defaults().
 const BUILTIN_TOOLS: &[(&str, &[(&str, &str)])] = &[
-    ("📁 Filesystem", &[
-        ("read_file",   "Read files (text/Office/PDF)"),
-        ("write_file",  "Create and write files"),
-        ("edit_file",   "Precise file content editing"),
-        ("list_dir",    "Browse directory structure"),
-        ("file_ops",    "Delete/move/copy/compress/decompress/PDF"),
-    ]),
-    ("⚡ Commands & System", &[
-        ("exec",           "Execute shell commands"),
-        ("system_info",    "Hardware/software/network detection"),
-    ]),
-    ("🌐 Web & Browser", &[
-        ("web_search",     "Search engine queries"),
-        ("web_fetch",      "Fetch web page content"),
-        ("browse",         "CDP browser automation (35+ actions, tabs/screenshots/PDF/network)"),
-        ("http_request",   "Generic HTTP/REST API calls"),
-    ]),
-    ("🖥️ GUI Automation", &[
-        ("app_control",    "macOS app control (System Events)"),
-    ]),
-    ("🎨 Media", &[
-        ("camera_capture",    "Camera capture"),
-        ("audio_transcribe",  "Speech-to-text (Whisper/API)"),
-        ("tts",               "Text-to-speech (say/piper/edge-tts/OpenAI)"),
-        ("ocr",               "Image text recognition (Tesseract/Vision/API)"),
-        ("image_understand",  "Multimodal image understanding (GPT-4o/Claude/Gemini)"),
-        ("video_process",     "Video processing (ffmpeg cut/merge/subtitle/watermark/compress)"),
-        ("chart_generate",    "Chart generation (matplotlib/plotly)"),
-    ]),
-    ("📊 Data Processing", &[
-        ("data_process",      "CSV read/write/stats/query/transform"),
-        ("office_write",      "Generate PPTX/DOCX/XLSX documents"),
-        ("knowledge_graph",   "Knowledge graph (entities/relations/paths/export DOT/Mermaid)"),
-    ]),
-    ("📬 Communication", &[
-        ("email",          "Email send/receive (SMTP/IMAP, attachments)"),
-        ("message",        "Channel messaging (Telegram/Slack/Discord)"),
-        ("notification",   "Multi-channel notifications (SMS/Push/Webhook/Desktop)"),
-        ("social_media",   "Social media (Twitter/Medium/WordPress)"),
-        ("contacts",       "Contacts management (macOS/Google/CardDAV)"),
-    ]),
-    ("📅 Business Integration", &[
-        ("calendar_api",   "Calendar/Notion/CRM/Ticketing"),
-        ("iot_control",    "IoT smart home (Home Assistant/MQTT)"),
-        ("cloud_api",      "Cloud platform management (AWS/GCP/Azure)"),
-        ("git_api",        "GitHub integration (PR/Issue/CI/Release)"),
-        ("health_api",     "Health data (Apple Health/Fitbit/Google Fit)"),
-        ("map_api",        "Maps & navigation (Google Maps/Amap)"),
-    ]),
-    ("💰 Finance", &[
-        ("finance_api",       "Stock/crypto/forex quotes (Alpha Vantage/CoinGecko)"),
-        ("stream_subscribe",  "Real-time data streams (WebSocket/SSE, CEX feeds)"),
-        ("alert_rule",        "Conditional monitoring alerts (price/indicator/change rate)"),
-    ]),
-    ("⛓️ Blockchain", &[
-        ("blockchain_rpc",     "EVM JSON-RPC + ABI encode/decode"),
-        ("blockchain_tx",      "On-chain transactions (build/sign/send, multi-wallet)"),
-        ("exchange_api",       "CEX trading (Binance/OKX/Bybit)"),
-        ("contract_security",  "Contract security audit (GoPlus API)"),
-        ("bridge_api",         "Cross-chain bridges (LI.FI/Stargate/LayerZero)"),
-        ("nft_market",         "NFT marketplace (OpenSea)"),
-        ("multisig",           "Multisig wallets (Gnosis Safe)"),
-    ]),
-    ("🔒 Security & Network", &[
-        ("encrypt",           "Encrypt/decrypt/password/hash/encode"),
-        ("network_monitor",   "Network diagnostics (ping/traceroute/port scan/SSL/DNS/WHOIS)"),
-    ]),
-    ("🧠 Memory & Cognition", &[
-        ("memory_query",  "Full-text memory search (SQLite FTS5)"),
-        ("memory_upsert", "Structured memory storage"),
-        ("memory_forget", "Memory delete and restore"),
-    ]),
-    ("🤖 Autonomy & Evolution", &[
-        ("spawn",             "Spawn sub-agents for parallel execution"),
-        ("list_tasks",        "View task status"),
-        ("cron",              "Scheduled task management"),
-        ("list_skills",       "Skill learning status query"),
-        ("capability_evolve", "Self-learn new tools via evolution"),
-    ]),
+    (
+        "📁 Filesystem",
+        &[
+            ("read_file", "Read files (text/Office/PDF)"),
+            ("write_file", "Create and write files"),
+            ("edit_file", "Precise file content editing"),
+            ("list_dir", "Browse directory structure"),
+            ("file_ops", "Delete/move/copy/compress/decompress/PDF"),
+        ],
+    ),
+    (
+        "⚡ Commands & System",
+        &[
+            ("exec", "Execute shell commands"),
+            ("system_info", "Hardware/software/network detection"),
+        ],
+    ),
+    (
+        "🌐 Web & Browser",
+        &[
+            ("web_search", "Search engine queries"),
+            ("web_fetch", "Fetch web page content"),
+            (
+                "browse",
+                "CDP browser automation (35+ actions, tabs/screenshots/PDF/network)",
+            ),
+            ("http_request", "Generic HTTP/REST API calls"),
+        ],
+    ),
+    (
+        "🖥️ GUI Automation",
+        &[("app_control", "macOS app control (System Events)")],
+    ),
+    (
+        "🎨 Media",
+        &[
+            ("camera_capture", "Camera capture"),
+            ("audio_transcribe", "Speech-to-text (Whisper/API)"),
+            ("tts", "Text-to-speech (say/piper/edge-tts/OpenAI)"),
+            ("ocr", "Image text recognition (Tesseract/Vision/API)"),
+            (
+                "image_understand",
+                "Multimodal image understanding (GPT-4o/Claude/Gemini)",
+            ),
+            (
+                "video_process",
+                "Video processing (ffmpeg cut/merge/subtitle/watermark/compress)",
+            ),
+            ("chart_generate", "Chart generation (matplotlib/plotly)"),
+        ],
+    ),
+    (
+        "📊 Data Processing",
+        &[
+            ("data_process", "CSV read/write/stats/query/transform"),
+            ("office_write", "Generate PPTX/DOCX/XLSX documents"),
+            (
+                "knowledge_graph",
+                "Knowledge graph (entities/relations/paths/export DOT/Mermaid)",
+            ),
+        ],
+    ),
+    (
+        "📬 Communication",
+        &[
+            ("email", "Email send/receive (SMTP/IMAP, attachments)"),
+            ("message", "Channel messaging (Telegram/Slack/Discord)"),
+        ],
+    ),
+    (
+        "📅 Business Integration",
+        &[],
+    ),
+    (
+        "💰 Finance",
+        &[
+            (
+                "stream_subscribe",
+                "Real-time data streams (WebSocket/SSE, CEX feeds)",
+            ),
+            (
+                "alert_rule",
+                "Conditional monitoring alerts (price/indicator/change rate)",
+            ),
+        ],
+    ),
+    (
+        "⛓️ Blockchain",
+        &[],
+    ),
+    (
+        "🔒 Security & Network",
+        &[
+            ("encrypt", "Encrypt/decrypt/password/hash/encode"),
+            (
+                "network_monitor",
+                "Network diagnostics (ping/traceroute/port scan/SSL/DNS/WHOIS)",
+            ),
+        ],
+    ),
+    (
+        "🧠 Memory & Cognition",
+        &[
+            ("memory_query", "Full-text memory search (SQLite FTS5)"),
+            ("memory_upsert", "Structured memory storage"),
+            ("memory_forget", "Memory delete and restore"),
+        ],
+    ),
+    (
+        "🤖 Autonomy & Evolution",
+        &[
+            ("spawn", "Spawn sub-agents for parallel execution"),
+            ("list_tasks", "View task status"),
+            ("cron", "Scheduled task management"),
+            ("list_skills", "Skill learning status query"),
+            ("capability_evolve", "Self-learn new tools via evolution"),
+        ],
+    ),
 ];
 
 /// Extract image file paths from user input.
@@ -136,7 +177,8 @@ fn extract_media_from_input(input: &str) -> (String, Vec<String>) {
         };
 
         let path = std::path::Path::new(&expanded);
-        let is_image = path.extension()
+        let is_image = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| image_extensions.contains(&e.to_lowercase().as_str()))
             .unwrap_or(false);
@@ -175,9 +217,67 @@ fn build_pool_with_overrides(
     ProviderPool::from_config(config)
 }
 
-pub async fn run(message: Option<String>, session: String, model: Option<String>, provider: Option<String>) -> anyhow::Result<()> {
-    let paths = Paths::new();
-    let mut config = Config::load_or_default(&paths)?;
+#[derive(Debug)]
+struct AgentCliContext {
+    agent_id: String,
+    session: String,
+    config: Config,
+    paths: Paths,
+}
+
+fn resolve_agent_context(
+    config: &Config,
+    paths: &Paths,
+    requested_agent: Option<&str>,
+    requested_session: Option<&str>,
+) -> anyhow::Result<AgentCliContext> {
+    let agent_id = requested_agent
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+        .unwrap_or("default");
+
+    if !config.agent_exists(agent_id) {
+        anyhow::bail!("Unknown agent '{}'", agent_id);
+    }
+
+    let agent_config = config
+        .config_for_agent(agent_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown agent '{}'", agent_id))?;
+    let agent_paths = paths.for_agent(agent_id);
+    let session = requested_session
+        .map(str::trim)
+        .filter(|session| !session.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("cli:{}", agent_id));
+
+    Ok(AgentCliContext {
+        agent_id: agent_id.to_string(),
+        session,
+        config: agent_config,
+        paths: agent_paths,
+    })
+}
+
+pub async fn run(
+    message: Option<String>,
+    agent: Option<String>,
+    session: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+) -> anyhow::Result<()> {
+    let root_paths = Paths::new();
+    let root_config = Config::load_or_default(&root_paths)?;
+    let resolved = resolve_agent_context(
+        &root_config,
+        &root_paths,
+        agent.as_deref(),
+        session.as_deref(),
+    )?;
+    let agent_id = resolved.agent_id.clone();
+    let session = resolved.session;
+    let paths = resolved.paths;
+    paths.ensure_dirs()?;
+    let mut config = resolved.config;
     let provider_pool = build_pool_with_overrides(&mut config, model, provider)?;
 
     // Ensure builtin skills are extracted to workspace/skills/ (silent, skips existing)
@@ -195,7 +295,10 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
             Some(Arc::new(adapter))
         }
         Err(e) => {
-            eprintln!("Warning: failed to open memory store: {}. Memory tools will be unavailable.", e);
+            eprintln!(
+                "Warning: failed to open memory store: {}. Memory tools will be unavailable.",
+                e
+            );
             None
         }
     };
@@ -239,9 +342,19 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
     if let Some(msg) = message {
         // Single message mode — no need for CronService
         let tool_registry = ToolRegistry::with_defaults();
-        let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), Arc::clone(&provider_pool), tool_registry)?;
+        let mut runtime = AgentRuntime::new(
+            config.clone(),
+            paths.clone(),
+            Arc::clone(&provider_pool),
+            tool_registry,
+        )?;
         runtime.mount_mcp_servers().await;
-        
+        runtime.validate_intent_router()?;
+        runtime.set_agent_id(Some(agent_id.clone()));
+        runtime.set_task_manager(TaskManager::with_persistence(
+            root_paths.workspace().join("tasks.json"),
+        ));
+
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
         if config.agents.defaults.evolution_model.is_some()
             || config.agents.defaults.evolution_provider.is_some()
@@ -252,11 +365,14 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                     info!("Evolution provider configured with independent model");
                 }
                 Err(e) => {
-                    warn!("Failed to create evolution provider: {}, using main provider", e);
+                    warn!(
+                        "Failed to create evolution provider: {}, using main provider",
+                        e
+                    );
                 }
             }
         }
-        
+
         if let Some(ref store) = memory_store_handle {
             runtime.set_memory_store(store.clone());
         }
@@ -265,6 +381,7 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
 
         let inbound = InboundMessage {
             channel: "cli".to_string(),
+            account_id: None,
             sender_id: "user".to_string(),
             chat_id: session.split(':').nth(1).unwrap_or("default").to_string(),
             content: msg,
@@ -278,6 +395,7 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
     } else {
         // Interactive mode with CronService
         println!("blockcell interactive mode (Ctrl+C to exit)");
+        println!("Agent: {}", agent_id);
         println!("Session: {}", session);
         println!("Type /help to see all available commands.");
         println!();
@@ -293,80 +411,89 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
         let (confirm_tx, mut confirm_rx) = mpsc::channel::<ConfirmRequest>(8);
 
         // Create shared task manager
-        let task_manager = TaskManager::new();
+        let task_manager = TaskManager::with_persistence(root_paths.workspace().join("tasks.json"));
 
         // Create channel manager for outbound message dispatch (before config is moved)
-        let channel_manager = ChannelManager::new(config.clone(), paths.clone(), inbound_tx.clone());
+        let channel_manager =
+            ChannelManager::new(config.clone(), paths.clone(), inbound_tx.clone());
 
         // Start messaging channels (before config is moved into runtime)
+        let mut channel_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
         #[cfg(feature = "telegram")]
-        let telegram_handle = {
-            let telegram = Arc::new(TelegramChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::telegram_listener_configs(&config) {
+            let telegram = Arc::new(TelegramChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 telegram.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "whatsapp")]
-        let whatsapp_handle = {
-            let whatsapp = Arc::new(WhatsAppChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::whatsapp_listener_configs(&config) {
+            let whatsapp = Arc::new(WhatsAppChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 whatsapp.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "feishu")]
-        let feishu_handle = {
-            let feishu = Arc::new(FeishuChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::feishu_scoped_configs(&config) {
+            let feishu = Arc::new(FeishuChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 feishu.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "slack")]
-        let slack_handle = {
-            let slack = Arc::new(SlackChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::slack_listener_configs(&config) {
+            let slack = Arc::new(SlackChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 slack.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "discord")]
-        let discord_handle = {
-            let discord = Arc::new(DiscordChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::discord_listener_configs(&config) {
+            let discord = Arc::new(DiscordChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 discord.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "dingtalk")]
-        let dingtalk_handle = {
-            let dingtalk = Arc::new(DingTalkChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::dingtalk_listener_configs(&config) {
+            let dingtalk = Arc::new(DingTalkChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 dingtalk.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         #[cfg(feature = "wecom")]
-        let wecom_handle = {
-            let wecom = Arc::new(WeComChannel::new(config.clone(), inbound_tx.clone()));
+        for listener in blockcell_channels::account::wecom_listener_configs(&config) {
+            let wecom = Arc::new(WeComChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            channel_handles.push(tokio::spawn(async move {
                 wecom.run_loop(shutdown_rx).await;
-            })
-        };
+            }));
+        }
 
         // Create agent runtime with outbound channel (consumes config)
         let tool_registry = ToolRegistry::with_defaults();
-        let mut runtime = AgentRuntime::new(config.clone(), paths.clone(), Arc::clone(&provider_pool), tool_registry)?;
+        let mut runtime = AgentRuntime::new(
+            config.clone(),
+            paths.clone(),
+            Arc::clone(&provider_pool),
+            tool_registry,
+        )?;
         runtime.mount_mcp_servers().await;
-        
+        runtime.validate_intent_router()?;
+
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
         if config.agents.defaults.evolution_model.is_some()
             || config.agents.defaults.evolution_provider.is_some()
@@ -377,14 +504,18 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                     info!("Evolution provider configured with independent model");
                 }
                 Err(e) => {
-                    warn!("Failed to create evolution provider: {}, using main provider", e);
+                    warn!(
+                        "Failed to create evolution provider: {}, using main provider",
+                        e
+                    );
                 }
             }
         }
-        
+
         runtime.set_outbound(outbound_tx);
         runtime.set_confirm(confirm_tx);
         runtime.set_task_manager(task_manager.clone());
+        runtime.set_agent_id(Some(agent_id.clone()));
         if let Some(ref store) = memory_store_handle {
             runtime.set_memory_store(store.clone());
         }
@@ -552,8 +683,10 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                         (q, r, c, f, tasks)
                     });
                     println!();
-                    println!("📋 Task overview: {} queued | {} running | {} completed | {} failed",
-                        queued, running, completed, failed);
+                    println!(
+                        "📋 Task overview: {} queued | {} running | {} completed | {} failed",
+                        queued, running, completed, failed
+                    );
                     if tasks.is_empty() {
                         println!("  (No tasks)");
                     } else {
@@ -567,8 +700,10 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                             };
                             let short_id_str: String = t.id.chars().take(12).collect();
                             let short_id = short_id_str.as_str();
-                            println!("  {} [{}] {} - {}",
-                                status_icon, short_id, t.status, t.label);
+                            println!(
+                                "  {} [{}] {} - {}",
+                                status_icon, short_id, t.status, t.label
+                            );
                             if let Some(ref progress) = t.progress {
                                 println!("    Progress: {}", progress);
                             }
@@ -637,8 +772,13 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                     );
                     let inbound = InboundMessage {
                         channel: "cli".to_string(),
+                        account_id: None,
                         sender_id: "user".to_string(),
-                        chat_id: session_clone.split(':').nth(1).unwrap_or("default").to_string(),
+                        chat_id: session_clone
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or("default")
+                            .to_string(),
                         content: learn_msg,
                         media: vec![],
                         metadata: serde_json::Value::Null,
@@ -657,8 +797,13 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
                 }
                 let inbound = InboundMessage {
                     channel: "cli".to_string(),
+                    account_id: None,
                     sender_id: "user".to_string(),
-                    chat_id: session_clone.split(':').nth(1).unwrap_or("default").to_string(),
+                    chat_id: session_clone
+                        .split(':')
+                        .nth(1)
+                        .unwrap_or("default")
+                        .to_string(),
                     content: if media.is_empty() { input } else { text },
                     media,
                     metadata: serde_json::Value::Null,
@@ -681,29 +826,13 @@ pub async fn run(message: Option<String>, session: String, model: Option<String>
         drop(inbound_tx);
 
         let mut handles: Vec<tokio::task::JoinHandle<()>> = vec![
-            runtime_handle, cron_handle, printer_handle, confirm_handle, outbound_dispatch_handle,
+            runtime_handle,
+            cron_handle,
+            printer_handle,
+            confirm_handle,
+            outbound_dispatch_handle,
         ];
-
-        #[cfg(feature = "telegram")]
-        handles.push(telegram_handle);
-
-        #[cfg(feature = "whatsapp")]
-        handles.push(whatsapp_handle);
-
-        #[cfg(feature = "feishu")]
-        handles.push(feishu_handle);
-
-        #[cfg(feature = "slack")]
-        handles.push(slack_handle);
-
-        #[cfg(feature = "discord")]
-        handles.push(discord_handle);
-
-        #[cfg(feature = "dingtalk")]
-        handles.push(dingtalk_handle);
-
-        #[cfg(feature = "wecom")]
-        handles.push(wecom_handle);
+        handles.extend(channel_handles);
 
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -731,9 +860,14 @@ fn scan_skill_dirs(dir: &std::path::Path) -> Vec<(String, String)> {
             if !p.join("SKILL.rhai").exists() && !p.join("SKILL.md").exists() {
                 continue;
             }
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
             // Try to read description from meta.yaml
-            let desc = p.join("meta.yaml")
+            let desc = p
+                .join("meta.yaml")
                 .exists()
                 .then(|| std::fs::read_to_string(p.join("meta.yaml")).ok())
                 .flatten()
@@ -762,37 +896,75 @@ fn scan_skill_dirs(dir: &std::path::Path) -> Vec<(String, String)> {
 
 /// Skill domain categories for grouping skills in /skills display.
 const SKILL_CATEGORIES: &[(&str, &[&str])] = &[
-    ("💰 Finance", &[
-        "stock_monitor", "stock_screener", "bond_monitor", "futures_monitor",
-        "futures_strategy", "portfolio_advisor", "macro_monitor", "daily_finance_report",
-    ]),
-    ("⛓️ Blockchain/DeFi", &[
-        "crypto_research", "crypto_onchain", "crypto_sentiment", "crypto_tax",
-        "quant_crypto", "defi_analysis", "nft_analysis", "dao_analysis",
-        "token_security", "contract_audit", "wallet_security", "whale_tracker",
-        "address_monitor", "treasury_management",
-    ]),
-    ("📧 Email", &[
-        "email_digest", "email_auto_reply", "email_cleanup", "email_backup",
-        "email_report", "email_to_tasks",
-    ]),
-    ("🖥️ GUI Automation", &[
-        "app_control", "camera",
-    ]),
-    ("📅 Productivity", &[
-        "daily_digest", "weekly_review", "calendar_manager", "calendar_reminders",
-        "personal_life", "smart_home", "learning_assistant",
-    ]),
-    ("🔧 DevOps", &[
-        "dev_workflow", "dev_security", "devops_monitor", "log_monitor",
-        "site_monitor", "security_privacy",
-    ]),
-    ("📰 Content", &[
-        "news_monitor", "content_creator",
-    ]),
-    ("🏢 Business", &[
-        "business_ops",
-    ]),
+    (
+        "💰 Finance",
+        &[
+            "stock_monitor",
+            "stock_screener",
+            "bond_monitor",
+            "futures_monitor",
+            "futures_strategy",
+            "portfolio_advisor",
+            "macro_monitor",
+            "daily_finance_report",
+        ],
+    ),
+    (
+        "⛓️ Blockchain/DeFi",
+        &[
+            "crypto_research",
+            "crypto_onchain",
+            "crypto_sentiment",
+            "crypto_tax",
+            "quant_crypto",
+            "defi_analysis",
+            "nft_analysis",
+            "dao_analysis",
+            "token_security",
+            "contract_audit",
+            "wallet_security",
+            "whale_tracker",
+            "address_monitor",
+            "treasury_management",
+        ],
+    ),
+    (
+        "📧 Email",
+        &[
+            "email_digest",
+            "email_auto_reply",
+            "email_cleanup",
+            "email_backup",
+            "email_report",
+            "email_to_tasks",
+        ],
+    ),
+    ("🖥️ GUI Automation", &["app_control", "camera"]),
+    (
+        "📅 Productivity",
+        &[
+            "daily_digest",
+            "weekly_review",
+            "calendar_manager",
+            "calendar_reminders",
+            "personal_life",
+            "smart_home",
+            "learning_assistant",
+        ],
+    ),
+    (
+        "🔧 DevOps",
+        &[
+            "dev_workflow",
+            "dev_security",
+            "devops_monitor",
+            "log_monitor",
+            "site_monitor",
+            "security_privacy",
+        ],
+    ),
+    ("📰 Content", &["news_monitor", "content_creator"]),
+    ("🏢 Business", &["business_ops"]),
 ];
 
 /// Print skill status (local filesystem operation, no LLM needed).
@@ -807,7 +979,8 @@ fn print_skills_status(paths: &Paths) {
     let workspace_skills = scan_skill_dirs(&paths.skills_dir());
 
     // Merge: workspace overrides built-in
-    let mut skill_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut skill_map: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for (name, desc) in &builtin_skills {
         skill_map.insert(name.clone(), desc.clone());
     }
@@ -850,7 +1023,8 @@ fn print_skills_status(paths: &Paths) {
     }
 
     // Show uncategorized skills (user-created or newly added)
-    let uncategorized: Vec<_> = skill_map.iter()
+    let uncategorized: Vec<_> = skill_map
+        .iter()
         .filter(|(name, _)| !categorized.contains(name.as_str()))
         .collect();
     if !uncategorized.is_empty() {
@@ -904,7 +1078,9 @@ fn print_skills_status(paths: &Paths) {
         let status_str = format!("{:?}", r.status);
         match status_str.as_str() {
             "Completed" => learned.push(r),
-            "Failed" | "RolledBack" | "AuditFailed" | "DryRunFailed" | "TestFailed" => failed.push(r),
+            "Failed" | "RolledBack" | "AuditFailed" | "DryRunFailed" | "TestFailed" => {
+                failed.push(r)
+            }
             _ => learning.push(r),
         }
     }
@@ -917,7 +1093,11 @@ fn print_skills_status(paths: &Paths) {
     if !learned.is_empty() {
         println!("  ✅ Learned ({}):", learned.len());
         for r in &learned {
-            println!("    • {} ({})", r.skill_name, format_timestamp(r.created_at));
+            println!(
+                "    • {} ({})",
+                r.skill_name,
+                format_timestamp(r.created_at)
+            );
         }
     }
 
@@ -935,21 +1115,36 @@ fn print_skills_status(paths: &Paths) {
                 "Observing" | "RollingOut" => "observing",
                 _ => "in progress",
             };
-            println!("    • {} [{}] ({})", r.skill_name, status_desc, format_timestamp(r.created_at));
+            println!(
+                "    • {} [{}] ({})",
+                r.skill_name,
+                status_desc,
+                format_timestamp(r.created_at)
+            );
         }
     }
 
     if !failed.is_empty() {
         println!("  ❌ Failed ({}):", failed.len());
         for r in &failed {
-            println!("    • {} ({})", r.skill_name, format_timestamp(r.created_at));
+            println!(
+                "    • {} ({})",
+                r.skill_name,
+                format_timestamp(r.created_at)
+            );
         }
     }
 
-    let builtin_err_count = records.iter().filter(|r| is_builtin_tool(&r.skill_name)).count();
+    let builtin_err_count = records
+        .iter()
+        .filter(|r| is_builtin_tool(&r.skill_name))
+        .count();
     if builtin_err_count > 0 {
         println!();
-        println!("  ℹ️  {} built-in tool error records hidden (/clear-skills to clean up)", builtin_err_count);
+        println!(
+            "  ℹ️  {} built-in tool error records hidden (/clear-skills to clean up)",
+            builtin_err_count
+        );
     }
 
     println!();
@@ -967,9 +1162,10 @@ fn clear_all_skill_records(paths: &Paths) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "json")
-                    && std::fs::remove_file(&path).is_ok() {
-                        count += 1;
-                    }
+                    && std::fs::remove_file(&path).is_ok()
+                {
+                    count += 1;
+                }
             }
         }
     }
@@ -998,9 +1194,10 @@ fn delete_skill_records(paths: &Paths, skill_name: &str) {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                             if record.skill_name == skill_name
-                                && std::fs::remove_file(&path).is_ok() {
-                                    count += 1;
-                                }
+                                && std::fs::remove_file(&path).is_ok()
+                            {
+                                count += 1;
+                            }
                         }
                     }
                 }
@@ -1010,7 +1207,10 @@ fn delete_skill_records(paths: &Paths, skill_name: &str) {
 
     println!();
     if count > 0 {
-        println!("  ✅ Deleted all records for skill `{}` ({} total)", skill_name, count);
+        println!(
+            "  ✅ Deleted all records for skill `{}` ({} total)",
+            skill_name, count
+        );
     } else {
         println!("  ⚠️  No records found for skill `{}`", skill_name);
     }
@@ -1025,7 +1225,11 @@ fn print_tools_status(paths: &Paths) {
     let total_tools: usize = BUILTIN_TOOLS.iter().map(|(_, items)| items.len()).sum();
 
     println!();
-    println!("🔌 Built-in tools ({} total, {} categories)", total_tools, BUILTIN_TOOLS.len());
+    println!(
+        "🔌 Built-in tools ({} total, {} categories)",
+        total_tools,
+        BUILTIN_TOOLS.len()
+    );
 
     for (category, items) in BUILTIN_TOOLS {
         println!();
@@ -1036,14 +1240,21 @@ fn print_tools_status(paths: &Paths) {
     }
 
     // Dynamic evolved tools from evolved_tools.json
-    let cap_file = paths.workspace().join("evolved_tools").join("evolved_tools.json");
+    let cap_file = paths
+        .workspace()
+        .join("evolved_tools")
+        .join("evolved_tools.json");
     if cap_file.exists() {
         if let Ok(content) = std::fs::read_to_string(&cap_file) {
             if let Ok(caps) = serde_json::from_str::<Vec<CapabilityDescriptor>>(&content) {
                 if !caps.is_empty() {
                     let active = caps.iter().filter(|c| c.is_available()).count();
                     println!();
-                    println!("  🧬 Dynamic evolved tools ({}, {} available)", caps.len(), active);
+                    println!(
+                        "  🧬 Dynamic evolved tools ({}, {} available)",
+                        caps.len(),
+                        active
+                    );
                     for cap in &caps {
                         let icon = match format!("{:?}", cap.status).as_str() {
                             "Active" => "✅",
@@ -1051,7 +1262,10 @@ fn print_tools_status(paths: &Paths) {
                             "Loading" | "Evolving" => "⏳",
                             _ => "❌",
                         };
-                        println!("    {} {} v{} — {}", icon, cap.id, cap.version, cap.description);
+                        println!(
+                            "    {} {} v{} — {}",
+                            icon, cap.id, cap.version, cap.description
+                        );
                     }
                 }
             }
@@ -1077,7 +1291,10 @@ fn print_tools_status(paths: &Paths) {
         }
         if evo_count > 0 {
             println!();
-            println!("  🧬 Core evolution: {} records ({} active)", evo_count, active_count);
+            println!(
+                "  🧬 Core evolution: {} records ({} active)",
+                evo_count, active_count
+            );
         }
     }
 
@@ -1088,9 +1305,79 @@ fn print_tools_status(paths: &Paths) {
 
 /// Format a Unix timestamp to a human-readable string.
 fn format_timestamp(ts: i64) -> String {
-    use chrono::{TimeZone, Local};
+    use chrono::{Local, TimeZone};
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m-%d %H:%M").to_string(),
         _ => "unknown".to_string(),
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockcell_core::config::AgentProfileConfig;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_resolve_agent_context_defaults_to_default_agent() {
+        let config = Config::default();
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+
+        let resolved = resolve_agent_context(&config, &paths, None, None)
+            .expect("default agent should resolve");
+
+        assert_eq!(resolved.agent_id, "default");
+        assert_eq!(resolved.session, "cli:default");
+        assert_eq!(resolved.paths.workspace(), PathBuf::from("/tmp/blockcell/workspace"));
+    }
+
+    #[test]
+    fn test_resolve_agent_context_uses_named_agent_paths_and_session() {
+        let mut config = Config::default();
+        config.agents.list.push(AgentProfileConfig {
+            id: "ops".to_string(),
+            enabled: true,
+            model: Some("deepseek-chat".to_string()),
+            provider: Some("deepseek".to_string()),
+            ..AgentProfileConfig::default()
+        });
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+
+        let resolved = resolve_agent_context(&config, &paths, Some("ops"), None)
+            .expect("named agent should resolve");
+
+        assert_eq!(resolved.agent_id, "ops");
+        assert_eq!(resolved.session, "cli:ops");
+        assert_eq!(resolved.paths.workspace(), PathBuf::from("/tmp/blockcell/agents/ops/workspace"));
+        assert_eq!(resolved.config.agents.defaults.provider.as_deref(), Some("deepseek"));
+        assert_eq!(resolved.config.agents.defaults.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn test_resolve_agent_context_preserves_explicit_session() {
+        let mut config = Config::default();
+        config.agents.list.push(AgentProfileConfig {
+            id: "ops".to_string(),
+            enabled: true,
+            ..AgentProfileConfig::default()
+        });
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+
+        let resolved = resolve_agent_context(&config, &paths, Some("ops"), Some("custom:thread"))
+            .expect("named agent with explicit session should resolve");
+
+        assert_eq!(resolved.session, "custom:thread");
+    }
+
+    #[test]
+    fn test_resolve_agent_context_rejects_unknown_agent() {
+        let config = Config::default();
+        let paths = Paths::with_base(PathBuf::from("/tmp/blockcell"));
+
+        let err = resolve_agent_context(&config, &paths, Some("ops"), None)
+            .expect_err("unknown agent should fail");
+
+        assert!(err.to_string().contains("Unknown agent 'ops'"));
     }
 }

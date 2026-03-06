@@ -68,6 +68,16 @@ In Blockcell's configuration file, modify the `discord` section:
 - `channels`: List of channel IDs the bot is allowed to respond in (string array). If left empty `[]`, the bot will respond in all channels it has access to.
 - `allowFrom`: List of allowed user IDs (string array). If left empty `[]`, anyone can call the bot in group chats or private messages.
 
+> If you enable this external channel through `blockcell gateway`, you also need an owner binding in `config.json`, for example:
+>
+> ```json
+> { "channelOwners": { "discord": "default" } }
+> ```
+>
+> If the same channel carries multiple accounts / bots, you can further add `channelAccountOwners.discord.<accountId> = "ops"` so one account routes to a different agent.
+>
+> Otherwise Gateway refuses to start because the enabled external channel has no owner.
+
 ## 6. Interaction Methods
 
 - **Private Chat (DM)**: Right-click the bot's avatar and select send message.

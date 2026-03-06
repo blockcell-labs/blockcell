@@ -107,12 +107,30 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
 
                             let inbound = InboundMessage {
                                 channel: "ws".to_string(),
+                                account_id: None,
                                 sender_id: "user".to_string(),
-                                chat_id,
+                                chat_id: chat_id.clone(),
                                 content,
                                 media,
                                 metadata: serde_json::Value::Null,
                                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            };
+
+                            let inbound = match parsed.get("agent_id").and_then(|v| v.as_str()) {
+                                Some(requested) => match resolve_requested_agent_id(&state.config, Some(requested)) {
+                                    Ok(agent_id) => with_route_agent_id(inbound, &agent_id),
+                                    Err(err) => {
+                                        let _ = ws_broadcast.send(
+                                            serde_json::to_string(&WsEvent::Error {
+                                                chat_id: chat_id.clone(),
+                                                message: err,
+                                            })
+                                            .unwrap_or_default(),
+                                        );
+                                        continue;
+                                    }
+                                },
+                                None => inbound,
                             };
 
                             if let Err(e) = inbound_tx.send(inbound).await {
@@ -154,6 +172,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
 
                             let inbound = InboundMessage {
                                 channel: "ws".to_string(),
+                                account_id: None,
                                 sender_id: "user".to_string(),
                                 chat_id: chat_id.clone(),
                                 content: "[cancel]".to_string(),
@@ -162,6 +181,23 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                     "cancel": true,
                                 }),
                                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            };
+
+                            let inbound = match parsed.get("agent_id").and_then(|v| v.as_str()) {
+                                Some(requested) => match resolve_requested_agent_id(&state.config, Some(requested)) {
+                                    Ok(agent_id) => with_route_agent_id(inbound, &agent_id),
+                                    Err(err) => {
+                                        let _ = ws_broadcast.send(
+                                            serde_json::to_string(&WsEvent::Error {
+                                                chat_id: chat_id.clone(),
+                                                message: err,
+                                            })
+                                            .unwrap_or_default(),
+                                        );
+                                        continue;
+                                    }
+                                },
+                                None => inbound,
                             };
 
                             if let Err(e) = inbound_tx.send(inbound).await {
@@ -178,6 +214,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                             // Fallback: treat as plain chat
                             let inbound = InboundMessage {
                                 channel: "ws".to_string(),
+                                account_id: None,
                                 sender_id: "user".to_string(),
                                 chat_id: "default".to_string(),
                                 content: text.to_string(),
@@ -192,6 +229,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                     // Plain text fallback
                     let inbound = InboundMessage {
                         channel: "ws".to_string(),
+                        account_id: None,
                         sender_id: "user".to_string(),
                         chat_id: "default".to_string(),
                         content: text.to_string(),

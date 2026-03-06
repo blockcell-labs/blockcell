@@ -75,19 +75,27 @@ impl Tool for ChartGenerateTool {
             return Err(Error::Tool("action must be 'generate' or 'info'".into()));
         }
         if action == "generate" {
-            let chart_type = params.get("chart_type").and_then(|v| v.as_str()).unwrap_or("");
+            let chart_type = params
+                .get("chart_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if chart_type.is_empty() {
                 return Err(Error::Tool("'chart_type' is required for generate".into()));
             }
             if chart_type != "custom" && params.get("data").is_none() {
-                return Err(Error::Tool("'data' is required for generate (unless chart_type is 'custom')".into()));
+                return Err(Error::Tool(
+                    "'data' is required for generate (unless chart_type is 'custom')".into(),
+                ));
             }
         }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         match action {
             "generate" => action_generate(&ctx, &params).await,
@@ -100,7 +108,11 @@ impl Tool for ChartGenerateTool {
 /// Check available chart generation backends.
 async fn action_info() -> Result<Value> {
     let has_python = which::which("python3").is_ok() || which::which("python").is_ok();
-    let python_bin = if which::which("python3").is_ok() { "python3" } else { "python" };
+    let python_bin = if which::which("python3").is_ok() {
+        "python3"
+    } else {
+        "python"
+    };
 
     let mut has_matplotlib = false;
     let mut has_plotly = false;
@@ -148,13 +160,19 @@ async fn action_info() -> Result<Value> {
 
 /// Generate a chart.
 async fn action_generate(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let chart_type = params.get("chart_type").and_then(|v| v.as_str()).unwrap_or("bar");
+    let chart_type = params
+        .get("chart_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("bar");
     let data = params.get("data").cloned().unwrap_or(json!({}));
     let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let x_label = params.get("x_label").and_then(|v| v.as_str()).unwrap_or("");
     let y_label = params.get("y_label").and_then(|v| v.as_str()).unwrap_or("");
     let style = params.get("style").cloned().unwrap_or(json!({}));
-    let backend = params.get("backend").and_then(|v| v.as_str()).unwrap_or("auto");
+    let backend = params
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
     let custom_script = params.get("custom_script").and_then(|v| v.as_str());
 
     // Determine output path and format
@@ -165,7 +183,8 @@ async fn action_generate(ctx: &ToolContext, params: &Value) -> Result<Value> {
         let _ = std::fs::create_dir_all(&dir);
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         dir.join(format!("chart_{}_{}.png", chart_type, timestamp))
-            .to_string_lossy().to_string()
+            .to_string_lossy()
+            .to_string()
     };
 
     if let Some(parent) = std::path::Path::new(&output_path).parent() {
@@ -194,18 +213,43 @@ async fn action_generate(ctx: &ToolContext, params: &Value) -> Result<Value> {
                 cs
             )
         } else {
-            return Err(Error::Tool("'custom_script' is required for chart_type='custom'".into()));
+            return Err(Error::Tool(
+                "'custom_script' is required for chart_type='custom'".into(),
+            ));
         }
     } else if use_plotly {
-        generate_plotly_script(chart_type, &data, title, x_label, y_label, &style, &output_path)?
+        generate_plotly_script(
+            chart_type,
+            &data,
+            title,
+            x_label,
+            y_label,
+            &style,
+            &output_path,
+        )?
     } else {
-        generate_matplotlib_script(chart_type, &data, title, x_label, y_label, &style, &output_path, &output_ext)?
+        generate_matplotlib_script(
+            chart_type,
+            &data,
+            title,
+            x_label,
+            y_label,
+            &style,
+            &output_path,
+            &output_ext,
+        )?
     };
 
     // Find python binary
-    let python_bin = if which::which("python3").is_ok() { "python3" } else { "python" };
+    let python_bin = if which::which("python3").is_ok() {
+        "python3"
+    } else {
+        "python"
+    };
     if which::which(python_bin).is_err() {
-        return Err(Error::Tool("Python not found. Install Python 3 to generate charts.".into()));
+        return Err(Error::Tool(
+            "Python not found. Install Python 3 to generate charts.".into(),
+        ));
     }
 
     // Write script to temp file
@@ -246,7 +290,9 @@ async fn action_generate(ctx: &ToolContext, params: &Value) -> Result<Value> {
         )));
     }
 
-    let file_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = std::fs::metadata(&output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     info!(path = %output_path, size = file_size, "📊 Chart generated");
 
@@ -273,23 +319,33 @@ fn generate_matplotlib_script(
 ) -> Result<String> {
     let width = style.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0);
     let height = style.get("height").and_then(|v| v.as_f64()).unwrap_or(6.0);
-    let font_size = style.get("font_size").and_then(|v| v.as_u64()).unwrap_or(12);
+    let font_size = style
+        .get("font_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(12);
     let grid = style.get("grid").and_then(|v| v.as_bool()).unwrap_or(true);
-    let theme = style.get("theme").and_then(|v| v.as_str()).unwrap_or("seaborn-v0_8-whitegrid");
+    let theme = style
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .unwrap_or("seaborn-v0_8-whitegrid");
     let colors_json = style.get("colors").cloned().unwrap_or(json!(null));
 
     let data_json = serde_json::to_string(data)
         .map_err(|e| Error::Tool(format!("Failed to serialize data: {}", e)))?;
 
     let colors_setup = if let Some(arr) = colors_json.as_array() {
-        let c: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| format!("'{}'", s))).collect();
+        let c: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| format!("'{}'", s)))
+            .collect();
         format!("colors = [{}]", c.join(", "))
     } else {
         "colors = None".to_string()
     };
 
     let chart_code = match chart_type {
-        "bar" => r#"
+        "bar" => {
+            r#"
 labels = data.get('labels', data.get('x', []))
 values = data.get('values', data.get('y', []))
 series = data.get('series', None)
@@ -305,8 +361,10 @@ if series:
     ax.legend()
 else:
     ax.bar(labels, values, color=colors)
-"#,
-        "line" => r#"
+"#
+        }
+        "line" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -319,14 +377,18 @@ else:
     x = data.get('x', data.get('labels', list(range(len(data.get('y', data.get('values', [])))))))
     y = data.get('y', data.get('values', []))
     ax.plot(x, y, marker='o', markersize=4, color=colors[0] if colors else None)
-"#,
-        "pie" => r#"
+"#
+        }
+        "pie" => {
+            r#"
 labels = data.get('labels', [])
 values = data.get('values', [])
 ax.pie(values, labels=labels, autopct='%1.1f%%', colors=colors)
 ax.axis('equal')
-"#,
-        "scatter" => r#"
+"#
+        }
+        "scatter" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -335,13 +397,17 @@ if series:
     ax.legend()
 else:
     ax.scatter(data.get('x', []), data.get('y', []), color=colors[0] if colors else None, alpha=0.7)
-"#,
-        "histogram" => r#"
+"#
+        }
+        "histogram" => {
+            r#"
 values = data.get('values', data.get('x', []))
 bins = data.get('bins', 'auto')
 ax.hist(values, bins=bins, color=colors[0] if colors else None, edgecolor='white', alpha=0.8)
-"#,
-        "heatmap" => r#"
+"#
+        }
+        "heatmap" => {
+            r#"
 import numpy as np
 matrix = np.array(data.get('matrix', data.get('values', [[]])))
 labels_x = data.get('x_labels', data.get('columns', None))
@@ -354,8 +420,10 @@ if labels_x:
 if labels_y:
     ax.set_yticks(range(len(labels_y)))
     ax.set_yticklabels(labels_y)
-"#,
-        "area" => r#"
+"#
+        }
+        "area" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -369,16 +437,24 @@ else:
     x = data.get('x', list(range(len(data.get('y', data.get('values', []))))))
     y = data.get('y', data.get('values', []))
     ax.fill_between(x, y, alpha=0.4, color=colors[0] if colors else None)
-"#,
-        "box" => r#"
+"#
+        }
+        "box" => {
+            r#"
 datasets = data.get('datasets', [data.get('values', [])])
 labels = data.get('labels', [f'Group {i+1}' for i in range(len(datasets))])
 bp = ax.boxplot(datasets, labels=labels, patch_artist=True)
 if colors:
     for i, patch in enumerate(bp['boxes']):
         patch.set_facecolor(colors[i % len(colors)])
-"#,
-        _ => return Err(Error::Tool(format!("Unsupported chart_type for matplotlib: {}", chart_type))),
+"#
+        }
+        _ => {
+            return Err(Error::Tool(format!(
+                "Unsupported chart_type for matplotlib: {}",
+                chart_type
+            )))
+        }
     };
 
     Ok(format!(
@@ -448,14 +524,18 @@ fn generate_plotly_script(
         .map_err(|e| Error::Tool(format!("Failed to serialize data: {}", e)))?;
 
     let colors_setup = if let Some(arr) = colors_json.as_array() {
-        let c: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| format!("'{}'", s))).collect();
+        let c: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| format!("'{}'", s)))
+            .collect();
         format!("colors = [{}]", c.join(", "))
     } else {
         "colors = None".to_string()
     };
 
     let trace_code = match chart_type {
-        "bar" => r#"
+        "bar" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -463,8 +543,10 @@ if series:
         fig.add_trace(go.Bar(x=data.get('labels', data.get('x', [])), y=s.get('values', s.get('y', [])), name=s.get('name',''), marker_color=c))
 else:
     fig.add_trace(go.Bar(x=data.get('labels', data.get('x', [])), y=data.get('values', data.get('y', [])), marker_color=colors))
-"#,
-        "line" => r#"
+"#
+        }
+        "line" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -476,11 +558,15 @@ else:
     x = data.get('x', data.get('labels', list(range(len(data.get('y', data.get('values', [])))))))
     y = data.get('y', data.get('values', []))
     fig.add_trace(go.Scatter(x=x, y=y, mode='lines+markers'))
-"#,
-        "pie" => r#"
+"#
+        }
+        "pie" => {
+            r#"
 fig.add_trace(go.Pie(labels=data.get('labels', []), values=data.get('values', []), marker=dict(colors=colors) if colors else {}))
-"#,
-        "scatter" => r#"
+"#
+        }
+        "scatter" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -488,19 +574,25 @@ if series:
         fig.add_trace(go.Scatter(x=s.get('x', []), y=s.get('y', []), mode='markers', name=s.get('name',''), marker=dict(color=c, opacity=0.7)))
 else:
     fig.add_trace(go.Scatter(x=data.get('x', []), y=data.get('y', []), mode='markers', marker=dict(opacity=0.7)))
-"#,
-        "histogram" => r#"
+"#
+        }
+        "histogram" => {
+            r#"
 fig.add_trace(go.Histogram(x=data.get('values', data.get('x', [])), marker_color=colors[0] if colors else None))
-"#,
-        "heatmap" => r#"
+"#
+        }
+        "heatmap" => {
+            r#"
 fig.add_trace(go.Heatmap(
     z=data.get('matrix', data.get('values', [[]])),
     x=data.get('x_labels', data.get('columns', None)),
     y=data.get('y_labels', data.get('rows', None)),
     colorscale='YlOrRd'
 ))
-"#,
-        "area" => r#"
+"#
+        }
+        "area" => {
+            r#"
 series = data.get('series', None)
 if series:
     for i, s in enumerate(series):
@@ -512,15 +604,23 @@ else:
     x = data.get('x', list(range(len(data.get('y', data.get('values', []))))))
     y = data.get('y', data.get('values', []))
     fig.add_trace(go.Scatter(x=x, y=y, fill='tozeroy'))
-"#,
-        "box" => r#"
+"#
+        }
+        "box" => {
+            r#"
 datasets = data.get('datasets', [data.get('values', [])])
 labels = data.get('labels', [f'Group {i+1}' for i in range(len(datasets))])
 for i, (ds, lbl) in enumerate(zip(datasets, labels)):
     c = colors[i % len(colors)] if colors else None
     fig.add_trace(go.Box(y=ds, name=lbl, marker_color=c))
-"#,
-        _ => return Err(Error::Tool(format!("Unsupported chart_type for plotly: {}", chart_type))),
+"#
+        }
+        _ => {
+            return Err(Error::Tool(format!(
+                "Unsupported chart_type for plotly: {}",
+                chart_type
+            )))
+        }
     };
 
     Ok(format!(
@@ -591,20 +691,26 @@ mod tests {
     #[test]
     fn test_validate_generate() {
         let tool = ChartGenerateTool;
-        assert!(tool.validate(&json!({
-            "action": "generate",
-            "chart_type": "bar",
-            "data": {"labels": ["A", "B"], "values": [1, 2]}
-        })).is_ok());
+        assert!(tool
+            .validate(&json!({
+                "action": "generate",
+                "chart_type": "bar",
+                "data": {"labels": ["A", "B"], "values": [1, 2]}
+            }))
+            .is_ok());
 
         // Missing chart_type
         assert!(tool.validate(&json!({"action": "generate"})).is_err());
 
         // Missing data (non-custom)
-        assert!(tool.validate(&json!({"action": "generate", "chart_type": "bar"})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "generate", "chart_type": "bar"}))
+            .is_err());
 
         // Custom without data is ok
-        assert!(tool.validate(&json!({"action": "generate", "chart_type": "custom"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "generate", "chart_type": "custom"}))
+            .is_ok());
     }
 
     #[test]
@@ -625,7 +731,16 @@ mod tests {
     fn test_generate_matplotlib_script() {
         let data = json!({"labels": ["A", "B", "C"], "values": [10, 20, 30]});
         let style = json!({});
-        let result = generate_matplotlib_script("bar", &data, "Test", "X", "Y", &style, "/tmp/test.png", "png");
+        let result = generate_matplotlib_script(
+            "bar",
+            &data,
+            "Test",
+            "X",
+            "Y",
+            &style,
+            "/tmp/test.png",
+            "png",
+        );
         assert!(result.is_ok());
         let script = result.unwrap();
         assert!(script.contains("matplotlib"));
@@ -636,7 +751,8 @@ mod tests {
     fn test_generate_plotly_script() {
         let data = json!({"labels": ["A", "B"], "values": [1, 2]});
         let style = json!({});
-        let result = generate_plotly_script("pie", &data, "Pie Chart", "", "", &style, "/tmp/test.html");
+        let result =
+            generate_plotly_script("pie", &data, "Pie Chart", "", "", &style, "/tmp/test.html");
         assert!(result.is_ok());
         let script = result.unwrap();
         assert!(script.contains("plotly"));

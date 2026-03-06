@@ -1,9 +1,7 @@
 use blockcell_core::{Config, Paths};
-use blockcell_skills::evolution::{
-    EvolutionRecord, EvolutionStatus, LLMProvider,
-};
-use blockcell_skills::service::{EvolutionService, EvolutionServiceConfig};
+use blockcell_skills::evolution::{EvolutionRecord, EvolutionStatus, LLMProvider};
 use blockcell_skills::is_builtin_tool;
+use blockcell_skills::service::{EvolutionService, EvolutionServiceConfig};
 use std::io::Write;
 
 // === LLM Provider Adapter ===
@@ -26,7 +24,9 @@ impl LLMProvider for OpenAILLMAdapter {
     async fn generate(&self, prompt: &str) -> blockcell_core::Result<String> {
         use blockcell_core::types::ChatMessage;
         let messages = vec![
-            ChatMessage::system("You are a skill evolution assistant. Follow instructions precisely."),
+            ChatMessage::system(
+                "You are a skill evolution assistant. Follow instructions precisely.",
+            ),
             ChatMessage::user(prompt),
         ];
         let response = self.provider.chat(&messages, &[]).await?;
@@ -55,7 +55,10 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
     println!();
 
     // Step 1: Trigger
-    let evolution_id = match service.trigger_manual_evolution(&skill_name, description).await {
+    let evolution_id = match service
+        .trigger_manual_evolution(&skill_name, description)
+        .await
+    {
         Ok(id) => {
             println!("  ⏳ Evolution triggered: {}", &id);
             id
@@ -90,13 +93,21 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
 
                 // Show attempt info
                 if record.attempt > 1 {
-                    println!("  🔄 Total attempts: {} ({} retries)", record.attempt, record.attempt - 1);
+                    println!(
+                        "  🔄 Total attempts: {} ({} retries)",
+                        record.attempt,
+                        record.attempt - 1
+                    );
                 }
                 if !record.feedback_history.is_empty() {
                     println!("  📋 Feedback history:");
                     for fb in &record.feedback_history {
-                        println!("     #{} [{}] {}", fb.attempt, fb.stage,
-                            fb.feedback.lines().next().unwrap_or(""));
+                        println!(
+                            "     #{} [{}] {}",
+                            fb.attempt,
+                            fb.stage,
+                            fb.feedback.lines().next().unwrap_or("")
+                        );
                     }
                 }
 
@@ -118,10 +129,14 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
                         }
                     }
                 }
-                if record.status == EvolutionStatus::CompileFailed || record.status == EvolutionStatus::DryRunFailed {
+                if record.status == EvolutionStatus::CompileFailed
+                    || record.status == EvolutionStatus::DryRunFailed
+                {
                     println!("  ❌ Build check failed");
                 }
-                if record.status == EvolutionStatus::Observing || record.status == EvolutionStatus::Completed {
+                if record.status == EvolutionStatus::Observing
+                    || record.status == EvolutionStatus::Completed
+                {
                     println!("  🚀 Deployed, observation window active");
                 }
 
@@ -141,7 +156,10 @@ pub async fn run(description: &str, watch: bool) -> anyhow::Result<()> {
     if watch {
         watch_evolution(&paths, &evolution_id).await?;
     } else {
-        println!("  💡 Use `blockcell evolve status {}` for details", truncate_str(&evolution_id, 20));
+        println!(
+            "  💡 Use `blockcell evolve status {}` for details",
+            truncate_str(&evolution_id, 20)
+        );
     }
 
     Ok(())
@@ -213,25 +231,45 @@ pub async fn list(all: bool, verbose: bool) -> anyhow::Result<()> {
         println!("  {} {} [{}]", icon, r.skill_name, desc);
         println!("    ID: {}", r.id);
         println!("    Trigger: {}", trigger_desc);
-        println!("    Created: {}  Updated: {}", format_ts(r.created_at), format_ts(r.updated_at));
+        println!(
+            "    Created: {}  Updated: {}",
+            format_ts(r.created_at),
+            format_ts(r.updated_at)
+        );
 
         if verbose {
             if let Some(ref patch) = r.patch {
-                println!("    Patch: {} ({})", patch.patch_id, format_ts(patch.generated_at));
+                println!(
+                    "    Patch: {} ({})",
+                    patch.patch_id,
+                    format_ts(patch.generated_at)
+                );
                 if !patch.explanation.is_empty() {
                     let preview: String = patch.explanation.chars().take(100).collect();
                     println!("    Explanation: {}...", preview);
                 }
             }
             if let Some(ref audit) = r.audit {
-                println!("    Audit: {} ({} issues)", if audit.passed { "passed" } else { "failed" }, audit.issues.len());
+                println!(
+                    "    Audit: {} ({} issues)",
+                    if audit.passed { "passed" } else { "failed" },
+                    audit.issues.len()
+                );
             }
             if let Some(ref test) = r.shadow_test {
-                println!("    Tests: {}/{} passed", test.test_cases_passed, test.test_cases_run);
+                println!(
+                    "    Tests: {}/{} passed",
+                    test.test_cases_passed, test.test_cases_run
+                );
             }
             if let Some(ref rollout) = r.rollout {
                 let stage = &rollout.stages[rollout.current_stage];
-                println!("    Canary: stage {}/{} ({}%)", rollout.current_stage + 1, rollout.stages.len(), stage.percentage);
+                println!(
+                    "    Canary: stage {}/{} ({}%)",
+                    rollout.current_stage + 1,
+                    rollout.stages.len(),
+                    stage.percentage
+                );
             }
         }
         println!();
@@ -249,9 +287,10 @@ pub async fn show(skill_name: &str) -> anyhow::Result<()> {
     records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     // Try to match by skill_name or evolution ID prefix
-    let matched: Vec<&EvolutionRecord> = records.iter().filter(|r| {
-        r.skill_name == skill_name || r.id.starts_with(skill_name)
-    }).collect();
+    let matched: Vec<&EvolutionRecord> = records
+        .iter()
+        .filter(|r| r.skill_name == skill_name || r.id.starts_with(skill_name))
+        .collect();
 
     if matched.is_empty() {
         // Try status lookup by ID
@@ -267,19 +306,35 @@ pub async fn show(skill_name: &str) -> anyhow::Result<()> {
     }
 
     println!();
-    println!("🧬 Evolution history for '{}'  ({} record(s))", skill_name, matched.len());
+    println!(
+        "🧬 Evolution history for '{}'  ({} record(s))",
+        skill_name,
+        matched.len()
+    );
     println!();
 
     for r in &matched {
         let icon = status_icon(&r.status);
         let desc = status_desc_cn(&r.status);
-        println!("  {} [{}] {}", icon, desc, &r.id.chars().take(20).collect::<String>());
-        println!("    Created: {}  Updated: {}", format_ts(r.created_at), format_ts(r.updated_at));
+        println!(
+            "  {} [{}] {}",
+            icon,
+            desc,
+            &r.id.chars().take(20).collect::<String>()
+        );
+        println!(
+            "    Created: {}  Updated: {}",
+            format_ts(r.created_at),
+            format_ts(r.updated_at)
+        );
         if let Some(ref patch) = r.patch {
             println!("    Patch: {}", patch.patch_id);
         }
         if let Some(ref audit) = r.audit {
-            println!("    Audit: {}", if audit.passed { "passed" } else { "failed" });
+            println!(
+                "    Audit: {}",
+                if audit.passed { "passed" } else { "failed" }
+            );
         }
         println!();
     }
@@ -295,9 +350,10 @@ pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()
     let mut records = load_all_records(&records_dir);
     records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
-    let skill_records: Vec<&EvolutionRecord> = records.iter().filter(|r| {
-        r.skill_name == skill_name
-    }).collect();
+    let skill_records: Vec<&EvolutionRecord> = records
+        .iter()
+        .filter(|r| r.skill_name == skill_name)
+        .collect();
 
     if skill_records.is_empty() {
         println!("  No evolution records found for skill '{}'.", skill_name);
@@ -306,13 +362,23 @@ pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()
 
     // Find the target record (by version tag or just "previous")
     let target = if let Some(ref version) = to {
-        skill_records.iter().find(|r| {
-            r.id.starts_with(version.as_str()) ||
-            r.patch.as_ref().map(|p| p.patch_id.starts_with(version.as_str())).unwrap_or(false)
-        }).copied()
+        skill_records
+            .iter()
+            .find(|r| {
+                r.id.starts_with(version.as_str())
+                    || r.patch
+                        .as_ref()
+                        .map(|p| p.patch_id.starts_with(version.as_str()))
+                        .unwrap_or(false)
+            })
+            .copied()
     } else {
         // Default: use the second-most-recent completed record
-        skill_records.iter().skip(1).find(|r| r.status == EvolutionStatus::Completed).copied()
+        skill_records
+            .iter()
+            .skip(1)
+            .find(|r| r.status == EvolutionStatus::Completed)
+            .copied()
     };
 
     match target {
@@ -321,7 +387,12 @@ pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()
             if to.is_some() {
                 println!("  Available records:");
                 for r in &skill_records {
-                    println!("    {} {:?} — {}", &r.id.chars().take(20).collect::<String>(), r.status, format_ts(r.created_at));
+                    println!(
+                        "    {} {:?} — {}",
+                        &r.id.chars().take(20).collect::<String>(),
+                        r.status,
+                        format_ts(r.created_at)
+                    );
                 }
             } else {
                 println!("  No previous completed version available.");
@@ -329,7 +400,11 @@ pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()
         }
         Some(target_record) => {
             println!();
-            println!("⏪ Rollback: skill '{}' → record {}", skill_name, &target_record.id.chars().take(20).collect::<String>());
+            println!(
+                "⏪ Rollback: skill '{}' → record {}",
+                skill_name,
+                &target_record.id.chars().take(20).collect::<String>()
+            );
             println!("  Status: {:?}", target_record.status);
             println!("  Created: {}", format_ts(target_record.created_at));
             if let Some(ref patch) = target_record.patch {
@@ -337,7 +412,10 @@ pub async fn rollback(skill_name: &str, to: Option<String>) -> anyhow::Result<()
             }
             println!();
             println!("  ℹ️  Rollback of skill evolution records is informational only.");
-            println!("  The actual skill files in workspace/skills/{} remain unchanged.", skill_name);
+            println!(
+                "  The actual skill files in workspace/skills/{} remain unchanged.",
+                skill_name
+            );
             println!("  To restore a previous skill version, manually revert the files in that directory.");
         }
     }
@@ -371,9 +449,10 @@ fn derive_skill_name(description: &str) -> String {
     // by taking the first few characters and appending a short hash
     let preview: String = description.chars().take(8).collect();
     // Simple hash: sum of char values mod 9999
-    let hash_val: u32 = description.chars().fold(0u32, |acc, c| {
-        acc.wrapping_add(c as u32).wrapping_mul(31)
-    }) % 9999;
+    let hash_val: u32 = description
+        .chars()
+        .fold(0u32, |acc, c| acc.wrapping_add(c as u32).wrapping_mul(31))
+        % 9999;
 
     // Transliterate common Chinese skill keywords to English
     let keyword = match_chinese_keyword(description);
@@ -435,7 +514,8 @@ fn resolve_evolution_id(paths: &Paths, prefix: &str) -> anyhow::Result<String> {
     let records_dir = paths.workspace().join("evolution_records");
     let records = load_all_records(&records_dir);
 
-    let matching: Vec<_> = records.iter()
+    let matching: Vec<_> = records
+        .iter()
         .filter(|r| r.id.starts_with(prefix) || r.id.contains(prefix))
         .collect();
 
@@ -445,7 +525,12 @@ fn resolve_evolution_id(paths: &Paths, prefix: &str) -> anyhow::Result<String> {
         _ => {
             println!("Multiple records match '{}':", prefix);
             for r in &matching {
-                println!("  {} - {} [{}]", r.id, r.skill_name, status_desc_cn(&r.status));
+                println!(
+                    "  {} - {} [{}]",
+                    r.id,
+                    r.skill_name,
+                    status_desc_cn(&r.status)
+                );
             }
             anyhow::bail!("Please provide a more specific ID");
         }
@@ -497,10 +582,15 @@ async fn watch_evolution(paths: &Paths, evolution_id: &str) -> anyhow::Result<()
                                 }
                             }
                         }
-                        EvolutionStatus::CompilePassed | EvolutionStatus::TestPassed | EvolutionStatus::DryRunPassed => {
+                        EvolutionStatus::CompilePassed
+                        | EvolutionStatus::TestPassed
+                        | EvolutionStatus::DryRunPassed => {
                             println!("     ✅ Compile check passed");
                         }
-                        EvolutionStatus::CompileFailed | EvolutionStatus::TestFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::Testing => {
+                        EvolutionStatus::CompileFailed
+                        | EvolutionStatus::TestFailed
+                        | EvolutionStatus::DryRunFailed
+                        | EvolutionStatus::Testing => {
                             println!("     ❌ Compile check failed");
                         }
                         EvolutionStatus::Observing | EvolutionStatus::RollingOut => {
@@ -549,9 +639,7 @@ async fn watch_all(paths: &Paths) -> anyhow::Result<()> {
     let records_dir = paths.workspace().join("evolution_records");
     let records = load_all_records(&records_dir);
 
-    let active: Vec<_> = records.iter()
-        .filter(|r| !is_terminal(&r.status))
-        .collect();
+    let active: Vec<_> = records.iter().filter(|r| !is_terminal(&r.status)).collect();
 
     if active.is_empty() {
         println!();
@@ -571,7 +659,14 @@ async fn watch_all(paths: &Paths) -> anyhow::Result<()> {
     for (i, r) in active.iter().enumerate() {
         let icon = status_icon(&r.status);
         let desc = status_desc_cn(&r.status);
-        println!("  {}. {} {} [{}] ({})", i + 1, icon, r.skill_name, desc, &r.id);
+        println!(
+            "  {}. {} {} [{}] ({})",
+            i + 1,
+            icon,
+            r.skill_name,
+            desc,
+            &r.id
+        );
     }
     println!();
     println!("  💡 Use `blockcell evolve watch <ID>` to watch a specific evolution");
@@ -585,7 +680,11 @@ fn print_record_detail(record: &EvolutionRecord) {
     println!("🧬 Evolution Details");
     println!("  ID:       {}", record.id);
     println!("  Skill:    {}", record.skill_name);
-    println!("  Status:   {} {}", status_icon(&record.status), status_desc_cn(&record.status));
+    println!(
+        "  Status:   {} {}",
+        status_icon(&record.status),
+        status_desc_cn(&record.status)
+    );
     println!("  Created:  {}", format_ts(record.created_at));
     println!("  Updated:  {}", format_ts(record.updated_at));
     println!();
@@ -601,11 +700,54 @@ fn print_record_detail(record: &EvolutionRecord) {
 
     // Pipeline stages
     println!("  📋 Pipeline:");
-    print_pipeline_stage("Triggered", true, record.status != EvolutionStatus::Triggered);
-    print_pipeline_stage("Generate Patch", record.patch.is_some(), matches!(record.status, EvolutionStatus::Generated | EvolutionStatus::Auditing | EvolutionStatus::AuditPassed | EvolutionStatus::CompilePassed | EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed | EvolutionStatus::RollingOut));
-    print_pipeline_stage("Audit", record.audit.is_some(), record.audit.as_ref().is_some_and(|a| a.passed));
-    print_pipeline_stage("Compile Check", record.status.is_compile_passed() || matches!(record.status, EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::RollingOut), record.status.is_compile_passed() || matches!(record.status, EvolutionStatus::Observing | EvolutionStatus::Completed | EvolutionStatus::RollingOut));
-    print_pipeline_stage("Deploy & Observe", record.observation.is_some() || record.rollout.is_some(), record.status == EvolutionStatus::Completed);
+    print_pipeline_stage(
+        "Triggered",
+        true,
+        record.status != EvolutionStatus::Triggered,
+    );
+    print_pipeline_stage(
+        "Generate Patch",
+        record.patch.is_some(),
+        matches!(
+            record.status,
+            EvolutionStatus::Generated
+                | EvolutionStatus::Auditing
+                | EvolutionStatus::AuditPassed
+                | EvolutionStatus::CompilePassed
+                | EvolutionStatus::Observing
+                | EvolutionStatus::Completed
+                | EvolutionStatus::DryRunPassed
+                | EvolutionStatus::TestPassed
+                | EvolutionStatus::RollingOut
+        ),
+    );
+    print_pipeline_stage(
+        "Audit",
+        record.audit.is_some(),
+        record.audit.as_ref().is_some_and(|a| a.passed),
+    );
+    print_pipeline_stage(
+        "Compile Check",
+        record.status.is_compile_passed()
+            || matches!(
+                record.status,
+                EvolutionStatus::Observing
+                    | EvolutionStatus::Completed
+                    | EvolutionStatus::RollingOut
+            ),
+        record.status.is_compile_passed()
+            || matches!(
+                record.status,
+                EvolutionStatus::Observing
+                    | EvolutionStatus::Completed
+                    | EvolutionStatus::RollingOut
+            ),
+    );
+    print_pipeline_stage(
+        "Deploy & Observe",
+        record.observation.is_some() || record.rollout.is_some(),
+        record.status == EvolutionStatus::Completed,
+    );
     println!();
 
     // Patch detail
@@ -627,7 +769,10 @@ fn print_record_detail(record: &EvolutionRecord) {
 
     // Audit detail
     if let Some(ref audit) = record.audit {
-        println!("  🔍 Audit: {}", if audit.passed { "passed" } else { "failed" });
+        println!(
+            "  🔍 Audit: {}",
+            if audit.passed { "passed" } else { "failed" }
+        );
         for issue in &audit.issues {
             let icon = match issue.severity.as_str() {
                 "error" => "❌",
@@ -642,7 +787,11 @@ fn print_record_detail(record: &EvolutionRecord) {
     // Observation detail
     if let Some(ref obs) = record.observation {
         println!("  🚀 Observation Window:");
-        println!("    Duration: {} min, Error threshold: {:.0}%", obs.duration_minutes, obs.error_threshold * 100.0);
+        println!(
+            "    Duration: {} min, Error threshold: {:.0}%",
+            obs.duration_minutes,
+            obs.error_threshold * 100.0
+        );
         let elapsed = (chrono::Utc::now().timestamp() - obs.started_at) / 60;
         println!("    Elapsed: {} min", elapsed);
         println!();
@@ -650,7 +799,13 @@ fn print_record_detail(record: &EvolutionRecord) {
 }
 
 fn print_pipeline_stage(name: &str, started: bool, passed: bool) {
-    let icon = if passed { "✅" } else if started { "🔄" } else { "⬜" };
+    let icon = if passed {
+        "✅"
+    } else if started {
+        "🔄"
+    } else {
+        "⬜"
+    };
     println!("    {} {}", icon, name);
 }
 
@@ -661,17 +816,34 @@ fn print_all_status(paths: &Paths) -> anyhow::Result<()> {
     records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     let active_count = records.iter().filter(|r| !is_terminal(&r.status)).count();
-    let completed_count = records.iter().filter(|r| r.status == EvolutionStatus::Completed).count();
-    let failed_count = records.iter().filter(|r| matches!(r.status,
-        EvolutionStatus::Failed | EvolutionStatus::RolledBack |
-        EvolutionStatus::AuditFailed | EvolutionStatus::CompileFailed |
-        EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed
-    )).count();
+    let completed_count = records
+        .iter()
+        .filter(|r| r.status == EvolutionStatus::Completed)
+        .count();
+    let failed_count = records
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                EvolutionStatus::Failed
+                    | EvolutionStatus::RolledBack
+                    | EvolutionStatus::AuditFailed
+                    | EvolutionStatus::CompileFailed
+                    | EvolutionStatus::DryRunFailed
+                    | EvolutionStatus::TestFailed
+            )
+        })
+        .count();
 
     println!();
     println!("🧬 Evolution Status");
-    println!("  🔄 Active: {}  ✅ Completed: {}  ❌ Failed: {}  📊 Total: {}",
-        active_count, completed_count, failed_count, records.len());
+    println!(
+        "  🔄 Active: {}  ✅ Completed: {}  ❌ Failed: {}  📊 Total: {}",
+        active_count,
+        completed_count,
+        failed_count,
+        records.len()
+    );
 
     if !records.is_empty() {
         println!();
@@ -681,7 +853,8 @@ fn print_all_status(paths: &Paths) -> anyhow::Result<()> {
             let icon = status_icon(&r.status);
             let desc = status_desc_cn(&r.status);
             let trigger = trigger_short(r);
-            println!("  {} {:<30} [{}] {} ({})",
+            println!(
+                "  {} {:<30} [{}] {} ({})",
                 icon,
                 truncate_str(&r.skill_name, 30),
                 desc,
@@ -690,7 +863,10 @@ fn print_all_status(paths: &Paths) -> anyhow::Result<()> {
             );
         }
         if records.len() > 10 {
-            println!("  ... {} more records (use `blockcell evolve list` to see all)", records.len() - 10);
+            println!(
+                "  ... {} more records (use `blockcell evolve list` to see all)",
+                records.len() - 10
+            );
         }
     }
     println!();
@@ -720,7 +896,10 @@ fn load_all_records(records_dir: &std::path::Path) -> Vec<EvolutionRecord> {
     records
 }
 
-fn load_record(records_dir: &std::path::Path, evolution_id: &str) -> anyhow::Result<EvolutionRecord> {
+fn load_record(
+    records_dir: &std::path::Path,
+    evolution_id: &str,
+) -> anyhow::Result<EvolutionRecord> {
     let path = records_dir.join(format!("{}.json", evolution_id));
     if !path.exists() {
         anyhow::bail!("Record file not found: {}", evolution_id);
@@ -731,14 +910,15 @@ fn load_record(records_dir: &std::path::Path, evolution_id: &str) -> anyhow::Res
 }
 
 fn is_terminal(status: &EvolutionStatus) -> bool {
-    matches!(status,
-        EvolutionStatus::Completed |
-        EvolutionStatus::Failed |
-        EvolutionStatus::RolledBack |
-        EvolutionStatus::AuditFailed |
-        EvolutionStatus::CompileFailed |
-        EvolutionStatus::DryRunFailed |
-        EvolutionStatus::TestFailed
+    matches!(
+        status,
+        EvolutionStatus::Completed
+            | EvolutionStatus::Failed
+            | EvolutionStatus::RolledBack
+            | EvolutionStatus::AuditFailed
+            | EvolutionStatus::CompileFailed
+            | EvolutionStatus::DryRunFailed
+            | EvolutionStatus::TestFailed
     )
 }
 
@@ -750,8 +930,13 @@ fn status_icon(status: &EvolutionStatus) -> &'static str {
         EvolutionStatus::Auditing => "🔍",
         EvolutionStatus::AuditPassed => "✅",
         EvolutionStatus::AuditFailed => "❌",
-        EvolutionStatus::CompilePassed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "✅",
-        EvolutionStatus::CompileFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "❌",
+        EvolutionStatus::CompilePassed
+        | EvolutionStatus::DryRunPassed
+        | EvolutionStatus::TestPassed => "✅",
+        EvolutionStatus::CompileFailed
+        | EvolutionStatus::DryRunFailed
+        | EvolutionStatus::TestFailed
+        | EvolutionStatus::Testing => "❌",
         EvolutionStatus::Observing | EvolutionStatus::RollingOut => "🚀",
         EvolutionStatus::Completed => "🎉",
         EvolutionStatus::RolledBack => "⏪",
@@ -767,8 +952,13 @@ fn status_desc_cn(status: &EvolutionStatus) -> &'static str {
         EvolutionStatus::Auditing => "auditing",
         EvolutionStatus::AuditPassed => "audit passed",
         EvolutionStatus::AuditFailed => "audit failed",
-        EvolutionStatus::CompilePassed | EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "compile passed",
-        EvolutionStatus::CompileFailed | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "compile failed",
+        EvolutionStatus::CompilePassed
+        | EvolutionStatus::DryRunPassed
+        | EvolutionStatus::TestPassed => "compile passed",
+        EvolutionStatus::CompileFailed
+        | EvolutionStatus::DryRunFailed
+        | EvolutionStatus::TestFailed
+        | EvolutionStatus::Testing => "compile failed",
         EvolutionStatus::Observing | EvolutionStatus::RollingOut => "observing",
         EvolutionStatus::Completed => "completed",
         EvolutionStatus::RolledBack => "rolled back",
@@ -781,13 +971,28 @@ fn trigger_desc(record: &EvolutionRecord) -> String {
         blockcell_skills::evolution::TriggerReason::ExecutionError { error, count } => {
             format!("Execution error ({}x): {}", count, truncate_str(error, 60))
         }
-        blockcell_skills::evolution::TriggerReason::ConsecutiveFailures { count, window_minutes } => {
-            format!("Consecutive failures {}x (within {}min)", count, window_minutes)
+        blockcell_skills::evolution::TriggerReason::ConsecutiveFailures {
+            count,
+            window_minutes,
+        } => {
+            format!(
+                "Consecutive failures {}x (within {}min)",
+                count, window_minutes
+            )
         }
-        blockcell_skills::evolution::TriggerReason::PerformanceDegradation { metric, threshold } => {
-            format!("Performance degradation: {} (threshold {:.2})", metric, threshold)
+        blockcell_skills::evolution::TriggerReason::PerformanceDegradation {
+            metric,
+            threshold,
+        } => {
+            format!(
+                "Performance degradation: {} (threshold {:.2})",
+                metric, threshold
+            )
         }
-        blockcell_skills::evolution::TriggerReason::ApiChange { endpoint, status_code } => {
+        blockcell_skills::evolution::TriggerReason::ApiChange {
+            endpoint,
+            status_code,
+        } => {
             format!("API change: {} ({})", endpoint, status_code)
         }
         blockcell_skills::evolution::TriggerReason::ManualRequest { description } => {
@@ -800,14 +1005,16 @@ fn trigger_short(record: &EvolutionRecord) -> &'static str {
     match &record.context.trigger {
         blockcell_skills::evolution::TriggerReason::ExecutionError { .. } => "exec error",
         blockcell_skills::evolution::TriggerReason::ConsecutiveFailures { .. } => "failures",
-        blockcell_skills::evolution::TriggerReason::PerformanceDegradation { .. } => "perf degradation",
+        blockcell_skills::evolution::TriggerReason::PerformanceDegradation { .. } => {
+            "perf degradation"
+        }
         blockcell_skills::evolution::TriggerReason::ApiChange { .. } => "API change",
         blockcell_skills::evolution::TriggerReason::ManualRequest { .. } => "manual",
     }
 }
 
 fn format_ts(ts: i64) -> String {
-    use chrono::{TimeZone, Local};
+    use chrono::{Local, TimeZone};
     match Local.timestamp_opt(ts, 0) {
         chrono::LocalResult::Single(dt) => dt.format("%m-%d %H:%M").to_string(),
         _ => "unknown".to_string(),

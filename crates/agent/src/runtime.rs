@@ -13,7 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
-use crate::context::ContextBuilder;
+use crate::context::{ActiveSkillContext, ContextBuilder, InteractionMode};
+use crate::intent::{IntentCategory, IntentToolResolver};
 use crate::task_manager::TaskManager;
 
 /// Adapter that wraps a Provider to implement the skills::LLMProvider trait.
@@ -46,6 +47,7 @@ pub struct RuntimeSpawnHandle {
     task_manager: TaskManager,
     outbound_tx: Option<mpsc::Sender<OutboundMessage>>,
     provider_pool: Arc<ProviderPool>,
+    agent_id: Option<String>,
 }
 
 impl SpawnHandle for RuntimeSpawnHandle {
@@ -77,6 +79,7 @@ impl SpawnHandle for RuntimeSpawnHandle {
         let label_clone = label.to_string();
         let origin_channel = origin_channel.to_string();
         let origin_chat_id = origin_chat_id.to_string();
+        let agent_id = self.agent_id.clone();
 
         // Spawn the background task. Task registration (create_task) happens inside
         // run_subagent_task before set_running(), eliminating the race condition.
@@ -91,6 +94,7 @@ impl SpawnHandle for RuntimeSpawnHandle {
             label_clone,
             origin_channel,
             origin_chat_id,
+            agent_id,
         ));
 
         Ok(serde_json::json!({
@@ -144,22 +148,70 @@ fn is_im_channel(channel: &str) -> bool {
     )
 }
 
-const CORE_TOOLS: &[&str] = &[
-    "read_file",
-    "write_file",
-    "edit_file",
-    "list_dir",
-    "exec",
-    "web_search",
-    "web_fetch",
-    "message",
-    "memory_query",
-    "memory_upsert",
-    "spawn",
-    "list_tasks",
-    "cron",
-    "toggle_manage",
-];
+fn resolve_routed_agent_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("route_agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn build_subagent_metadata(agent_id: Option<&str>) -> serde_json::Value {
+    match agent_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(agent_id) => serde_json::json!({
+            "route_agent_id": agent_id,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn kernel_tool_names() -> Vec<String> {
+    blockcell_tools::registry::kernel_tool_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn active_tool_names_for_mode(
+    mode: InteractionMode,
+    active_skill: Option<&ActiveSkillContext>,
+    available_tools: &HashSet<String>,
+) -> Vec<String> {
+    let mut tool_names: Vec<String> = match mode {
+        InteractionMode::Skill => {
+            let mut names = kernel_tool_names();
+            if let Some(skill) = active_skill {
+                names.extend(skill.tools.iter().cloned());
+            }
+            names
+        }
+        InteractionMode::Chat => vec![],
+        InteractionMode::General => kernel_tool_names(),
+    };
+    tool_names.retain(|name| available_tools.contains(name));
+    tool_names.sort();
+    tool_names.dedup();
+    tool_names
+}
+
+fn resolve_profile_tool_names(
+    config: &Config,
+    agent_id: Option<&str>,
+    intents: &[IntentCategory],
+    available_tools: &HashSet<String>,
+) -> Vec<String> {
+    IntentToolResolver::new(config)
+        .resolve_tool_names(agent_id, intents, Some(available_tools))
+        .unwrap_or_default()
+}
+
+fn scoped_tool_denied_result(tool_name: &str) -> String {
+    format!(
+        "Error: Tool '{}' is not available in the current built-in/skill scope.",
+        tool_name
+    )
+}
 
 fn normalize_path_for_check(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -568,6 +620,8 @@ pub struct AgentRuntime {
     authorized_dirs: HashSet<PathBuf>,
     /// Shared task manager for tracking background subagent tasks.
     task_manager: TaskManager,
+    /// Agent id bound to this runtime.
+    agent_id: Option<String>,
     /// Shared memory store handle for tools.
     memory_store: Option<MemoryStoreHandle>,
     /// Capability registry handle for tools.
@@ -619,6 +673,7 @@ impl AgentRuntime {
             confirm_tx: None,
             authorized_dirs: HashSet::new(),
             task_manager: TaskManager::new(),
+            agent_id: None,
             memory_store: None,
             capability_registry: None,
             core_evolution: None,
@@ -650,9 +705,17 @@ impl AgentRuntime {
         self.task_manager = tm;
     }
 
+    pub fn set_agent_id(&mut self, agent_id: Option<String>) {
+        self.agent_id = agent_id;
+    }
+
     /// Set the broadcast sender for streaming events to WebSocket clients.
     pub fn set_event_tx(&mut self, tx: broadcast::Sender<String>) {
         self.event_tx = Some(tx);
+    }
+
+    pub fn validate_intent_router(&self) -> Result<()> {
+        Ok(())
     }
 
     /// 设置独立的自进化 LLM provider（可选覆盖，不影响主 pool）
@@ -711,42 +774,25 @@ impl AgentRuntime {
         use blockcell_tools::alert_rule::AlertRuleTool;
         use blockcell_tools::app_control::AppControlTool;
         use blockcell_tools::audio_transcribe::AudioTranscribeTool;
-        use blockcell_tools::blockchain_rpc::BlockchainRpcTool;
-        use blockcell_tools::blockchain_tx::BlockchainTxTool;
-        use blockcell_tools::bridge_api::BridgeApiTool;
         use blockcell_tools::browser::BrowseTool;
-        use blockcell_tools::calendar_api::CalendarApiTool;
         use blockcell_tools::camera::CameraCaptureTool;
         use blockcell_tools::chart_generate::ChartGenerateTool;
-        use blockcell_tools::cloud_api::CloudApiTool;
         use blockcell_tools::community_hub::CommunityHubTool;
-        use blockcell_tools::contacts::ContactsTool;
-        use blockcell_tools::contract_security::ContractSecurityTool;
         use blockcell_tools::data_process::DataProcessTool;
         use blockcell_tools::email::EmailTool;
         use blockcell_tools::encrypt::EncryptTool;
-        use blockcell_tools::exchange_api::ExchangeApiTool;
         use blockcell_tools::exec::ExecTool;
         use blockcell_tools::file_ops::FileOpsTool;
-        use blockcell_tools::finance_api::FinanceApiTool;
         use blockcell_tools::fs::*;
-        use blockcell_tools::git_api::GitApiTool;
-        use blockcell_tools::health_api::HealthApiTool;
         use blockcell_tools::http_request::HttpRequestTool;
         use blockcell_tools::image_understand::ImageUnderstandTool;
-        use blockcell_tools::iot_control::IotControlTool;
         use blockcell_tools::knowledge_graph::KnowledgeGraphTool;
-        use blockcell_tools::map_api::MapApiTool;
         use blockcell_tools::memory::{MemoryForgetTool, MemoryQueryTool, MemoryUpsertTool};
         use blockcell_tools::memory_maintenance::MemoryMaintenanceTool;
-        use blockcell_tools::multisig::MultisigTool;
         use blockcell_tools::network_monitor::NetworkMonitorTool;
-        use blockcell_tools::nft_market::NftMarketTool;
-        use blockcell_tools::notification::NotificationTool;
         use blockcell_tools::ocr::OcrTool;
         use blockcell_tools::office_write::OfficeWriteTool;
         use blockcell_tools::skills::ListSkillsTool;
-        use blockcell_tools::social_media::SocialMediaTool;
         use blockcell_tools::stream_subscribe::StreamSubscribeTool;
         use blockcell_tools::system_info::{CapabilityEvolveTool, SystemInfoTool};
         use blockcell_tools::tasks::ListTasksTool;
@@ -781,32 +827,15 @@ impl AgentRuntime {
         registry.register(Arc::new(AudioTranscribeTool));
         registry.register(Arc::new(ChartGenerateTool));
         registry.register(Arc::new(OfficeWriteTool));
-        registry.register(Arc::new(CalendarApiTool));
-        registry.register(Arc::new(IotControlTool));
         registry.register(Arc::new(TtsTool));
         registry.register(Arc::new(OcrTool));
         registry.register(Arc::new(ImageUnderstandTool));
-        registry.register(Arc::new(SocialMediaTool));
-        registry.register(Arc::new(NotificationTool));
-        registry.register(Arc::new(CloudApiTool));
-        registry.register(Arc::new(GitApiTool));
-        registry.register(Arc::new(FinanceApiTool));
         registry.register(Arc::new(VideoProcessTool));
-        registry.register(Arc::new(HealthApiTool));
-        registry.register(Arc::new(MapApiTool));
-        registry.register(Arc::new(ContactsTool));
         registry.register(Arc::new(EncryptTool));
         registry.register(Arc::new(NetworkMonitorTool));
         registry.register(Arc::new(KnowledgeGraphTool));
         registry.register(Arc::new(StreamSubscribeTool));
         registry.register(Arc::new(AlertRuleTool));
-        registry.register(Arc::new(BlockchainRpcTool));
-        registry.register(Arc::new(ExchangeApiTool));
-        registry.register(Arc::new(BlockchainTxTool));
-        registry.register(Arc::new(ContractSecurityTool));
-        registry.register(Arc::new(BridgeApiTool));
-        registry.register(Arc::new(NftMarketTool));
-        registry.register(Arc::new(MultisigTool));
         registry.register(Arc::new(CommunityHubTool));
         registry.register(Arc::new(MemoryMaintenanceTool));
         registry.register(Arc::new(ToggleManageTool));
@@ -1057,16 +1086,27 @@ impl AgentRuntime {
 
         // ── Record sender as a known channel contact (for cross-channel lookup) ──
         if msg.channel != "ws" && msg.channel != "cli" && msg.channel != "system" {
-            let sender_name = msg.metadata.get("sender_nick")
+            let sender_name = msg
+                .metadata
+                .get("sender_nick")
                 .and_then(|v| v.as_str())
                 .or_else(|| msg.metadata.get("username").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let chat_type = match msg.metadata.get("conversation_type").and_then(|v| v.as_str()) {
+            let chat_type = match msg
+                .metadata
+                .get("conversation_type")
+                .and_then(|v| v.as_str())
+            {
                 Some("1") => "private",
                 Some("2") => "group",
                 _ => {
-                    if msg.metadata.get("is_group").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if msg
+                        .metadata
+                        .get("is_group")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
                         "group"
                     } else if msg.sender_id == msg.chat_id {
                         "private"
@@ -1075,14 +1115,15 @@ impl AgentRuntime {
                     }
                 }
             };
-            self.channel_contacts.upsert(blockcell_storage::ChannelContact {
-                channel: msg.channel.clone(),
-                chat_id: msg.chat_id.clone(),
-                sender_id: msg.sender_id.clone(),
-                name: sender_name,
-                chat_type: chat_type.to_string(),
-                last_active: chrono::Utc::now().to_rfc3339(),
-            });
+            self.channel_contacts
+                .upsert(blockcell_storage::ChannelContact {
+                    channel: msg.channel.clone(),
+                    chat_id: msg.chat_id.clone(),
+                    sender_id: msg.sender_id.clone(),
+                    name: sender_name,
+                    chat_type: chat_type.to_string(),
+                    last_active: chrono::Utc::now().to_rfc3339(),
+                });
         }
 
         // ── skill script fast path: execute SKILL.rhai / SKILL.py directly without LLM ──
@@ -1141,7 +1182,9 @@ impl AgentRuntime {
 
             // Send response to outbound
             if let Some(tx) = &self.outbound_tx {
-                let outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                let mut outbound =
+                    OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                outbound.account_id = msg.account_id.clone();
                 let _ = tx.send(outbound).await;
             }
 
@@ -1183,7 +1226,9 @@ impl AgentRuntime {
 
             // Send to outbound (CLI printer + gateway's outbound_to_ws_bridge)
             if let Some(tx) = &self.outbound_tx {
-                let outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                let mut outbound =
+                    OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                outbound.account_id = msg.account_id.clone();
                 let _ = tx.send(outbound).await;
             }
 
@@ -1208,7 +1253,10 @@ impl AgentRuntime {
 
         // Auto-set session display name from first user message
         if history.is_empty() {
-            if let Some(new_name) = self.session_store.set_session_name_if_new(&session_key, &msg.content) {
+            if let Some(new_name) = self
+                .session_store
+                .set_session_name_if_new(&session_key, &msg.content)
+            {
                 // If this is a WS chat, notify the client immediately to update the sidebar
                 if msg.channel == "ws" {
                     if let Some(ref event_tx) = self.event_tx {
@@ -1223,49 +1271,59 @@ impl AgentRuntime {
             }
         }
 
-        // ── Intent classification (Method A) ──
         let classifier = crate::intent::IntentClassifier::new();
-        let intents = classifier.classify(&msg.content);
-        let intent_names: Vec<String> = intents.iter().map(|i| format!("{:?}", i)).collect();
-        info!(intents = ?intent_names, "Intent classified");
 
         // Load disabled toggles for filtering
         let disabled_tools = load_disabled_toggles(&self.paths, "tools");
         let disabled_skills = load_disabled_toggles(&self.paths, "skills");
 
-        // Build messages for LLM with intent-filtered system prompt (Methods A+B+C+D+E+F)
-        // Note: build_messages_for_intents appends the current user message from user_content,
-        // so we pass history WITHOUT the current user message to avoid duplication.
-        let pending_intent = msg
-            .metadata
-            .get("media_pending_intent")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let messages = self
+        let active_skill = self
             .context_builder
-            .build_messages_for_intents_with_channel(
-                &history,
-                &msg.content,
-                &msg.media,
-                &intents,
-                &disabled_skills,
-                &disabled_tools,
-                &msg.channel,
-                pending_intent,
-            );
+            .resolve_active_skill(&msg.content, &disabled_skills);
+        let chat_intents = classifier.classify(&msg.content);
+        let is_chat = active_skill.is_none()
+            && chat_intents.len() == 1
+            && matches!(chat_intents[0], crate::intent::IntentCategory::Chat);
+        let mode = if active_skill.is_some() {
+            InteractionMode::Skill
+        } else if is_chat {
+            InteractionMode::Chat
+        } else {
+            InteractionMode::General
+        };
+        info!(
+            mode = ?mode,
+            active_skill = active_skill.as_ref().map(|s| s.name.as_str()),
+            "Interaction mode resolved"
+        );
 
-        // Now add user message to history for session persistence
-        history.push(ChatMessage::user(&msg.content));
+        let available_tools: HashSet<String> =
+            self.tool_registry.tool_names().into_iter().collect();
+        let routed_agent_id = self.agent_id.as_deref();
+        let mut tool_names = match mode {
+            InteractionMode::Skill => {
+                active_tool_names_for_mode(mode, active_skill.as_ref(), &available_tools)
+            }
+            InteractionMode::Chat => resolve_profile_tool_names(
+                &self.config,
+                routed_agent_id,
+                &[IntentCategory::Chat],
+                &available_tools,
+            ),
+            InteractionMode::General => {
+                resolve_profile_tool_names(&self.config, routed_agent_id, &chat_intents, &available_tools)
+            }
+        };
 
-        // Get tool schemas filtered by intent (Method A) + disabled tools
-        let mut tool_names = crate::intent::tools_for_intents(&intents);
+        if tool_names.is_empty() && !matches!(mode, InteractionMode::Chat) {
+            tool_names = kernel_tool_names();
+            tool_names.retain(|name| available_tools.contains(name));
+        }
 
         // Ghost routine: ensure required tools are always available.
         // Rationale: intent classification may treat the routine prompt as Chat, producing zero tools,
         // which would cause the LLM to think tools are unavailable.
         if msg.metadata.get("ghost").and_then(|v| v.as_bool()) == Some(true) {
-            // Keep this list minimal and safe. All sensitive connection settings are resolved
-            // internally by tools; do not expose any config details in the prompt.
             let required = [
                 "community_hub",
                 "memory_maintenance",
@@ -1277,21 +1335,70 @@ impl AgentRuntime {
                 "notification",
             ];
             for name in required {
-                if !tool_names.contains(&name) {
-                    tool_names.push(name);
+                if !tool_names.iter().any(|tool_name| tool_name == name) {
+                    tool_names.push(name.to_string());
                 }
             }
         }
 
         tool_names.sort();
         tool_names.dedup();
+
+        // Collect tool-specific prompt rules from the registry for actually loaded tools.
+        let mode_names: Vec<String> = match mode {
+            InteractionMode::Skill => active_skill
+                .as_ref()
+                .map(|skill| vec![format!("Skill:{}", skill.name)])
+                .unwrap_or_else(|| vec!["Skill".to_string()]),
+            InteractionMode::Chat => vec!["Chat".to_string()],
+            InteractionMode::General => vec!["General".to_string()],
+        };
+        let prompt_ctx = blockcell_tools::PromptContext {
+            channel: &msg.channel,
+            intents: &mode_names,
+        };
+        let tool_name_refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+        let mut tool_prompt_rules = self.tool_registry.get_prompt_rules(&tool_name_refs, &prompt_ctx);
+        // MCP meta-rule: inject if any loaded tool is an MCP tool (name contains "__")
+        if tool_names.iter().any(|t| t.contains("__")) {
+            tool_prompt_rules.push("- **MCP (Model Context Protocol)**: blockcell **已内置 MCP 客户端支持**，可连接任意 MCP 服务器（SQLite、GitHub、文件系统、数据库等）。MCP 工具会以 `<serverName>__<toolName>` 格式出现在工具列表中。若用户询问 MCP 功能或当前工具列表中无 MCP 工具，说明尚未配置 MCP 服务器，请引导用户在 `~/.blockcell/config.json` 的 `mcpServers` 字段中添加配置，示例：`{\"mcpServers\": {\"sqlite\": {\"command\": \"uvx\", \"args\": [\"mcp-server-sqlite\", \"--db-path\", \"/tmp/test.db\"]}}}`，重启后即可使用。".to_string());
+        }
+
+        // Build messages for LLM with skill-first mode prompt.
+        // Note: build_messages_for_mode_with_channel appends the current user message from user_content,
+        // so we pass history WITHOUT the current user message to avoid duplication.
+        let pending_intent = msg
+            .metadata
+            .get("media_pending_intent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let messages = self
+            .context_builder
+            .build_messages_for_mode_with_channel(
+                &history,
+                &msg.content,
+                &msg.media,
+                mode,
+                active_skill.as_ref(),
+                &disabled_skills,
+                &disabled_tools,
+                &msg.channel,
+                pending_intent,
+                &tool_prompt_rules,
+            );
+
+        // Now add user message to history for session persistence
+        history.push(ChatMessage::user(&msg.content));
+
+        // Get tool schemas from resolved tool names
         let mut tools = if tool_names.is_empty() {
-            // Chat intent: no tools
+            // Chat mode: no tools
             vec![]
         } else {
+            let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
             let mut schemas = self
                 .tool_registry
-                .get_tiered_schemas(&tool_names, CORE_TOOLS);
+                .get_tiered_schemas(&tool_name_refs, blockcell_tools::registry::kernel_tool_names());
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
                     let name = schema
@@ -1305,10 +1412,12 @@ impl AgentRuntime {
             schemas
         };
         info!(
+            mode = ?mode,
+            active_skill = active_skill.as_ref().map(|s| s.name.as_str()),
             tool_count = tools.len(),
             disabled_tools = disabled_tools.len(),
             disabled_skills = disabled_skills.len(),
-            "Tools loaded for intent"
+            "Tools loaded for interaction mode"
         );
 
         // Main loop with max iterations
@@ -1450,7 +1559,11 @@ impl AgentRuntime {
                             message_tool_sent_media = true;
                         }
                     }
-                    let result = self.execute_tool_call(tool_call, &msg).await;
+                    let result = if tool_names.iter().any(|allowed| allowed == &tool_call.name) {
+                        self.execute_tool_call(tool_call, &msg).await
+                    } else {
+                        scoped_tool_denied_result(&tool_call.name)
+                    };
 
                     // Collect media paths from tool results for WebUI display.
                     // Skip the "message" tool — it already dispatches its own OutboundMessage
@@ -1458,8 +1571,8 @@ impl AgentRuntime {
                     if tool_call.name != "message" {
                         if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
                             let media_exts = [
-                                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav", "m4a",
-                                "mp4", "webm", "mov",
+                                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav",
+                                "m4a", "mp4", "webm", "mov",
                             ];
                             // Scalar fields: output_path, path, file_path, etc.
                             for key in &[
@@ -1706,6 +1819,7 @@ impl AgentRuntime {
                 );
                 if let Some(tx) = &self.outbound_tx {
                     let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, "");
+                    outbound.account_id = msg.account_id.clone();
                     outbound.media = vec![image_path.clone()];
                     let _ = tx.send(outbound).await;
                 }
@@ -1767,6 +1881,7 @@ impl AgentRuntime {
             if let Some(tx) = &self.outbound_tx {
                 let mut outbound =
                     OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                outbound.account_id = msg.account_id.clone();
                 outbound.media = collected_media.clone();
                 outbound.metadata = extract_reply_metadata(&msg);
                 let _ = tx.send(outbound).await;
@@ -1892,7 +2007,12 @@ impl AgentRuntime {
     /// For tools that access the filesystem, check if any paths are outside the
     /// workspace. If so, send a confirmation request to the user and wait for
     /// their response. Returns Ok(true) if access is allowed, Ok(false) if denied.
-    async fn check_path_permission(&mut self, tool_name: &str, args: &serde_json::Value, msg: &InboundMessage) -> bool {
+    async fn check_path_permission(
+        &mut self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        msg: &InboundMessage,
+    ) -> bool {
         let raw_paths = self.extract_paths(tool_name, args);
         if raw_paths.is_empty() {
             return true; // No filesystem paths to check
@@ -1954,7 +2074,12 @@ impl AgentRuntime {
         }
     }
 
-    async fn confirm_dangerous_operation(&mut self, tool_name: &str, items: Vec<String>, msg: &InboundMessage) -> bool {
+    async fn confirm_dangerous_operation(
+        &mut self,
+        tool_name: &str,
+        items: Vec<String>,
+        msg: &InboundMessage,
+    ) -> bool {
         if items.is_empty() {
             return true;
         }
@@ -2086,7 +2211,10 @@ impl AgentRuntime {
                             "hint": "This channel cannot show an interactive confirm prompt. Reply with '确认执行' to proceed with recursive delete / config file modifications."
                         }).to_string();
                     }
-                } else if !self.confirm_dangerous_operation("file_ops", items, msg).await {
+                } else if !self
+                    .confirm_dangerous_operation("file_ops", items, msg)
+                    .await
+                {
                     return serde_json::json!({
                         "error": "Permission denied: destructive file operation requires explicit user confirmation.",
                         "tool": "file_ops",
@@ -2118,6 +2246,7 @@ impl AgentRuntime {
             task_manager: self.task_manager.clone(),
             outbound_tx: self.outbound_tx.clone(),
             provider_pool: Arc::clone(&self.provider_pool),
+            agent_id: resolve_routed_agent_id(&msg.metadata).or_else(|| self.agent_id.clone()),
         });
 
         let ctx = blockcell_tools::ToolContext {
@@ -2125,6 +2254,7 @@ impl AgentRuntime {
             builtin_skills_dir: Some(self.paths.builtin_skills_dir()),
             session_key: msg.session_key(),
             channel: msg.channel.clone(),
+            account_id: msg.account_id.clone(),
             chat_id: msg.chat_id.clone(),
             config: self.config.clone(),
             permissions: blockcell_core::types::PermissionSet::new(), // TODO: Load from skill meta
@@ -2243,7 +2373,7 @@ impl AgentRuntime {
         if let Some(evo_service) = self.context_builder.evolution_service() {
             let mut reported_name = tool_call.name.clone();
             if let Some(sm) = self.context_builder.skill_manager() {
-                if let Some(skill) = sm.match_skill(&msg.content) {
+                if let Some(skill) = sm.match_skill(&msg.content, &HashSet::new()) {
                     reported_name = skill.name.clone();
                 }
             }
@@ -2371,96 +2501,96 @@ impl AgentRuntime {
         let capability_registry = self.capability_registry.clone();
         let core_evolution = self.core_evolution.clone();
 
-        let tool_executor = move |tool_name: &str,
-                                  params: serde_json::Value|
-              -> Result<serde_json::Value> {
-            // Security gate: block disabled tools/skills in skill scripts
-            let disabled_tools = load_disabled_toggles(&paths, "tools");
-            if disabled_tools.contains(tool_name) {
-                return Err(blockcell_core::Error::Tool(format!(
-                    "Tool '{}' is disabled via toggles",
-                    tool_name
-                )));
-            }
-            let disabled_skills = load_disabled_toggles(&paths, "skills");
-            if disabled_skills.contains(tool_name) {
-                return Err(blockcell_core::Error::Tool(format!(
-                    "Skill '{}' is disabled via toggles",
-                    tool_name
-                )));
-            }
-
-            // Security gate: block dangerous exec commands from skill scripts
-            if tool_name == "exec" {
-                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                    if is_dangerous_exec_command(cmd) {
-                        return Err(blockcell_core::Error::Tool(format!(
-                            "Dangerous command blocked in skill script: {}",
-                            cmd
-                        )));
-                    }
+        let tool_executor =
+            move |tool_name: &str, params: serde_json::Value| -> Result<serde_json::Value> {
+                // Security gate: block disabled tools/skills in skill scripts
+                let disabled_tools = load_disabled_toggles(&paths, "tools");
+                if disabled_tools.contains(tool_name) {
+                    return Err(blockcell_core::Error::Tool(format!(
+                        "Tool '{}' is disabled via toggles",
+                        tool_name
+                    )));
                 }
-            }
+                let disabled_skills = load_disabled_toggles(&paths, "skills");
+                if disabled_skills.contains(tool_name) {
+                    return Err(blockcell_core::Error::Tool(format!(
+                        "Skill '{}' is disabled via toggles",
+                        tool_name
+                    )));
+                }
 
-            // Security gate: validate filesystem paths are within workspace
-            let fs_tools = [
-                "read_file",
-                "write_file",
-                "edit_file",
-                "list_dir",
-                "file_ops",
-            ];
-            if fs_tools.contains(&tool_name) {
-                let workspace = paths.workspace();
-                for key in &["path", "destination", "output_path"] {
-                    if let Some(p) = params.get(*key).and_then(|v| v.as_str()) {
-                        let resolved = if std::path::Path::new(p).is_absolute() {
-                            std::path::PathBuf::from(p)
-                        } else {
-                            workspace.join(p)
-                        };
-                        if !is_path_within_base(&workspace, &resolved) {
+                // Security gate: block dangerous exec commands from skill scripts
+                if tool_name == "exec" {
+                    if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                        if is_dangerous_exec_command(cmd) {
                             return Err(blockcell_core::Error::Tool(format!(
-                                "Path '{}' is outside workspace — blocked in skill script",
-                                p
+                                "Dangerous command blocked in skill script: {}",
+                                cmd
                             )));
                         }
                     }
                 }
-            }
 
-            let ctx = blockcell_tools::ToolContext {
-                workspace: paths.workspace(),
-                builtin_skills_dir: Some(paths.builtin_skills_dir()),
-                session_key: session_key.clone(),
-                channel: channel.clone(),
-                chat_id: chat_id.clone(),
-                config: config.clone(),
-                permissions: blockcell_core::types::PermissionSet::new(),
-                task_manager: Some(Arc::new(task_manager.clone())),
-                memory_store: memory_store.clone(),
-                outbound_tx: outbound_tx.clone(),
-                spawn_handle: None, // No spawning from cron skill scripts
-                capability_registry: capability_registry.clone(),
-                core_evolution: core_evolution.clone(),
-                channel_contacts_file: Some(paths.channel_contacts_file()),
+                // Security gate: validate filesystem paths are within workspace
+                let fs_tools = [
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "list_dir",
+                    "file_ops",
+                ];
+                if fs_tools.contains(&tool_name) {
+                    let workspace = paths.workspace();
+                    for key in &["path", "destination", "output_path"] {
+                        if let Some(p) = params.get(*key).and_then(|v| v.as_str()) {
+                            let resolved = if std::path::Path::new(p).is_absolute() {
+                                std::path::PathBuf::from(p)
+                            } else {
+                                workspace.join(p)
+                            };
+                            if !is_path_within_base(&workspace, &resolved) {
+                                return Err(blockcell_core::Error::Tool(format!(
+                                    "Path '{}' is outside workspace — blocked in skill script",
+                                    p
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                let ctx = blockcell_tools::ToolContext {
+                    workspace: paths.workspace(),
+                    builtin_skills_dir: Some(paths.builtin_skills_dir()),
+                    session_key: session_key.clone(),
+                    channel: channel.clone(),
+                    account_id: None,
+                    chat_id: chat_id.clone(),
+                    config: config.clone(),
+                    permissions: blockcell_core::types::PermissionSet::new(),
+                    task_manager: Some(Arc::new(task_manager.clone())),
+                    memory_store: memory_store.clone(),
+                    outbound_tx: outbound_tx.clone(),
+                    spawn_handle: None, // No spawning from cron skill scripts
+                    capability_registry: capability_registry.clone(),
+                    core_evolution: core_evolution.clone(),
+                    channel_contacts_file: Some(paths.channel_contacts_file()),
+                };
+
+                // Execute tool synchronously via a new tokio runtime handle
+                let rt = tokio::runtime::Handle::current();
+                let tool_name_owned = tool_name.to_string();
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        rt.block_on(async { registry.execute(&tool_name_owned, ctx, params).await })
+                    })
+                    .join()
+                    .unwrap_or_else(|_| {
+                        Err(blockcell_core::Error::Tool(
+                            "Tool execution panicked".into(),
+                        ))
+                    })
+                })
             };
-
-            // Execute tool synchronously via a new tokio runtime handle
-            let rt = tokio::runtime::Handle::current();
-            let tool_name_owned = tool_name.to_string();
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    rt.block_on(async { registry.execute(&tool_name_owned, ctx, params).await })
-                })
-                .join()
-                .unwrap_or_else(|_| {
-                    Err(blockcell_core::Error::Tool(
-                        "Tool execution panicked".into(),
-                    ))
-                })
-            })
-        };
 
         // Context variables for the script
         let mut context_vars = HashMap::new();
@@ -2636,6 +2766,21 @@ impl AgentRuntime {
         let mut active_message_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
         let (task_done_tx, mut task_done_rx) = mpsc::unbounded_channel::<(String, String)>();
 
+        async fn abort_active_message_tasks(
+            task_manager: &TaskManager,
+            active_chat_tasks: &mut HashMap<String, String>,
+            active_message_tasks: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+        ) {
+            let active_task_ids: Vec<String> = active_message_tasks.keys().cloned().collect();
+            for task_id in active_task_ids {
+                if let Some(handle) = active_message_tasks.remove(&task_id) {
+                    handle.abort();
+                }
+                task_manager.remove_task(&task_id).await;
+            }
+            active_chat_tasks.clear();
+        }
+
         loop {
             tokio::select! {
                 _ = async {
@@ -2645,6 +2790,11 @@ impl AgentRuntime {
                         std::future::pending::<()>().await;
                     }
                 } => {
+                    abort_active_message_tasks(
+                        &self.task_manager,
+                        &mut active_chat_tasks,
+                        &mut active_message_tasks,
+                    ).await;
                     break;
                 }
                 done = task_done_rx.recv() => {
@@ -2719,6 +2869,7 @@ impl AgentRuntime {
                                 &msg.content,
                                 &msg.channel,
                                 &msg.chat_id,
+                                self.agent_id.as_deref(),
                             ).await;
 
                             if let Some(prev_task_id) = active_chat_tasks.remove(&chat_id_for_task) {
@@ -2861,6 +3012,11 @@ impl AgentRuntime {
                 }
             }
         }
+        abort_active_message_tasks(
+            &self.task_manager,
+            &mut active_chat_tasks,
+            &mut active_message_tasks,
+        ).await;
         info!("AgentRuntime stopped");
     }
 }
@@ -2889,13 +3045,10 @@ async fn run_message_task(
         Err(e) => {
             task_manager.set_failed(&task_id, &format!("{}", e)).await;
             if let Some(tx) = &outbound_tx {
-                let _ = tx
-                    .send(OutboundMessage::new(
-                        &msg.channel,
-                        &msg.chat_id,
-                        &format!("❌ {}", e),
-                    ))
-                    .await;
+                let mut outbound =
+                    OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("❌ {}", e));
+                outbound.account_id = msg.account_id.clone();
+                let _ = tx.send(outbound).await;
             }
             return;
         }
@@ -2952,6 +3105,7 @@ async fn run_subagent_task(
     label: String,
     origin_channel: String,
     origin_chat_id: String,
+    agent_id: Option<String>,
 ) {
     // Create the task entry first, then immediately mark it running.
     // This ensures set_running() never operates on a non-existent task ID.
@@ -2962,6 +3116,7 @@ async fn run_subagent_task(
             &task_str,
             &origin_channel,
             &origin_chat_id,
+            agent_id.as_deref(),
         )
         .await;
     task_manager.set_running(&task_id).await;
@@ -2977,6 +3132,7 @@ async fn run_subagent_task(
         }
     };
     sub_runtime.set_task_manager(task_manager.clone());
+    sub_runtime.set_agent_id(agent_id.clone());
 
     // Create a unique session key for this subagent
     let session_key = format!("subagent:{}", task_id);
@@ -2991,14 +3147,22 @@ async fn run_subagent_task(
 
         let inbound = InboundMessage {
             channel: "subagent".to_string(),
+            account_id: None,
             sender_id: "system".to_string(),
             chat_id: session_key,
             content: user_query.to_string(),
             media: vec![],
-            metadata: serde_json::json!({
-                "skill_script": true,
-                "skill_name": skill_name,
-            }),
+            metadata: {
+                let mut metadata = build_subagent_metadata(agent_id.as_deref());
+                if !metadata.is_object() {
+                    metadata = serde_json::json!({});
+                }
+                if let Some(obj) = metadata.as_object_mut() {
+                    obj.insert("skill_script".to_string(), serde_json::json!(true));
+                    obj.insert("skill_name".to_string(), serde_json::json!(skill_name));
+                }
+                metadata
+            },
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         // process_message will detect skill_script metadata and use the fast path
@@ -3006,11 +3170,12 @@ async fn run_subagent_task(
     } else {
         let inbound = InboundMessage {
             channel: "subagent".to_string(),
+            account_id: None,
             sender_id: "system".to_string(),
             chat_id: session_key,
             content: task_str,
             media: vec![],
-            metadata: serde_json::Value::Null,
+            metadata: build_subagent_metadata(agent_id.as_deref()),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         sub_runtime.process_message(inbound).await
@@ -3064,10 +3229,7 @@ fn extract_reply_metadata(msg: &InboundMessage) -> serde_json::Value {
         }
         "feishu" | "lark" => {
             // Use chat_type from metadata: "group" = group chat, "p2p" = direct message
-            let is_group = msg.metadata
-                .get("chat_type")
-                .and_then(|v| v.as_str())
-                == Some("group");
+            let is_group = msg.metadata.get("chat_type").and_then(|v| v.as_str()) == Some("group");
             if is_group {
                 if let Some(mid) = msg.metadata.get("message_id").and_then(|v| v.as_str()) {
                     return serde_json::json!({ "reply_to_message_id": mid });
@@ -3077,7 +3239,8 @@ fn extract_reply_metadata(msg: &InboundMessage) -> serde_json::Value {
         }
         "discord" => {
             // Discord server messages carry a non-empty guild_id; DMs do not
-            let in_guild = msg.metadata
+            let in_guild = msg
+                .metadata
                 .get("guild_id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
@@ -3101,7 +3264,8 @@ fn extract_reply_metadata(msg: &InboundMessage) -> serde_json::Value {
         }
         "dingtalk" => {
             // DingTalk group chats have conversation_type "2"
-            let is_group = msg.metadata
+            let is_group = msg
+                .metadata
                 .get("conversation_type")
                 .and_then(|v| v.as_str())
                 == Some("2");
@@ -3122,7 +3286,7 @@ mod tests {
 
     #[test]
     fn test_core_tools_contains_toggle_manage() {
-        assert!(CORE_TOOLS.contains(&"toggle_manage"));
+        assert!(kernel_tool_names().iter().any(|name| name == "toggle_manage"));
     }
 
     #[test]
@@ -3167,5 +3331,147 @@ mod tests {
     fn test_should_supplement_tool_schema_ignores_permission_denied() {
         let result = "Error: Tool error: Permission denied: path blocked";
         assert!(!should_supplement_tool_schema(result));
+    }
+
+    #[test]
+    fn test_resolve_routed_agent_id_from_metadata() {
+        let metadata = serde_json::json!({
+            "route_agent_id": "ops"
+        });
+
+        assert_eq!(resolve_routed_agent_id(&metadata).as_deref(), Some("ops"));
+        assert_eq!(resolve_routed_agent_id(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn test_subagent_metadata_preserves_route_agent_id() {
+        let metadata = build_subagent_metadata(Some("ops"));
+
+        assert_eq!(
+            metadata.get("route_agent_id").and_then(|v| v.as_str()),
+            Some("ops")
+        );
+    }
+
+    #[test]
+    fn test_kernel_tool_names_excludes_email() {
+        let names = kernel_tool_names();
+
+        assert!(names.iter().any(|name| name == "toggle_manage"));
+        assert!(names.iter().any(|name| name == "memory_query"));
+        assert!(names.iter().any(|name| name == "list_skills"));
+        assert!(!names.iter().any(|name| name == "email"));
+        assert!(!names.iter().any(|name| name == "finance_api"));
+        assert!(!names.iter().any(|name| name == "read_file"));
+    }
+
+    #[test]
+    fn test_active_tool_names_for_skill_include_kernel_and_declared_tools() {
+        use crate::context::ActiveSkillContext;
+
+        let available: HashSet<String> = [
+            "memory_query",
+            "memory_upsert",
+            "memory_forget",
+            "spawn",
+            "list_tasks",
+            "list_skills",
+            "toggle_manage",
+            "finance_api",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let skill = ActiveSkillContext {
+            name: "stock_analysis".to_string(),
+            prompt_md: String::new(),
+            tools: vec!["finance_api".to_string()],
+            fallback_message: None,
+        };
+
+        let tool_names = active_tool_names_for_mode(InteractionMode::Skill, Some(&skill), &available);
+
+        assert!(tool_names.contains(&"finance_api".to_string()));
+        assert!(tool_names.contains(&"memory_query".to_string()));
+        assert!(tool_names.contains(&"toggle_manage".to_string()));
+        assert_eq!(tool_names.iter().filter(|name| name.as_str() == "finance_api").count(), 1);
+    }
+
+    #[test]
+    fn test_resolve_profile_tool_names_uses_agent_profile_for_unknown_intent() {
+        let raw = r#"{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true, "intentProfile": "ops" }
+    ]
+  },
+  "intentRouter": {
+    "enabled": true,
+    "defaultProfile": "default",
+    "profiles": {
+      "default": {
+        "coreTools": ["read_file"],
+        "intentTools": {
+          "Chat": { "inheritBase": false, "tools": [] },
+          "Unknown": ["browse"]
+        }
+      },
+      "ops": {
+        "coreTools": ["read_file", "exec", "file_ops"],
+        "intentTools": {
+          "Chat": { "inheritBase": false, "tools": [] },
+          "Unknown": ["browse", "http_request"],
+          "DevOps": ["git_api", "network_monitor"]
+        }
+      }
+    }
+  }
+}"#;
+        let config: Config = serde_json::from_str(raw).unwrap();
+        let available: HashSet<String> = [
+            "read_file",
+            "exec",
+            "file_ops",
+            "browse",
+            "http_request",
+            "git_api",
+            "network_monitor",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let tool_names = resolve_profile_tool_names(
+            &config,
+            Some("ops"),
+            &[IntentCategory::Unknown],
+            &available,
+        );
+
+        assert!(tool_names.contains(&"read_file".to_string()));
+        assert!(tool_names.contains(&"exec".to_string()));
+        assert!(tool_names.contains(&"file_ops".to_string()));
+        assert!(tool_names.contains(&"browse".to_string()));
+        assert!(tool_names.contains(&"http_request".to_string()));
+        assert!(!tool_names.contains(&"git_api".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_profile_tool_names_returns_empty_for_chat_when_profile_configures_none() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        let available: HashSet<String> = ["read_file", "browse"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let tool_names = resolve_profile_tool_names(
+            &config,
+            None,
+            &[IntentCategory::Chat],
+            &available,
+        );
+
+        assert!(tool_names.is_empty());
     }
 }

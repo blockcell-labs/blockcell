@@ -4,10 +4,16 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// GET /v1/cron — list all cron jobs
-pub(super) async fn handle_cron_list(State(state): State<GatewayState>) -> impl IntoResponse {
-    // Reload from disk to get latest
-    let _ = state.cron_service.load().await;
-    let jobs = state.cron_service.list_jobs().await;
+pub(super) async fn handle_cron_list(
+    State(state): State<GatewayState>,
+    Query(agent): Query<AgentScopedQuery>,
+) -> impl IntoResponse {
+    let (_, cron_service) = match cron_service_for_agent(&state, agent.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let _ = cron_service.load().await;
+    let jobs = cron_service.list_jobs().await;
     let jobs_json: Vec<serde_json::Value> = jobs
         .iter()
         .map(|j| serde_json::to_value(j).unwrap_or_default())
@@ -66,6 +72,7 @@ fn resolve_cron_skill_payload_kind(paths: &Paths, skill_name: Option<&str>) -> &
 /// POST /v1/cron — create a cron job
 pub(super) async fn handle_cron_create(
     State(state): State<GatewayState>,
+    Query(agent): Query<AgentScopedQuery>,
     Json(req): Json<CronCreateRequest>,
 ) -> impl IntoResponse {
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -100,7 +107,18 @@ pub(super) async fn handle_cron_create(
         );
     };
 
-    let payload_kind = resolve_cron_skill_payload_kind(&state.paths, req.skill_name.as_deref());
+    let agent_id = match resolve_requested_agent_id(&state.config, agent.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let (_, cron_service) = match cron_service_for_agent(&state, Some(&agent_id)) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let payload_kind = resolve_cron_skill_payload_kind(
+        &state.paths.for_agent(&agent_id),
+        req.skill_name.as_deref(),
+    );
 
     let job = CronJob {
         id: uuid::Uuid::new_v4().to_string(),
@@ -122,7 +140,7 @@ pub(super) async fn handle_cron_create(
     };
 
     let job_id = job.id.clone();
-    match state.cron_service.add_job(job).await {
+    match cron_service.add_job(job).await {
         Ok(_) => Json(serde_json::json!({ "status": "created", "job_id": job_id })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -132,8 +150,13 @@ pub(super) async fn handle_cron_create(
 pub(super) async fn handle_cron_delete(
     State(state): State<GatewayState>,
     AxumPath(job_id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
 ) -> impl IntoResponse {
-    match state.cron_service.remove_job(&job_id).await {
+    let (_, cron_service) = match cron_service_for_agent(&state, agent.agent.as_deref()) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    match cron_service.remove_job(&job_id).await {
         Ok(true) => Json(serde_json::json!({ "status": "deleted", "job_id": job_id })),
         Ok(false) => Json(serde_json::json!({ "status": "not_found", "job_id": job_id })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
@@ -144,8 +167,17 @@ pub(super) async fn handle_cron_delete(
 pub(super) async fn handle_cron_run(
     State(state): State<GatewayState>,
     AxumPath(job_id): AxumPath<String>,
+    Query(agent): Query<AgentScopedQuery>,
 ) -> impl IntoResponse {
-    let jobs = state.cron_service.list_jobs().await;
+    let agent_id = match resolve_requested_agent_id(&state.config, agent.agent.as_deref()) {
+        Ok(agent_id) => agent_id,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let (_, cron_service) = match cron_service_for_agent(&state, Some(&agent_id)) {
+        Ok(value) => value,
+        Err(err) => return Json(serde_json::json!({ "error": err })),
+    };
+    let jobs = cron_service.list_jobs().await;
     let job = jobs.iter().find(|j| j.id == job_id);
 
     match job {
@@ -180,15 +212,19 @@ pub(super) async fn handle_cron_run(
                 }
                 meta
             };
-            let inbound = InboundMessage {
-                channel: "cron".to_string(),
-                sender_id: "cron".to_string(),
-                chat_id: job.id.clone(),
-                content: format!("[Manual trigger] {}", job.payload.message),
-                media: vec![],
-                metadata,
-                timestamp_ms: chrono::Utc::now().timestamp_millis(),
-            };
+            let inbound = with_route_agent_id(
+                InboundMessage {
+                    channel: "cron".to_string(),
+                    account_id: None,
+                    sender_id: "cron".to_string(),
+                    chat_id: job.id.clone(),
+                    content: format!("[Manual trigger] {}", job.payload.message),
+                    media: vec![],
+                    metadata,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                },
+                &agent_id,
+            );
             let _ = state.inbound_tx.send(inbound).await;
             Json(serde_json::json!({ "status": "triggered", "job_id": job.id }))
         }

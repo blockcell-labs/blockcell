@@ -63,7 +63,7 @@ impl Default for CommunityHubConfig {
 }
 
 /// 一个可用的"模型+供应商"条目，用于 model_pool 多模型高可用配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEntry {
     /// 模型名称，例如 "deepseek-chat"、"claude-3-5-sonnet"
@@ -91,7 +91,7 @@ fn default_entry_priority() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefaults {
     #[serde(default = "default_workspace")]
@@ -246,6 +246,453 @@ pub struct AgentsConfig {
     pub defaults: AgentDefaults,
     #[serde(default)]
     pub ghost: GhostConfig,
+    /// Optional multi-agent definitions.
+    /// If empty, runtime falls back to a single implicit "default" agent.
+    #[serde(default)]
+    pub list: Vec<AgentProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfileConfig {
+    pub id: String,
+    #[serde(default = "default_agent_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub intent_profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model_pool: Vec<ModelEntry>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub max_tool_iterations: Option<u32>,
+    #[serde(default)]
+    pub llm_max_retries: Option<u32>,
+    #[serde(default)]
+    pub llm_retry_delay_ms: Option<u64>,
+    #[serde(default)]
+    pub max_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub evolution_model: Option<String>,
+    #[serde(default)]
+    pub evolution_provider: Option<String>,
+}
+
+fn default_agent_enabled() -> bool {
+    true
+}
+
+impl Default for AgentProfileConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            name: None,
+            intent_profile: None,
+            model: None,
+            provider: None,
+            model_pool: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            max_tool_iterations: None,
+            llm_max_retries: None,
+            llm_retry_delay_ms: None,
+            max_context_tokens: None,
+            evolution_model: None,
+            evolution_provider: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedAgentConfig {
+    pub id: String,
+    pub name: Option<String>,
+    pub defaults: AgentDefaults,
+    pub intent_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentToolRuleConfig {
+    #[serde(default = "default_true")]
+    pub inherit_base: bool,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+impl Default for IntentToolRuleConfig {
+    fn default() -> Self {
+        Self {
+            inherit_base: true,
+            tools: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IntentToolEntryConfig {
+    Tools(Vec<String>),
+    Rule(IntentToolRuleConfig),
+}
+
+impl IntentToolEntryConfig {
+    pub fn inherit_base(&self) -> bool {
+        match self {
+            Self::Tools(_) => true,
+            Self::Rule(rule) => rule.inherit_base,
+        }
+    }
+
+    pub fn tools(&self) -> &[String] {
+        match self {
+            Self::Tools(tools) => tools,
+            Self::Rule(rule) => &rule.tools,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentToolProfileConfig {
+    #[serde(default)]
+    pub core_tools: Vec<String>,
+    #[serde(default)]
+    pub intent_tools: HashMap<String, IntentToolEntryConfig>,
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentRouterConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_intent_router_profile")]
+    pub default_profile: String,
+    #[serde(default)]
+    pub agent_profiles: HashMap<String, String>,
+    #[serde(default = "default_intent_router_profiles")]
+    pub profiles: HashMap<String, IntentToolProfileConfig>,
+}
+
+impl Default for IntentRouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_profile: default_intent_router_profile(),
+            agent_profiles: HashMap::new(),
+            profiles: default_intent_router_profiles(),
+        }
+    }
+}
+
+fn default_intent_router_profile() -> String {
+    "default".to_string()
+}
+
+fn default_intent_router_profiles() -> HashMap<String, IntentToolProfileConfig> {
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "default".to_string(),
+        IntentToolProfileConfig {
+            core_tools: vec![
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "list_dir".to_string(),
+                "exec".to_string(),
+                "web_search".to_string(),
+                "web_fetch".to_string(),
+                "memory_query".to_string(),
+                "memory_upsert".to_string(),
+                "toggle_manage".to_string(),
+                "message".to_string(),
+            ],
+            intent_tools: HashMap::from([
+                (
+                    "Chat".to_string(),
+                    IntentToolEntryConfig::Rule(IntentToolRuleConfig {
+                        inherit_base: false,
+                        tools: vec![],
+                    }),
+                ),
+                (
+                    "FileOps".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "edit_file".to_string(),
+                        "file_ops".to_string(),
+                        "data_process".to_string(),
+                        "office_write".to_string(),
+                    ]),
+                ),
+                (
+                    "WebSearch".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "browse".to_string(),
+                        "http_request".to_string(),
+                    ]),
+                ),
+                (
+                    "Finance".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "http_request".to_string(),
+                        "data_process".to_string(),
+                        "chart_generate".to_string(),
+                        "alert_rule".to_string(),
+                        "stream_subscribe".to_string(),
+                        "knowledge_graph".to_string(),
+                        "cron".to_string(),
+                        "office_write".to_string(),
+                        "browse".to_string(),
+                    ]),
+                ),
+                (
+                    "Blockchain".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "stream_subscribe".to_string(),
+                        "http_request".to_string(),
+                        "knowledge_graph".to_string(),
+                    ]),
+                ),
+                (
+                    "DataAnalysis".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "edit_file".to_string(),
+                        "file_ops".to_string(),
+                        "data_process".to_string(),
+                        "chart_generate".to_string(),
+                        "office_write".to_string(),
+                        "http_request".to_string(),
+                    ]),
+                ),
+                (
+                    "Communication".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "email".to_string(),
+                        "message".to_string(),
+                        "http_request".to_string(),
+                        "community_hub".to_string(),
+                    ]),
+                ),
+                (
+                    "SystemControl".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "system_info".to_string(),
+                        "capability_evolve".to_string(),
+                        "app_control".to_string(),
+                        "camera_capture".to_string(),
+                        "browse".to_string(),
+                        "image_understand".to_string(),
+                        "termux_api".to_string(),
+                    ]),
+                ),
+                (
+                    "Organization".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "calendar_api".to_string(),
+                        "cron".to_string(),
+                        "memory_forget".to_string(),
+                        "knowledge_graph".to_string(),
+                        "list_tasks".to_string(),
+                        "spawn".to_string(),
+                        "list_skills".to_string(),
+                        "memory_maintenance".to_string(),
+                        "community_hub".to_string(),
+                    ]),
+                ),
+                (
+                    "IoT".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "http_request".to_string(),
+                        "cron".to_string(),
+                    ]),
+                ),
+                (
+                    "Media".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "audio_transcribe".to_string(),
+                        "tts".to_string(),
+                        "ocr".to_string(),
+                        "image_understand".to_string(),
+                        "video_process".to_string(),
+                        "file_ops".to_string(),
+                    ]),
+                ),
+                (
+                    "DevOps".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "network_monitor".to_string(),
+                        "encrypt".to_string(),
+                        "http_request".to_string(),
+                        "edit_file".to_string(),
+                        "file_ops".to_string(),
+                    ]),
+                ),
+                (
+                    "Lifestyle".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "http_request".to_string(),
+                    ]),
+                ),
+                (
+                    "Unknown".to_string(),
+                    IntentToolEntryConfig::Tools(vec![
+                        "edit_file".to_string(),
+                        "file_ops".to_string(),
+                        "office_write".to_string(),
+                        "http_request".to_string(),
+                        "browse".to_string(),
+                        "spawn".to_string(),
+                        "list_tasks".to_string(),
+                        "cron".to_string(),
+                        "memory_forget".to_string(),
+                        "list_skills".to_string(),
+                        "community_hub".to_string(),
+                        "memory_maintenance".to_string(),
+                    ]),
+                ),
+            ]),
+            deny_tools: Vec::new(),
+        },
+    );
+    profiles
+}
+
+fn default_intent_router_option() -> Option<IntentRouterConfig> {
+    Some(IntentRouterConfig::default())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WhatsAppAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_whatsapp_bridge_url")]
+    pub bridge_url: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub encrypt_key: String,
+    #[serde(default)]
+    pub verification_token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub app_token: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_slack_poll_interval")]
+    pub poll_interval_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DingTalkAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_key: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub robot_code: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LarkAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub encrypt_key: String,
+    #[serde(default)]
+    pub verification_token: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WeComAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub corp_id: String,
+    #[serde(default)]
+    pub corp_secret: String,
+    #[serde(default)]
+    pub agent_id: i64,
+    #[serde(default)]
+    pub callback_token: String,
+    #[serde(default)]
+    pub encoding_aes_key: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_wecom_poll_interval")]
+    pub poll_interval_secs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +704,11 @@ pub struct WhatsAppConfig {
     pub bridge_url: String,
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// Multi-account config map. Key is account_id.
+    #[serde(default)]
+    pub accounts: HashMap<String, WhatsAppAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 impl Default for WhatsAppConfig {
@@ -265,6 +717,8 @@ impl Default for WhatsAppConfig {
             enabled: false,
             bridge_url: default_whatsapp_bridge_url(),
             allow_from: Vec::new(),
+            accounts: HashMap::new(),
+            default_account_id: None,
         }
     }
 }
@@ -284,6 +738,10 @@ pub struct TelegramConfig {
     pub allow_from: Vec<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, TelegramAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -301,6 +759,10 @@ pub struct FeishuConfig {
     pub verification_token: String,
     #[serde(default)]
     pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, FeishuAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -318,6 +780,10 @@ pub struct SlackConfig {
     pub allow_from: Vec<String>,
     #[serde(default = "default_slack_poll_interval")]
     pub poll_interval_secs: u32,
+    #[serde(default)]
+    pub accounts: HashMap<String, SlackAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 fn default_slack_poll_interval() -> u32 {
@@ -335,6 +801,10 @@ pub struct DiscordConfig {
     pub channels: Vec<String>,
     #[serde(default)]
     pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, DiscordAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 /// 钉钉 (DingTalk) channel configuration.
@@ -356,6 +826,10 @@ pub struct DingTalkConfig {
     /// Allowlist of sender user IDs. Empty = allow all.
     #[serde(default)]
     pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, DingTalkAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 /// Lark (international Feishu) channel configuration.
@@ -376,6 +850,10 @@ pub struct LarkConfig {
     pub verification_token: String,
     #[serde(default)]
     pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, LarkAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 /// 企业微信 (WeCom / WeChat Work) channel configuration.
@@ -406,6 +884,10 @@ pub struct WeComConfig {
     /// Polling interval in seconds (used when callback is not configured). Default: 10.
     #[serde(default = "default_wecom_poll_interval")]
     pub poll_interval_secs: u32,
+    #[serde(default)]
+    pub accounts: HashMap<String, WeComAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
 }
 
 fn default_wecom_poll_interval() -> u32 {
@@ -423,6 +905,8 @@ impl Default for WeComConfig {
             encoding_aes_key: String::new(),
             allow_from: Vec::new(),
             poll_interval_secs: default_wecom_poll_interval(),
+            accounts: HashMap::new(),
+            default_account_id: None,
         }
     }
 }
@@ -668,10 +1152,21 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+    /// Simplified multi-agent routing table: channel -> owner agent id.
+    #[serde(default)]
+    pub channel_owners: HashMap<String, String>,
+    /// Account-level routing overrides: channel -> account_id -> owner agent id.
+    #[serde(default)]
+    pub channel_account_owners: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(
+        default = "default_intent_router_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub intent_router: Option<IntentRouterConfig>,
     #[serde(default)]
     pub auto_upgrade: AutoUpgradeConfig,
     /// MCP server definitions. Key = server name (used as tool name prefix).
@@ -803,8 +1298,11 @@ impl Default for Config {
             community_hub: CommunityHubConfig::default(),
             agents: AgentsConfig::default(),
             channels: ChannelsConfig::default(),
+            channel_owners: HashMap::new(),
+            channel_account_owners: HashMap::new(),
             gateway: GatewayConfig::default(),
             tools: ToolsConfig::default(),
+            intent_router: Some(IntentRouterConfig::default()),
             auto_upgrade: AutoUpgradeConfig::default(),
             mcp_servers: HashMap::new(),
         }
@@ -883,6 +1381,209 @@ impl Config {
         }
         None
     }
+
+    pub fn resolve_channel_owner(&self, channel: &str) -> Option<&str> {
+        self.channel_owners
+            .get(channel)
+            .map(|owner| owner.as_str())
+            .filter(|owner| !owner.trim().is_empty())
+    }
+
+    pub fn resolve_channel_account_owner(&self, channel: &str, account_id: &str) -> Option<&str> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+
+        self.channel_account_owners
+            .get(channel)
+            .and_then(|owners| owners.get(account_id))
+            .map(|owner| owner.as_str())
+            .filter(|owner| !owner.trim().is_empty())
+    }
+
+    pub fn resolve_effective_channel_owner(
+        &self,
+        channel: &str,
+        account_id: Option<&str>,
+    ) -> Option<&str> {
+        account_id
+            .and_then(|account_id| self.resolve_channel_account_owner(channel, account_id))
+            .or_else(|| self.resolve_channel_owner(channel))
+    }
+
+    pub fn is_external_channel_enabled(&self, channel: &str) -> bool {
+        match channel {
+            "telegram" => self.channels.telegram.enabled,
+            "whatsapp" => self.channels.whatsapp.enabled,
+            "feishu" => self.channels.feishu.enabled,
+            "slack" => self.channels.slack.enabled,
+            "discord" => self.channels.discord.enabled,
+            "dingtalk" => self.channels.dingtalk.enabled,
+            "wecom" => self.channels.wecom.enabled,
+            "lark" => self.channels.lark.enabled,
+            _ => false,
+        }
+    }
+
+    pub fn known_agent_ids(&self) -> Vec<String> {
+        let mut ids = vec!["default".to_string()];
+        for agent in self.agents.list.iter().filter(|agent| agent.enabled) {
+            let agent_id = agent.id.trim();
+            if agent_id.is_empty() || agent_id == "default" {
+                continue;
+            }
+            if !ids.iter().any(|id| id == agent_id) {
+                ids.push(agent_id.to_string());
+            }
+        }
+        ids
+    }
+
+    pub fn agent_exists(&self, agent_id: &str) -> bool {
+        let agent_id = agent_id.trim();
+        !agent_id.is_empty() && self.known_agent_ids().iter().any(|id| id == agent_id)
+    }
+
+    pub fn resolve_agent_spec(&self, agent_id: &str) -> Option<ResolvedAgentConfig> {
+        let agent_id = agent_id.trim();
+        if agent_id.is_empty() {
+            return None;
+        }
+
+        let agent = self
+            .agents
+            .list
+            .iter()
+            .find(|agent| agent.enabled && agent.id.trim() == agent_id);
+
+        if agent_id != "default" && agent.is_none() {
+            return None;
+        }
+
+        let mut defaults = self.agents.defaults.clone();
+        if let Some(agent) = agent {
+            let explicit_model = agent
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let explicit_provider = agent
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let has_single_model_override = explicit_model.is_some() || explicit_provider.is_some();
+
+            if let Some(model) = explicit_model {
+                defaults.model = model;
+            }
+            if let Some(provider) = explicit_provider {
+                defaults.provider = Some(provider);
+            }
+            if !agent.model_pool.is_empty() {
+                defaults.model_pool = agent.model_pool.clone();
+            } else if has_single_model_override {
+                defaults.model_pool.clear();
+            }
+            if let Some(max_tokens) = agent.max_tokens {
+                defaults.max_tokens = max_tokens;
+            }
+            if let Some(temperature) = agent.temperature {
+                defaults.temperature = temperature;
+            }
+            if let Some(max_tool_iterations) = agent.max_tool_iterations {
+                defaults.max_tool_iterations = max_tool_iterations;
+            }
+            if let Some(llm_max_retries) = agent.llm_max_retries {
+                defaults.llm_max_retries = llm_max_retries;
+            }
+            if let Some(llm_retry_delay_ms) = agent.llm_retry_delay_ms {
+                defaults.llm_retry_delay_ms = llm_retry_delay_ms;
+            }
+            if let Some(max_context_tokens) = agent.max_context_tokens {
+                defaults.max_context_tokens = max_context_tokens;
+            }
+            if let Some(evolution_model) = agent
+                .evolution_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+            {
+                defaults.evolution_model = Some(evolution_model);
+            }
+            if let Some(evolution_provider) = agent
+                .evolution_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+            {
+                defaults.evolution_provider = Some(evolution_provider);
+            }
+        }
+
+        Some(ResolvedAgentConfig {
+            id: agent_id.to_string(),
+            name: agent.and_then(|entry| entry.name.clone()),
+            defaults,
+            intent_profile: self.resolve_intent_profile_id(Some(agent_id)),
+        })
+    }
+
+    pub fn resolved_agents(&self) -> Vec<ResolvedAgentConfig> {
+        self.known_agent_ids()
+            .into_iter()
+            .filter_map(|agent_id| self.resolve_agent_spec(&agent_id))
+            .collect()
+    }
+
+    pub fn config_for_agent(&self, agent_id: &str) -> Option<Config> {
+        let resolved = self.resolve_agent_spec(agent_id)?;
+        let mut config = self.clone();
+        config.agents.defaults = resolved.defaults;
+        Some(config)
+    }
+
+    pub fn resolve_intent_profile_id(&self, agent_id: Option<&str>) -> Option<String> {
+        let router = self.intent_router.clone().unwrap_or_default();
+
+        let requested_agent_id = agent_id.map(str::trim).filter(|id| !id.is_empty());
+
+        if let Some(agent_id) = requested_agent_id {
+            if let Some(profile) = self
+                .agents
+                .list
+                .iter()
+                .find(|agent| agent.enabled && agent.id.trim() == agent_id)
+                .and_then(|agent| agent.intent_profile.as_deref())
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+            {
+                return Some(profile.to_string());
+            }
+
+            if let Some(profile) = router
+                .agent_profiles
+                .get(agent_id)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+            {
+                return Some(profile.to_string());
+            }
+        }
+
+        let default_profile = router.default_profile.trim();
+        if default_profile.is_empty() {
+            None
+        } else {
+            Some(default_profile.to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -901,5 +1602,298 @@ mod tests {
             Some("http://example.com")
         );
         assert_eq!(cfg.community_hub_api_key().as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn test_channel_owners_and_accounts_deserialize() {
+        let raw = r#"{
+  "agents": {
+    "list": [
+      { "id": "chat", "enabled": true }
+    ]
+  },
+  "channelOwners": {
+    "telegram": "chat"
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "defaultAccountId": "default",
+      "accounts": {
+        "default": {
+          "enabled": true,
+          "token": "tg-token"
+        }
+      }
+    }
+  }
+}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.resolve_channel_owner("telegram"), Some("chat"));
+        assert!(cfg.is_external_channel_enabled("telegram"));
+        assert_eq!(
+            cfg.channels.telegram.default_account_id.as_deref(),
+            Some("default")
+        );
+        let acc = cfg.channels.telegram.accounts.get("default").unwrap();
+        assert_eq!(acc.token, "tg-token");
+        assert!(cfg.agent_exists("chat"));
+    }
+
+    #[test]
+    fn test_channel_account_owner_override_deserializes_and_resolves() {
+        let raw = r#"{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true }
+    ]
+  },
+  "channelOwners": {
+    "telegram": "default"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "accounts": {
+        "bot1": { "enabled": true, "token": "tg-bot1" },
+        "bot2": { "enabled": true, "token": "tg-bot2" }
+      }
+    }
+  }
+}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(cfg.resolve_channel_account_owner("telegram", "bot2"), Some("ops"));
+        assert_eq!(
+            cfg.resolve_effective_channel_owner("telegram", Some("bot2")),
+            Some("ops")
+        );
+        assert_eq!(
+            cfg.resolve_effective_channel_owner("telegram", Some("bot1")),
+            Some("default")
+        );
+        assert_eq!(
+            cfg.resolve_effective_channel_owner("telegram", None),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn test_channel_account_owner_resolution_ignores_blank_values() {
+        let raw = r#"{
+  "channelOwners": {
+    "telegram": "default"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot1": "   "
+    }
+  }
+}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(cfg.resolve_channel_account_owner("telegram", "bot1"), None);
+        assert_eq!(
+            cfg.resolve_effective_channel_owner("telegram", Some("bot1")),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn test_legacy_single_channel_fields_still_work() {
+        let raw = r#"{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "legacy-token"
+    }
+  }
+}"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.channels.telegram.token, "legacy-token");
+        assert!(cfg.channels.telegram.accounts.is_empty());
+        assert_eq!(cfg.channels.telegram.default_account_id, None);
+        assert!(cfg.agent_exists("default"));
+    }
+
+    #[test]
+    fn test_known_agent_ids_fallback_to_default() {
+        let cfg = Config::default();
+        let ids = cfg.known_agent_ids();
+        assert_eq!(ids, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn test_intent_router_deserializes_and_resolves_agent_profile() {
+        let raw = r#"{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true, "intentProfile": "ops" }
+    ]
+  },
+  "intentRouter": {
+    "enabled": true,
+    "defaultProfile": "default",
+    "profiles": {
+      "default": {
+        "coreTools": ["read_file", "message"],
+        "intentTools": {
+          "Chat": { "inheritBase": false, "tools": [] },
+          "Unknown": ["browse"]
+        }
+      },
+      "ops": {
+        "coreTools": ["read_file", "exec"],
+        "intentTools": {
+          "DevOps": ["git_api"],
+          "Unknown": ["http_request"]
+        },
+        "denyTools": ["email"]
+      }
+    }
+  }
+}"#;
+
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let router = cfg.intent_router.as_ref().expect("intent router");
+        assert!(router.enabled);
+        assert_eq!(
+            cfg.resolve_intent_profile_id(Some("ops")),
+            Some("ops".to_string())
+        );
+        assert_eq!(
+            cfg.resolve_intent_profile_id(Some("missing")),
+            Some("default".to_string())
+        );
+        assert_eq!(
+            cfg.resolve_intent_profile_id(None),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_default_config_includes_intent_router_defaults() {
+        let cfg = Config::default();
+        let router = cfg.intent_router.as_ref().expect("default intent router");
+
+        assert!(router.profiles.contains_key("default"));
+        assert_eq!(
+            cfg.resolve_intent_profile_id(Some("default")),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_missing_intent_router_uses_default_router() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        let router = cfg.intent_router.as_ref().expect("defaulted intent router");
+
+        assert!(router.enabled);
+        assert!(router.profiles.contains_key("default"));
+        assert_eq!(
+            cfg.resolve_intent_profile_id(None),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolved_agent_falls_back_to_implicit_default() {
+        let cfg = Config::default();
+        let resolved = cfg
+            .resolve_agent_spec("default")
+            .expect("implicit default agent");
+
+        assert_eq!(resolved.id, "default");
+        assert_eq!(resolved.defaults.model, cfg.agents.defaults.model);
+        assert_eq!(resolved.defaults.provider, cfg.agents.defaults.provider);
+        assert_eq!(resolved.intent_profile.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn test_resolved_agent_inherits_and_overrides_defaults() {
+        let raw = r#"{
+  "agents": {
+    "defaults": {
+      "model": "deepseek-chat",
+      "provider": "deepseek",
+      "modelPool": [
+        { "model": "deepseek-chat", "provider": "deepseek", "weight": 1, "priority": 1 }
+      ]
+    },
+    "list": [
+      {
+        "id": "ops",
+        "enabled": true,
+        "intentProfile": "ops",
+        "model": "gpt-4.1",
+        "provider": "openai"
+      }
+    ]
+  },
+  "intentRouter": {
+    "enabled": true,
+    "defaultProfile": "default",
+    "profiles": {
+      "default": {
+        "coreTools": ["read_file"],
+        "intentTools": { "Unknown": [] }
+      },
+      "ops": {
+        "coreTools": ["exec"],
+        "intentTools": { "Unknown": ["http_request"] }
+      }
+    }
+  }
+}"#;
+
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let resolved = cfg.resolve_agent_spec("ops").expect("resolved ops agent");
+
+        assert_eq!(resolved.id, "ops");
+        assert_eq!(resolved.defaults.model, "gpt-4.1");
+        assert_eq!(resolved.defaults.provider.as_deref(), Some("openai"));
+        assert!(
+            resolved.defaults.model_pool.is_empty(),
+            "explicit model/provider override should disable inherited model_pool"
+        );
+        assert_eq!(resolved.intent_profile.as_deref(), Some("ops"));
+    }
+
+    #[test]
+    fn test_resolved_agents_always_include_default() {
+        let raw = r#"{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true, "intentProfile": "ops" }
+    ]
+  },
+  "intentRouter": {
+    "enabled": true,
+    "defaultProfile": "default",
+    "profiles": {
+      "default": {
+        "coreTools": ["read_file"],
+        "intentTools": { "Unknown": [] }
+      },
+      "ops": {
+        "coreTools": ["exec"],
+        "intentTools": { "Unknown": ["http_request"] }
+      }
+    }
+  }
+}"#;
+
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        let ids: Vec<String> = cfg
+            .resolved_agents()
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect();
+        assert_eq!(ids, vec!["default".to_string(), "ops".to_string()]);
     }
 }

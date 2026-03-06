@@ -1,7 +1,6 @@
 # 第13篇：消息处理与自进化生命周期 —— 从收到消息到触发进化的全过程
 
-> 系列文章：《blockcell 开源项目深度解析》第 13/14 篇
-
+> 系列文章：《blockcell 开源项目深度解析》第 13 篇
 ---
 
 在上一篇文章中，我们了解了 blockcell 的整体架构。这一篇我们把视角拉近：跟随一条普通的用户消息，看看它在 blockcell 内部是如何被并发处理、如何触发工具调用，以及在连续失败时如何启动 **自进化（Self-Evolution）** 完成自动修复。
@@ -106,11 +105,11 @@ Blockcell 内部有一个 `EvolutionService`（进化服务）。每一次工具
 ```rust
 async fn process_message(user_msg) {
     // 1. 意图识别与组装 Prompt
-    let intent = classify_intent(user_msg);
-    let tools = get_tools_for_intent(intent);
+    let intents = classify_intent(user_msg);
+    let tools = resolve_tools_from_intent_router(config, agent_id, intents);
     let memory = db.query_related_memory(user_msg);
     
-    let prompt = build_prompt(intent, memory);
+    let prompt = build_prompt(intents, memory);
     
     // 2. 核心 Tool Loop
     loop {

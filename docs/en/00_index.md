@@ -1,6 +1,6 @@
 # blockcell Technical Article Series: “A Self-Evolving AI Agent Framework”
 
-> An in-depth guide to blockcell for everyday developers and beginners. The main series contains 16 articles (this page is the index).
+> An in-depth guide to blockcell for everyday developers and beginners, covering the core series plus up-to-date supplemental guides (this page is the index).
 
 ---
 
@@ -60,3 +60,10 @@ The name blockcell comes from **Block + Cell** (a modular foundation + evolvable
 ---
 
 *This series is written against the real blockcell codebase, and all examples are runnable.*
+
+---
+
+## Additional guides
+
+- [intentRouter multi-profile guide](./21_intent_router_profiles.md) — config-driven intent/tool routing for multiple agents
+- `Provider Pool` guide is currently available in Chinese: `docs/20_provider_pool.md`

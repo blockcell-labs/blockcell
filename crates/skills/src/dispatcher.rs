@@ -70,7 +70,7 @@ impl SkillDispatcher {
             engine.register_fn("call_tool", move |name: String, params: Map| -> Dynamic {
                 let params_json = map_to_json(&params);
                 debug!(tool = %name, "SKILL.rhai calling tool");
-                
+
                 match exec(&name, params_json.clone()) {
                     Ok(result) => {
                         tc.lock().unwrap().push(ToolCallRecord {
@@ -99,33 +99,36 @@ impl SkillDispatcher {
         {
             let tc = tool_calls.clone();
             let exec = executor.clone();
-            engine.register_fn("call_tool_json", move |name: String, params_str: String| -> Dynamic {
-                let params_json: Value = serde_json::from_str(&params_str)
-                    .unwrap_or(Value::Object(serde_json::Map::new()));
-                debug!(tool = %name, "SKILL.rhai calling tool (JSON)");
-                
-                match exec(&name, params_json.clone()) {
-                    Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
-                            tool_name: name,
-                            params: params_json,
-                            result: result.clone(),
-                            success: true,
-                        });
-                        json_to_dynamic(&result)
+            engine.register_fn(
+                "call_tool_json",
+                move |name: String, params_str: String| -> Dynamic {
+                    let params_json: Value = serde_json::from_str(&params_str)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                    debug!(tool = %name, "SKILL.rhai calling tool (JSON)");
+
+                    match exec(&name, params_json.clone()) {
+                        Ok(result) => {
+                            tc.lock().unwrap().push(ToolCallRecord {
+                                tool_name: name,
+                                params: params_json,
+                                result: result.clone(),
+                                success: true,
+                            });
+                            json_to_dynamic(&result)
+                        }
+                        Err(e) => {
+                            let err_val = serde_json::json!({"error": format!("{}", e)});
+                            tc.lock().unwrap().push(ToolCallRecord {
+                                tool_name: name,
+                                params: params_json,
+                                result: err_val.clone(),
+                                success: false,
+                            });
+                            json_to_dynamic(&err_val)
+                        }
                     }
-                    Err(e) => {
-                        let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
-                            tool_name: name,
-                            params: params_json,
-                            result: err_val.clone(),
-                            success: false,
-                        });
-                        json_to_dynamic(&err_val)
-                    }
-                }
-            });
+                },
+            );
         }
 
         // Register set_output(value) — sets the final output
@@ -141,8 +144,7 @@ impl SkillDispatcher {
         {
             let out = output.clone();
             engine.register_fn("set_output_json", move |json_str: String| {
-                let val: Value = serde_json::from_str(&json_str)
-                    .unwrap_or(Value::String(json_str));
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
                 *out.lock().unwrap() = Some(val);
             });
         }
@@ -158,9 +160,7 @@ impl SkillDispatcher {
         });
 
         // Register is_error(result) — check if a tool result is an error
-        engine.register_fn("is_error", |val: Map| -> bool {
-            val.contains_key("error")
-        });
+        engine.register_fn("is_error", |val: Map| -> bool { val.contains_key("error") });
 
         // Register get_field(map, key) — safely get a field from a map
         engine.register_fn("get_field", |map: Map, key: String| -> Dynamic {
@@ -189,9 +189,7 @@ impl SkillDispatcher {
         });
 
         // Register timestamp() — current Unix timestamp
-        engine.register_fn("timestamp", || -> i64 {
-            chrono::Utc::now().timestamp()
-        });
+        engine.register_fn("timestamp", || -> i64 { chrono::Utc::now().timestamp() });
 
         // Register shorthand tool functions so SKILL.rhai can call exec(cmd) instead of
         // call_tool("exec", #{command: cmd}).  These are thin wrappers around call_tool.
@@ -320,30 +318,33 @@ impl SkillDispatcher {
         {
             let tc = tool_calls.clone();
             let exec = executor.clone();
-            engine.register_fn("write_file", move |path: String, content: String| -> Dynamic {
-                let params = serde_json::json!({"path": path, "content": content});
-                match exec("write_file", params.clone()) {
-                    Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
-                            tool_name: "write_file".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
-                        json_to_dynamic(&result)
+            engine.register_fn(
+                "write_file",
+                move |path: String, content: String| -> Dynamic {
+                    let params = serde_json::json!({"path": path, "content": content});
+                    match exec("write_file", params.clone()) {
+                        Ok(result) => {
+                            tc.lock().unwrap().push(ToolCallRecord {
+                                tool_name: "write_file".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
+                            json_to_dynamic(&result)
+                        }
+                        Err(e) => {
+                            let err_val = serde_json::json!({"error": format!("{}", e)});
+                            tc.lock().unwrap().push(ToolCallRecord {
+                                tool_name: "write_file".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
+                            json_to_dynamic(&err_val)
+                        }
                     }
-                    Err(e) => {
-                        let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
-                            tool_name: "write_file".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
-                        json_to_dynamic(&err_val)
-                    }
-                }
-            });
+                },
+            );
         }
 
         // http_request(url) -> Dynamic  (simple GET)
@@ -407,9 +408,9 @@ impl SkillDispatcher {
         }
 
         // Compile
-        let ast = engine.compile(script).map_err(|e| {
-            Error::Skill(format!("SKILL.rhai compilation error: {}", e))
-        })?;
+        let ast = engine
+            .compile(script)
+            .map_err(|e| Error::Skill(format!("SKILL.rhai compilation error: {}", e)))?;
 
         // Set up scope
         let mut scope = Scope::new();
@@ -446,7 +447,6 @@ impl SkillDispatcher {
             }
         }
     }
-
 }
 
 impl Default for SkillDispatcher {
@@ -537,16 +537,18 @@ mod tests {
     #[test]
     fn test_simple_skill_script() {
         let dispatcher = SkillDispatcher::new();
-        let result = dispatcher.execute_sync(
-            r#"
+        let result = dispatcher
+            .execute_sync(
+                r#"
             let msg = "Hello, " + user_input;
             set_output(msg);
             msg
             "#,
-            "world",
-            HashMap::new(),
-            |_name, _params| Ok(serde_json::json!({"ok": true})),
-        ).unwrap();
+                "world",
+                HashMap::new(),
+                |_name, _params| Ok(serde_json::json!({"ok": true})),
+            )
+            .unwrap();
 
         assert!(result.success);
         assert_eq!(result.output, Value::String("Hello, world".to_string()));
@@ -555,21 +557,23 @@ mod tests {
     #[test]
     fn test_tool_call_from_rhai() {
         let dispatcher = SkillDispatcher::new();
-        let result = dispatcher.execute_sync(
-            r#"
+        let result = dispatcher
+            .execute_sync(
+                r#"
             let params = #{
                 path: "/tmp/test.txt"
             };
             let result = call_tool("read_file", params);
             set_output(result);
             "#,
-            "",
-            HashMap::new(),
-            |name, _params| {
-                assert_eq!(name, "read_file");
-                Ok(serde_json::json!({"content": "file contents here"}))
-            },
-        ).unwrap();
+                "",
+                HashMap::new(),
+                |name, _params| {
+                    assert_eq!(name, "read_file");
+                    Ok(serde_json::json!({"content": "file contents here"}))
+                },
+            )
+            .unwrap();
 
         assert!(result.success);
         assert_eq!(result.tool_calls.len(), 1);
@@ -580,23 +584,26 @@ mod tests {
     #[test]
     fn test_tool_error_handling() {
         let dispatcher = SkillDispatcher::new();
-        let result = dispatcher.execute_sync(
-            r#"
+        let result = dispatcher
+            .execute_sync(
+                r#"
             let result = call_tool("bad_tool", #{});
             if is_error(result) {
                 set_output("Tool failed, using fallback");
                 log_warn("Tool call failed, degrading");
             }
             "#,
-            "",
-            HashMap::new(),
-            |_name, _params| {
-                Err(Error::Tool("not found".to_string()))
-            },
-        ).unwrap();
+                "",
+                HashMap::new(),
+                |_name, _params| Err(Error::Tool("not found".to_string())),
+            )
+            .unwrap();
 
         assert!(result.success);
-        assert_eq!(result.output, Value::String("Tool failed, using fallback".to_string()));
+        assert_eq!(
+            result.output,
+            Value::String("Tool failed, using fallback".to_string())
+        );
         assert_eq!(result.tool_calls.len(), 1);
         assert!(!result.tool_calls[0].success);
     }
@@ -608,25 +615,31 @@ mod tests {
         ctx.insert("device".to_string(), serde_json::json!("front_camera"));
         ctx.insert("resolution".to_string(), serde_json::json!("1080p"));
 
-        let result = dispatcher.execute_sync(
-            r#"
+        let result = dispatcher
+            .execute_sync(
+                r#"
             let msg = "Using " + device + " at " + resolution;
             set_output(msg);
             "#,
-            "",
-            ctx,
-            |_name, _params| Ok(serde_json::json!({})),
-        ).unwrap();
+                "",
+                ctx,
+                |_name, _params| Ok(serde_json::json!({})),
+            )
+            .unwrap();
 
         assert!(result.success);
-        assert_eq!(result.output, Value::String("Using front_camera at 1080p".to_string()));
+        assert_eq!(
+            result.output,
+            Value::String("Using front_camera at 1080p".to_string())
+        );
     }
 
     #[test]
     fn test_multi_step_orchestration() {
         let dispatcher = SkillDispatcher::new();
-        let result = dispatcher.execute_sync(
-            r#"
+        let result = dispatcher
+            .execute_sync(
+                r#"
             // Step 1: List devices
             let devices = call_tool("camera_list", #{});
             log("Found devices");
@@ -651,16 +664,17 @@ mod tests {
                 });
             }
             "#,
-            "帮我拍张照",
-            HashMap::new(),
-            |name, _params| {
-                match name {
+                "帮我拍张照",
+                HashMap::new(),
+                |name, _params| match name {
                     "camera_list" => Ok(serde_json::json!({"devices": ["FaceTime HD Camera"]})),
-                    "camera_capture" => Ok(serde_json::json!({"path": "/tmp/photo.jpg", "success": true})),
+                    "camera_capture" => {
+                        Ok(serde_json::json!({"path": "/tmp/photo.jpg", "success": true}))
+                    }
                     _ => Err(Error::Tool(format!("Unknown tool: {}", name))),
-                }
-            },
-        ).unwrap();
+                },
+            )
+            .unwrap();
 
         assert!(result.success);
         assert_eq!(result.tool_calls.len(), 2);

@@ -44,7 +44,16 @@ impl OpenAIProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> Self {
-        Self::new_with_proxy(api_key, api_base, model, max_tokens, temperature, None, None, &[])
+        Self::new_with_proxy(
+            api_key,
+            api_base,
+            model,
+            max_tokens,
+            temperature,
+            None,
+            None,
+            &[],
+        )
     }
 
     pub fn new_with_proxy(
@@ -95,8 +104,14 @@ impl OpenAIProvider {
 
         for tool in tools {
             if let Some(func) = tool.get("function") {
-                let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let desc = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let name = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let desc = func
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let params = func.get("parameters").cloned().unwrap_or(Value::Null);
                 s.push_str(&format!("### {}\n", name));
                 s.push_str(&format!("{}\n", desc));
@@ -130,11 +145,13 @@ impl OpenAIProvider {
                 if let Some(end) = after_tag.find("</tool_call>") {
                     let json_str = after_tag[..end].trim();
                     if let Ok(val) = serde_json::from_str::<Value>(json_str) {
-                        let name = val.get("name")
+                        let name = val
+                            .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
-                        let arguments = val.get("arguments")
+                        let arguments = val
+                            .get("arguments")
                             .cloned()
                             .unwrap_or(Value::Object(serde_json::Map::new()));
                         tool_calls.push(ToolCallRequest {
@@ -146,7 +163,9 @@ impl OpenAIProvider {
                         call_index += 1;
                     } else {
                         warn!(json = %json_str, "Failed to parse tool_call JSON");
-                        remaining.push_str(&rest[start..start + "<tool_call>".len() + end + "</tool_call>".len()]);
+                        remaining.push_str(
+                            &rest[start..start + "<tool_call>".len() + end + "</tool_call>".len()],
+                        );
                     }
                     rest = &after_tag[end + "</tool_call>".len()..];
                 } else {
@@ -214,10 +233,12 @@ impl OpenAIProvider {
                         let after_bracket = &after_called[bracket_end + 1..];
                         // Find end of this block: </minimax:tool_call> or </invoke>
                         let lower_after = after_bracket.to_lowercase();
-                        let block_end = lower_after.find("</minimax:tool_call>")
+                        let block_end = lower_after
+                            .find("</minimax:tool_call>")
                             .or_else(|| lower_after.find("</invoke>"));
                         let (params_str, consumed) = if let Some(end) = block_end {
-                            let tag_len = if lower_after[end..].starts_with("</minimax:tool_call>") {
+                            let tag_len = if lower_after[end..].starts_with("</minimax:tool_call>")
+                            {
                                 "</minimax:tool_call>".len()
                             } else {
                                 "</invoke>".len()
@@ -244,7 +265,10 @@ impl OpenAIProvider {
                                             let vl = value_str.to_lowercase();
                                             if let Some(close) = vl.find("</parameter>") {
                                                 let value = value_str[..close].to_string();
-                                                args.insert(param_name, serde_json::Value::String(value));
+                                                args.insert(
+                                                    param_name,
+                                                    serde_json::Value::String(value),
+                                                );
                                                 scan = &value_str[close + "</parameter>".len()..];
                                                 continue;
                                             }
@@ -298,7 +322,8 @@ impl OpenAIProvider {
                         if let Some(name_end) = after_name.find('"') {
                             let tool_name = after_name[..name_end].trim().to_string();
                             // Find the > that closes the <invoke ...> tag
-                            let tag_content_start = &after_invoke[name_attr_start + "name=\"".len() + name_end + 1..];
+                            let tag_content_start =
+                                &after_invoke[name_attr_start + "name=\"".len() + name_end + 1..];
                             if let Some(gt_pos) = tag_content_start.find('>') {
                                 let body = &tag_content_start[gt_pos + 1..];
                                 // Find </invoke> end
@@ -326,10 +351,12 @@ impl OpenAIProvider {
                                                     if let Some(close) = vl.find("</parameter>") {
                                                         let value = value_str[..close].to_string();
                                                         // Try to parse as JSON value (number, bool, etc.)
-                                                        let json_val = serde_json::from_str::<Value>(&value)
-                                                            .unwrap_or(Value::String(value));
+                                                        let json_val =
+                                                            serde_json::from_str::<Value>(&value)
+                                                                .unwrap_or(Value::String(value));
                                                         args.insert(param_name, json_val);
-                                                        scan = &value_str[close + "</parameter>".len()..];
+                                                        scan = &value_str
+                                                            [close + "</parameter>".len()..];
                                                         continue;
                                                     }
                                                 }
@@ -351,7 +378,10 @@ impl OpenAIProvider {
                                 }
                                 // Skip optional </minimax:tool_call> after </invoke>
                                 let trimmed_after = after_body.trim_start();
-                                rest4 = if trimmed_after.to_lowercase().starts_with("</minimax:tool_call>") {
+                                rest4 = if trimmed_after
+                                    .to_lowercase()
+                                    .starts_with("</minimax:tool_call>")
+                                {
                                     &trimmed_after["</minimax:tool_call>".len()..]
                                 } else {
                                     after_body
@@ -382,12 +412,14 @@ impl OpenAIProvider {
     fn parse_nonstandard_tool_block(block: &str, index: u64) -> Option<ToolCallRequest> {
         // Try standard JSON first
         if let Ok(val) = serde_json::from_str::<Value>(block) {
-            let name = val.get("name")
+            let name = val
+                .get("name")
                 .or_else(|| val.get("tool"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let arguments = val.get("arguments")
+            let arguments = val
+                .get("arguments")
                 .or_else(|| val.get("args"))
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
@@ -430,7 +462,7 @@ impl OpenAIProvider {
         // Match: key => "value" or key =\u003e "value" (escaped >)
         let patterns = [
             format!("{} =>", key),
-            format!("{} =\\u003e", key),  // JSON-escaped >
+            format!("{} =\\u003e", key), // JSON-escaped >
         ];
         for pat in &patterns {
             if let Some(pos) = text.find(pat.as_str()) {
@@ -442,7 +474,8 @@ impl OpenAIProvider {
                     }
                 }
                 // Unquoted value — take until comma or whitespace
-                let val: String = after.chars()
+                let val: String = after
+                    .chars()
                     .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '}')
                     .collect();
                 if !val.is_empty() {
@@ -490,7 +523,8 @@ impl OpenAIProvider {
                     }
                 }
                 // Bare value after =>
-                let val: String = after.chars()
+                let val: String = after
+                    .chars()
                     .take_while(|c| *c != ',' && *c != '}')
                     .collect();
                 let val = val.trim();
@@ -510,7 +544,9 @@ impl OpenAIProvider {
         let mut current_key: Option<String> = None;
         let mut current_val_parts: Vec<String> = Vec::new();
 
-        let flush = |key: &mut Option<String>, parts: &mut Vec<String>, map: &mut serde_json::Map<String, Value>| {
+        let flush = |key: &mut Option<String>,
+                     parts: &mut Vec<String>,
+                     map: &mut serde_json::Map<String, Value>| {
             if let Some(k) = key.take() {
                 let val_str = parts.join(" ");
                 let val_str = val_str.trim().trim_matches('"').trim();
@@ -569,7 +605,12 @@ impl OpenAIProvider {
     }
 
     /// Send a chat request to the API.
-    async fn send_request(&self, messages: &[ChatMessage], tools: &[Value], use_native_tools: bool) -> Result<(ChatResponse, String)> {
+    async fn send_request(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Value],
+        use_native_tools: bool,
+    ) -> Result<(ChatResponse, String)> {
         let url = format!("{}/chat/completions", self.api_base);
 
         let (api_messages, api_tools) = if use_native_tools && !tools.is_empty() {
@@ -594,7 +635,13 @@ impl OpenAIProvider {
             temperature: self.temperature,
         };
 
-        let mode = if use_native_tools && !tools.is_empty() { "native" } else if !tools.is_empty() { "text" } else { "no-tools" };
+        let mode = if use_native_tools && !tools.is_empty() {
+            "native"
+        } else if !tools.is_empty() {
+            "text"
+        } else {
+            "no-tools"
+        };
         info!(url = %url, model = %self.model, tools_count = tools.len(), messages_count = messages.len(), mode = %mode, "Calling LLM");
 
         let request_body = serde_json::to_string(&request)
@@ -616,7 +663,10 @@ impl OpenAIProvider {
 
         if !status.is_success() {
             error!(status = %status, body = %raw_body, "LLM API error");
-            return Err(Error::Provider(format!("API error {}: {}", status, raw_body)));
+            return Err(Error::Provider(format!(
+                "API error {}: {}",
+                status, raw_body
+            )));
         }
 
         {
@@ -624,11 +674,14 @@ impl OpenAIProvider {
             info!(body_len = raw_body.len(), preview = %&raw_body[..end], "LLM raw response");
         }
 
-        let chat_response: ChatResponse = serde_json::from_str(&raw_body)
-            .map_err(|e| {
-                let end = truncate_at_char_boundary(&raw_body, 500);
-                Error::Provider(format!("Failed to parse response: {}. Body: {}", e, &raw_body[..end]))
-            })?;
+        let chat_response: ChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            let end = truncate_at_char_boundary(&raw_body, 500);
+            Error::Provider(format!(
+                "Failed to parse response: {}. Body: {}",
+                e,
+                &raw_body[..end]
+            ))
+        })?;
 
         Ok((chat_response, raw_body))
     }
@@ -723,7 +776,11 @@ impl Provider for OpenAIProvider {
             } else if !native_tool_calls.is_empty() || tools.is_empty() {
                 // Native tool calls present, or no tools were requested — return as-is
                 return Ok(LLMResponse {
-                    content: if content.is_empty() { None } else { Some(content) },
+                    content: if content.is_empty() {
+                        None
+                    } else {
+                        Some(content)
+                    },
                     reasoning_content,
                     tool_calls: native_tool_calls,
                     finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
@@ -736,9 +793,16 @@ impl Provider for OpenAIProvider {
                 // Try to parse text-based tool calls from the content.
                 let (remaining_text, parsed_calls) = Self::parse_text_tool_calls(&content);
                 if !parsed_calls.is_empty() {
-                    info!(count = parsed_calls.len(), "Parsed text-based tool calls from native mode response");
+                    info!(
+                        count = parsed_calls.len(),
+                        "Parsed text-based tool calls from native mode response"
+                    );
                     return Ok(LLMResponse {
-                        content: if remaining_text.is_empty() { None } else { Some(remaining_text) },
+                        content: if remaining_text.is_empty() {
+                            None
+                        } else {
+                            Some(remaining_text)
+                        },
                         reasoning_content,
                         tool_calls: parsed_calls,
                         finish_reason: "tool_calls".to_string(),
@@ -779,7 +843,11 @@ impl Provider for OpenAIProvider {
         }
 
         Ok(LLMResponse {
-            content: if remaining_text.is_empty() { None } else { Some(remaining_text) },
+            content: if remaining_text.is_empty() {
+                None
+            } else {
+                Some(remaining_text)
+            },
             reasoning_content: choice.message.reasoning_content,
             tool_calls,
             finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
@@ -874,7 +942,11 @@ Done."#;
         assert_eq!(calls.len(), 1, "Should parse 1 tool call, got: {:?}", calls);
         assert_eq!(calls[0].name, "list_skills");
         assert!(calls[0].arguments.as_object().unwrap().is_empty());
-        assert!(remaining.is_empty(), "remaining should be empty, got: {:?}", remaining);
+        assert!(
+            remaining.is_empty(),
+            "remaining should be empty, got: {:?}",
+            remaining
+        );
     }
 
     #[test]
@@ -889,12 +961,12 @@ Done."#;
 
     #[test]
     fn test_parse_minimax_invoke_multiple_params() {
-        let content = "<invoke name=\"finance_api\">\n<parameter name=\"action\">stock_quote</parameter>\n<parameter name=\"symbol\">601318</parameter>\n</invoke>\n</minimax:tool_call>";
+        let content = "<invoke name=\"http_request\">\n<parameter name=\"action\">get</parameter>\n<parameter name=\"url\">https://example.com</parameter>\n</invoke>\n</minimax:tool_call>";
         let (remaining, calls) = OpenAIProvider::parse_text_tool_calls(content);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "finance_api");
-        assert_eq!(calls[0].arguments["action"], "stock_quote");
-        assert_eq!(calls[0].arguments["symbol"], 601318);
+        assert_eq!(calls[0].name, "http_request");
+        assert_eq!(calls[0].arguments["action"], "get");
+        assert_eq!(calls[0].arguments["url"], "https://example.com");
         assert!(remaining.is_empty());
     }
 

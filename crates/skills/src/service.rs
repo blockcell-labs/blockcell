@@ -1,6 +1,6 @@
 use crate::evolution::{
-    EvolutionContext, EvolutionRecord, EvolutionStatus, FeedbackEntry,
-    LLMProvider, SkillEvolution, SkillType, TriggerReason,
+    EvolutionContext, EvolutionRecord, EvolutionStatus, FeedbackEntry, LLMProvider, SkillEvolution,
+    SkillType, TriggerReason,
 };
 use blockcell_core::{Error, Result};
 use std::collections::{HashMap, HashSet};
@@ -14,16 +14,25 @@ use tracing::{debug, error, info, warn};
 /// not missing skills that can be "learned".
 const BUILTIN_TOOLS: &[&str] = &[
     "__llm_provider__",
-    "read_file", "write_file", "edit_file", "list_dir",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
     "exec",
-    "web_search", "web_fetch",
+    "web_search",
+    "web_fetch",
     "browse",
-    "message", "spawn",
+    "message",
+    "spawn",
     "list_tasks",
     "cron",
-    "memory_query", "memory_upsert", "memory_forget",
+    "memory_query",
+    "memory_upsert",
+    "memory_forget",
     "list_skills",
-    "system_info", "capability_evolve",
+    "system_info",
+    "agent_status",
+    "capability_evolve",
     "camera_capture",
     "app_control",
     "file_ops",
@@ -33,32 +42,15 @@ const BUILTIN_TOOLS: &[&str] = &[
     "audio_transcribe",
     "chart_generate",
     "office_write",
-    "calendar_api",
-    "iot_control",
     "tts",
     "ocr",
     "image_understand",
-    "social_media",
-    "notification",
-    "cloud_api",
-    "git_api",
-    "finance_api",
     "video_process",
-    "health_api",
-    "map_api",
-    "contacts",
     "encrypt",
     "network_monitor",
     "knowledge_graph",
     "stream_subscribe",
     "alert_rule",
-    "blockchain_rpc",
-    "exchange_api",
-    "blockchain_tx",
-    "contract_security",
-    "bridge_api",
-    "nft_market",
-    "multisig",
     "community_hub",
     "memory_maintenance",
     "toggle_manage",
@@ -142,15 +134,18 @@ impl ErrorTracker {
         let now = chrono::Utc::now().timestamp();
         let cutoff = now - (self.window_minutes as i64 * 60);
 
-        let entry = self.errors.entry(skill_name.to_string()).or_insert((Vec::new(), None));
+        let entry = self
+            .errors
+            .entry(skill_name.to_string())
+            .or_insert((Vec::new(), None));
         let (timestamps, triggered_at) = entry;
-        
+
         let was_empty = timestamps.is_empty();
         timestamps.push(now);
 
         // 清理过期的错误记录
         timestamps.retain(|&t| t > cutoff);
-        
+
         // 如果已触发的进化也过期了，清除标记
         if let Some(trigger_time) = *triggered_at {
             if trigger_time <= cutoff {
@@ -176,7 +171,7 @@ impl ErrorTracker {
 
         // 检查是否应该触发进化：达到阈值 且 未在窗口期内触发过 且 不在冷却期
         let should_trigger = count >= self.threshold && triggered_at.is_none() && !in_cooldown;
-        
+
         if should_trigger {
             // 标记已触发，但不清空计数器（保留历史用于统计）
             *triggered_at = Some(now);
@@ -201,7 +196,7 @@ impl ErrorTracker {
     fn clear(&mut self, skill_name: &str) {
         self.errors.remove(skill_name);
     }
-    
+
     /// 重置触发标记（允许再次触发进化）
     #[allow(dead_code)]
     fn reset_trigger(&mut self, skill_name: &str) {
@@ -212,9 +207,9 @@ impl ErrorTracker {
 
     /// 设置冷却期（回滚后调用，避免立即重新触发进化）
     fn set_cooldown(&mut self, skill_name: &str) {
-        let cooldown_until = chrono::Utc::now().timestamp()
-            + (self.cooldown_minutes as i64 * 60);
-        self.cooldowns.insert(skill_name.to_string(), cooldown_until);
+        let cooldown_until = chrono::Utc::now().timestamp() + (self.cooldown_minutes as i64 * 60);
+        self.cooldowns
+            .insert(skill_name.to_string(), cooldown_until);
     }
 
     /// 检查某个技能是否在冷却期内
@@ -238,7 +233,9 @@ struct ObservationStats {
 impl ObservationStats {
     /// 记录一次技能调用结果
     fn record_call(&mut self, evolution_id: &str, is_error: bool) {
-        let entry = self.active.entry(evolution_id.to_string())
+        let entry = self
+            .active
+            .entry(evolution_id.to_string())
             .or_insert((0, 0));
         entry.0 += 1;
         if is_error {
@@ -249,7 +246,11 @@ impl ObservationStats {
     /// 获取当前错误率
     fn error_rate(&self, evolution_id: &str) -> f64 {
         if let Some(&(total, errors)) = self.active.get(evolution_id) {
-            if total == 0 { 0.0 } else { errors as f64 / total as f64 }
+            if total == 0 {
+                0.0
+            } else {
+                errors as f64 / total as f64
+            }
         } else {
             0.0
         }
@@ -434,10 +435,7 @@ impl EvolutionService {
     }
 
     pub fn new(skills_dir: PathBuf, config: EvolutionServiceConfig) -> Self {
-        let error_tracker = ErrorTracker::new(
-            config.error_threshold,
-            config.error_window_minutes,
-        );
+        let error_tracker = ErrorTracker::new(config.error_threshold, config.error_window_minutes);
 
         Self {
             evolution: SkillEvolution::new(skills_dir, config.llm_timeout_secs),
@@ -546,7 +544,9 @@ impl EvolutionService {
             skill_name
         );
 
-        let current_version = self.evolution.version_manager()
+        let current_version = self
+            .evolution
+            .version_manager()
             .get_current_version(skill_name)
             .unwrap_or_else(|_| "unknown".to_string());
 
@@ -591,9 +591,8 @@ impl EvolutionService {
         llm_provider: &dyn LLMProvider,
     ) -> Result<Vec<String>> {
         let active = self.active_evolutions.lock().await;
-        let pending: Vec<(String, String)> = active.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let pending: Vec<(String, String)> =
+            active.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         drop(active);
 
         let mut completed = Vec::new();
@@ -651,7 +650,9 @@ impl EvolutionService {
             locks.insert(evolution_id.to_string());
         }
 
-        let result = self.run_single_evolution_inner(evolution_id, llm_provider).await;
+        let result = self
+            .run_single_evolution_inner(evolution_id, llm_provider)
+            .await;
 
         // 释放 pipeline 锁
         {
@@ -684,7 +685,10 @@ impl EvolutionService {
         // ═══════════════════════════════════════════════════════════
         if record.status == EvolutionStatus::Triggered {
             info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Step 1: Generating initial patch ═══");
-            let patch = self.evolution.generate_patch(evolution_id, llm_provider).await?;
+            let patch = self
+                .evolution
+                .generate_patch(evolution_id, llm_provider)
+                .await?;
             info!(
                 evolution_id = %evolution_id,
                 patch_id = %patch.patch_id,
@@ -724,10 +728,15 @@ impl EvolutionService {
             let record = self.evolution.load_record(evolution_id)?;
             if record.status == EvolutionStatus::Generated {
                 info!(evolution_id = %evolution_id, "🧠 [pipeline] ═══ Auditing patch (attempt {}) ═══", attempt);
-                let audit = self.evolution.audit_patch(evolution_id, llm_provider).await?;
+                let audit = self
+                    .evolution
+                    .audit_patch(evolution_id, llm_provider)
+                    .await?;
 
                 if !audit.passed {
-                    let issues_text = audit.issues.iter()
+                    let issues_text = audit
+                        .issues
+                        .iter()
                         .map(|i| format!("[{}][{}] {}", i.severity, i.category, i.message))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -739,19 +748,27 @@ impl EvolutionService {
                         audit.issues.len()
                     );
 
-                    let current_code = record.patch.as_ref()
+                    let current_code = record
+                        .patch
+                        .as_ref()
                         .map(|p| p.diff.clone())
                         .unwrap_or_default();
 
                     let feedback = FeedbackEntry {
                         attempt: record.attempt,
                         stage: "audit".to_string(),
-                        feedback: format!("Audit found {} issues:\n{}", audit.issues.len(), issues_text),
+                        feedback: format!(
+                            "Audit found {} issues:\n{}",
+                            audit.issues.len(),
+                            issues_text
+                        ),
                         previous_code: current_code,
                         timestamp: chrono::Utc::now().timestamp(),
                     };
 
-                    self.evolution.regenerate_with_feedback(evolution_id, llm_provider, &feedback).await?;
+                    self.evolution
+                        .regenerate_with_feedback(evolution_id, llm_provider, &feedback)
+                        .await?;
                     continue;
                 }
                 info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Audit passed (attempt {})", attempt);
@@ -764,14 +781,17 @@ impl EvolutionService {
                 let (passed, compile_error) = self.evolution.compile_check(evolution_id).await?;
 
                 if !passed {
-                    let error_msg = compile_error.unwrap_or_else(|| "Unknown compilation error".to_string());
+                    let error_msg =
+                        compile_error.unwrap_or_else(|| "Unknown compilation error".to_string());
                     warn!(
                         evolution_id = %evolution_id,
                         "🧠 [pipeline] Compile FAILED: {}, will regenerate with feedback",
                         error_msg
                     );
 
-                    let current_code = record.patch.as_ref()
+                    let current_code = record
+                        .patch
+                        .as_ref()
                         .map(|p| p.diff.clone())
                         .unwrap_or_default();
 
@@ -783,7 +803,9 @@ impl EvolutionService {
                         timestamp: chrono::Utc::now().timestamp(),
                     };
 
-                    self.evolution.regenerate_with_feedback(evolution_id, llm_provider, &feedback).await?;
+                    self.evolution
+                        .regenerate_with_feedback(evolution_id, llm_provider, &feedback)
+                        .await?;
                     continue;
                 }
                 info!(evolution_id = %evolution_id, "🧠 [pipeline] ✅ Compile check passed (attempt {})", attempt);
@@ -840,7 +862,8 @@ impl EvolutionService {
                 count = pending.len(),
                 has_llm = has_llm,
                 "🧠 [自进化] 发现 {} 个待处理的进化任务 (LLM: {})",
-                pending.len(), if has_llm { "ready" } else { "none" }
+                pending.len(),
+                if has_llm { "ready" } else { "none" }
             );
         }
         for (skill_name, evolution_id) in &pending {
@@ -850,7 +873,10 @@ impl EvolutionService {
                 "🧠 [自进化] 开始处理技能 `{}` 的进化 ({})",
                 skill_name, evolution_id
             );
-            if let Err(e) = self.process_pending_evolution(skill_name, evolution_id).await {
+            if let Err(e) = self
+                .process_pending_evolution(skill_name, evolution_id)
+                .await
+            {
                 error!(
                     skill = %skill_name,
                     evolution_id = %evolution_id,
@@ -862,13 +888,15 @@ impl EvolutionService {
 
         // Phase 2: Check observation windows
         let active = self.active_evolutions.lock().await;
-        let observing: Vec<(String, String)> = active.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let observing: Vec<(String, String)> =
+            active.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         drop(active);
 
         for (skill_name, evolution_id) in observing {
-            if let Err(e) = self.tick_single_observation(&skill_name, &evolution_id).await {
+            if let Err(e) = self
+                .tick_single_observation(&skill_name, &evolution_id)
+                .await
+            {
                 error!(
                     evolution_id = %evolution_id,
                     error = %e,
@@ -884,11 +912,7 @@ impl EvolutionService {
     ///
     /// If an LLM provider is configured, runs the full pipeline (generate→audit→compile→deploy+observe).
     /// Otherwise, just marks the record as "Generating" so list_skills can show it.
-    async fn process_pending_evolution(
-        &self,
-        skill_name: &str,
-        evolution_id: &str,
-    ) -> Result<()> {
+    async fn process_pending_evolution(&self, skill_name: &str, evolution_id: &str) -> Result<()> {
         let record = self.evolution.load_record(evolution_id)?;
 
         if record.status != EvolutionStatus::Triggered {
@@ -922,7 +946,10 @@ impl EvolutionService {
                 evolution_id = %evolution_id,
                 "🧠 [自进化] LLM provider 可用，开始执行完整进化 pipeline"
             );
-            match self.run_single_evolution(evolution_id, llm_provider.as_ref()).await {
+            match self
+                .run_single_evolution(evolution_id, llm_provider.as_ref())
+                .await
+            {
                 Ok(true) => {
                     info!(
                         skill = %skill_name,
@@ -970,11 +997,7 @@ impl EvolutionService {
     }
 
     /// P1: 观察窗口 tick — 检查错误率和观察时间
-    async fn tick_single_observation(
-        &self,
-        skill_name: &str,
-        evolution_id: &str,
-    ) -> Result<()> {
+    async fn tick_single_observation(&self, skill_name: &str, evolution_id: &str) -> Result<()> {
         let record = match self.evolution.load_record(evolution_id) {
             Ok(r) => r,
             Err(_) => return Ok(()),
@@ -1017,11 +1040,17 @@ impl EvolutionService {
                     error_rate = error_rate,
                     "🧠 [观察] 错误率超阈值，回滚"
                 );
-                self.evolution.rollback(evolution_id, &format!(
-                    "Error rate {:.2}% exceeded threshold during observation",
-                    error_rate * 100.0,
-                )).await?;
-                self.cleanup_evolution_rollback(skill_name, evolution_id).await;
+                self.evolution
+                    .rollback(
+                        evolution_id,
+                        &format!(
+                            "Error rate {:.2}% exceeded threshold during observation",
+                            error_rate * 100.0,
+                        ),
+                    )
+                    .await?;
+                self.cleanup_evolution_rollback(skill_name, evolution_id)
+                    .await;
             }
             None => {
                 // 仍在观察中，不做操作
@@ -1136,15 +1165,22 @@ impl EvolutionService {
 
     /// 清理已完成/失败的进化（成功时清除错误计数器）
     async fn cleanup_evolution(&self, skill_name: &str, evolution_id: &str) {
-        self.cleanup_evolution_inner(skill_name, evolution_id, false).await;
+        self.cleanup_evolution_inner(skill_name, evolution_id, false)
+            .await;
     }
 
     /// 清理回滚的进化（设置冷却期，不清除错误计数器）
     async fn cleanup_evolution_rollback(&self, skill_name: &str, evolution_id: &str) {
-        self.cleanup_evolution_inner(skill_name, evolution_id, true).await;
+        self.cleanup_evolution_inner(skill_name, evolution_id, true)
+            .await;
     }
 
-    async fn cleanup_evolution_inner(&self, skill_name: &str, evolution_id: &str, is_rollback: bool) {
+    async fn cleanup_evolution_inner(
+        &self,
+        skill_name: &str,
+        evolution_id: &str,
+        is_rollback: bool,
+    ) {
         // 将磁盘上处于中间状态的记录标记为 Failed，防止孤尻记录被无限重新接管
         if let Ok(mut record) = self.evolution.load_record(evolution_id) {
             let is_terminal = matches!(
@@ -1241,7 +1277,10 @@ impl EvolutionService {
     async fn adopt_orphaned_records(&self) {
         let records_dir = self.records_dir();
         if !records_dir.exists() {
-            debug!("🧠 [adopt] records_dir does not exist: {}", records_dir.display());
+            debug!(
+                "🧠 [adopt] records_dir does not exist: {}",
+                records_dir.display()
+            );
             return;
         }
 
@@ -1305,7 +1344,11 @@ impl EvolutionService {
 
         let adopted = active.len() - active_count_before;
         if adopted > 0 {
-            info!("🧠 [adopt] Adopted {} orphaned record(s), total active: {}", adopted, active.len());
+            info!(
+                "🧠 [adopt] Adopted {} orphaned record(s), total active: {}",
+                adopted,
+                active.len()
+            );
         }
     }
 
@@ -1326,7 +1369,9 @@ impl EvolutionService {
             )));
         }
 
-        let current_version = self.evolution.version_manager()
+        let current_version = self
+            .evolution
+            .version_manager()
             .get_current_version(skill_name)
             .unwrap_or_else(|_| "0.0.0".to_string());
 
@@ -1411,9 +1456,10 @@ impl EvolutionService {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().is_some_and(|e| e == "json")
-                        && std::fs::remove_file(&path).is_ok() {
-                            count += 1;
-                        }
+                        && std::fs::remove_file(&path).is_ok()
+                    {
+                        count += 1;
+                    }
                 }
             }
         }
@@ -1449,9 +1495,10 @@ impl EvolutionService {
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
                                 if record.skill_name == skill_name
-                                    && std::fs::remove_file(&path).is_ok() {
-                                        count += 1;
-                                    }
+                                    && std::fs::remove_file(&path).is_ok()
+                                {
+                                    count += 1;
+                                }
                             }
                         }
                     }
@@ -1478,7 +1525,13 @@ impl EvolutionService {
     }
 
     /// 列出进化记录的简要信息（用于 CLI 展示）
-    pub fn list_records_summary(&self) -> Result<(Vec<SkillRecordSummary>, Vec<SkillRecordSummary>, Vec<SkillRecordSummary>)> {
+    pub fn list_records_summary(
+        &self,
+    ) -> Result<(
+        Vec<SkillRecordSummary>,
+        Vec<SkillRecordSummary>,
+        Vec<SkillRecordSummary>,
+    )> {
         let records = self.list_all_records()?;
 
         let mut learning = Vec::new();
@@ -1504,14 +1557,21 @@ impl EvolutionService {
                     EvolutionStatus::RolledBack => "已回滚".to_string(),
                     EvolutionStatus::Failed => "失败".to_string(),
                     // Legacy statuses
-                    EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => "编译检查通过".to_string(),
-                    EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed | EvolutionStatus::Testing => "编译检查失败".to_string(),
+                    EvolutionStatus::DryRunPassed | EvolutionStatus::TestPassed => {
+                        "编译检查通过".to_string()
+                    }
+                    EvolutionStatus::DryRunFailed
+                    | EvolutionStatus::TestFailed
+                    | EvolutionStatus::Testing => "编译检查失败".to_string(),
                     EvolutionStatus::RollingOut => "已部署，观察中".to_string(),
                 },
                 created_at: r.created_at,
                 error_snippet: r.context.error_stack.as_ref().map(|e| {
                     if e.chars().count() > 80 {
-                        format!("{}...", &e[..e.char_indices().nth(80).map(|(i,_)|i).unwrap_or(e.len())])
+                        format!(
+                            "{}...",
+                            &e[..e.char_indices().nth(80).map(|(i, _)| i).unwrap_or(e.len())]
+                        )
                     } else {
                         e.clone()
                     }
@@ -1520,9 +1580,12 @@ impl EvolutionService {
 
             match r.status {
                 EvolutionStatus::Completed => learned.push(summary),
-                EvolutionStatus::Failed | EvolutionStatus::RolledBack
-                    | EvolutionStatus::AuditFailed | EvolutionStatus::CompileFailed
-                    | EvolutionStatus::DryRunFailed | EvolutionStatus::TestFailed => failed.push(summary),
+                EvolutionStatus::Failed
+                | EvolutionStatus::RolledBack
+                | EvolutionStatus::AuditFailed
+                | EvolutionStatus::CompileFailed
+                | EvolutionStatus::DryRunFailed
+                | EvolutionStatus::TestFailed => failed.push(summary),
                 _ => learning.push(summary),
             }
         }
@@ -1579,7 +1642,10 @@ mod tests {
         assert!(r.trigger.is_some());
         assert_eq!(r.count, 1);
         match r.trigger.unwrap() {
-            TriggerReason::ConsecutiveFailures { count, window_minutes } => {
+            TriggerReason::ConsecutiveFailures {
+                count,
+                window_minutes,
+            } => {
                 assert_eq!(count, 1);
                 assert_eq!(window_minutes, 30);
             }

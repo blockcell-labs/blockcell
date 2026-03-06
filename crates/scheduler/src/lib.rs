@@ -6,4 +6,4 @@ pub mod job;
 pub use cron_service::CronService;
 pub use ghost::{GhostService, GhostServiceConfig};
 pub use heartbeat::HeartbeatService;
-pub use job::{CronJob, JobSchedule, JobPayload, JobState, ScheduleKind};
+pub use job::{CronJob, JobPayload, JobSchedule, JobState, ScheduleKind};

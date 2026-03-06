@@ -58,9 +58,9 @@ impl ChannelContacts {
     /// otherwise insert a new entry.
     pub fn upsert(&self, contact: ChannelContact) {
         let mut contacts = self.load();
-        let existing = contacts.iter_mut().find(|c| {
-            c.channel == contact.channel && c.chat_id == contact.chat_id
-        });
+        let existing = contacts
+            .iter_mut()
+            .find(|c| c.channel == contact.channel && c.chat_id == contact.chat_id);
         if let Some(entry) = existing {
             // Update name only if the new one is non-empty
             if !contact.name.is_empty() {
@@ -94,9 +94,7 @@ impl ChannelContacts {
         let mut matches: Vec<ChannelContact> = self
             .load()
             .into_iter()
-            .filter(|c| {
-                c.channel == channel && c.name.to_lowercase().contains(&name_lower)
-            })
+            .filter(|c| c.channel == channel && c.name.to_lowercase().contains(&name_lower))
             .collect();
         matches.sort_by(|a, b| b.last_active.cmp(&a.last_active));
         matches

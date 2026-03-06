@@ -63,12 +63,11 @@ impl AtomicSwitcher {
                 std::fs::copy(new_binary, &tmp_path)
                     .map_err(|e| Error::Other(format!("Failed to copy new binary: {}", e)))?;
             }
-            std::fs::rename(&tmp_path, &current_binary)
-                .map_err(|e| {
-                    // 如果 rename 失败，清理临时文件
-                    let _ = std::fs::remove_file(&tmp_path);
-                    Error::Other(format!("Atomic rename failed: {}", e))
-                })?;
+            std::fs::rename(&tmp_path, &current_binary).map_err(|e| {
+                // 如果 rename 失败，清理临时文件
+                let _ = std::fs::remove_file(&tmp_path);
+                Error::Other(format!("Atomic rename failed: {}", e))
+            })?;
             info!("Binary replaced atomically");
         }
 
@@ -166,7 +165,7 @@ impl AtomicSwitcher {
                 | [0xce, 0xfa, 0xed, 0xfe]  // 小端 32-bit
                 | [0xfe, 0xed, 0xfa, 0xcf]  // 大端 64-bit
                 | [0xfe, 0xed, 0xfa, 0xce]  // 大端 32-bit
-                | [0xca, 0xfe, 0xba, 0xbe]  // Fat Binary (Universal)
+                | [0xca, 0xfe, 0xba, 0xbe] // Fat Binary (Universal)
             );
             if !is_macho {
                 return Err(Error::Validation("Not a valid Mach-O binary".to_string()));

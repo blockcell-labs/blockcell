@@ -1,5 +1,5 @@
 use blockcell_core::{Error, Result};
-use calamine::{Reader, open_workbook_auto, Data};
+use calamine::{open_workbook_auto, Data, Reader};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
@@ -210,14 +210,21 @@ fn extract_text_from_xml(xml: &str, target_tag: &str) -> Result<String> {
 /// Check if a file extension indicates an office document we can read.
 pub fn is_office_file(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(ext.to_lowercase().as_str(), "xlsx" | "xls" | "docx" | "pptx"),
+        Some(ext) => matches!(
+            ext.to_lowercase().as_str(),
+            "xlsx" | "xls" | "docx" | "pptx"
+        ),
         None => false,
     }
 }
 
 /// Read an office file and return its text content.
 pub fn read_office_file(path: &Path) -> Result<String> {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+    {
         Some(ext) if ext == "xlsx" || ext == "xls" => read_excel(path),
         Some(ext) if ext == "docx" => read_docx(path),
         Some(ext) if ext == "pptx" => read_pptx(path),

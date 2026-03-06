@@ -110,8 +110,15 @@ impl Tool for EmailTool {
 
         match action {
             "send" => {
-                if params.get("to").and_then(|v| v.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
-                    return Err(Error::Validation("send requires 'to' (non-empty array of recipients)".to_string()));
+                if params
+                    .get("to")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(Error::Validation(
+                        "send requires 'to' (non-empty array of recipients)".to_string(),
+                    ));
                 }
                 if params.get("subject").and_then(|v| v.as_str()).is_none() {
                     return Err(Error::Validation("send requires 'subject'".to_string()));
@@ -119,7 +126,9 @@ impl Tool for EmailTool {
                 let has_body = params.get("body").and_then(|v| v.as_str()).is_some();
                 let has_html = params.get("html_body").and_then(|v| v.as_str()).is_some();
                 if !has_body && !has_html {
-                    return Err(Error::Validation("send requires 'body' or 'html_body'".to_string()));
+                    return Err(Error::Validation(
+                        "send requires 'body' or 'html_body'".to_string(),
+                    ));
                 }
             }
             "list" => {}
@@ -165,18 +174,36 @@ fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
 }
 
 async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
-    let smtp_host = params.get("smtp_host").and_then(|v| v.as_str())
+    let smtp_host = params
+        .get("smtp_host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("send requires 'smtp_host'".to_string()))?;
-    let smtp_port = params.get("smtp_port").and_then(|v| v.as_u64()).unwrap_or(587) as u16;
-    let username = params.get("username").and_then(|v| v.as_str())
+    let smtp_port = params
+        .get("smtp_port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(587) as u16;
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("send requires 'username'".to_string()))?;
-    let password = params.get("password").and_then(|v| v.as_str())
+    let password = params
+        .get("password")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("send requires 'password'".to_string()))?;
 
-    let from = params.get("from").and_then(|v| v.as_str()).unwrap_or(username);
-    let to: Vec<&str> = params["to"].as_array().unwrap()
-        .iter().filter_map(|v| v.as_str()).collect();
-    let cc: Vec<&str> = params.get("cc").and_then(|v| v.as_array())
+    let from = params
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or(username);
+    let to: Vec<&str> = params["to"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let cc: Vec<&str> = params
+        .get("cc")
+        .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     let subject = params["subject"].as_str().unwrap();
@@ -184,40 +211,54 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
     let html_body = params.get("html_body").and_then(|v| v.as_str());
 
     // Build email using lettre
-    use lettre::message::{header, Mailbox, MultiPart, SinglePart, Attachment};
-    use lettre::{Message, SmtpTransport, Transport};
+    use lettre::message::{header, Attachment, Mailbox, MultiPart, SinglePart};
     use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, SmtpTransport, Transport};
 
-    let from_mailbox: Mailbox = from.parse()
+    let from_mailbox: Mailbox = from
+        .parse()
         .map_err(|e| Error::Tool(format!("Invalid 'from' address '{}': {}", from, e)))?;
 
-    let mut builder = Message::builder()
-        .from(from_mailbox)
-        .subject(subject);
+    let mut builder = Message::builder().from(from_mailbox).subject(subject);
 
     for addr in &to {
-        let mb: Mailbox = addr.parse()
+        let mb: Mailbox = addr
+            .parse()
             .map_err(|e| Error::Tool(format!("Invalid 'to' address '{}': {}", addr, e)))?;
         builder = builder.to(mb);
     }
     for addr in &cc {
-        let mb: Mailbox = addr.parse()
+        let mb: Mailbox = addr
+            .parse()
             .map_err(|e| Error::Tool(format!("Invalid 'cc' address '{}': {}", addr, e)))?;
         builder = builder.cc(mb);
     }
 
     // Collect attachments
-    let attachment_paths: Vec<PathBuf> = params.get("attachments")
+    let attachment_paths: Vec<PathBuf> = params
+        .get("attachments")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|p| expand_path(p, workspace)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|p| expand_path(p, workspace))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut attachment_parts: Vec<SinglePart> = Vec::new();
     for att_path in &attachment_paths {
         if !att_path.exists() {
-            return Err(Error::NotFound(format!("Attachment not found: {}", att_path.display())));
+            return Err(Error::NotFound(format!(
+                "Attachment not found: {}",
+                att_path.display()
+            )));
         }
-        let filename = att_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = att_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let file_body = tokio::fs::read(att_path).await?;
         let content_type = match att_path.extension().and_then(|e| e.to_str()).unwrap_or("") {
             "pdf" => header::ContentType::parse("application/pdf").unwrap(),
@@ -226,31 +267,39 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
             "gif" => header::ContentType::parse("image/gif").unwrap(),
             "zip" => header::ContentType::parse("application/zip").unwrap(),
             "csv" => header::ContentType::parse("text/csv").unwrap(),
-            "xlsx" => header::ContentType::parse("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").unwrap(),
-            "docx" => header::ContentType::parse("application/vnd.openxmlformats-officedocument.wordprocessingml.document").unwrap(),
+            "xlsx" => header::ContentType::parse(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            .unwrap(),
+            "docx" => header::ContentType::parse(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            .unwrap(),
             _ => header::ContentType::parse("application/octet-stream").unwrap(),
         };
-        attachment_parts.push(
-            Attachment::new(filename).body(file_body, content_type)
-        );
+        attachment_parts.push(Attachment::new(filename).body(file_body, content_type));
     }
 
     // Build message body
     let email = if attachment_parts.is_empty() {
         if let Some(html) = html_body {
             if !body.is_empty() {
-                builder.multipart(
-                    MultiPart::alternative()
-                        .singlepart(SinglePart::plain(body.to_string()))
-                        .singlepart(SinglePart::html(html.to_string()))
-                ).map_err(|e| Error::Tool(format!("Failed to build email: {}", e)))?
+                builder
+                    .multipart(
+                        MultiPart::alternative()
+                            .singlepart(SinglePart::plain(body.to_string()))
+                            .singlepart(SinglePart::html(html.to_string())),
+                    )
+                    .map_err(|e| Error::Tool(format!("Failed to build email: {}", e)))?
             } else {
-                builder.header(header::ContentType::TEXT_HTML)
+                builder
+                    .header(header::ContentType::TEXT_HTML)
                     .body(html.to_string())
                     .map_err(|e| Error::Tool(format!("Failed to build email: {}", e)))?
             }
         } else {
-            builder.header(header::ContentType::TEXT_PLAIN)
+            builder
+                .header(header::ContentType::TEXT_PLAIN)
                 .body(body.to_string())
                 .map_err(|e| Error::Tool(format!("Failed to build email: {}", e)))?
         }
@@ -261,8 +310,7 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
                 .singlepart(SinglePart::plain(body.to_string()))
                 .singlepart(SinglePart::html(html.to_string()))
         } else {
-            MultiPart::mixed()
-                .singlepart(SinglePart::plain(body.to_string()))
+            MultiPart::mixed().singlepart(SinglePart::plain(body.to_string()))
         };
 
         let mut mixed = MultiPart::mixed().multipart(text_part);
@@ -270,7 +318,8 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
             mixed = mixed.singlepart(att);
         }
 
-        builder.multipart(mixed)
+        builder
+            .multipart(mixed)
             .map_err(|e| Error::Tool(format!("Failed to build email: {}", e)))?
     };
 
@@ -291,7 +340,8 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
             .build()
     };
 
-    mailer.send(&email)
+    mailer
+        .send(&email)
         .map_err(|e| Error::Tool(format!("Failed to send email: {}", e)))?;
 
     Ok(json!({
@@ -304,19 +354,34 @@ async fn action_send(workspace: &Path, params: &Value) -> Result<Value> {
     }))
 }
 
-async fn connect_imap(params: &Value) -> Result<async_imap::Session<tokio_util::compat::Compat<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>> {
-    use tokio_util::compat::TokioAsyncReadCompatExt;
-    use tokio_rustls::TlsConnector;
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore, Certificate};
-    use tokio_rustls::rustls::ServerName;
+async fn connect_imap(
+    params: &Value,
+) -> Result<
+    async_imap::Session<
+        tokio_util::compat::Compat<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    >,
+> {
     use std::sync::Arc;
+    use tokio_rustls::rustls::ServerName;
+    use tokio_rustls::rustls::{Certificate, ClientConfig, RootCertStore};
+    use tokio_rustls::TlsConnector;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
-    let host = params.get("imap_host").and_then(|v| v.as_str())
+    let host = params
+        .get("imap_host")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("IMAP requires 'imap_host'".to_string()))?;
-    let port = params.get("imap_port").and_then(|v| v.as_u64()).unwrap_or(993) as u16;
-    let username = params.get("username").and_then(|v| v.as_str())
+    let port = params
+        .get("imap_port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(993) as u16;
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("IMAP requires 'username'".to_string()))?;
-    let password = params.get("password").and_then(|v| v.as_str())
+    let password = params
+        .get("password")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Validation("IMAP requires 'password'".to_string()))?;
 
     let mut root_store = RootCertStore::empty();
@@ -335,25 +400,35 @@ async fn connect_imap(params: &Value) -> Result<async_imap::Session<tokio_util::
     let server_name = ServerName::try_from(host)
         .map_err(|e| Error::Tool(format!("Invalid IMAP hostname '{}': {}", host, e)))?;
 
-    let tcp = tokio::net::TcpStream::connect((host, port)).await
+    let tcp = tokio::net::TcpStream::connect((host, port))
+        .await
         .map_err(|e| Error::Tool(format!("IMAP TCP connect error: {}", e)))?;
-    let tls_stream = connector.connect(server_name, tcp).await
+    let tls_stream = connector
+        .connect(server_name, tcp)
+        .await
         .map_err(|e| Error::Tool(format!("IMAP TLS error: {}", e)))?;
 
     let client = async_imap::Client::new(tls_stream.compat());
 
-    let session = client.login(username, password).await
+    let session = client
+        .login(username, password)
+        .await
         .map_err(|e| Error::Tool(format!("IMAP login error: {}", e.0)))?;
 
     Ok(session)
 }
 
 async fn action_list_emails(_workspace: &PathBuf, params: &Value) -> Result<Value> {
-    let folder = params.get("folder").and_then(|v| v.as_str()).unwrap_or("INBOX");
+    let folder = params
+        .get("folder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INBOX");
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let mut session = connect_imap(params).await?;
-    let mailbox = session.select(folder).await
+    let mailbox = session
+        .select(folder)
+        .await
         .map_err(|e| Error::Tool(format!("Failed to select folder '{}': {}", folder, e)))?;
 
     let total = mailbox.exists as usize;
@@ -370,9 +445,12 @@ async fn action_list_emails(_workspace: &PathBuf, params: &Value) -> Result<Valu
     let range = format!("{}:{}", start, total);
 
     use futures::TryStreamExt;
-    let messages: Vec<_> = session.fetch(&range, "(UID ENVELOPE FLAGS)").await
+    let messages: Vec<_> = session
+        .fetch(&range, "(UID ENVELOPE FLAGS)")
+        .await
         .map_err(|e| Error::Tool(format!("IMAP fetch error: {}", e)))?
-        .try_collect().await
+        .try_collect()
+        .await
         .map_err(|e| Error::Tool(format!("IMAP fetch stream error: {}", e)))?;
 
     let mut emails = Vec::new();
@@ -420,21 +498,30 @@ async fn action_list_emails(_workspace: &PathBuf, params: &Value) -> Result<Valu
 }
 
 async fn action_read_email(workspace: &Path, params: &Value) -> Result<Value> {
-    let folder = params.get("folder").and_then(|v| v.as_str()).unwrap_or("INBOX");
+    let folder = params
+        .get("folder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INBOX");
     let uid = params["uid"].as_u64().unwrap() as u32;
     let save_dir = params.get("save_attachments_to").and_then(|v| v.as_str());
 
     let mut session = connect_imap(params).await?;
-    session.select(folder).await
+    session
+        .select(folder)
+        .await
         .map_err(|e| Error::Tool(format!("Failed to select folder: {}", e)))?;
 
     use futures::TryStreamExt;
-    let messages: Vec<_> = session.uid_fetch(format!("{}", uid), "(UID ENVELOPE BODY[] FLAGS)").await
+    let messages: Vec<_> = session
+        .uid_fetch(format!("{}", uid), "(UID ENVELOPE BODY[] FLAGS)")
+        .await
         .map_err(|e| Error::Tool(format!("IMAP uid_fetch error: {}", e)))?
-        .try_collect().await
+        .try_collect()
+        .await
         .map_err(|e| Error::Tool(format!("IMAP uid_fetch stream error: {}", e)))?;
 
-    let msg = messages.first()
+    let msg = messages
+        .first()
         .ok_or_else(|| Error::NotFound(format!("Email with UID {} not found", uid)))?;
 
     let mut result = json!({
@@ -482,15 +569,22 @@ async fn action_read_email(workspace: &Path, params: &Value) -> Result<Value> {
 }
 
 async fn action_search_emails(_workspace: &PathBuf, params: &Value) -> Result<Value> {
-    let folder = params.get("folder").and_then(|v| v.as_str()).unwrap_or("INBOX");
+    let folder = params
+        .get("folder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("INBOX");
     let query = params["query"].as_str().unwrap();
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
     let mut session = connect_imap(params).await?;
-    session.select(folder).await
+    session
+        .select(folder)
+        .await
         .map_err(|e| Error::Tool(format!("Failed to select folder: {}", e)))?;
 
-    let uids = session.uid_search(query).await
+    let uids = session
+        .uid_search(query)
+        .await
         .map_err(|e| Error::Tool(format!("IMAP search error: {}", e)))?;
 
     let uid_list: Vec<u32> = uids.iter().copied().collect();
@@ -505,11 +599,18 @@ async fn action_search_emails(_workspace: &PathBuf, params: &Value) -> Result<Va
 
     let mut emails = Vec::new();
     if !selected.is_empty() {
-        let uid_range = selected.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+        let uid_range = selected
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         use futures::TryStreamExt;
-        let messages: Vec<_> = session.uid_fetch(&uid_range, "(UID ENVELOPE FLAGS)").await
+        let messages: Vec<_> = session
+            .uid_fetch(&uid_range, "(UID ENVELOPE FLAGS)")
+            .await
             .map_err(|e| Error::Tool(format!("IMAP fetch error: {}", e)))?
-            .try_collect().await
+            .try_collect()
+            .await
             .map_err(|e| Error::Tool(format!("IMAP fetch stream error: {}", e)))?;
 
         for msg in &messages {
@@ -519,10 +620,12 @@ async fn action_search_emails(_workspace: &PathBuf, params: &Value) -> Result<Va
 
             if let Some(envelope) = msg.envelope() {
                 if let Some(subject) = &envelope.subject {
-                    email_info["subject"] = json!(decode_mime_header(&String::from_utf8_lossy(subject)));
+                    email_info["subject"] =
+                        json!(decode_mime_header(&String::from_utf8_lossy(subject)));
                 }
                 if let Some(from) = &envelope.from {
-                    email_info["from"] = json!(from.iter().map(format_address).collect::<Vec<String>>());
+                    email_info["from"] =
+                        json!(from.iter().map(format_address).collect::<Vec<String>>());
                 }
                 if let Some(date) = &envelope.date {
                     email_info["date"] = json!(String::from_utf8_lossy(date).to_string());
@@ -546,13 +649,19 @@ async fn action_search_emails(_workspace: &PathBuf, params: &Value) -> Result<Va
 }
 
 fn format_address(addr: &async_imap::imap_proto::types::Address<'_>) -> String {
-    let name = addr.name.as_ref()
+    let name = addr
+        .name
+        .as_ref()
         .map(|n| decode_mime_header(&String::from_utf8_lossy(n)))
         .unwrap_or_default();
-    let mailbox = addr.mailbox.as_ref()
+    let mailbox = addr
+        .mailbox
+        .as_ref()
         .map(|m| String::from_utf8_lossy(m).to_string())
         .unwrap_or_default();
-    let host = addr.host.as_ref()
+    let host = addr
+        .host
+        .as_ref()
         .map(|h| String::from_utf8_lossy(h).to_string())
         .unwrap_or_default();
 
@@ -585,19 +694,24 @@ fn decode_mime_header(s: &str) -> String {
                 let decoded = match encoding.as_str() {
                     "B" => {
                         use base64::Engine;
-                        base64::engine::general_purpose::STANDARD.decode(text)
+                        base64::engine::general_purpose::STANDARD
+                            .decode(text)
                             .ok()
                             .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
                             .unwrap_or_else(|| text.to_string())
                     }
                     "Q" => {
                         // Quoted-printable
-                        text.replace('_', " ")
-                            .replace("=20", " ")
+                        text.replace('_', " ").replace("=20", " ")
                     }
                     _ => text.to_string(),
                 };
-                result = format!("{}{}{}", &result[..start], decoded, &result[start + 2 + end + 2..]);
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    decoded,
+                    &result[start + 2 + end + 2..]
+                );
             } else {
                 break;
             }
@@ -629,7 +743,9 @@ fn parse_email_body(
                 }
 
                 let (headers, body) = split_headers_body(part);
-                let content_type = get_header(&headers, "Content-Type").unwrap_or_default().to_lowercase();
+                let content_type = get_header(&headers, "Content-Type")
+                    .unwrap_or_default()
+                    .to_lowercase();
                 let disposition = get_header(&headers, "Content-Disposition").unwrap_or_default();
 
                 if disposition.contains("attachment") || content_type.starts_with("application/") {
@@ -649,7 +765,8 @@ fn parse_email_body(
                             let _ = std::fs::create_dir_all(parent);
                         }
                         // Decode and save
-                        let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
+                        let encoding =
+                            get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
                         let decoded = decode_body(body.trim(), encoding);
                         let _ = std::fs::write(&save_path, &decoded);
                         att_info["saved_to"] = json!(save_path.display().to_string());
@@ -658,11 +775,13 @@ fn parse_email_body(
 
                     attachments.push(att_info);
                 } else if content_type.contains("text/plain") {
-                    let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
+                    let encoding =
+                        get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
                     let decoded = decode_body(body.trim(), encoding);
                     text_content = String::from_utf8_lossy(&decoded).to_string();
                 } else if content_type.contains("text/html") && text_content.is_empty() {
-                    let encoding = get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
+                    let encoding =
+                        get_header(&headers, "Content-Transfer-Encoding").unwrap_or_default();
                     let decoded = decode_body(body.trim(), encoding);
                     let html = String::from_utf8_lossy(&decoded).to_string();
                     // Strip HTML tags for plain text
@@ -695,7 +814,8 @@ fn extract_boundary(line: &str) -> String {
         let rest = &line[idx + 9..];
         let boundary = rest.trim().trim_matches('"').trim_matches('\'');
         // Take until whitespace or semicolon
-        boundary.split(|c: char| c == ';' || c.is_whitespace())
+        boundary
+            .split(|c: char| c == ';' || c.is_whitespace())
             .next()
             .unwrap_or("")
             .trim_matches('"')
@@ -748,12 +868,11 @@ fn decode_body(body: &str, encoding: &str) -> Vec<u8> {
         "base64" => {
             use base64::Engine;
             let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-            base64::engine::general_purpose::STANDARD.decode(&cleaned)
+            base64::engine::general_purpose::STANDARD
+                .decode(&cleaned)
                 .unwrap_or_else(|_| body.as_bytes().to_vec())
         }
-        "quoted-printable" => {
-            decode_quoted_printable(body)
-        }
+        "quoted-printable" => decode_quoted_printable(body),
         _ => body.as_bytes().to_vec(),
     }
 }
@@ -800,15 +919,20 @@ fn strip_html_tags(html: &str) -> String {
     }
     // Collapse whitespace
     let mut prev_space = false;
-    let collapsed: String = result.chars().filter(|c| {
-        if c.is_whitespace() {
-            if prev_space { return false; }
-            prev_space = true;
-        } else {
-            prev_space = false;
-        }
-        true
-    }).collect();
+    let collapsed: String = result
+        .chars()
+        .filter(|c| {
+            if c.is_whitespace() {
+                if prev_space {
+                    return false;
+                }
+                prev_space = true;
+            } else {
+                prev_space = false;
+            }
+            true
+        })
+        .collect();
     collapsed.trim().to_string()
 }
 
@@ -826,20 +950,28 @@ mod tests {
     #[test]
     fn test_validate_send() {
         let tool = EmailTool;
-        assert!(tool.validate(&json!({
-            "action": "send",
-            "to": ["test@example.com"],
-            "subject": "Test",
-            "body": "Hello"
-        })).is_ok());
-        assert!(tool.validate(&json!({"action": "send", "to": [], "subject": "Test", "body": "Hi"})).is_err());
-        assert!(tool.validate(&json!({"action": "send", "to": ["a@b.com"], "subject": "Test"})).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "send",
+                "to": ["test@example.com"],
+                "subject": "Test",
+                "body": "Hello"
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "send", "to": [], "subject": "Test", "body": "Hi"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "send", "to": ["a@b.com"], "subject": "Test"}))
+            .is_err());
     }
 
     #[test]
     fn test_validate_read() {
         let tool = EmailTool;
-        assert!(tool.validate(&json!({"action": "read", "uid": 123})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "read", "uid": 123}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "read"})).is_err());
     }
 

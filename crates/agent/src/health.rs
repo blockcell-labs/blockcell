@@ -30,7 +30,8 @@ impl HealthChecker {
                     invariants.can_compile = true;
                     "rustc not found, but bash available for script-based evolution".to_string()
                 } else {
-                    "Neither rustc nor bash available — cannot compile or generate new code".to_string()
+                    "Neither rustc nor bash available — cannot compile or generate new code"
+                        .to_string()
                 }
             },
         );
@@ -74,10 +75,7 @@ impl HealthChecker {
             info!("🫀 [健康检查] 所有生存不变量正常");
         } else {
             let violations = invariants.violations();
-            warn!(
-                "🫀 [健康检查] 生存不变量异常: {:?}",
-                violations
-            );
+            warn!("🫀 [健康检查] 生存不变量异常: {:?}", violations);
         }
 
         invariants

@@ -1,7 +1,6 @@
 # Article 01: What Is blockcell? A Self-Evolving AI Agent Framework
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 1/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 1
 ---
 
 ## Start with a scenario

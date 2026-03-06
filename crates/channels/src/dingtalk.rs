@@ -1,6 +1,8 @@
+use crate::account::dingtalk_account_id;
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -12,6 +14,8 @@ const DINGTALK_MSG_LIMIT: usize = 4096;
 /// Token refresh margin: refresh 5 minutes before expiry
 #[allow(dead_code)]
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
+
+const DEDUP_CACHE_LIMIT: usize = 2048;
 
 fn shared_client() -> Client {
     Client::builder()
@@ -34,6 +38,28 @@ impl CachedToken {
     fn is_valid(&self) -> bool {
         !self.token.is_empty()
             && chrono::Utc::now().timestamp() < self.expires_at - TOKEN_REFRESH_MARGIN_SECS
+    }
+}
+
+#[derive(Default)]
+struct DedupCache {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl DedupCache {
+    fn insert_new(&mut self, key: String) -> bool {
+        if self.seen.contains(&key) {
+            return false;
+        }
+        self.seen.insert(key.clone());
+        self.order.push_back(key);
+        while self.order.len() > DEDUP_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
     }
 }
 
@@ -128,6 +154,7 @@ pub struct DingTalkChannel {
     inbound_tx: mpsc::Sender<InboundMessage>,
     #[allow(dead_code)]
     token_cache: Arc<tokio::sync::Mutex<CachedToken>>,
+    dedup_cache: Arc<tokio::sync::Mutex<DedupCache>>,
 }
 
 impl DingTalkChannel {
@@ -137,6 +164,7 @@ impl DingTalkChannel {
             client: shared_client(),
             inbound_tx,
             token_cache: Arc::new(tokio::sync::Mutex::new(CachedToken::default())),
+            dedup_cache: Arc::new(tokio::sync::Mutex::new(DedupCache::default())),
         }
     }
 
@@ -146,6 +174,19 @@ impl DingTalkChannel {
             return true;
         }
         allow_from.iter().any(|a| a == sender_id)
+    }
+
+    async fn is_duplicate_message(&self, event_id: Option<&str>, msg_id: Option<&str>) -> bool {
+        let Some(key) = event_id
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("event:{}", s))
+            .or_else(|| msg_id.filter(|s| !s.is_empty()).map(|s| format!("msg:{}", s)))
+        else {
+            return false;
+        };
+
+        let mut cache = self.dedup_cache.lock().await;
+        !cache.insert_new(key)
     }
 
     #[allow(dead_code)]
@@ -161,15 +202,17 @@ impl DingTalkChannel {
         let resp = self
             .client
             .get(format!("{}/gettoken", DINGTALK_API_BASE))
-            .query(&[("appkey", app_key.as_str()), ("appsecret", app_secret.as_str())])
+            .query(&[
+                ("appkey", app_key.as_str()),
+                ("appsecret", app_secret.as_str()),
+            ])
             .send()
             .await
             .map_err(|e| Error::Channel(format!("DingTalk gettoken request failed: {}", e)))?;
 
-        let body: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| Error::Channel(format!("Failed to parse DingTalk token response: {}", e)))?;
+        let body: TokenResponse = resp.json().await.map_err(|e| {
+            Error::Channel(format!("Failed to parse DingTalk token response: {}", e))
+        })?;
 
         if body.errcode != 0 {
             return Err(Error::Channel(format!(
@@ -185,7 +228,10 @@ impl DingTalkChannel {
 
         cache.token = token.clone();
         cache.expires_at = chrono::Utc::now().timestamp() + expires_in;
-        info!("DingTalk access_token refreshed (expires in {}s)", expires_in);
+        info!(
+            "DingTalk access_token refreshed (expires in {}s)",
+            expires_in
+        );
         Ok(token)
     }
 
@@ -229,7 +275,9 @@ impl DingTalkChannel {
             .json(&req)
             .send()
             .await
-            .map_err(|e| Error::Channel(format!("DingTalk stream endpoint request failed: {}", e)))?;
+            .map_err(|e| {
+                Error::Channel(format!("DingTalk stream endpoint request failed: {}", e))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -240,10 +288,9 @@ impl DingTalkChannel {
             )));
         }
 
-        let endpoint: StreamEndpointResponse = resp
-            .json()
-            .await
-            .map_err(|e| Error::Channel(format!("Failed to parse DingTalk stream endpoint: {}", e)))?;
+        let endpoint: StreamEndpointResponse = resp.json().await.map_err(|e| {
+            Error::Channel(format!("Failed to parse DingTalk stream endpoint: {}", e))
+        })?;
 
         Ok(endpoint)
     }
@@ -272,7 +319,9 @@ impl DingTalkChannel {
                     match serde_json::from_str::<StreamEvent>(&text) {
                         Ok(event) => {
                             // Send ACK back (per official Stream SDK protocol)
-                            let msg_id = event.headers.as_ref()
+                            let msg_id = event
+                                .headers
+                                .as_ref()
                                 .and_then(|h| h.event_id.as_deref())
                                 .unwrap_or("");
                             let ack = serde_json::json!({
@@ -306,7 +355,14 @@ impl DingTalkChannel {
                                             // Already a JSON object (defensive fallback)
                                             data.clone()
                                         };
-                                        if let Err(e) = self.handle_callback_message(&parsed_data).await {
+                                        let stream_event_id = event
+                                            .headers
+                                            .as_ref()
+                                            .and_then(|h| h.event_id.as_deref())
+                                            .map(|s| s.to_string());
+                                        if let Err(e) =
+                                            self.handle_callback_message(&parsed_data, stream_event_id.as_deref()).await
+                                        {
                                             error!(error = %e, "Failed to handle DingTalk callback");
                                         }
                                     }
@@ -339,12 +395,9 @@ impl DingTalkChannel {
         Err(Error::Channel("DingTalk stream ended".to_string()))
     }
 
-    async fn handle_callback_message(&self, data: &serde_json::Value) -> Result<()> {
+    async fn handle_callback_message(&self, data: &serde_json::Value, event_id: Option<&str>) -> Result<()> {
         // DingTalk callback message format
-        let msg_type = data
-            .get("msgtype")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let msg_type = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
 
         let sender_id = data
             .get("senderStaffId")
@@ -374,6 +427,15 @@ impl DingTalkChannel {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        if self.is_duplicate_message(event_id, msg_id.as_deref()).await {
+            info!(
+                event_id = event_id.unwrap_or(""),
+                msg_id = msg_id.as_deref().unwrap_or(""),
+                "DingTalk: duplicate inbound callback skipped"
+            );
+            return Ok(());
+        }
+
         let conversation_type = data
             .get("conversationType")
             .and_then(|v| v.as_str())
@@ -390,7 +452,9 @@ impl DingTalkChannel {
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                if text.is_empty() { return Ok(()); }
+                if text.is_empty() {
+                    return Ok(());
+                }
                 (text, vec![])
             }
             "picture" | "image" => {
@@ -400,12 +464,23 @@ impl DingTalkChannel {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let paths = if !download_code.is_empty() {
-                    match self.download_dingtalk_media(download_code, "image", "jpg").await {
+                    match self
+                        .download_dingtalk_media(download_code, "image", "jpg")
+                        .await
+                    {
                         Ok(p) => vec![p],
-                        Err(e) => { warn!(error = %e, "DingTalk: failed to download image"); vec![] }
+                        Err(e) => {
+                            warn!(error = %e, "DingTalk: failed to download image");
+                            vec![]
+                        }
                     }
-                } else { vec![] };
-                ("[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(), paths)
+                } else {
+                    vec![]
+                };
+                (
+                    "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(),
+                    paths,
+                )
             }
             "audio" | "voice" => {
                 let download_code = data
@@ -419,12 +494,23 @@ impl DingTalkChannel {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let paths = if !download_code.is_empty() {
-                    match self.download_dingtalk_media(download_code, "voice", "amr").await {
+                    match self
+                        .download_dingtalk_media(download_code, "voice", "amr")
+                        .await
+                    {
                         Ok(p) => vec![p],
-                        Err(e) => { warn!(error = %e, "DingTalk: failed to download audio"); vec![] }
+                        Err(e) => {
+                            warn!(error = %e, "DingTalk: failed to download audio");
+                            vec![]
+                        }
                     }
-                } else { vec![] };
-                let desc = format!("[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]", duration);
+                } else {
+                    vec![]
+                };
+                let desc = format!(
+                    "[语音消息 {}ms，已下载到本地，请用 audio_transcribe 工具转写后回复]",
+                    duration
+                );
                 (desc, paths)
             }
             "file" => {
@@ -440,24 +526,44 @@ impl DingTalkChannel {
                     .unwrap_or("file");
                 let ext = file_name.rsplit('.').next().unwrap_or("bin");
                 let paths = if !download_code.is_empty() {
-                    match self.download_dingtalk_media(download_code, "file", ext).await {
+                    match self
+                        .download_dingtalk_media(download_code, "file", ext)
+                        .await
+                    {
                         Ok(p) => vec![p],
-                        Err(e) => { warn!(error = %e, "DingTalk: failed to download file"); vec![] }
+                        Err(e) => {
+                            warn!(error = %e, "DingTalk: failed to download file");
+                            vec![]
+                        }
                     }
-                } else { vec![] };
-                (format!("[文件: {}，已下载到本地，可用 read_file 读取]", file_name), paths)
+                } else {
+                    vec![]
+                };
+                (
+                    format!("[文件: {}，已下载到本地，可用 read_file 读取]", file_name),
+                    paths,
+                )
             }
             "richText" => {
                 let items = data
                     .get("content")
                     .and_then(|v| v.get("richText"))
                     .and_then(|v| v.as_array());
-                let text = items.map(|arr| {
-                    arr.iter().filter_map(|item| {
-                        item.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
-                    }).collect::<Vec<_>>().join("")
-                }).unwrap_or_default();
-                if text.is_empty() { return Ok(()); }
+                let text = items
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.get("text")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    return Ok(());
+                }
                 (text, vec![])
             }
             other => {
@@ -476,6 +582,7 @@ impl DingTalkChannel {
 
         let inbound = InboundMessage {
             channel: "dingtalk".to_string(),
+            account_id: dingtalk_account_id(&self.config),
             sender_id: sender_id.clone(),
             chat_id: effective_chat_id,
             content,
@@ -556,7 +663,8 @@ impl DingTalkChannel {
         let app_secret = &self.config.channels.dingtalk.app_secret;
         let token = fetch_access_token(&self.client, app_key, app_secret).await?;
 
-        let resp_body: serde_json::Value = self.client
+        let resp_body: serde_json::Value = self
+            .client
             .post(format!("{}/media/downloadFile", DINGTALK_API_BASE))
             .query(&[("access_token", token.as_str())])
             .json(&serde_json::json!({ "downloadCode": download_code, "robotCode": app_key }))
@@ -574,14 +682,18 @@ impl DingTalkChannel {
             .ok_or_else(|| Error::Channel("DingTalk: no downloadUrl in response".to_string()))?
             .to_string();
 
-        let file_resp = self.client
+        let file_resp = self
+            .client
             .get(&download_url)
             .send()
             .await
             .map_err(|e| Error::Channel(format!("DingTalk media fetch failed: {}", e)))?;
 
         if !file_resp.status().is_success() {
-            return Err(Error::Channel(format!("DingTalk media HTTP {}", file_resp.status())));
+            return Err(Error::Channel(format!(
+                "DingTalk media HTTP {}",
+                file_resp.status()
+            )));
         }
 
         let media_dir = dirs::home_dir()
@@ -595,7 +707,9 @@ impl DingTalkChannel {
         let filename = format!("dingtalk_{}_{}.{}", media_type, safe_code, ext);
         let file_path = media_dir.join(&filename);
 
-        let bytes = file_resp.bytes().await
+        let bytes = file_resp
+            .bytes()
+            .await
             .map_err(|e| Error::Channel(format!("DingTalk media read failed: {}", e)))?;
         tokio::fs::write(&file_path, &bytes)
             .await
@@ -644,9 +758,9 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 
     if is_group_chat_id(chat_id) {
         // ── Group chat: old API /media/upload + /chat/send ──
-        let media_id = upload_media_old_api(
-            &upload_client, &token, &bytes, &file_name, media_type, mime,
-        ).await?;
+        let media_id =
+            upload_media_old_api(&upload_client, &token, &bytes, &file_name, media_type, mime)
+                .await?;
         info!(media_id = %media_id, media_type = %media_type, "DingTalk: group media uploaded");
 
         let msg = match media_type {
@@ -686,9 +800,9 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
         }
     } else {
         // ── 1:1 robot message: upload via /media/upload + oToMessages/batchSend ──
-        let media_id = upload_media_old_api(
-            &upload_client, &token, &bytes, &file_name, media_type, mime,
-        ).await?;
+        let media_id =
+            upload_media_old_api(&upload_client, &token, &bytes, &file_name, media_type, mime)
+                .await?;
         info!(media_id = %media_id, media_type = %media_type, "DingTalk: 1:1 media uploaded");
 
         // Build msgKey and msgParam per DingTalk oToMessages API spec:
@@ -705,7 +819,8 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
                 serde_json::json!({
                     "mediaId": media_id,
                     "duration": "0"
-                }).to_string(),
+                })
+                .to_string(),
             ),
             _ => (
                 "sampleFile",
@@ -713,7 +828,8 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
                     "mediaId": media_id,
                     "fileName": file_name,
                     "fileType": ext
-                }).to_string(),
+                })
+                .to_string(),
             ),
         };
 
@@ -787,7 +903,6 @@ async fn upload_media_old_api(
     resp.media_id
         .ok_or_else(|| Error::Channel("DingTalk media/upload: no media_id".to_string()))
 }
-
 
 fn dingtalk_media_type_for_ext(ext: &str) -> &'static str {
     match ext {
@@ -1041,7 +1156,11 @@ mod tests {
         let chunks = split_message(&text, 4096);
         assert!(chunks.len() > 1);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= 4096, "chunk too long: {} chars", chunk.chars().count());
+            assert!(
+                chunk.chars().count() <= 4096,
+                "chunk too long: {} chars",
+                chunk.chars().count()
+            );
         }
     }
 
@@ -1098,14 +1217,24 @@ mod tests {
 
         // data should be a Value::String, not a Value::Object
         let data = event.data.unwrap();
-        assert!(data.is_string(), "data should be a JSON string, got: {:?}", data);
+        assert!(
+            data.is_string(),
+            "data should be a JSON string, got: {:?}",
+            data
+        );
 
         // Parse the stringified JSON
         let inner: serde_json::Value = serde_json::from_str(data.as_str().unwrap()).unwrap();
         assert_eq!(inner.get("msgtype").and_then(|v| v.as_str()), Some("text"));
-        assert_eq!(inner.get("senderId").and_then(|v| v.as_str()), Some("user123"));
         assert_eq!(
-            inner.get("text").and_then(|v| v.get("content")).and_then(|v| v.as_str()),
+            inner.get("senderId").and_then(|v| v.as_str()),
+            Some("user123")
+        );
+        assert_eq!(
+            inner
+                .get("text")
+                .and_then(|v| v.get("content"))
+                .and_then(|v| v.as_str()),
             Some(" hello")
         );
     }
@@ -1117,5 +1246,4 @@ mod tests {
         assert_eq!(resp.errcode, 40014);
         assert_eq!(resp.errmsg, "invalid access_token");
     }
-
 }

@@ -1,7 +1,6 @@
 # Article 02: Get Started with blockcell in 5 Minutes — From Installation to Your First Chat
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 2/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 2
 ---
 
 ## Preface
@@ -16,15 +15,14 @@ In the previous article, we introduced what blockcell is. In this one, we’ll g
 
 ## The fastest 5-minute path (follow these steps)
 
-If you only want to run it once as quickly as possible, do these 5 steps:
+If you only want the quickest successful run, do these 4 steps:
 
 1. Install: run the installer script
-2. Initialize: `blockcell onboard`
-3. Configure: edit `~/.blockcell/config.json` and set an available provider (DeepSeek or Kimi recommended)
-4. Check: `blockcell status` and make sure everything is ✓
-5. Start: `blockcell agent` and send a message to test
+2. Configure: `blockcell setup` (interactive wizard; creates config and validates it)
+3. Start: `blockcell agent` and send a test message
+4. Start: `blockcell gateway`, then open `http://127.0.0.1:18791` for the WebUI
 
-The rest of this article goes deeper (multi-provider options, common commands, FAQ, deployment suggestions). After you get the first run working, you can read those parts slowly.
+The rest of this article goes deeper (provider choices, multi-agent layout, common commands, FAQ, deployment suggestions).
 
 ---
 
@@ -63,35 +61,53 @@ blockcell --version
 
 ---
 
-## Step 2: Initialize
+## Step 2: Configure (the `setup` wizard is recommended)
 
 ```bash
-blockcell onboard
+blockcell setup
 ```
 
 This command will:
 1. Create the `~/.blockcell/` directory structure
-2. Generate the default config file `~/.blockcell/config.json`
-3. Print a short onboarding guide
+2. Let you choose an LLM provider
+3. Save the API key and model
+4. Optionally configure one external channel
+5. Validate the saved provider configuration
+6. Auto-bind a newly configured external channel to the `default` agent when no owner is set yet
+7. If you later want one account / bot on the same channel to use a different agent, add `channelAccountOwners.<channel>.<accountId>`
 
 The directory structure looks like this:
 
 ```
 ~/.blockcell/
 ├── config.json          # Main config
-└── workspace/           # The AI’s working directory
-    ├── memory/          # Memory database
-    ├── sessions/        # Session history
-    ├── skills/          # User-installed skills
-    ├── media/           # Screenshots, audio, etc.
-    └── audit/           # Operation audit logs
+├── sessions/            # Session history for the default agent
+├── audit/               # Audit logs for the default agent
+├── workspace/           # Default agent workspace
+│   ├── memory/          # Memory database
+│   ├── skills/          # User-installed skills
+│   ├── media/           # Screenshots, audio, etc.
+│   └── tasks.json       # Shared background task snapshot
+└── agents/              # Non-default agents (created on demand)
+    └── ops/
+        ├── sessions/
+        ├── audit/
+        └── workspace/
+```
+
+`default` keeps using the root `~/.blockcell/` layout. Additional agents live under `~/.blockcell/agents/<ID>/`.
+
+If you prefer the older manual flow, you can still run:
+
+```bash
+blockcell onboard
 ```
 
 ---
 
 ## Step 3: Configure your API key
 
-Open the config file:
+If you already completed `blockcell setup`, you can skip this step. Otherwise, open the config file:
 
 ```bash
 # macOS
@@ -333,9 +349,18 @@ Key fields in `~/.blockcell/config.json`:
     "webuiPort": 18791,
     "apiToken": "optional access token"
   },
+  "channelOwners": {
+    "telegram": "default"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  },
   "channels": {
     "telegram": {
-      "botToken": "your bot token",
+      "enabled": true,
+      "token": "your bot token",
       "allowFrom": ["your user id"]
     }
   }

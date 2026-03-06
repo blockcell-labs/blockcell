@@ -30,7 +30,16 @@ impl AnthropicProvider {
         max_tokens: u32,
         temperature: f32,
     ) -> Self {
-        Self::new_with_proxy(api_key, api_base, model, max_tokens, temperature, None, None, &[])
+        Self::new_with_proxy(
+            api_key,
+            api_base,
+            model,
+            max_tokens,
+            temperature,
+            None,
+            None,
+            &[],
+        )
     }
 
     pub fn new_with_proxy(
@@ -73,11 +82,17 @@ impl AnthropicProvider {
             .filter_map(|tool| {
                 let func = tool.get("function")?;
                 let name = func.get("name")?.as_str()?;
-                let description = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                let parameters = func.get("parameters").cloned().unwrap_or(serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }));
+                let description = func
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let parameters = func
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }));
 
                 Some(serde_json::json!({
                     "name": name,
@@ -110,21 +125,25 @@ impl AnthropicProvider {
                     if let Some(arr) = msg.content.as_array() {
                         let mut blocks: Vec<Value> = Vec::new();
                         for block in arr {
-                            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let block_type =
+                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             match block_type {
                                 "text" => {
                                     blocks.push(block.clone());
                                 }
                                 "image_url" => {
                                     // Convert OpenAI image_url format to Anthropic image format
-                                    if let Some(url) = block.get("image_url")
+                                    if let Some(url) = block
+                                        .get("image_url")
                                         .and_then(|v| v.get("url"))
                                         .and_then(|v| v.as_str())
                                     {
                                         if let Some(rest) = url.strip_prefix("data:") {
                                             if let Some(semi) = rest.find(';') {
                                                 let mime = &rest[..semi];
-                                                if let Some(data) = rest[semi..].strip_prefix(";base64,") {
+                                                if let Some(data) =
+                                                    rest[semi..].strip_prefix(";base64,")
+                                                {
                                                     blocks.push(serde_json::json!({
                                                         "type": "image",
                                                         "source": {
@@ -208,7 +227,8 @@ impl AnthropicProvider {
                             if let Some(content) = last.get_mut("content") {
                                 if let Some(arr) = content.as_array_mut() {
                                     // Check if this is a tool_result array
-                                    if arr.first()
+                                    if arr
+                                        .first()
                                         .and_then(|v| v.get("type"))
                                         .and_then(|v| v.as_str())
                                         == Some("tool_result")
@@ -384,7 +404,10 @@ impl Provider for AnthropicProvider {
                 }
                 "tool_use" => {
                     if let (Some(id), Some(name)) = (&block.id, &block.name) {
-                        let arguments = block.input.clone().unwrap_or(Value::Object(serde_json::Map::new()));
+                        let arguments = block
+                            .input
+                            .clone()
+                            .unwrap_or(Value::Object(serde_json::Map::new()));
                         tool_calls.push(ToolCallRequest {
                             id: id.clone(),
                             name: name.clone(),

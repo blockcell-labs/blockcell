@@ -75,8 +75,11 @@ impl McpToolProvider {
         let mcp_tools = self.client.list_tools().await;
         let mut result: Vec<Arc<dyn Tool>> = Vec::new();
         for t in mcp_tools {
-            let wrapper: Arc<dyn Tool> =
-                Arc::new(McpToolWrapper::new(&self.server_name, t, self.client.clone()));
+            let wrapper: Arc<dyn Tool> = Arc::new(McpToolWrapper::new(
+                &self.server_name,
+                t,
+                self.client.clone(),
+            ));
             result.push(wrapper);
         }
         result

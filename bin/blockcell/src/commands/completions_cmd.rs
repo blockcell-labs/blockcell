@@ -80,7 +80,14 @@ fn build_cli() -> clap::Command {
             clap::Command::new("channels")
                 .about("Manage channels")
                 .subcommand(clap::Command::new("status").about("Show channel status"))
-                .subcommand(clap::Command::new("login").about("Login to a channel")),
+                .subcommand(clap::Command::new("login").about("Login to a channel"))
+                .subcommand(
+                    clap::Command::new("owner")
+                        .about("Manage channel owner bindings")
+                        .subcommand(clap::Command::new("list").about("List owner bindings"))
+                        .subcommand(clap::Command::new("set").about("Set owner binding"))
+                        .subcommand(clap::Command::new("clear").about("Clear owner binding")),
+                ),
         )
         .subcommand(
             clap::Command::new("cron")

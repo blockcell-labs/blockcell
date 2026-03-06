@@ -1,9 +1,9 @@
-pub mod openai;
 pub mod anthropic;
-pub mod ollama;
-pub mod gemini;
-pub mod factory;
 pub mod client;
+pub mod factory;
+pub mod gemini;
+pub mod ollama;
+pub mod openai;
 pub mod pool;
 
 use async_trait::async_trait;
@@ -16,9 +16,11 @@ pub trait Provider: Send + Sync {
     async fn chat(&self, messages: &[ChatMessage], tools: &[Value]) -> Result<LLMResponse>;
 }
 
-pub use openai::OpenAIProvider;
 pub use anthropic::AnthropicProvider;
-pub use ollama::OllamaProvider;
+pub use factory::{
+    create_evolution_provider, create_main_provider, create_provider, infer_provider_from_model,
+};
 pub use gemini::GeminiProvider;
-pub use factory::{create_provider, create_main_provider, create_evolution_provider, infer_provider_from_model};
-pub use pool::{ProviderPool, PoolEntryStatus, CallResult};
+pub use ollama::OllamaProvider;
+pub use openai::OpenAIProvider;
+pub use pool::{CallResult, PoolEntryStatus, ProviderPool};

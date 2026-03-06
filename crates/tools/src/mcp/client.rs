@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -138,25 +138,39 @@ impl McpClient {
         }
 
         let line = serde_json::to_string(&req).map_err(|e| {
-            blockcell_core::Error::Tool(format!("MCP[{}]: serialize error: {}", self.server_name, e))
+            blockcell_core::Error::Tool(format!(
+                "MCP[{}]: serialize error: {}",
+                self.server_name, e
+            ))
         })?;
         debug!(server = %self.server_name, id, method, "MCP → request");
 
         {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                blockcell_core::Error::Tool(format!("MCP[{}]: write error: {}", self.server_name, e))
+                blockcell_core::Error::Tool(format!(
+                    "MCP[{}]: write error: {}",
+                    self.server_name, e
+                ))
             })?;
             stdin.write_all(b"\n").await.map_err(|e| {
-                blockcell_core::Error::Tool(format!("MCP[{}]: write error: {}", self.server_name, e))
+                blockcell_core::Error::Tool(format!(
+                    "MCP[{}]: write error: {}",
+                    self.server_name, e
+                ))
             })?;
             stdin.flush().await.map_err(|e| {
-                blockcell_core::Error::Tool(format!("MCP[{}]: flush error: {}", self.server_name, e))
+                blockcell_core::Error::Tool(format!(
+                    "MCP[{}]: flush error: {}",
+                    self.server_name, e
+                ))
             })?;
         }
 
         rx.await
-            .map_err(|_| blockcell_core::Error::Tool(format!("MCP[{}]: server closed", self.server_name)))?
+            .map_err(|_| {
+                blockcell_core::Error::Tool(format!("MCP[{}]: server closed", self.server_name))
+            })?
             .map_err(|e| blockcell_core::Error::Tool(format!("MCP[{}]: {}", self.server_name, e)))
     }
 
@@ -190,11 +204,14 @@ impl McpClient {
     /// Fetch tools/list and cache them locally.
     pub async fn refresh_tools(&self) -> blockcell_core::Result<()> {
         let result = self.call("tools/list", None).await?;
-        let tools: Vec<McpTool> = serde_json::from_value(
-            result.get("tools").cloned().unwrap_or(Value::Array(vec![]))
-        ).map_err(|e| {
-            blockcell_core::Error::Tool(format!("MCP[{}]: parse tools: {}", self.server_name, e))
-        })?;
+        let tools: Vec<McpTool> =
+            serde_json::from_value(result.get("tools").cloned().unwrap_or(Value::Array(vec![])))
+                .map_err(|e| {
+                    blockcell_core::Error::Tool(format!(
+                        "MCP[{}]: parse tools: {}",
+                        self.server_name, e
+                    ))
+                })?;
         debug!(server = %self.server_name, count = tools.len(), "MCP tools loaded");
         *self.tools.lock().await = tools;
         Ok(())
@@ -206,7 +223,11 @@ impl McpClient {
     }
 
     /// Call tools/call on the MCP server.
-    pub async fn call_tool(&self, tool_name: &str, arguments: Value) -> blockcell_core::Result<Value> {
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> blockcell_core::Result<Value> {
         let params = serde_json::json!({
             "name": tool_name,
             "arguments": arguments
@@ -228,10 +249,13 @@ impl McpClient {
         // Extract text content blocks into a single string result
         let content = result.get("content").cloned().unwrap_or(Value::Null);
         if let Some(arr) = content.as_array() {
-            let text: String = arr.iter()
+            let text: String = arr
+                .iter()
                 .filter_map(|item| {
                     if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        item.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
                     } else {
                         None
                     }

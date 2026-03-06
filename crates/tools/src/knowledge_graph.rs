@@ -31,12 +31,18 @@ impl Tool for KnowledgeGraphTool {
         props.insert("source_id".into(), json!({"type": "string", "description": "(add_relation/get_relations) Source entity ID"}));
         props.insert("target_id".into(), json!({"type": "string", "description": "(add_relation/get_relations) Target entity ID"}));
         props.insert("relation_type".into(), json!({"type": "string", "description": "(add_relation/get_relations) Relation type (e.g. 'knows', 'depends_on', 'part_of', 'related_to')"}));
-        props.insert("relation_id".into(), json!({"type": "string", "description": "(delete_relation) Relation ID to delete"}));
+        props.insert(
+            "relation_id".into(),
+            json!({"type": "string", "description": "(delete_relation) Relation ID to delete"}),
+        );
         props.insert("query".into(), json!({"type": "string", "description": "(search_entities/query) Search query or Cypher-like pattern"}));
         props.insert("depth".into(), json!({"type": "integer", "description": "(subgraph/find_path) Max traversal depth. Default: 2"}));
         props.insert("max_results".into(), json!({"type": "integer", "description": "(search_entities/query) Max results. Default: 50"}));
         props.insert("format".into(), json!({"type": "string", "enum": ["json", "dot", "mermaid"], "description": "(export/subgraph) Output format. Default: json"}));
-        props.insert("output_path".into(), json!({"type": "string", "description": "(export) Output file path"}));
+        props.insert(
+            "output_path".into(),
+            json!({"type": "string", "description": "(export) Output file path"}),
+        );
         props.insert("graph_name".into(), json!({"type": "string", "description": "Graph database name. Default: 'default'. Allows multiple separate graphs."}));
         props.insert("direction".into(), json!({"type": "string", "enum": ["outgoing", "incoming", "both"], "description": "(get_relations/subgraph) Relation direction filter. Default: both"}));
         props.insert("bidirectional".into(), json!({"type": "boolean", "description": "(add_relation) If true, creates relation in both directions. Default: false"}));
@@ -55,21 +61,43 @@ impl Tool for KnowledgeGraphTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let valid = [
-            "add_entity", "get_entity", "update_entity", "delete_entity", "search_entities",
-            "add_relation", "get_relations", "delete_relation",
-            "find_path", "subgraph", "stats", "export", "query", "merge_entity",
+            "add_entity",
+            "get_entity",
+            "update_entity",
+            "delete_entity",
+            "search_entities",
+            "add_relation",
+            "get_relations",
+            "delete_relation",
+            "find_path",
+            "subgraph",
+            "stats",
+            "export",
+            "query",
+            "merge_entity",
         ];
         if !valid.contains(&action) {
-            return Err(Error::Tool(format!("Invalid action '{}'. Valid: {}", action, valid.join(", "))));
+            return Err(Error::Tool(format!(
+                "Invalid action '{}'. Valid: {}",
+                action,
+                valid.join(", ")
+            )));
         }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let action = params["action"].as_str().unwrap_or("");
-        let graph_name = params.get("graph_name").and_then(|v| v.as_str()).unwrap_or("default");
+        let graph_name = params
+            .get("graph_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
 
-        debug!(action = action, graph = graph_name, "knowledge_graph execute");
+        debug!(
+            action = action,
+            graph = graph_name,
+            "knowledge_graph execute"
+        );
 
         // Open or create the graph database
         let db_dir = ctx.workspace.join("knowledge_graphs");
@@ -159,10 +187,15 @@ fn init_schema(db: &rusqlite::Connection) -> Result<()> {
 // ─── Entity operations ──────────────────────────────────────────────────────
 
 fn action_add_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("entity_id").and_then(|v| v.as_str())
+    let id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let entity_type = params.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
+    let entity_type = params
+        .get("entity_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let default_props = json!({});
     let default_tags = json!([]);
@@ -186,26 +219,30 @@ fn action_add_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value>
 }
 
 fn action_get_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("entity_id").and_then(|v| v.as_str())
+    let id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("entity_id is required for get_entity".into()))?;
 
     let mut stmt = db.prepare(
         "SELECT id, entity_type, name, properties, tags, created_at, updated_at FROM entities WHERE id = ?1"
     ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
 
-    let entity = stmt.query_row(rusqlite::params![id], |row| {
-        let props_str: String = row.get(3)?;
-        let tags_str: String = row.get(4)?;
-        Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "entity_type": row.get::<_, String>(1)?,
-            "name": row.get::<_, String>(2)?,
-            "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
-            "tags": serde_json::from_str::<Value>(&tags_str).unwrap_or(json!([])),
-            "created_at": row.get::<_, String>(5)?,
-            "updated_at": row.get::<_, String>(6)?,
-        }))
-    }).map_err(|e| Error::Tool(format!("Entity not found: {}", e)))?;
+    let entity = stmt
+        .query_row(rusqlite::params![id], |row| {
+            let props_str: String = row.get(3)?;
+            let tags_str: String = row.get(4)?;
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "entity_type": row.get::<_, String>(1)?,
+                "name": row.get::<_, String>(2)?,
+                "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
+                "tags": serde_json::from_str::<Value>(&tags_str).unwrap_or(json!([])),
+                "created_at": row.get::<_, String>(5)?,
+                "updated_at": row.get::<_, String>(6)?,
+            }))
+        })
+        .map_err(|e| Error::Tool(format!("Entity not found: {}", e)))?;
 
     // Also get relations
     let relations = get_entity_relations(db, id, "both")?;
@@ -217,7 +254,9 @@ fn action_get_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value>
 }
 
 fn action_update_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("entity_id").and_then(|v| v.as_str())
+    let id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("entity_id is required for update_entity".into()))?;
 
     // Build SET clause dynamically
@@ -234,11 +273,15 @@ fn action_update_entity(db: &rusqlite::Connection, params: &Value) -> Result<Val
     }
     if let Some(properties) = params.get("properties") {
         sets.push("properties = ?");
-        values.push(Box::new(serde_json::to_string(properties).unwrap_or_else(|_| "{}".to_string())));
+        values.push(Box::new(
+            serde_json::to_string(properties).unwrap_or_else(|_| "{}".to_string()),
+        ));
     }
     if let Some(tags) = params.get("tags") {
         sets.push("tags = ?");
-        values.push(Box::new(serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())));
+        values.push(Box::new(
+            serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string()),
+        ));
     }
 
     if sets.is_empty() {
@@ -250,7 +293,8 @@ fn action_update_entity(db: &rusqlite::Connection, params: &Value) -> Result<Val
     values.push(Box::new(id.to_string()));
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-    let affected = db.execute(&sql, params_refs.as_slice())
+    let affected = db
+        .execute(&sql, params_refs.as_slice())
         .map_err(|e| Error::Tool(format!("Update failed: {}", e)))?;
 
     if affected == 0 {
@@ -261,16 +305,21 @@ fn action_update_entity(db: &rusqlite::Connection, params: &Value) -> Result<Val
 }
 
 fn action_delete_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("entity_id").and_then(|v| v.as_str())
+    let id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("entity_id is required for delete_entity".into()))?;
 
     // Delete relations first
-    let relations_deleted = db.execute(
-        "DELETE FROM relations WHERE source_id = ?1 OR target_id = ?1",
-        rusqlite::params![id],
-    ).map_err(|e| Error::Tool(format!("Failed to delete relations: {}", e)))?;
+    let relations_deleted = db
+        .execute(
+            "DELETE FROM relations WHERE source_id = ?1 OR target_id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| Error::Tool(format!("Failed to delete relations: {}", e)))?;
 
-    let affected = db.execute("DELETE FROM entities WHERE id = ?1", rusqlite::params![id])
+    let affected = db
+        .execute("DELETE FROM entities WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| Error::Tool(format!("Delete failed: {}", e)))?;
 
     Ok(json!({
@@ -283,7 +332,10 @@ fn action_delete_entity(db: &rusqlite::Connection, params: &Value) -> Result<Val
 fn action_search_entities(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
     let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let entity_type = params.get("entity_type").and_then(|v| v.as_str());
-    let max_results = params.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50);
+    let max_results = params
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50);
 
     let entities = if !query.is_empty() {
         // FTS search
@@ -324,16 +376,20 @@ fn action_search_entities(db: &rusqlite::Connection, params: &Value) -> Result<V
 }
 
 fn action_merge_entity(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("entity_id").and_then(|v| v.as_str())
+    let id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("entity_id is required for merge_entity".into()))?;
 
     // Check if entity exists
-    let exists: bool = db.query_row(
-        "SELECT COUNT(*) FROM entities WHERE id = ?1",
-        rusqlite::params![id],
-        |row| row.get::<_, i64>(0),
-    ).map(|c| c > 0)
-    .unwrap_or(false);
+    let exists: bool = db
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
 
     if exists {
         // Update existing
@@ -347,32 +403,56 @@ fn action_merge_entity(db: &rusqlite::Connection, params: &Value) -> Result<Valu
 // ─── Relation operations ────────────────────────────────────────────────────
 
 fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let source_id = params.get("source_id").and_then(|v| v.as_str())
+    let source_id = params
+        .get("source_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("source_id is required for add_relation".into()))?;
-    let target_id = params.get("target_id").and_then(|v| v.as_str())
+    let target_id = params
+        .get("target_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("target_id is required for add_relation".into()))?;
-    let relation_type = params.get("relation_type").and_then(|v| v.as_str()).unwrap_or("related_to");
+    let relation_type = params
+        .get("relation_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("related_to");
     let default_props = json!({});
     let properties = params.get("properties").unwrap_or(&default_props);
-    let bidirectional = params.get("bidirectional").and_then(|v| v.as_bool()).unwrap_or(false);
+    let bidirectional = params
+        .get("bidirectional")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let props_str = serde_json::to_string(properties).unwrap_or_else(|_| "{}".to_string());
 
     // Verify both entities exist
-    let source_exists: bool = db.query_row(
-        "SELECT COUNT(*) FROM entities WHERE id = ?1", rusqlite::params![source_id],
-        |row| row.get::<_, i64>(0),
-    ).map(|c| c > 0).unwrap_or(false);
+    let source_exists: bool = db
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE id = ?1",
+            rusqlite::params![source_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
     if !source_exists {
-        return Err(Error::Tool(format!("Source entity '{}' not found", source_id)));
+        return Err(Error::Tool(format!(
+            "Source entity '{}' not found",
+            source_id
+        )));
     }
 
-    let target_exists: bool = db.query_row(
-        "SELECT COUNT(*) FROM entities WHERE id = ?1", rusqlite::params![target_id],
-        |row| row.get::<_, i64>(0),
-    ).map(|c| c > 0).unwrap_or(false);
+    let target_exists: bool = db
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE id = ?1",
+            rusqlite::params![target_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
     if !target_exists {
-        return Err(Error::Tool(format!("Target entity '{}' not found", target_id)));
+        return Err(Error::Tool(format!(
+            "Target entity '{}' not found",
+            target_id
+        )));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -403,9 +483,15 @@ fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Valu
 }
 
 fn action_get_relations(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let entity_id = params.get("entity_id").or(params.get("source_id")).and_then(|v| v.as_str());
+    let entity_id = params
+        .get("entity_id")
+        .or(params.get("source_id"))
+        .and_then(|v| v.as_str());
     let relation_type = params.get("relation_type").and_then(|v| v.as_str());
-    let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
+    let direction = params
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("both");
 
     let relations = if let Some(eid) = entity_id {
         get_entity_relations(db, eid, direction)?
@@ -421,7 +507,8 @@ fn action_get_relations(db: &rusqlite::Connection, params: &Value) -> Result<Val
         );
         query_relations_full(db, &sql)?
     } else {
-        let sql = "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
+        let sql =
+            "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
              s.name as source_name, t.name as target_name \
              FROM relations r \
              LEFT JOIN entities s ON r.source_id = s.id \
@@ -432,7 +519,10 @@ fn action_get_relations(db: &rusqlite::Connection, params: &Value) -> Result<Val
 
     // Filter by relation_type if both entity_id and relation_type are specified
     let filtered = if let (Some(_), Some(rt)) = (entity_id, relation_type) {
-        relations.into_iter().filter(|r| r.get("relation_type").and_then(|v| v.as_str()) == Some(rt)).collect()
+        relations
+            .into_iter()
+            .filter(|r| r.get("relation_type").and_then(|v| v.as_str()) == Some(rt))
+            .collect()
     } else {
         relations
     };
@@ -441,10 +531,13 @@ fn action_get_relations(db: &rusqlite::Connection, params: &Value) -> Result<Val
 }
 
 fn action_delete_relation(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let id = params.get("relation_id").and_then(|v| v.as_str())
+    let id = params
+        .get("relation_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("relation_id is required for delete_relation".into()))?;
 
-    let affected = db.execute("DELETE FROM relations WHERE id = ?1", rusqlite::params![id])
+    let affected = db
+        .execute("DELETE FROM relations WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| Error::Tool(format!("Delete failed: {}", e)))?;
 
     Ok(json!({
@@ -456,16 +549,21 @@ fn action_delete_relation(db: &rusqlite::Connection, params: &Value) -> Result<V
 // ─── Graph traversal ────────────────────────────────────────────────────────
 
 fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let source_id = params.get("source_id").and_then(|v| v.as_str())
+    let source_id = params
+        .get("source_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("source_id is required for find_path".into()))?;
-    let target_id = params.get("target_id").and_then(|v| v.as_str())
+    let target_id = params
+        .get("target_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("target_id is required for find_path".into()))?;
     let max_depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
     // BFS shortest path
     let mut visited = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
-    let mut parent: std::collections::HashMap<String, (String, String, String)> = std::collections::HashMap::new(); // node -> (parent, relation_id, relation_type)
+    let mut parent: std::collections::HashMap<String, (String, String, String)> =
+        std::collections::HashMap::new(); // node -> (parent, relation_id, relation_type)
 
     visited.insert(source_id.to_string());
     queue.push_back((source_id.to_string(), 0usize));
@@ -473,29 +571,32 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
     let mut found = false;
 
     while let Some((current, depth)) = queue.pop_front() {
-        if depth >= max_depth { continue; }
+        if depth >= max_depth {
+            continue;
+        }
 
         // Get neighbors (both directions)
         let mut stmt = db.prepare(
             "SELECT id, source_id, target_id, relation_type FROM relations WHERE source_id = ?1 OR target_id = ?1"
         ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
 
-        let neighbors: Vec<(String, String, String)> = stmt.query_map(
-            rusqlite::params![current],
-            |row| {
+        let neighbors: Vec<(String, String, String)> = stmt
+            .query_map(rusqlite::params![current], |row| {
                 let rel_id: String = row.get(0)?;
                 let src: String = row.get(1)?;
                 let tgt: String = row.get(2)?;
                 let rel_type: String = row.get(3)?;
                 let neighbor = if src == current { tgt } else { src };
                 Ok((neighbor, rel_id, rel_type))
-            },
-        ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-        .filter_map(|r| r.ok())
-        .collect();
+            })
+            .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for (neighbor, rel_id, rel_type) in neighbors {
-            if visited.contains(&neighbor) { continue; }
+            if visited.contains(&neighbor) {
+                continue;
+            }
             visited.insert(neighbor.clone());
             parent.insert(neighbor.clone(), (current.clone(), rel_id, rel_type));
 
@@ -506,7 +607,9 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
             queue.push_back((neighbor, depth + 1));
         }
 
-        if found { break; }
+        if found {
+            break;
+        }
     }
 
     if !found {
@@ -555,10 +658,15 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
 }
 
 fn action_subgraph(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let entity_id = params.get("entity_id").and_then(|v| v.as_str())
+    let entity_id = params
+        .get("entity_id")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("entity_id is required for subgraph".into()))?;
     let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
-    let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("json");
+    let format = params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("json");
 
     // BFS to collect neighborhood
     let mut visited = std::collections::HashSet::new();
@@ -572,24 +680,27 @@ fn action_subgraph(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
     while let Some((current, d)) = queue.pop_front() {
         entities.push(get_entity_brief(db, &current));
 
-        if d >= depth { continue; }
+        if d >= depth {
+            continue;
+        }
 
         let mut stmt = db.prepare(
             "SELECT id, source_id, target_id, relation_type, properties FROM relations WHERE source_id = ?1 OR target_id = ?1"
         ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
 
-        let rels: Vec<(String, String, String, String, String)> = stmt.query_map(
-            rusqlite::params![current],
-            |row| Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            )),
-        ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        let rels: Vec<(String, String, String, String, String)> = stmt
+            .query_map(rusqlite::params![current], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for (rel_id, src, tgt, rel_type, _props) in rels {
             let neighbor = if src == current { &tgt } else { &src };
@@ -616,67 +727,79 @@ fn action_subgraph(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
     match format {
         "dot" => {
             let dot = export_dot(&entities, &relations);
-            Ok(json!({"format": "dot", "content": dot, "entities": entities.len(), "relations": relations.len()}))
+            Ok(
+                json!({"format": "dot", "content": dot, "entities": entities.len(), "relations": relations.len()}),
+            )
         }
         "mermaid" => {
             let mermaid = export_mermaid(&entities, &relations);
-            Ok(json!({"format": "mermaid", "content": mermaid, "entities": entities.len(), "relations": relations.len()}))
+            Ok(
+                json!({"format": "mermaid", "content": mermaid, "entities": entities.len(), "relations": relations.len()}),
+            )
         }
-        _ => {
-            Ok(json!({
-                "center": entity_id,
-                "depth": depth,
-                "entities": entities,
-                "relations": relations,
-                "entity_count": entities.len(),
-                "relation_count": relations.len(),
-            }))
-        }
+        _ => Ok(json!({
+            "center": entity_id,
+            "depth": depth,
+            "entities": entities,
+            "relations": relations,
+            "entity_count": entities.len(),
+            "relation_count": relations.len(),
+        })),
     }
 }
 
 // ─── Stats & Export ─────────────────────────────────────────────────────────
 
 fn action_stats(db: &rusqlite::Connection) -> Result<Value> {
-    let entity_count: i64 = db.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+    let entity_count: i64 = db
+        .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
         .unwrap_or(0);
-    let relation_count: i64 = db.query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
+    let relation_count: i64 = db
+        .query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
         .unwrap_or(0);
 
     // Entity types distribution
     let mut stmt = db.prepare("SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type ORDER BY COUNT(*) DESC")
         .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-    let types: Vec<Value> = stmt.query_map([], |row| {
-        Ok(json!({"type": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
-    }).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-    .filter_map(|r| r.ok())
-    .collect();
+    let types: Vec<Value> = stmt
+        .query_map([], |row| {
+            Ok(json!({"type": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
+        })
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Relation types distribution
     let mut stmt = db.prepare("SELECT relation_type, COUNT(*) FROM relations GROUP BY relation_type ORDER BY COUNT(*) DESC")
         .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-    let rel_types: Vec<Value> = stmt.query_map([], |row| {
-        Ok(json!({"type": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
-    }).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-    .filter_map(|r| r.ok())
-    .collect();
+    let rel_types: Vec<Value> = stmt
+        .query_map([], |row| {
+            Ok(json!({"type": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
+        })
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Most connected entities
-    let mut stmt = db.prepare(
-        "SELECT e.id, e.name, e.entity_type, \
+    let mut stmt = db
+        .prepare(
+            "SELECT e.id, e.name, e.entity_type, \
          (SELECT COUNT(*) FROM relations WHERE source_id = e.id OR target_id = e.id) as degree \
-         FROM entities e ORDER BY degree DESC LIMIT 10"
-    ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-    let top_entities: Vec<Value> = stmt.query_map([], |row| {
-        Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "name": row.get::<_, String>(1)?,
-            "type": row.get::<_, String>(2)?,
-            "degree": row.get::<_, i64>(3)?,
-        }))
-    }).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-    .filter_map(|r| r.ok())
-    .collect();
+         FROM entities e ORDER BY degree DESC LIMIT 10",
+        )
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
+    let top_entities: Vec<Value> = stmt
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "type": row.get::<_, String>(2)?,
+                "degree": row.get::<_, i64>(3)?,
+            }))
+        })
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     Ok(json!({
         "entity_count": entity_count,
@@ -688,17 +811,24 @@ fn action_stats(db: &rusqlite::Connection) -> Result<Value> {
 }
 
 fn action_export(db: &rusqlite::Connection, params: &Value, ctx: &ToolContext) -> Result<Value> {
-    let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("json");
+    let format = params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("json");
     let output_path = params.get("output_path").and_then(|v| v.as_str());
 
     // Get all entities and relations
-    let entities = query_entities(db, "SELECT id, entity_type, name, properties, tags, created_at FROM entities")?;
-    let relations = query_relations_full(db,
+    let entities = query_entities(
+        db,
+        "SELECT id, entity_type, name, properties, tags, created_at FROM entities",
+    )?;
+    let relations = query_relations_full(
+        db,
         "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
          s.name as source_name, t.name as target_name \
          FROM relations r \
          LEFT JOIN entities s ON r.source_id = s.id \
-         LEFT JOIN entities t ON r.target_id = t.id"
+         LEFT JOIN entities t ON r.target_id = t.id",
     )?;
 
     let content = match format {
@@ -716,16 +846,25 @@ fn action_export(db: &rusqlite::Connection, params: &Value, ctx: &ToolContext) -
         };
         std::fs::write(&resolved, &content)
             .map_err(|e| Error::Tool(format!("Failed to write export: {}", e)))?;
-        Ok(json!({"status": "exported", "path": resolved, "format": format, "entities": entities.len(), "relations": relations.len()}))
+        Ok(
+            json!({"status": "exported", "path": resolved, "format": format, "entities": entities.len(), "relations": relations.len()}),
+        )
     } else {
-        Ok(json!({"format": format, "content": content, "entities": entities.len(), "relations": relations.len()}))
+        Ok(
+            json!({"format": format, "content": content, "entities": entities.len(), "relations": relations.len()}),
+        )
     }
 }
 
 fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
-    let query = params.get("query").and_then(|v| v.as_str())
+    let query = params
+        .get("query")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("query is required".into()))?;
-    let max_results = params.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50);
+    let max_results = params
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50);
 
     // Simple pattern matching: "entity_type:person" or "tag:important" or free text
     if query.starts_with("type:") || query.starts_with("entity_type:") {
@@ -766,67 +905,78 @@ fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn query_entities(db: &rusqlite::Connection, sql: &str) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare(sql)
+    let mut stmt = db
+        .prepare(sql)
         .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-    let entities: Vec<Value> = stmt.query_map([], |row| {
-        let props_str: String = row.get(3)?;
-        let tags_str: String = row.get(4)?;
-        Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "entity_type": row.get::<_, String>(1)?,
-            "name": row.get::<_, String>(2)?,
-            "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
-            "tags": serde_json::from_str::<Value>(&tags_str).unwrap_or(json!([])),
-            "created_at": row.get::<_, String>(5)?,
-        }))
-    }).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-    .filter_map(|r| r.ok())
-    .collect();
+    let entities: Vec<Value> = stmt
+        .query_map([], |row| {
+            let props_str: String = row.get(3)?;
+            let tags_str: String = row.get(4)?;
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "entity_type": row.get::<_, String>(1)?,
+                "name": row.get::<_, String>(2)?,
+                "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
+                "tags": serde_json::from_str::<Value>(&tags_str).unwrap_or(json!([])),
+                "created_at": row.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(entities)
 }
 
 fn query_relations_full(db: &rusqlite::Connection, sql: &str) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare(sql)
+    let mut stmt = db
+        .prepare(sql)
         .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-    let relations: Vec<Value> = stmt.query_map([], |row| {
-        let props_str: String = row.get(4)?;
-        Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "source_id": row.get::<_, String>(1)?,
-            "target_id": row.get::<_, String>(2)?,
-            "relation_type": row.get::<_, String>(3)?,
-            "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
-            "created_at": row.get::<_, String>(5)?,
-            "source_name": row.get::<_, String>(6).unwrap_or_default(),
-            "target_name": row.get::<_, String>(7).unwrap_or_default(),
-        }))
-    }).map_err(|e| Error::Tool(format!("Query error: {}", e)))?
-    .filter_map(|r| r.ok())
-    .collect();
+    let relations: Vec<Value> = stmt
+        .query_map([], |row| {
+            let props_str: String = row.get(4)?;
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "source_id": row.get::<_, String>(1)?,
+                "target_id": row.get::<_, String>(2)?,
+                "relation_type": row.get::<_, String>(3)?,
+                "properties": serde_json::from_str::<Value>(&props_str).unwrap_or(json!({})),
+                "created_at": row.get::<_, String>(5)?,
+                "source_name": row.get::<_, String>(6).unwrap_or_default(),
+                "target_name": row.get::<_, String>(7).unwrap_or_default(),
+            }))
+        })
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(relations)
 }
 
-fn get_entity_relations(db: &rusqlite::Connection, entity_id: &str, direction: &str) -> Result<Vec<Value>> {
-    let sql = match direction {
-        "outgoing" => format!(
+fn get_entity_relations(
+    db: &rusqlite::Connection,
+    entity_id: &str,
+    direction: &str,
+) -> Result<Vec<Value>> {
+    let sql =
+        match direction {
+            "outgoing" => format!(
             "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
              s.name, t.name FROM relations r \
              LEFT JOIN entities s ON r.source_id = s.id LEFT JOIN entities t ON r.target_id = t.id \
              WHERE r.source_id = '{}'", entity_id
         ),
-        "incoming" => format!(
+            "incoming" => format!(
             "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
              s.name, t.name FROM relations r \
              LEFT JOIN entities s ON r.source_id = s.id LEFT JOIN entities t ON r.target_id = t.id \
              WHERE r.target_id = '{}'", entity_id
         ),
-        _ => format!(
+            _ => format!(
             "SELECT r.id, r.source_id, r.target_id, r.relation_type, r.properties, r.created_at, \
              s.name, t.name FROM relations r \
              LEFT JOIN entities s ON r.source_id = s.id LEFT JOIN entities t ON r.target_id = t.id \
              WHERE r.source_id = '{}' OR r.target_id = '{}'", entity_id, entity_id
         ),
-    };
+        };
     query_relations_full(db, &sql)
 }
 
@@ -834,29 +984,45 @@ fn get_entity_brief(db: &rusqlite::Connection, id: &str) -> Value {
     db.query_row(
         "SELECT id, entity_type, name FROM entities WHERE id = ?1",
         rusqlite::params![id],
-        |row| Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "entity_type": row.get::<_, String>(1)?,
-            "name": row.get::<_, String>(2)?,
-        })),
-    ).unwrap_or(json!({"id": id, "name": "unknown"}))
+        |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "entity_type": row.get::<_, String>(1)?,
+                "name": row.get::<_, String>(2)?,
+            }))
+        },
+    )
+    .unwrap_or(json!({"id": id, "name": "unknown"}))
 }
 
 fn export_dot(entities: &[Value], relations: &[Value]) -> String {
-    let mut dot = String::from("digraph KnowledgeGraph {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n\n");
+    let mut dot = String::from(
+        "digraph KnowledgeGraph {\n  rankdir=LR;\n  node [shape=box, style=rounded];\n\n",
+    );
     for e in entities {
         let id = e["id"].as_str().unwrap_or("");
         let name = e["name"].as_str().unwrap_or(id);
         let etype = e["entity_type"].as_str().unwrap_or("");
-        let label = if etype.is_empty() { name.to_string() } else { format!("{}\\n[{}]", name, etype) };
-        dot.push_str(&format!("  \"{}\" [label=\"{}\"];\n", id, label.replace('"', "\\\"")));
+        let label = if etype.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}\\n[{}]", name, etype)
+        };
+        dot.push_str(&format!(
+            "  \"{}\" [label=\"{}\"];\n",
+            id,
+            label.replace('"', "\\\"")
+        ));
     }
     dot.push('\n');
     for r in relations {
         let src = r["source_id"].as_str().unwrap_or("");
         let tgt = r["target_id"].as_str().unwrap_or("");
         let rtype = r["relation_type"].as_str().unwrap_or("");
-        dot.push_str(&format!("  \"{}\" -> \"{}\" [label=\"{}\"];\n", src, tgt, rtype));
+        dot.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            src, tgt, rtype
+        ));
     }
     dot.push_str("}\n");
     dot
@@ -872,8 +1038,14 @@ fn export_mermaid(entities: &[Value], relations: &[Value]) -> String {
         md.push_str(&format!("  {}[\"{}\"]\n", safe_id, name));
     }
     for r in relations {
-        let src = r["source_id"].as_str().unwrap_or("").replace(['-', ' '], "_");
-        let tgt = r["target_id"].as_str().unwrap_or("").replace(['-', ' '], "_");
+        let src = r["source_id"]
+            .as_str()
+            .unwrap_or("")
+            .replace(['-', ' '], "_");
+        let tgt = r["target_id"]
+            .as_str()
+            .unwrap_or("")
+            .replace(['-', ' '], "_");
         let rtype = r["relation_type"].as_str().unwrap_or("");
         if rtype.is_empty() {
             md.push_str(&format!("  {} --> {}\n", src, tgt));
@@ -889,7 +1061,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_tool() -> KnowledgeGraphTool { KnowledgeGraphTool }
+    fn make_tool() -> KnowledgeGraphTool {
+        KnowledgeGraphTool
+    }
 
     #[test]
     fn test_schema() {
@@ -919,31 +1093,51 @@ mod tests {
         init_schema(&db).unwrap();
 
         // Add entities
-        let r1 = action_add_entity(&db, &json!({
-            "entity_id": "alice", "entity_type": "person", "name": "Alice",
-            "properties": {"age": 30}, "tags": ["engineer"]
-        })).unwrap();
+        let r1 = action_add_entity(
+            &db,
+            &json!({
+                "entity_id": "alice", "entity_type": "person", "name": "Alice",
+                "properties": {"age": 30}, "tags": ["engineer"]
+            }),
+        )
+        .unwrap();
         assert_eq!(r1["status"], "created");
 
-        let r2 = action_add_entity(&db, &json!({
-            "entity_id": "bob", "entity_type": "person", "name": "Bob"
-        })).unwrap();
+        let r2 = action_add_entity(
+            &db,
+            &json!({
+                "entity_id": "bob", "entity_type": "person", "name": "Bob"
+            }),
+        )
+        .unwrap();
         assert_eq!(r2["status"], "created");
 
-        let r3 = action_add_entity(&db, &json!({
-            "entity_id": "rust", "entity_type": "skill", "name": "Rust Programming"
-        })).unwrap();
+        let r3 = action_add_entity(
+            &db,
+            &json!({
+                "entity_id": "rust", "entity_type": "skill", "name": "Rust Programming"
+            }),
+        )
+        .unwrap();
         assert_eq!(r3["status"], "created");
 
         // Add relations
-        let rel1 = action_add_relation(&db, &json!({
-            "source_id": "alice", "target_id": "bob", "relation_type": "knows"
-        })).unwrap();
+        let rel1 = action_add_relation(
+            &db,
+            &json!({
+                "source_id": "alice", "target_id": "bob", "relation_type": "knows"
+            }),
+        )
+        .unwrap();
         assert_eq!(rel1["status"], "created");
 
-        let rel2 = action_add_relation(&db, &json!({
-            "source_id": "alice", "target_id": "rust", "relation_type": "has_skill"
-        })).unwrap();
+        let rel2 = action_add_relation(
+            &db,
+            &json!({
+                "source_id": "alice", "target_id": "rust", "relation_type": "has_skill"
+            }),
+        )
+        .unwrap();
         assert_eq!(rel2["status"], "created");
 
         // Get entity with relations
@@ -956,7 +1150,8 @@ mod tests {
         assert!(search["count"].as_u64().unwrap() >= 1);
 
         // Find path
-        let path = action_find_path(&db, &json!({"source_id": "bob", "target_id": "rust"})).unwrap();
+        let path =
+            action_find_path(&db, &json!({"source_id": "bob", "target_id": "rust"})).unwrap();
         assert_eq!(path["found"], true);
         assert!(path["length"].as_u64().unwrap() >= 1);
 
@@ -970,11 +1165,16 @@ mod tests {
         assert!(sg["entity_count"].as_u64().unwrap() >= 2);
 
         // Export mermaid
-        let mermaid = action_subgraph(&db, &json!({"entity_id": "alice", "depth": 2, "format": "mermaid"})).unwrap();
+        let mermaid = action_subgraph(
+            &db,
+            &json!({"entity_id": "alice", "depth": 2, "format": "mermaid"}),
+        )
+        .unwrap();
         assert!(mermaid["content"].as_str().unwrap().contains("graph LR"));
 
         // Update entity
-        let upd = action_update_entity(&db, &json!({"entity_id": "alice", "name": "Alice Smith"})).unwrap();
+        let upd = action_update_entity(&db, &json!({"entity_id": "alice", "name": "Alice Smith"}))
+            .unwrap();
         assert_eq!(upd["status"], "updated");
 
         // Delete relation
@@ -997,11 +1197,16 @@ mod tests {
         init_schema(&db).unwrap();
 
         // First merge creates
-        let r1 = action_merge_entity(&db, &json!({"entity_id": "test1", "name": "Test", "entity_type": "thing"})).unwrap();
+        let r1 = action_merge_entity(
+            &db,
+            &json!({"entity_id": "test1", "name": "Test", "entity_type": "thing"}),
+        )
+        .unwrap();
         assert_eq!(r1["status"], "created");
 
         // Second merge updates
-        let r2 = action_merge_entity(&db, &json!({"entity_id": "test1", "name": "Test Updated"})).unwrap();
+        let r2 = action_merge_entity(&db, &json!({"entity_id": "test1", "name": "Test Updated"}))
+            .unwrap();
         assert_eq!(r2["status"], "updated");
     }
 
@@ -1017,9 +1222,22 @@ mod tests {
     #[test]
     fn test_validate_all_actions() {
         let tool = make_tool();
-        for action in &["add_entity", "get_entity", "update_entity", "delete_entity", "search_entities",
-                        "add_relation", "get_relations", "delete_relation", "find_path", "subgraph",
-                        "stats", "export", "query", "merge_entity"] {
+        for action in &[
+            "add_entity",
+            "get_entity",
+            "update_entity",
+            "delete_entity",
+            "search_entities",
+            "add_relation",
+            "get_relations",
+            "delete_relation",
+            "find_path",
+            "subgraph",
+            "stats",
+            "export",
+            "query",
+            "merge_entity",
+        ] {
             assert!(tool.validate(&json!({"action": action})).is_ok());
         }
     }

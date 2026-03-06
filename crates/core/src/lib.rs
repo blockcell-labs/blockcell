@@ -6,8 +6,8 @@ pub mod paths;
 pub mod types;
 
 pub use capability::{
-    CapabilityDescriptor, CapabilityType, CapabilityStatus, CapabilityCost,
-    CapabilityLifecycle, ProviderKind, PrivilegeLevel, SurvivalInvariants,
+    CapabilityCost, CapabilityDescriptor, CapabilityLifecycle, CapabilityStatus, CapabilityType,
+    PrivilegeLevel, ProviderKind, SurvivalInvariants,
 };
 pub use config::Config;
 pub use error::{Error, Result};

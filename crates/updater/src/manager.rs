@@ -1,11 +1,10 @@
-use crate::manifest::Manifest;
-use crate::verification::{SignatureVerifier, Sha256Verifier, HealthChecker};
 use crate::atomic::{AtomicSwitcher, MaintenanceWindow};
+use crate::manifest::Manifest;
+use crate::verification::{HealthChecker, Sha256Verifier, SignatureVerifier};
 use blockcell_core::{Config, Error, Paths, Result};
 use reqwest::Client;
 use std::path::PathBuf;
-use tracing::{debug, info, warn, error};
-
+use tracing::{debug, error, info, warn};
 
 pub struct UpdateManager {
     config: Config,
@@ -28,9 +27,9 @@ impl UpdateManager {
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
-        
+
         let switcher = AtomicSwitcher::new(install_dir);
-        
+
         Self {
             config,
             paths,
@@ -91,7 +90,7 @@ impl UpdateManager {
 
     pub async fn download(&self, manifest: &Manifest) -> Result<PathBuf> {
         let (os, arch) = get_current_platform();
-        
+
         let artifact = manifest
             .get_artifact(&os, &arch)
             .ok_or_else(|| Error::NotFound(format!("No artifact for {}/{}", os, arch)))?;
@@ -148,7 +147,7 @@ impl UpdateManager {
 
     pub fn status(&self) -> UpdateStatus {
         let current_version = env!("CARGO_PKG_VERSION").to_string();
-        
+
         UpdateStatus {
             current_version,
             latest_version: None,
@@ -171,7 +170,7 @@ impl UpdateManager {
         // 2. 运行 Healthcheck（在切换前）
         let checker = HealthChecker::new(staging_path.to_path_buf());
         let health_result = checker.check(30).await?;
-        
+
         if !health_result.passed {
             error!("Healthcheck failed before switch");
             for check in &health_result.checks {
@@ -196,9 +195,9 @@ impl UpdateManager {
 
     pub async fn rollback(&self) -> Result<()> {
         warn!("Rolling back to previous version");
-        
+
         self.switcher.rollback().await?;
-        
+
         info!("Rollback completed. Restart required.");
         Ok(())
     }
@@ -210,9 +209,8 @@ impl UpdateManager {
         data: &[u8],
         signature: Option<&str>,
     ) -> Result<()> {
-        let sig = signature.ok_or_else(|| {
-            Error::Validation("Signature required but not provided".to_string())
-        })?;
+        let sig = signature
+            .ok_or_else(|| Error::Validation("Signature required but not provided".to_string()))?;
 
         // 从环境变量或配置获取公钥
         let public_key_hex = std::env::var("BLOCKCELL_PUBLIC_KEY")

@@ -1,9 +1,9 @@
-pub mod session;
 pub mod audit;
-pub mod memory;
 pub mod contacts;
+pub mod memory;
+pub mod session;
 
-pub use session::SessionStore;
-pub use audit::{AuditLogger, AuditEvent};
+pub use audit::{AuditEvent, AuditLogger};
+pub use contacts::{ChannelContact, ChannelContacts};
 pub use memory::MemoryStore;
-pub use contacts::{ChannelContacts, ChannelContact};
+pub use session::SessionStore;

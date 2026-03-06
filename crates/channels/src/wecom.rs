@@ -1,3 +1,4 @@
+use crate::account::{wecom_account_id, wecom_listener_configs};
 use aes::cipher::{BlockDecryptMut, KeyIvInit};
 use base64::{
     alphabet,
@@ -148,7 +149,10 @@ impl WeComChannel {
         let resp = self
             .client
             .get(format!("{}/gettoken", WECOM_API_BASE))
-            .query(&[("corpid", corp_id.as_str()), ("corpsecret", corp_secret.as_str())])
+            .query(&[
+                ("corpid", corp_id.as_str()),
+                ("corpsecret", corp_secret.as_str()),
+            ])
             .send()
             .await
             .map_err(|e| Error::Channel(format!("WeCom gettoken request failed: {}", e)))?;
@@ -183,9 +187,8 @@ impl WeComChannel {
     /// instead we use the appchat message list or rely on callback.
     /// This implementation uses a simple polling approach via message statistics.
     async fn run_polling(&self, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
-        let poll_interval = Duration::from_secs(
-            self.config.channels.wecom.poll_interval_secs.max(5) as u64,
-        );
+        let poll_interval =
+            Duration::from_secs(self.config.channels.wecom.poll_interval_secs.max(5) as u64);
 
         info!(
             interval_secs = poll_interval.as_secs(),
@@ -227,7 +230,9 @@ impl WeComChannel {
         // The correct approach is to configure a callback URL in the WeCom admin
         // console. In polling mode we simply verify the token is still valid.
         let _token = self.get_access_token().await?;
-        debug!("WeCom token heartbeat OK (polling mode — no inbound messages without callback URL)");
+        debug!(
+            "WeCom token heartbeat OK (polling mode — no inbound messages without callback URL)"
+        );
         Ok(())
     }
 
@@ -275,8 +280,13 @@ impl WeComChannel {
 
         let inbound = InboundMessage {
             channel: "wecom".to_string(),
+            account_id: wecom_account_id(&self.config),
             sender_id: from_user.clone(),
-            chat_id: if to_party.is_empty() { from_user } else { to_party },
+            chat_id: if to_party.is_empty() {
+                from_user
+            } else {
+                to_party
+            },
             content,
             media: vec![],
             metadata: serde_json::json!({
@@ -343,7 +353,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_nibble(bytes[i+1]), hex_nibble(bytes[i+2])) {
+            if let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
                 out.push(char::from(h << 4 | l));
                 i += 3;
                 continue;
@@ -390,27 +400,37 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
     for chunk in msg.chunks(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         for i in 16..80 {
-            w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1);
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
 
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
 
         for i in 0..80 {
             let (f, k) = match i {
-                0..=19  => ((b & c) | ((!b) & d), 0x5A827999u32),
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                _       => (b ^ c ^ d, 0xCA62C1D6u32),
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
-            let temp = a.rotate_left(5)
+            let temp = a
+                .rotate_left(5)
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
                 .wrapping_add(w[i]);
-            e = d; d = c; c = b.rotate_left(30); b = a; a = temp;
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
         }
 
         h[0] = h[0].wrapping_add(a);
@@ -423,7 +443,7 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
     let mut result = [0u8; 20];
     for (i, &val) in h.iter().enumerate() {
         let bytes = val.to_be_bytes();
-        result[i*4..i*4+4].copy_from_slice(&bytes);
+        result[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }
     result
 }
@@ -433,6 +453,49 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 /// Handle a WeCom webhook request.
 ///
 /// WeCom sends two types of requests to the callback URL:
+fn resolve_wecom_webhook_config(
+    config: &Config,
+    method: &str,
+    query: &std::collections::HashMap<String, String>,
+    body: &str,
+) -> Config {
+    let listeners = wecom_listener_configs(config);
+    if listeners.is_empty() {
+        return config.clone();
+    }
+    if listeners.len() == 1 {
+        return listeners[0].config.clone();
+    }
+
+    let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
+    let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
+    let msg_signature = query
+        .get("msg_signature")
+        .or_else(|| query.get("signature"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let signed_payload = if method == "GET" {
+        query.get("echostr").map(|s| percent_decode(s)).unwrap_or_default()
+    } else {
+        extract_xml_tag(body, "Encrypt").unwrap_or_default()
+    };
+
+    if !msg_signature.is_empty() && !signed_payload.is_empty() {
+        for listener in &listeners {
+            let token = listener.config.channels.wecom.callback_token.as_str();
+            if token.is_empty() {
+                continue;
+            }
+            if verify_signature_4(token, timestamp, nonce, &signed_payload, msg_signature) {
+                return listener.config.clone();
+            }
+        }
+    }
+
+    config.clone()
+}
+
 /// - **GET**: URL verification — responds with `echostr` query param if signature is valid
 /// - **POST**: Message/event callback — parses XML body and forwards to inbound channel
 ///
@@ -444,7 +507,8 @@ pub async fn process_webhook(
     body: &str,
     inbound_tx: Option<&tokio::sync::mpsc::Sender<blockcell_core::InboundMessage>>,
 ) -> (u16, String) {
-    let wecom_cfg = &config.channels.wecom;
+    let resolved_config = resolve_wecom_webhook_config(config, method, query, body);
+    let wecom_cfg = &resolved_config.channels.wecom;
 
     let has_wecom_params = query.contains_key("msg_signature")
         || query.contains_key("signature")
@@ -459,7 +523,11 @@ pub async fn process_webhook(
         // WeCom URL verification:
         // 1. echostr is AES-encrypted Base64
         // 2. Signature = SHA1(sort(token, timestamp, nonce, echostr_encrypted))
-        let msg_signature = query.get("msg_signature").or_else(|| query.get("signature")).map(|s| s.as_str()).unwrap_or("");
+        let msg_signature = query
+            .get("msg_signature")
+            .or_else(|| query.get("signature"))
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
         let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
         // URL-decode the echostr: WeCom percent-encodes '+' as '%2B' etc. in the query string,
@@ -483,10 +551,12 @@ pub async fn process_webhook(
 
         if !wecom_cfg.callback_token.is_empty() {
             // 计算签名并打印，方便对比
-            let mut parts = [wecom_cfg.callback_token.as_str(),
+            let mut parts = [
+                wecom_cfg.callback_token.as_str(),
                 timestamp,
                 nonce,
-                echostr_enc];
+                echostr_enc,
+            ];
             parts.sort_unstable();
             let combined = parts.join("");
             let computed = sha1_hex(combined.as_bytes());
@@ -531,13 +601,25 @@ pub async fn process_webhook(
     let msg_encrypt = extract_xml_tag(body, "Encrypt").unwrap_or_default();
     let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
     let nonce = query.get("nonce").map(|s| s.as_str()).unwrap_or("");
-    let msg_signature = query.get("msg_signature").or_else(|| query.get("signature")).map(|s| s.as_str()).unwrap_or("");
+    let msg_signature = query
+        .get("msg_signature")
+        .or_else(|| query.get("signature"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
 
-    if !wecom_cfg.callback_token.is_empty() && !msg_encrypt.is_empty()
-        && !verify_signature_4(&wecom_cfg.callback_token, timestamp, nonce, &msg_encrypt, msg_signature) {
-            tracing::warn!("WeCom webhook: POST signature verification failed");
-            return (403, "Forbidden: invalid signature".to_string());
-        }
+    if !wecom_cfg.callback_token.is_empty()
+        && !msg_encrypt.is_empty()
+        && !verify_signature_4(
+            &wecom_cfg.callback_token,
+            timestamp,
+            nonce,
+            &msg_encrypt,
+            msg_signature,
+        )
+    {
+        tracing::warn!("WeCom webhook: POST signature verification failed");
+        return (403, "Forbidden: invalid signature".to_string());
+    }
 
     // Decrypt the message body
     let decrypted_body = if !msg_encrypt.is_empty() && !wecom_cfg.encoding_aes_key.is_empty() {
@@ -614,11 +696,15 @@ pub async fn process_webhook(
             let pic_url = extract_xml_tag(&decrypted_body, "PicUrl").unwrap_or_default();
             info!(media_id = %media_id, "WeCom webhook: received image");
             let paths = if !media_id.is_empty() {
-                match download_wecom_media(config, &media_id, "image", None).await {
+                match download_wecom_media(&resolved_config, &media_id, "image", None).await {
                     Ok(p) => vec![p],
                     Err(e) => {
                         warn!(error = %e.to_string(), "WeCom: failed to download image, using PicUrl");
-                        if !pic_url.is_empty() { vec![pic_url] } else { vec![] }
+                        if !pic_url.is_empty() {
+                            vec![pic_url]
+                        } else {
+                            vec![]
+                        }
                     }
                 }
             } else if !pic_url.is_empty() {
@@ -630,7 +716,8 @@ pub async fn process_webhook(
         }
         "voice" => {
             let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
-            let format = extract_xml_tag(&decrypted_body, "Format").unwrap_or_else(|| "amr".to_string());
+            let format =
+                extract_xml_tag(&decrypted_body, "Format").unwrap_or_else(|| "amr".to_string());
             info!(media_id = %media_id, format = %format, "WeCom webhook: received voice");
             let paths = if !media_id.is_empty() {
                 match download_wecom_media(config, &media_id, "voice", Some(&format)).await {
@@ -654,7 +741,7 @@ pub async fn process_webhook(
             let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
             info!(media_id = %media_id, "WeCom webhook: received video");
             let paths = if !media_id.is_empty() {
-                match download_wecom_media(config, &media_id, "video", Some("mp4")).await {
+                match download_wecom_media(&resolved_config, &media_id, "video", Some("mp4")).await {
                     Ok(p) => vec![p],
                     Err(e) => {
                         warn!(error = %e.to_string(), "WeCom: failed to download video");
@@ -664,7 +751,12 @@ pub async fn process_webhook(
             } else {
                 vec![]
             };
-            ("用户发来了一个视频，请问您需要我做什么？（例如：提取音频、截取片段等）".to_string(), paths, true)
+            (
+                "用户发来了一个视频，请问您需要我做什么？（例如：提取音频、截取片段等）"
+                    .to_string(),
+                paths,
+                true,
+            )
         }
         "file" => {
             let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
@@ -672,7 +764,7 @@ pub async fn process_webhook(
             let ext = file_name.rsplit('.').next().map(|s| s.to_string());
             info!(media_id = %media_id, file_name = %file_name, "WeCom webhook: received file");
             let paths = if !media_id.is_empty() {
-                match download_wecom_media(config, &media_id, "file", ext.as_deref()).await {
+                match download_wecom_media(&resolved_config, &media_id, "file", ext.as_deref()).await {
                     Ok(p) => vec![p],
                     Err(e) => {
                         warn!(error = %e.to_string(), "WeCom: failed to download file");
@@ -685,7 +777,10 @@ pub async fn process_webhook(
             let desc = if file_name.is_empty() {
                 "用户发来了一个文件，请问您需要我做什么？（例如：读取内容、分析数据等）".to_string()
             } else {
-                format!("用户发来了文件「{}」，请问您需要我做什么？（例如：读取内容、分析数据等）", file_name)
+                format!(
+                    "用户发来了文件「{}」，请问您需要我做什么？（例如：读取内容、分析数据等）",
+                    file_name
+                )
             };
             (desc, paths, true)
         }
@@ -715,6 +810,7 @@ pub async fn process_webhook(
     if let Some(tx) = inbound_tx {
         let inbound = blockcell_core::InboundMessage {
             channel: "wecom".to_string(),
+            account_id: wecom_account_id(&resolved_config),
             sender_id: from_user.clone(),
             chat_id: from_user.clone(),
             content: final_content,
@@ -786,7 +882,12 @@ async fn download_wecom_media(
         .await
         .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
-    let filename = format!("wecom_{}_{}.{}", media_type, &media_id[..media_id.len().min(16)], ext);
+    let filename = format!(
+        "wecom_{}_{}.{}",
+        media_type,
+        &media_id[..media_id.len().min(16)],
+        ext
+    );
     let file_path = media_dir.join(&filename);
 
     let bytes = resp
@@ -839,7 +940,7 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let content = &xml[start..end];
     // Strip CDATA if present
     let content = if content.starts_with("<![CDATA[") && content.ends_with("]]>") {
-        &content[9..content.len()-3]
+        &content[9..content.len() - 3]
     } else {
         content
     };
@@ -848,7 +949,13 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 
 /// Verify WeCom 4-param signature: SHA1(sort(token, timestamp, nonce, msg_encrypt))
 /// This is the correct signature for both GET (echostr) and POST (Encrypt) callbacks.
-fn verify_signature_4(token: &str, timestamp: &str, nonce: &str, msg_encrypt: &str, expected: &str) -> bool {
+fn verify_signature_4(
+    token: &str,
+    timestamp: &str,
+    nonce: &str,
+    msg_encrypt: &str,
+    expected: &str,
+) -> bool {
     let mut parts = [token, timestamp, nonce, msg_encrypt];
     parts.sort_unstable();
     let combined = parts.join("");
@@ -863,7 +970,10 @@ fn verify_signature_4(token: &str, timestamp: &str, nonce: &str, msg_encrypt: &s
 /// - IV = first 16 bytes of AES key
 /// - Ciphertext = Base64Decode(msg_encrypt)
 /// - Plaintext layout: 16B random | 4B msg_len (big-endian) | msg | corpId
-fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::Result<String, String> {
+fn decrypt_wecom_msg(
+    msg_encrypt: &str,
+    encoding_aes_key: &str,
+) -> std::result::Result<String, String> {
     if encoding_aes_key.is_empty() {
         return Err("encodingAesKey not configured".to_string());
     }
@@ -919,9 +1029,12 @@ fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::
             .with_decode_padding_mode(DecodePaddingMode::Indifferent)
             .with_decode_allow_trailing_bits(true),
     );
-    let key_bytes = LENIENT
-        .decode(&padded_key)
-        .map_err(|e| format!("Failed to decode EncodingAESKey: {}. Key was: '{}'", e, padded_key))?;
+    let key_bytes = LENIENT.decode(&padded_key).map_err(|e| {
+        format!(
+            "Failed to decode EncodingAESKey: {}. Key was: '{}'",
+            e, padded_key
+        )
+    })?;
     if key_bytes.len() != 32 {
         return Err(format!(
             "AES key length invalid after base64 decode: {} (expected 32). Please verify WeCom EncodingAESKey is correct (usually 43 chars, no '=').",
@@ -938,9 +1051,14 @@ fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::
         msg_encrypt_len = msg_encrypt.len(),
         "WeCom decrypt: decoding msg_encrypt ciphertext"
     );
-    let ciphertext = general_purpose::STANDARD
-        .decode(msg_encrypt)
-        .map_err(|e| format!("Failed to decode msg_encrypt (len={}): {}. Value was: '{}'", msg_encrypt.len(), e, msg_encrypt))?;
+    let ciphertext = general_purpose::STANDARD.decode(msg_encrypt).map_err(|e| {
+        format!(
+            "Failed to decode msg_encrypt (len={}): {}. Value was: '{}'",
+            msg_encrypt.len(),
+            e,
+            msg_encrypt
+        )
+    })?;
 
     // AES-256-CBC decrypt — WeCom uses PKCS7 with block size 32 (not 16),
     // so pad values 1-32 are valid. Use NoPadding and unpad manually.
@@ -960,12 +1078,14 @@ fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::
 
     // Layout: 16B random | 4B msg_len (big-endian) | msg | corpId
     if plaintext.len() < 20 {
-        return Err(format!("Decrypted data too short: {} bytes", plaintext.len()));
+        return Err(format!(
+            "Decrypted data too short: {} bytes",
+            plaintext.len()
+        ));
     }
 
-    let msg_len = u32::from_be_bytes([
-        plaintext[16], plaintext[17], plaintext[18], plaintext[19],
-    ]) as usize;
+    let msg_len =
+        u32::from_be_bytes([plaintext[16], plaintext[17], plaintext[18], plaintext[19]]) as usize;
 
     let content_start = 20;
     let content_end = content_start + msg_len;
@@ -986,11 +1106,7 @@ fn decrypt_wecom_msg(msg_encrypt: &str, encoding_aes_key: &str) -> std::result::
 /// Upload a local file to WeCom as a temporary media asset.
 /// Returns the `media_id` (valid for 3 days).
 /// `media_type` must be one of: image / voice / video / file
-pub async fn upload_media(
-    config: &Config,
-    file_path: &str,
-    media_type: &str,
-) -> Result<String> {
+pub async fn upload_media(config: &Config, file_path: &str, media_type: &str) -> Result<String> {
     let client = shared_client();
     let token = fetch_access_token_static(&client, config).await?;
 
@@ -1077,11 +1193,7 @@ fn mime_for_path(path: &str) -> &'static str {
 
 /// Send a media message (image/voice/video/file) to a WeCom user or group.
 /// `file_path` is a local file path; it will be uploaded first to get a media_id.
-pub async fn send_media_message(
-    config: &Config,
-    chat_id: &str,
-    file_path: &str,
-) -> Result<()> {
+pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str) -> Result<()> {
     crate::rate_limit::wecom_limiter().acquire().await;
 
     let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -1189,10 +1301,12 @@ async fn ensure_wecom_voice_amr(file_path: &str) -> Result<String> {
         .arg("amr_nb")
         .arg(&output);
 
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| Error::Channel(format!("WeCom voice: ffmpeg not available or failed to start: {}", e)))?;
+    let out = cmd.output().await.map_err(|e| {
+        Error::Channel(format!(
+            "WeCom voice: ffmpeg not available or failed to start: {}",
+            e
+        ))
+    })?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -1216,9 +1330,12 @@ async fn ensure_wecom_voice_amr(file_path: &str) -> Result<String> {
 async fn probe_audio_duration(file_path: &str) -> Option<f64> {
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
         ])
         .arg(file_path)
         .output()
@@ -1280,11 +1397,7 @@ fn build_media_body_user(
     }
 }
 
-fn build_media_body_group(
-    chat_id: &str,
-    msg_type: &str,
-    media_id: &str,
-) -> serde_json::Value {
+fn build_media_body_group(chat_id: &str, msg_type: &str, media_id: &str) -> serde_json::Value {
     match msg_type {
         "image" => serde_json::json!({
             "chatid": chat_id,
@@ -1337,7 +1450,10 @@ async fn fetch_access_token_static(client: &Client, config: &Config) -> Result<S
 
     let resp = client
         .get(format!("{}/gettoken", WECOM_API_BASE))
-        .query(&[("corpid", corp_id.as_str()), ("corpsecret", corp_secret.as_str())])
+        .query(&[
+            ("corpid", corp_id.as_str()),
+            ("corpsecret", corp_secret.as_str()),
+        ])
         .send()
         .await
         .map_err(|e| Error::Channel(format!("WeCom gettoken failed: {}", e)))?;
@@ -1477,7 +1593,11 @@ mod tests {
         let chunks = split_message(&text, 2048);
         assert!(chunks.len() > 1);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= 2048, "chunk too long: {} chars", chunk.chars().count());
+            assert!(
+                chunk.chars().count() <= 2048,
+                "chunk too long: {} chars",
+                chunk.chars().count()
+            );
         }
     }
 
@@ -1504,6 +1624,92 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_wecom_webhook_config_matches_signed_account() {
+        let mut config = Config::default();
+        config.channels.wecom.enabled = true;
+        config.channels.wecom.accounts.insert(
+            "default".to_string(),
+            blockcell_core::config::WeComAccountConfig {
+                enabled: true,
+                corp_id: "corp-a".to_string(),
+                corp_secret: "secret-a".to_string(),
+                agent_id: 1,
+                callback_token: "token-a".to_string(),
+                encoding_aes_key: "aes-a".to_string(),
+                allow_from: vec![],
+                poll_interval_secs: 30,
+            },
+        );
+        config.channels.wecom.accounts.insert(
+            "ops".to_string(),
+            blockcell_core::config::WeComAccountConfig {
+                enabled: true,
+                corp_id: "corp-b".to_string(),
+                corp_secret: "secret-b".to_string(),
+                agent_id: 2,
+                callback_token: "token-b".to_string(),
+                encoding_aes_key: "aes-b".to_string(),
+                allow_from: vec![],
+                poll_interval_secs: 30,
+            },
+        );
+
+        let timestamp = "1710000000";
+        let nonce = "nonce-1";
+        let encrypt = "ciphertext";
+        let mut parts = ["token-b", timestamp, nonce, encrypt];
+        parts.sort_unstable();
+        let signature = sha1_hex(parts.join("").as_bytes());
+        let query = std::collections::HashMap::from([
+            ("timestamp".to_string(), timestamp.to_string()),
+            ("nonce".to_string(), nonce.to_string()),
+            ("msg_signature".to_string(), signature),
+        ]);
+        let body = format!("<xml><Encrypt>{}</Encrypt></xml>", encrypt);
+
+        let resolved = resolve_wecom_webhook_config(&config, "POST", &query, &body);
+        assert_eq!(resolved.channels.wecom.default_account_id.as_deref(), Some("ops"));
+        assert_eq!(resolved.channels.wecom.callback_token, "token-b");
+    }
+
+    #[test]
+    fn test_resolve_wecom_webhook_config_keeps_legacy_when_ambiguous() {
+        let mut config = Config::default();
+        config.channels.wecom.enabled = true;
+        config.channels.wecom.corp_id = "legacy-corp".to_string();
+        config.channels.wecom.accounts.insert(
+            "default".to_string(),
+            blockcell_core::config::WeComAccountConfig {
+                enabled: true,
+                corp_id: "corp-a".to_string(),
+                corp_secret: "secret-a".to_string(),
+                agent_id: 1,
+                callback_token: "token-a".to_string(),
+                encoding_aes_key: "aes-a".to_string(),
+                allow_from: vec![],
+                poll_interval_secs: 30,
+            },
+        );
+        config.channels.wecom.accounts.insert(
+            "ops".to_string(),
+            blockcell_core::config::WeComAccountConfig {
+                enabled: true,
+                corp_id: "corp-b".to_string(),
+                corp_secret: "secret-b".to_string(),
+                agent_id: 2,
+                callback_token: "token-b".to_string(),
+                encoding_aes_key: "aes-b".to_string(),
+                allow_from: vec![],
+                poll_interval_secs: 30,
+            },
+        );
+
+        let resolved = resolve_wecom_webhook_config(&config, "POST", &std::collections::HashMap::new(), "<xml></xml>");
+        assert_eq!(resolved.channels.wecom.corp_id, "legacy-corp");
+        assert_eq!(resolved.channels.wecom.default_account_id, None);
+    }
+
+    #[test]
     fn test_verify_signature() {
         // WeCom signature: SHA1(sort(token, timestamp, nonce))
         // token="test", timestamp="1409735669", nonce="xxxxxx"
@@ -1515,6 +1721,8 @@ mod tests {
         parts.sort_unstable();
         let combined = parts.join("");
         let expected = sha1_hex(combined.as_bytes());
-        assert!(WeComChannel::verify_signature(token, timestamp, nonce, &expected));
+        assert!(WeComChannel::verify_signature(
+            token, timestamp, nonce, &expected
+        ));
     }
 }

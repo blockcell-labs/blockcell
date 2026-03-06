@@ -30,7 +30,7 @@ blockcell setup [OPTIONS]
 | `--provider <NAME>` | 指定 LLM provider（deepseek/openai/kimi/anthropic/gemini/zhipu/minimax/ollama） |
 | `--api-key <KEY>` | 指定 provider 的 API key |
 | `--model <MODEL>` | 指定模型名（如 deepseek-chat、moonshot-v1-8k、claude-sonnet-4-20250514） |
-| `--channel <NAME>` | 可选渠道配置（telegram/feishu/wecom/dingtalk/lark/skip） |
+| `--channel <NAME>` | 可选渠道配置（telegram/feishu/wecom/dingtalk/lark/none；`skip` 也兼容） |
 | `--skip-provider-test` | 跳过保存后的 provider 配置验证 |
 
 **支持的 provider:**
@@ -75,7 +75,8 @@ blockcell setup --provider ollama --skip-provider-test
 3. 选择或确认模型名称
 4. 可选：配置一个消息渠道
 5. 自动验证 provider 配置（除非使用 `--skip-provider-test`）
-6. 显示配置摘要和下一步操作提示
+6. 如渠道 owner 缺失，自动绑定到 `default` agent
+7. 显示配置摘要和下一步操作提示
 
 ---
 
@@ -123,7 +124,8 @@ blockcell agent [OPTIONS]
 | 选项 | 短写 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--message <TEXT>` | `-m` | — | 发送单条消息后退出 |
-| `--session <ID>` | `-s` | `cli:default` | 会话 ID |
+| `--agent <ID>` | `-a` | `default` | 指定运行的 agent |
+| `--session <ID>` | `-s` | `cli:<agent>` | 会话 ID |
 | `--model <MODEL>` | — | — | 临时覆盖 LLM 模型 |
 | `--provider <NAME>` | — | — | 临时覆盖 LLM provider |
 
@@ -132,14 +134,17 @@ blockcell agent [OPTIONS]
 # 进入交互模式
 blockcell agent
 
+# 使用指定 agent
+blockcell agent --agent ops
+
 # 发送单条消息
-blockcell agent -m "帮我查询 BTC 价格"
+blockcell agent -a ops -m "帮我查询 BTC 价格"
 
 # 指定会话 ID（便于管理多个会话）
-blockcell agent -s work:finance
+blockcell agent -a ops -s work:finance
 
 # 临时使用不同模型
-blockcell agent --model gpt-4o --provider openai
+blockcell agent --agent ops --model gpt-4o --provider openai
 ```
 
 **交互模式内置命令：**
@@ -184,6 +189,8 @@ blockcell gateway --port 8080 --host 127.0.0.1
 | `GET  /v1/health` | 健康检查（不需要认证） |
 | `GET  /v1/tasks` | 列出后台任务 |
 | `GET  /v1/ws` | WebSocket 连接 |
+| `GET  /v1/channels/status` | 查看渠道连接状态 |
+| `GET  /v1/channel-owners` | 查看渠道 owner 绑定 |
 
 ---
 
@@ -193,7 +200,7 @@ blockcell gateway --port 8080 --host 127.0.0.1
 blockcell status
 ```
 
-显示当前配置状态（provider、模型、API key 是否配置、渠道状态等）。
+显示当前配置状态（provider、模型、API key 是否配置、agent → intent profile、渠道 owner 等）。
 
 ---
 
@@ -203,7 +210,7 @@ blockcell status
 blockcell doctor
 ```
 
-检查运行环境，包括依赖工具（ffmpeg、chrome、python3 等）是否安装、API key 是否有效等。
+检查运行环境，包括依赖工具（ffmpeg、chrome、python3 等）是否安装、API key 是否有效、`intentRouter` / `channelOwners` / `channelAccountOwners` 是否通过校验等。
 
 ---
 
@@ -347,23 +354,38 @@ blockcell run <SUBCOMMAND>
 
 ### run tool
 
-直接运行工具（与 `tools test` 等价）。
+直接运行工具（与 `tools test` 等价）。支持通过 `--agent/-a` 指定目标 agent。
 
 ```bash
-blockcell run tool <TOOL_NAME> '<JSON_PARAMS>'
+blockcell run tool <TOOL_NAME> '<JSON_PARAMS>' [--agent <ID>]
+```
+
+| 选项 | 短写 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--agent <ID>` | `-a` | `default` | 指定运行的 agent |
+
+**示例：**
+```bash
+blockcell run tool read_file '{"path":"README.md"}' -a ops
 ```
 
 ### run msg
 
-通过 Agent 发送消息（等同于 `agent -m`）。
+通过 Agent 发送消息（等同于 `agent -m`）。支持通过 `--agent/-a` 指定目标 agent。
 
 ```bash
-blockcell run msg <MESSAGE> [--session <ID>]
+blockcell run msg <MESSAGE> [--session <ID>] [--agent <ID>]
 ```
 
 | 选项 | 短写 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--session <ID>` | `-s` | `cli:run` | 会话 ID |
+| `--agent <ID>` | `-a` | `default` | 指定运行的 agent |
+
+**示例：**
+```bash
+blockcell run msg "你好" -a ops
+```
 
 ---
 
@@ -373,11 +395,13 @@ blockcell run msg <MESSAGE> [--session <ID>]
 blockcell tasks <SUBCOMMAND>
 ```
 
+任务快照保存在共享文件 `~/.blockcell/workspace/tasks.json` 中；CLI 默认只显示 `default` agent 的任务。
+
 | 子命令 | 说明 |
 |--------|------|
-| `list` | 列出所有后台任务 |
-| `show <TASK_ID>` | 显示指定任务详情（支持 ID 前缀匹配） |
-| `cancel <TASK_ID>` | 取消运行中的任务（支持 ID 前缀匹配） |
+| `list [--all] [--agent <ID>]` | 列出后台任务；默认只看 `default` agent，`--all` 查看所有 agent |
+| `show <TASK_ID> [--all] [--agent <ID>]` | 显示指定任务详情（支持 ID 前缀匹配） |
+| `cancel <TASK_ID> [--all] [--agent <ID>]` | 取消运行中的任务（支持 ID 前缀匹配） |
 
 ---
 
@@ -390,7 +414,17 @@ blockcell channels <SUBCOMMAND>
 | 子命令 | 说明 |
 |--------|------|
 | `status` | 显示所有渠道连接状态 |
-| `login <CHANNEL>` | 登录指定渠道（如 WhatsApp 需扫码） |
+| `login <CHANNEL>` | 登录指定渠道（当前主要用于 WhatsApp 扫码） |
+| `owner list` | 列出渠道 fallback owner 与账号级 owner 覆盖 |
+| `owner set --channel <NAME> [--account <ACCOUNT_ID>] --agent <ID>` | 设置渠道或账号 owner |
+| `owner clear --channel <NAME> [--account <ACCOUNT_ID>]` | 清除渠道或账号 owner |
+
+**示例：**
+```bash
+blockcell channels owner set --channel telegram --agent default
+blockcell channels owner set --channel telegram --account bot2 --agent ops
+blockcell channels owner clear --channel telegram --account bot2
+```
 
 ---
 

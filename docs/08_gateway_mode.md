@@ -1,7 +1,6 @@
 # 第08篇：Gateway 模式 —— 把 AI 变成一个服务
 
-> 系列文章：《blockcell 开源项目深度解析》第 8/14 篇
-
+> 系列文章：《blockcell 开源项目深度解析》第 8 篇
 ---
 
 ## 两种运行模式
@@ -15,8 +14,9 @@ blockcell 有两种运行模式：
 
 **`blockcell gateway`** — 守护进程模式
 - 在后台持续运行
-- 提供 HTTP API 和 WebSocket 接口
-- 监听消息渠道（Telegram/Slack/Discord）
+- 提供 HTTP API、WebSocket 和 WebUI
+- 维护一个按 agent 划分的运行时池
+- 监听消息渠道（Telegram/Slack/Discord 等）
 - 执行定时任务（Cron）
 - 你不在，AI 也在工作
 
@@ -45,6 +45,26 @@ blockcell gateway
 默认端口：
 - **18790**：API 服务器（HTTP）
 - **18791**：WebUI（浏览器界面）
+
+默认路由规则：
+- CLI / WebSocket / WebUI 内部请求默认进入 `default` agent
+- 外部渠道消息优先按 `channelAccountOwners.<channel>.<accountId>` 路由到目标 agent，未命中时回退到 `channelOwners.<channel>`
+- 已启用的外部渠道如果没有 owner，Gateway 会在启动时直接报错
+
+例如，**2 个 Telegram bot / 2 个 agent** 可以这样路由：
+
+```json
+{
+  "channelAccountOwners": {
+    "telegram": {
+      "bot1": "default",
+      "bot2": "ops"
+    }
+  }
+}
+```
+
+这样同一个 `telegram` 渠道下，Gateway 会把 `bot1` 的消息分发到 `default` runtime，把 `bot2` 的消息分发到 `ops` runtime。
 
 ---
 
@@ -140,6 +160,15 @@ ws.onmessage = (event) => {
 
 WebSocket 支持**流式输出**，AI 的回复会一个字一个字地推送过来，体验更流畅。
 
+另外，Gateway 还提供：
+
+- `GET /v1/channels/status`：返回当前各渠道连接状态
+- `GET /v1/channel-owners`：查看渠道级与账号级 owner 绑定
+- `PUT /v1/channel-owners/:channel`：修改渠道 fallback owner
+- `DELETE /v1/channel-owners/:channel`：删除渠道 fallback owner
+- `PUT /v1/channel-owners/:channel/accounts/:account_id`：设置账号级 owner
+- `DELETE /v1/channel-owners/:channel/accounts/:account_id`：删除账号级 owner
+
 ---
 
 ## WebUI 界面
@@ -173,17 +202,18 @@ WebUI 的主要功能：
 
 ## API 认证
 
-如果你的 Gateway 暴露在公网，**必须**设置 API Token：
+当前版本里，`gateway.apiToken` 如果为空，Gateway 会在首次启动时**自动生成并写回 `config.json`**。这意味着 API 默认不会以“完全无密码”的状态运行，但在公网场景下你仍然应该手动设置一个长期稳定的 token。
 
 ```json
 {
   "gateway": {
-    "apiToken": "一个复杂的随机字符串，至少32位"
+    "apiToken": "一个复杂的随机字符串，至少32位",
+    "webuiPass": "单独的 WebUI 登录密码（可选）"
   }
 }
 ```
 
-调用 API 时，在 Header 里带上 Token：
+调用 API 时，在 Header 里带上 token：
 
 ```bash
 curl -H "Authorization: Bearer 你的token" http://你的服务器:18790/v1/chat
@@ -195,14 +225,11 @@ curl -H "Authorization: Bearer 你的token" http://你的服务器:18790/v1/chat
 ws://你的服务器:18790/v1/ws?token=你的token
 ```
 
-WebUI 登录也使用同一个 Token 作为密码。
+WebUI 登录密码与 API token 现在**分离**：
 
-如果没有设置 Token，Gateway 启动时会打印警告：
-
-```
-⚠️  WARNING: No API token configured. Gateway is open to anyone!
-    Set gateway.apiToken in config.json to secure your instance.
-```
+- 如果设置了 `gateway.webuiPass`，WebUI 使用这个固定密码
+- 如果没设置，Gateway 会在启动时打印一个临时密码
+- `apiToken` 继续只负责 API / WebSocket 鉴权
 
 ---
 

@@ -81,12 +81,13 @@ Error detected → LLM generates fix → Audit → Test → Canary deploy → Fu
 Run BlockCell as a daemon and connect it to:
 
 - **Telegram** (long polling)
-- **WhatsApp** (Webhook)
-- **Feishu/Lark** (WebSocket / Webhook)
-- **Slack** (Socket Mode)
+- **WhatsApp** (bridge WebSocket)
+- **Feishu** (long-connection WebSocket)
+- **Lark** (webhook)
+- **Slack** (Socket Mode, with polling fallback when `appToken` is absent)
 - **Discord** (Gateway WebSocket)
 - **DingTalk** (Stream SDK)
-- **WeCom** (Polling / Webhook)
+- **WeCom** (polling / webhook)
 
 #### 📖 Channel Integration Guides
 
@@ -159,15 +160,14 @@ cargo build --release
 ### First Run
 
 ```bash
-# Initialize configuration
-blockcell onboard
-
-# Edit config and add your API key
-# ~/.blockcell/config.json
+# Recommended: interactive setup wizard
+blockcell setup
 
 # Start interactive mode
 blockcell agent
 ```
+
+`setup` creates `~/.blockcell/`, saves provider settings, and auto-binds newly enabled external channels to the `default` agent when no owner is set yet.
 
 ### Daemon Mode (with WebUI)
 
@@ -177,6 +177,7 @@ blockcell gateway
 
 - **API Server**: `http://localhost:18790`
 - **WebUI**: `http://localhost:18791`
+- **Default routing**: CLI / WebUI / WebSocket go to the `default` agent; external channels first check `channelAccountOwners.<channel>.<accountId>` and fall back to `channelOwners.<channel>`
 
 ---
 
@@ -210,6 +211,31 @@ Minimal configuration example (`~/.blockcell/config.json`):
     "defaults": {
       "model": "anthropic/claude-sonnet-4-20250514"
     }
+  }
+}
+```
+
+To enable multi-agent routing plus external channels, you can extend it with:
+
+```json
+{
+  "agents": {
+    "list": [
+      { "id": "ops", "enabled": true, "intentProfile": "ops" }
+    ]
+  },
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  },
+  "gateway": {
+    "apiToken": "YOUR_STABLE_API_TOKEN",
+    "webuiPass": "YOUR_WEBUI_PASSWORD"
   }
 }
 ```

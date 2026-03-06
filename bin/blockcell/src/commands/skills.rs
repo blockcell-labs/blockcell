@@ -413,6 +413,7 @@ pub async fn learn(description: &str) -> anyhow::Result<()> {
 
     let inbound = InboundMessage {
         channel: "cli".to_string(),
+        account_id: None,
         sender_id: "user".to_string(),
         chat_id: "default".to_string(),
         content: learn_msg,

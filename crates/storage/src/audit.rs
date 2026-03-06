@@ -1,5 +1,5 @@
-use chrono::Utc;
 use blockcell_core::{Paths, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -110,7 +110,7 @@ impl AuditLogger {
 
     fn write_event(&mut self, event: AuditEvent) -> Result<()> {
         let log_file = self.current_log_file_path();
-        
+
         // Ensure audit directory exists
         if let Some(parent) = log_file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -135,13 +135,15 @@ impl AuditLogger {
         if today != self.current_date {
             self.current_date = today;
         }
-        self.paths.audit_dir().join(format!("{}.jsonl", self.current_date))
+        self.paths
+            .audit_dir()
+            .join(format!("{}.jsonl", self.current_date))
     }
 
     /// Read audit events from a specific date
     pub fn read_events(&self, date: &str) -> Result<Vec<AuditEvent>> {
         let log_file = self.paths.audit_dir().join(format!("{}.jsonl", date));
-        
+
         if !log_file.exists() {
             return Ok(Vec::new());
         }

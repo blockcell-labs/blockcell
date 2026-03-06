@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 /// 预编译的 FTS5 特殊字符正则，避免每次调用重新编译
-static FTS_SPECIAL_CHARS: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"[*"():^{}]"#).expect("FTS special chars regex is valid")
-});
+static FTS_SPECIAL_CHARS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"[*"():^{}]"#).expect("FTS special chars regex is valid"));
 
 /// Scope of a memory item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -192,9 +191,10 @@ impl MemoryStore {
     }
 
     fn init_schema(&self) -> Result<()> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         conn.execute_batch(
             "
@@ -258,8 +258,9 @@ impl MemoryStore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            "
-        ).map_err(|e| {
+            ",
+        )
+        .map_err(|e| {
             blockcell_core::Error::Storage(format!("Failed to init memory schema: {}", e))
         })?;
 
@@ -270,9 +271,10 @@ impl MemoryStore {
     /// Upsert a memory item. If dedup_key is set and a matching non-deleted item exists,
     /// update it instead of inserting a new one.
     pub fn upsert(&self, params: UpsertParams) -> Result<MemoryItem> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let now = Utc::now().to_rfc3339();
         let tags_str = params.tags.join(",");
@@ -297,13 +299,19 @@ impl MemoryStore {
                             expires_at = ?9
                          WHERE id = ?10",
                         params![
-                            params.content, params.summary, params.title, tags_str,
-                            params.importance, now, params.scope, params.item_type,
-                            params.expires_at, id
+                            params.content,
+                            params.summary,
+                            params.title,
+                            tags_str,
+                            params.importance,
+                            now,
+                            params.scope,
+                            params.item_type,
+                            params.expires_at,
+                            id
                         ],
-                    ).map_err(|e| {
-                        blockcell_core::Error::Storage(format!("Update error: {}", e))
-                    })?;
+                    )
+                    .map_err(|e| blockcell_core::Error::Storage(format!("Update error: {}", e)))?;
 
                     debug!(id = %id, dedup_key = %dk, "Memory item updated via dedup_key");
                     return self.get_by_id_inner(&conn, &id);
@@ -318,14 +326,24 @@ impl MemoryStore {
                 channel, session_key, importance, created_at, updated_at, expires_at, dedup_key)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
-                id, params.scope, params.item_type, params.title, params.content,
-                params.summary, tags_str, params.source, params.channel,
-                params.session_key, params.importance, now, now,
-                params.expires_at, params.dedup_key
+                id,
+                params.scope,
+                params.item_type,
+                params.title,
+                params.content,
+                params.summary,
+                tags_str,
+                params.source,
+                params.channel,
+                params.session_key,
+                params.importance,
+                now,
+                now,
+                params.expires_at,
+                params.dedup_key
             ],
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Insert error: {}", e))
-        })?;
+        )
+        .map_err(|e| blockcell_core::Error::Storage(format!("Insert error: {}", e)))?;
 
         debug!(id = %id, scope = %params.scope, "Memory item inserted");
         self.get_by_id_inner(&conn, &id)
@@ -333,9 +351,10 @@ impl MemoryStore {
 
     /// Query memory items using FTS5 + structured filters + scoring.
     pub fn query(&self, params: &QueryParams) -> Result<Vec<MemoryResult>> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let has_fts_query = params.query.as_ref().is_some_and(|q| !q.is_empty());
 
@@ -350,16 +369,14 @@ impl MemoryStore {
                 "SELECT m.*, bm25(memory_fts) AS fts_score
                  FROM memory_items m
                  JOIN memory_fts ON memory_fts.rowid = m.rowid
-                 WHERE memory_fts MATCH ?1"
+                 WHERE memory_fts MATCH ?1",
             );
             // FTS5 query: escape special chars, use implicit AND
             let fts_query = sanitize_fts_query(params.query.as_ref().unwrap());
             bind_values.push(Box::new(fts_query));
             bind_idx = 2;
         } else {
-            sql.push_str(
-                "SELECT m.*, 0.0 AS fts_score FROM memory_items m WHERE 1=1"
-            );
+            sql.push_str("SELECT m.*, 0.0 AS fts_score FROM memory_items m WHERE 1=1");
         }
 
         // Soft-delete filter
@@ -384,10 +401,14 @@ impl MemoryStore {
         // Tags filter (any match)
         if let Some(ref tags) = params.tags {
             if !tags.is_empty() {
-                let tag_conditions: Vec<String> = tags.iter().enumerate().map(|(i, _)| {
-                    let idx = bind_idx + i;
-                    format!("m.tags LIKE '%' || ?{} || '%'", idx)
-                }).collect();
+                let tag_conditions: Vec<String> = tags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        let idx = bind_idx + i;
+                        format!("m.tags LIKE '%' || ?{} || '%'", idx)
+                    })
+                    .collect();
                 where_clauses.push(format!("({})", tag_conditions.join(" OR ")));
                 for tag in tags {
                     bind_values.push(Box::new(tag.clone()));
@@ -408,11 +429,14 @@ impl MemoryStore {
         if !params.include_deleted {
             let now_str = Utc::now().to_rfc3339();
             where_clauses.push(format!(
-                "(m.expires_at IS NULL OR m.expires_at > ?{})", bind_idx
+                "(m.expires_at IS NULL OR m.expires_at > ?{})",
+                bind_idx
             ));
             bind_values.push(Box::new(now_str));
             #[allow(unused_assignments)]
-            { bind_idx += 1; }
+            {
+                bind_idx += 1;
+            }
         }
 
         for clause in &where_clauses {
@@ -428,7 +452,7 @@ impl MemoryStore {
                 "(-fts_score * 10.0 + m.importance * 5.0 + \
                  CASE WHEN julianday('now') - julianday(m.updated_at) < 1 THEN 3.0 \
                       WHEN julianday('now') - julianday(m.updated_at) < 7 THEN 1.5 \
-                      ELSE 0.0 END) DESC"
+                      ELSE 0.0 END) DESC",
             );
         } else {
             sql.push_str("m.importance DESC, m.updated_at DESC");
@@ -436,49 +460,50 @@ impl MemoryStore {
 
         sql.push_str(&format!(" LIMIT {}", params.top_k));
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Prepare error: {}", e))
-        })?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| blockcell_core::Error::Storage(format!("Prepare error: {}", e)))?;
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
 
         // 先收集所有结果，释放 stmt 对 conn 的借用，再更新 access_count
         let results: Vec<MemoryResult> = {
-            let rows = stmt.query_map(bind_refs.as_slice(), |row| {
-                let fts_score: f64 = row.get("fts_score")?;
-                let importance: f64 = row.get("importance")?;
-                let tags_str: String = row.get("tags")?;
+            let rows = stmt
+                .query_map(bind_refs.as_slice(), |row| {
+                    let fts_score: f64 = row.get("fts_score")?;
+                    let importance: f64 = row.get("importance")?;
+                    let tags_str: String = row.get("tags")?;
 
-                Ok(MemoryResult {
-                    item: MemoryItem {
-                        id: row.get("id")?,
-                        scope: row.get("scope")?,
-                        item_type: row.get("type")?,
-                        title: row.get("title")?,
-                        content: row.get("content")?,
-                        summary: row.get("summary")?,
-                        tags: if tags_str.is_empty() {
-                            vec![]
-                        } else {
-                            tags_str.split(',').map(|s| s.trim().to_string()).collect()
+                    Ok(MemoryResult {
+                        item: MemoryItem {
+                            id: row.get("id")?,
+                            scope: row.get("scope")?,
+                            item_type: row.get("type")?,
+                            title: row.get("title")?,
+                            content: row.get("content")?,
+                            summary: row.get("summary")?,
+                            tags: if tags_str.is_empty() {
+                                vec![]
+                            } else {
+                                tags_str.split(',').map(|s| s.trim().to_string()).collect()
+                            },
+                            source: row.get("source")?,
+                            channel: row.get("channel")?,
+                            session_key: row.get("session_key")?,
+                            importance,
+                            created_at: row.get("created_at")?,
+                            updated_at: row.get("updated_at")?,
+                            last_accessed_at: row.get("last_accessed_at")?,
+                            access_count: row.get("access_count")?,
+                            expires_at: row.get("expires_at")?,
+                            deleted_at: row.get("deleted_at")?,
+                            dedup_key: row.get("dedup_key")?,
                         },
-                        source: row.get("source")?,
-                        channel: row.get("channel")?,
-                        session_key: row.get("session_key")?,
-                        importance,
-                        created_at: row.get("created_at")?,
-                        updated_at: row.get("updated_at")?,
-                        last_accessed_at: row.get("last_accessed_at")?,
-                        access_count: row.get("access_count")?,
-                        expires_at: row.get("expires_at")?,
-                        deleted_at: row.get("deleted_at")?,
-                        dedup_key: row.get("dedup_key")?,
-                    },
-                    score: -fts_score * 10.0 + importance * 5.0,
+                        score: -fts_score * 10.0 + importance * 5.0,
+                    })
                 })
-            }).map_err(|e| {
-                blockcell_core::Error::Storage(format!("Query error: {}", e))
-            })?;
+                .map_err(|e| blockcell_core::Error::Storage(format!("Query error: {}", e)))?;
 
             let mut collected = Vec::new();
             for row in rows {
@@ -507,13 +532,16 @@ impl MemoryStore {
 
     /// Get a single item by ID.
     pub fn get_by_id(&self, id: &str) -> Result<Option<MemoryItem>> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
         match self.get_by_id_inner(&conn, id) {
             Ok(item) => Ok(Some(item)),
             // 仅当记录不存在时返回 None，其他数据库错误向上传播
-            Err(blockcell_core::Error::Storage(ref msg)) if msg.contains("QueryReturnedNoRows") => Ok(None),
+            Err(blockcell_core::Error::Storage(ref msg)) if msg.contains("QueryReturnedNoRows") => {
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
@@ -549,23 +577,23 @@ impl MemoryStore {
                     dedup_key: row.get("dedup_key")?,
                 })
             },
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Get by id error: {}", e))
-        })
+        )
+        .map_err(|e| blockcell_core::Error::Storage(format!("Get by id error: {}", e)))
     }
 
     /// Soft-delete a memory item.
     pub fn soft_delete(&self, id: &str) -> Result<bool> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
         let now = Utc::now().to_rfc3339();
-        let affected = conn.execute(
-            "UPDATE memory_items SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-            params![now, id],
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Soft delete error: {}", e))
-        })?;
+        let affected = conn
+            .execute(
+                "UPDATE memory_items SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![now, id],
+            )
+            .map_err(|e| blockcell_core::Error::Storage(format!("Soft delete error: {}", e)))?;
         Ok(affected > 0)
     }
 
@@ -577,12 +605,14 @@ impl MemoryStore {
         tags: Option<&[String]>,
         time_before: Option<&str>,
     ) -> Result<usize> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let now = Utc::now().to_rfc3339();
-        let mut sql = "UPDATE memory_items SET deleted_at = ?1 WHERE deleted_at IS NULL".to_string();
+        let mut sql =
+            "UPDATE memory_items SET deleted_at = ?1 WHERE deleted_at IS NULL".to_string();
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         bind_values.push(Box::new(now));
         let mut idx = 2;
@@ -608,13 +638,16 @@ impl MemoryStore {
             sql.push_str(&format!(" AND created_at < ?{}", idx));
             bind_values.push(Box::new(before.to_string()));
             #[allow(unused_assignments)]
-            { idx += 1; }
+            {
+                idx += 1;
+            }
         }
 
-        let bind_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
-        let affected = conn.execute(&sql, bind_refs.as_slice()).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Batch delete error: {}", e))
-        })?;
+        let bind_refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
+        let affected = conn
+            .execute(&sql, bind_refs.as_slice())
+            .map_err(|e| blockcell_core::Error::Storage(format!("Batch delete error: {}", e)))?;
 
         info!(count = affected, "Batch soft-deleted memory items");
         Ok(affected)
@@ -622,9 +655,10 @@ impl MemoryStore {
 
     /// Restore a soft-deleted item.
     pub fn restore(&self, id: &str) -> Result<bool> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
         let affected = conn.execute(
             "UPDATE memory_items SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
             params![id],
@@ -637,9 +671,10 @@ impl MemoryStore {
     /// Clean up expired items (set deleted_at) and hard-delete items that have been
     /// soft-deleted for more than `recycle_days` days.
     pub fn maintenance(&self, recycle_days: i64) -> Result<(usize, usize)> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let now = Utc::now().to_rfc3339();
 
@@ -653,12 +688,12 @@ impl MemoryStore {
 
         // Hard-delete items in recycle bin for too long
         let cutoff = (Utc::now() - chrono::Duration::days(recycle_days)).to_rfc3339();
-        let purged = conn.execute(
-            "DELETE FROM memory_items WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
-            params![cutoff],
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Purge error: {}", e))
-        })?;
+        let purged = conn
+            .execute(
+                "DELETE FROM memory_items WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| blockcell_core::Error::Storage(format!("Purge error: {}", e)))?;
 
         if expired > 0 || purged > 0 {
             info!(expired, purged, "Memory maintenance completed");
@@ -691,18 +726,20 @@ impl MemoryStore {
 
     /// Get the session summary for a given session key, if one exists.
     pub fn get_session_summary(&self, session_key: &str) -> Result<Option<String>> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let dedup_key = format!("session_summary:{}", session_key);
-        let result: Option<String> = conn.query_row(
-            "SELECT content FROM memory_items WHERE dedup_key = ?1 AND deleted_at IS NULL",
-            params![dedup_key],
-            |row| row.get(0),
-        ).optional().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Query error: {}", e))
-        })?;
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT content FROM memory_items WHERE dedup_key = ?1 AND deleted_at IS NULL",
+                params![dedup_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Query error: {}", e)))?;
 
         Ok(result)
     }
@@ -710,35 +747,36 @@ impl MemoryStore {
     /// Generate a brief summary for prompt injection.
     /// Returns up to `long_term_max` long-term summaries and `short_term_max` short-term summaries.
     pub fn generate_brief(&self, long_term_max: usize, short_term_max: usize) -> Result<String> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
         let mut brief = String::new();
 
         // Long-term items: highest importance, use summary if available
-        let mut stmt = conn.prepare(
-            "SELECT id, title, summary, content, type, importance FROM memory_items
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, summary, content, type, importance FROM memory_items
              WHERE scope = 'long_term' AND deleted_at IS NULL
                AND (expires_at IS NULL OR expires_at > ?1)
              ORDER BY importance DESC, access_count DESC, updated_at DESC
-             LIMIT ?2"
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-        })?;
+             LIMIT ?2",
+            )
+            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
         let now = Utc::now().to_rfc3339();
         let now_s = now.as_str();
         let lt_max = long_term_max as i64;
-        let lt_rows = stmt.query_map(params![now_s, lt_max], |row| {
-            let title: Option<String> = row.get("title")?;
-            let summary: Option<String> = row.get("summary")?;
-            let content: String = row.get("content")?;
-            let item_type: String = row.get("type")?;
-            Ok((title, summary, content, item_type))
-        }).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-        })?;
+        let lt_rows = stmt
+            .query_map(params![now_s, lt_max], |row| {
+                let title: Option<String> = row.get("title")?;
+                let summary: Option<String> = row.get("summary")?;
+                let content: String = row.get("content")?;
+                let item_type: String = row.get("type")?;
+                Ok((title, summary, content, item_type))
+            })
+            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
         let mut lt_items = Vec::new();
         for (title, summary, content, item_type) in lt_rows.flatten() {
@@ -773,26 +811,26 @@ impl MemoryStore {
         }
 
         // Short-term items: recent, high importance
-        let mut stmt = conn.prepare(
-            "SELECT id, title, summary, content, type, importance FROM memory_items
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, summary, content, type, importance FROM memory_items
              WHERE scope = 'short_term' AND deleted_at IS NULL
                AND (expires_at IS NULL OR expires_at > ?1)
              ORDER BY updated_at DESC, importance DESC
-             LIMIT ?2"
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-        })?;
+             LIMIT ?2",
+            )
+            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
         let st_max = short_term_max as i64;
-        let st_rows = stmt.query_map(params![now_s, st_max], |row| {
-            let title: Option<String> = row.get("title")?;
-            let summary: Option<String> = row.get("summary")?;
-            let content: String = row.get("content")?;
-            let item_type: String = row.get("type")?;
-            Ok((title, summary, content, item_type))
-        }).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-        })?;
+        let st_rows = stmt
+            .query_map(params![now_s, st_max], |row| {
+                let title: Option<String> = row.get("title")?;
+                let summary: Option<String> = row.get("summary")?;
+                let content: String = row.get("content")?;
+                let item_type: String = row.get("type")?;
+                Ok((title, summary, content, item_type))
+            })
+            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
         let mut st_items = Vec::new();
         for (title, summary, content, item_type) in st_rows.flatten() {
@@ -847,16 +885,18 @@ impl MemoryStore {
         // self.generate_brief(). std::sync::Mutex is NOT reentrant — calling
         // generate_brief() while holding the lock would deadlock.
         let items = {
-            let conn = self.inner.lock().map_err(|e| {
-                blockcell_core::Error::Storage(format!("Lock error: {}", e))
-            })?;
+            let conn = self
+                .inner
+                .lock()
+                .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
             let now = Utc::now().to_rfc3339();
             let max = max_items as i64;
 
             // FTS5 search across all non-deleted, non-expired memories, ranked by relevance + importance
-            let mut stmt = conn.prepare(
-                "SELECT m.id, m.title, m.summary, m.content, m.type, m.scope, m.importance,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.id, m.title, m.summary, m.content, m.type, m.scope, m.importance,
                         bm25(memory_fts) AS fts_score
                  FROM memory_items m
                  JOIN memory_fts ON memory_fts.rowid = m.rowid
@@ -865,21 +905,20 @@ impl MemoryStore {
                    AND (m.expires_at IS NULL OR m.expires_at > ?2)
                  ORDER BY (-bm25(memory_fts) * 10.0 + m.importance * 5.0 +
                            CASE WHEN m.scope = 'long_term' THEN 3.0 ELSE 0.0 END) DESC
-                 LIMIT ?3"
-            ).map_err(|e| {
-                blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-            })?;
+                 LIMIT ?3",
+                )
+                .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
-            let rows = stmt.query_map(params![fts_query, now, max], |row| {
-                let title: Option<String> = row.get("title")?;
-                let summary: Option<String> = row.get("summary")?;
-                let content: String = row.get("content")?;
-                let item_type: String = row.get("type")?;
-                let scope: String = row.get("scope")?;
-                Ok((title, summary, content, item_type, scope))
-            }).map_err(|e| {
-                blockcell_core::Error::Storage(format!("Brief query error: {}", e))
-            })?;
+            let rows = stmt
+                .query_map(params![fts_query, now, max], |row| {
+                    let title: Option<String> = row.get("title")?;
+                    let summary: Option<String> = row.get("summary")?;
+                    let content: String = row.get("content")?;
+                    let item_type: String = row.get("type")?;
+                    let scope: String = row.get("scope")?;
+                    Ok((title, summary, content, item_type, scope))
+                })
+                .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
 
             let mut items = Vec::new();
             for row in rows.flatten() {
@@ -926,14 +965,18 @@ impl MemoryStore {
 
     /// Get statistics about the memory store.
     pub fn stats(&self) -> Result<serde_json::Value> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NULL",
-            [], |row| row.get(0),
-        ).unwrap_or(0);
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         let long_term: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memory_items WHERE scope = 'long_term' AND deleted_at IS NULL",
@@ -945,10 +988,13 @@ impl MemoryStore {
             [], |row| row.get(0),
         ).unwrap_or(0);
 
-        let deleted: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NOT NULL",
-            [], |row| row.get(0),
-        ).unwrap_or(0);
+        let deleted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_items WHERE deleted_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         Ok(serde_json::json!({
             "total_active": total,
@@ -970,7 +1016,10 @@ impl MemoryStore {
             }
 
             // Each non-empty section becomes a long-term memory item
-            let dedup_key = format!("import.long_term.{}", heading.to_lowercase().replace(' ', "_"));
+            let dedup_key = format!(
+                "import.long_term.{}",
+                heading.to_lowercase().replace(' ', "_")
+            );
             let _ = self.upsert(UpsertParams {
                 scope: "long_term".to_string(),
                 item_type: classify_section(heading),
@@ -1066,21 +1115,22 @@ impl MemoryStore {
             "SELECT value FROM memory_meta WHERE key = 'migrated_from_md'",
             [],
             |row| row.get::<_, String>(0),
-        ).is_ok()
+        )
+        .is_ok()
     }
 
     /// Mark migration as done.
     pub fn mark_migrated(&self) -> Result<()> {
-        let conn = self.inner.lock().map_err(|e| {
-            blockcell_core::Error::Storage(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR REPLACE INTO memory_meta (key, value) VALUES ('migrated_from_md', ?1)",
             params![now],
-        ).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Mark migrated error: {}", e))
-        })?;
+        )
+        .map_err(|e| blockcell_core::Error::Storage(format!("Mark migrated error: {}", e)))?;
         Ok(())
     }
 
@@ -1204,10 +1254,8 @@ fn compute_daily_expiry(date_str: &str, days: i64) -> Option<String> {
         .ok()
         .map(|d| {
             let expiry = d + chrono::Duration::days(days);
-            let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
-                expiry.and_hms_opt(0, 0, 0).unwrap(),
-                Utc,
-            );
+            let dt: DateTime<Utc> =
+                DateTime::from_naive_utc_and_offset(expiry.and_hms_opt(0, 0, 0).unwrap(), Utc);
             dt.to_rfc3339()
         })
 }
@@ -1229,37 +1277,43 @@ mod tests {
         let (store, _dir) = test_store();
 
         // Insert
-        let item = store.upsert(UpsertParams {
-            scope: "long_term".to_string(),
-            item_type: "fact".to_string(),
-            title: Some("User name".to_string()),
-            content: "The user's name is Alice".to_string(),
-            summary: Some("User is Alice".to_string()),
-            tags: vec!["user".to_string()],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.9,
-            dedup_key: Some("user.name".to_string()),
-            expires_at: None,
-        }).unwrap();
+        let item = store
+            .upsert(UpsertParams {
+                scope: "long_term".to_string(),
+                item_type: "fact".to_string(),
+                title: Some("User name".to_string()),
+                content: "The user's name is Alice".to_string(),
+                summary: Some("User is Alice".to_string()),
+                tags: vec!["user".to_string()],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.9,
+                dedup_key: Some("user.name".to_string()),
+                expires_at: None,
+            })
+            .unwrap();
 
         assert_eq!(item.scope, "long_term");
         assert_eq!(item.content, "The user's name is Alice");
 
         // Query by FTS
-        let results = store.query(&QueryParams {
-            query: Some("Alice".to_string()),
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .query(&QueryParams {
+                query: Some("Alice".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item.id, item.id);
 
         // Query with scope filter
-        let results = store.query(&QueryParams {
-            scope: Some("short_term".to_string()),
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .query(&QueryParams {
+                scope: Some("short_term".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -1268,36 +1322,40 @@ mod tests {
         let (store, _dir) = test_store();
 
         // Insert first
-        let item1 = store.upsert(UpsertParams {
-            scope: "long_term".to_string(),
-            item_type: "preference".to_string(),
-            title: Some("Language".to_string()),
-            content: "User prefers English".to_string(),
-            summary: None,
-            tags: vec![],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.8,
-            dedup_key: Some("pref.language".to_string()),
-            expires_at: None,
-        }).unwrap();
+        let item1 = store
+            .upsert(UpsertParams {
+                scope: "long_term".to_string(),
+                item_type: "preference".to_string(),
+                title: Some("Language".to_string()),
+                content: "User prefers English".to_string(),
+                summary: None,
+                tags: vec![],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.8,
+                dedup_key: Some("pref.language".to_string()),
+                expires_at: None,
+            })
+            .unwrap();
 
         // Upsert with same dedup_key
-        let item2 = store.upsert(UpsertParams {
-            scope: "long_term".to_string(),
-            item_type: "preference".to_string(),
-            title: Some("Language".to_string()),
-            content: "User prefers Chinese".to_string(),
-            summary: None,
-            tags: vec![],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.8,
-            dedup_key: Some("pref.language".to_string()),
-            expires_at: None,
-        }).unwrap();
+        let item2 = store
+            .upsert(UpsertParams {
+                scope: "long_term".to_string(),
+                item_type: "preference".to_string(),
+                title: Some("Language".to_string()),
+                content: "User prefers Chinese".to_string(),
+                summary: None,
+                tags: vec![],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.8,
+                dedup_key: Some("pref.language".to_string()),
+                expires_at: None,
+            })
+            .unwrap();
 
         // Same ID, updated content
         assert_eq!(item1.id, item2.id);
@@ -1308,20 +1366,22 @@ mod tests {
     fn test_soft_delete_and_restore() {
         let (store, _dir) = test_store();
 
-        let item = store.upsert(UpsertParams {
-            scope: "short_term".to_string(),
-            item_type: "note".to_string(),
-            title: None,
-            content: "Temporary note".to_string(),
-            summary: None,
-            tags: vec![],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.5,
-            dedup_key: None,
-            expires_at: None,
-        }).unwrap();
+        let item = store
+            .upsert(UpsertParams {
+                scope: "short_term".to_string(),
+                item_type: "note".to_string(),
+                title: None,
+                content: "Temporary note".to_string(),
+                summary: None,
+                tags: vec![],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.5,
+                dedup_key: None,
+                expires_at: None,
+            })
+            .unwrap();
 
         // Soft delete
         assert!(store.soft_delete(&item.id).unwrap());
@@ -1331,10 +1391,12 @@ mod tests {
         assert_eq!(results.len(), 0);
 
         // Should appear with include_deleted
-        let results = store.query(&QueryParams {
-            include_deleted: true,
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .query(&QueryParams {
+                include_deleted: true,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         // Restore
@@ -1349,35 +1411,39 @@ mod tests {
     fn test_brief_generation() {
         let (store, _dir) = test_store();
 
-        store.upsert(UpsertParams {
-            scope: "long_term".to_string(),
-            item_type: "fact".to_string(),
-            title: Some("User name".to_string()),
-            content: "Alice".to_string(),
-            summary: Some("User is Alice".to_string()),
-            tags: vec![],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.9,
-            dedup_key: None,
-            expires_at: None,
-        }).unwrap();
+        store
+            .upsert(UpsertParams {
+                scope: "long_term".to_string(),
+                item_type: "fact".to_string(),
+                title: Some("User name".to_string()),
+                content: "Alice".to_string(),
+                summary: Some("User is Alice".to_string()),
+                tags: vec![],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.9,
+                dedup_key: None,
+                expires_at: None,
+            })
+            .unwrap();
 
-        store.upsert(UpsertParams {
-            scope: "short_term".to_string(),
-            item_type: "note".to_string(),
-            title: Some("Meeting".to_string()),
-            content: "Had a meeting about project X".to_string(),
-            summary: None,
-            tags: vec![],
-            source: "user".to_string(),
-            channel: None,
-            session_key: None,
-            importance: 0.5,
-            dedup_key: None,
-            expires_at: None,
-        }).unwrap();
+        store
+            .upsert(UpsertParams {
+                scope: "short_term".to_string(),
+                item_type: "note".to_string(),
+                title: Some("Meeting".to_string()),
+                content: "Had a meeting about project X".to_string(),
+                summary: None,
+                tags: vec![],
+                source: "user".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.5,
+                dedup_key: None,
+                expires_at: None,
+            })
+            .unwrap();
 
         let brief = store.generate_brief(20, 10).unwrap();
         assert!(brief.contains("Long-term Memory"));
@@ -1409,10 +1475,12 @@ Language: Chinese
         let count = store.import_long_term_md(md).unwrap();
         assert_eq!(count, 2); // Empty/placeholder sections skipped
 
-        let results = store.query(&QueryParams {
-            query: Some("Bob".to_string()),
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .query(&QueryParams {
+                query: Some("Bob".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
     }
 }

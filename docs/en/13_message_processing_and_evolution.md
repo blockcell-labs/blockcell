@@ -1,7 +1,6 @@
 # Article 13: Message Processing and the Self-Evolution Lifecycle — From Receiving a Message to Triggering Evolution
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 13/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 13
 ---
 
 In the previous article, we looked at blockcell’s overall architecture. In this one, we zoom in: we follow a single user message and see how it is processed concurrently, how it triggers tool calls, and how repeated failures can start **Self-Evolution** to automatically repair the system.
@@ -105,11 +104,11 @@ If a skill/tool fails repeatedly within a short time window and reaches the conf
 ```rust
 async fn process_message(user_msg) {
     // 1) Intent classification + prompt assembly
-    let intent = classify_intent(user_msg);
-    let tools = get_tools_for_intent(intent);
+    let intents = classify_intent(user_msg);
+    let tools = resolve_tools_from_intent_router(config, agent_id, intents);
     let memory = db.query_related_memory(user_msg);
 
-    let prompt = build_prompt(intent, memory);
+    let prompt = build_prompt(intents, memory);
 
     // 2) Core tool loop
     loop {

@@ -71,9 +71,13 @@ enum Commands {
         #[arg(short, long)]
         message: Option<String>,
 
-        /// Session ID
-        #[arg(short, long, default_value = "cli:default")]
-        session: String,
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
+
+        /// Session ID (defaults to cli:<agent>)
+        #[arg(short, long)]
+        session: Option<String>,
 
         /// Override LLM model for this session
         #[arg(long)]
@@ -197,17 +201,36 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum TasksCommands {
-    /// List all background tasks
-    List,
+    /// List background tasks
+    List {
+        /// Show tasks from all agents
+        #[arg(long)]
+        all: bool,
+        /// Show tasks for a specific agent (default: default)
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
+    },
     /// Show details for a specific task
     Show {
         /// Task ID (prefix match)
         task_id: String,
+        /// Search across all agents
+        #[arg(long)]
+        all: bool,
+        /// Search within a specific agent (default: default)
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
     },
     /// Cancel a running task (if supported)
     Cancel {
         /// Task ID (prefix match)
         task_id: String,
+        /// Search across all agents
+        #[arg(long)]
+        all: bool,
+        /// Search within a specific agent (default: default)
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
     },
 }
 
@@ -293,6 +316,9 @@ enum RunCommands {
         tool_name: String,
         /// JSON parameters
         params: String,
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
     },
     /// Send a message through the agent (shortcut for `agent -m`)
     #[command(name = "msg")]
@@ -302,6 +328,9 @@ enum RunCommands {
         /// Session ID
         #[arg(short, long, default_value = "cli:run")]
         session: String,
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
     },
 }
 
@@ -324,7 +353,7 @@ enum AlertsCommands {
         /// Rule name
         #[arg(long)]
         name: String,
-        /// Data source (e.g. "finance_api:stock_quote:600519")
+        /// Data source (e.g. "stream_subscribe:ticker:BTCUSDT")
         #[arg(long)]
         source: String,
         /// Field to monitor (e.g. "price", "change_pct")
@@ -450,6 +479,38 @@ enum ChannelsCommands {
     Login {
         /// Channel name
         channel: String,
+    },
+    /// Manage channel owner bindings (channel -> agent)
+    Owner {
+        #[command(subcommand)]
+        command: ChannelOwnerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChannelOwnerCommands {
+    /// List channel owner bindings
+    List,
+    /// Set owner agent for a channel or channel account
+    Set {
+        /// Channel name
+        #[arg(long)]
+        channel: String,
+        /// Optional account id for account-level binding
+        #[arg(long)]
+        account: Option<String>,
+        /// Agent id
+        #[arg(long)]
+        agent: String,
+    },
+    /// Clear owner binding for a channel or channel account
+    Clear {
+        /// Channel name
+        #[arg(long)]
+        channel: String,
+        /// Optional account id for account-level binding
+        #[arg(long)]
+        account: Option<String>,
     },
 }
 
@@ -763,11 +824,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Agent {
             message,
+            agent,
             session,
             model,
             provider,
         } => {
-            commands::agent::run(message, session, model, provider).await?;
+            commands::agent::run(message, agent, session, model, provider).await?;
         }
         Commands::Gateway { port, host } => {
             commands::gateway::run(host, port).await?;
@@ -826,24 +888,40 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Tasks ───────────────────────────────────────────────────────
         Commands::Tasks { command } => match command {
-            TasksCommands::List => {
-                commands::tasks_cmd::list().await?;
+            TasksCommands::List { all, agent } => {
+                commands::tasks_cmd::list(agent.as_deref(), all).await?;
             }
-            TasksCommands::Show { task_id } => {
-                commands::tasks_cmd::show(&task_id).await?;
+            TasksCommands::Show {
+                task_id,
+                all,
+                agent,
+            } => {
+                commands::tasks_cmd::show(&task_id, agent.as_deref(), all).await?;
             }
-            TasksCommands::Cancel { task_id } => {
-                commands::tasks_cmd::cancel(&task_id).await?;
+            TasksCommands::Cancel {
+                task_id,
+                all,
+                agent,
+            } => {
+                commands::tasks_cmd::cancel(&task_id, agent.as_deref(), all).await?;
             }
         },
 
         // ── P0: Run ─────────────────────────────────────────────────────
         Commands::Run { command } => match command {
-            RunCommands::Tool { tool_name, params } => {
-                commands::run_cmd::tool(&tool_name, &params).await?;
+            RunCommands::Tool {
+                tool_name,
+                params,
+                agent,
+            } => {
+                commands::run_cmd::tool(&tool_name, &params, agent.as_deref()).await?;
             }
-            RunCommands::Message { message, session } => {
-                commands::run_cmd::message(&message, &session).await?;
+            RunCommands::Message {
+                message,
+                session,
+                agent,
+            } => {
+                commands::run_cmd::message(&message, &session, agent.as_deref()).await?;
             }
         },
 
@@ -855,6 +933,21 @@ async fn main() -> anyhow::Result<()> {
             ChannelsCommands::Login { channel } => {
                 commands::channels::login(&channel).await?;
             }
+            ChannelsCommands::Owner { command } => match command {
+                ChannelOwnerCommands::List => {
+                    commands::channels::owner_list().await?;
+                }
+                ChannelOwnerCommands::Set {
+                    channel,
+                    account,
+                    agent,
+                } => {
+                    commands::channels::owner_set(&channel, account.as_deref(), &agent).await?;
+                }
+                ChannelOwnerCommands::Clear { channel, account } => {
+                    commands::channels::owner_clear(&channel, account.as_deref()).await?;
+                }
+            },
         },
         Commands::Cron { command } => match command {
             CronCommands::List { all } => {
@@ -1103,4 +1196,189 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_agent_subcommand_accepts_agent_flag() {
+        let cli = Cli::try_parse_from(["blockcell", "agent", "--agent", "ops"])
+            .expect("agent flag should parse");
+
+        match cli.command {
+            Commands::Agent { agent, session, .. } => {
+                assert_eq!(agent.as_deref(), Some("ops"));
+                assert!(session.is_none());
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_agent_subcommand_accepts_agent_short_flag() {
+        let cli = Cli::try_parse_from(["blockcell", "agent", "-a", "ops", "-m", "hello"])
+            .expect("short agent flag should parse");
+
+        match cli.command {
+            Commands::Agent { agent, message, .. } => {
+                assert_eq!(agent.as_deref(), Some("ops"));
+                assert_eq!(message.as_deref(), Some("hello"));
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+
+    #[test]
+    fn test_run_message_subcommand_accepts_agent_flag() {
+        let cli = Cli::try_parse_from(["blockcell", "run", "msg", "hello", "--agent", "ops"])
+            .expect("run msg agent flag should parse");
+
+        match cli.command {
+            Commands::Run { command } => match command {
+                RunCommands::Message { message, session, agent } => {
+                    assert_eq!(message, "hello");
+                    assert_eq!(session, "cli:run");
+                    assert_eq!(agent.as_deref(), Some("ops"));
+                }
+                other => panic!("unexpected run command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+
+    #[test]
+    fn test_run_tool_subcommand_accepts_agent_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcell",
+            "run",
+            "tool",
+            "read_file",
+            r#"{"path":"README.md"}"#,
+            "--agent",
+            "ops",
+        ])
+        .expect("run tool agent flag should parse");
+
+        match cli.command {
+            Commands::Run { command } => match command {
+                RunCommands::Tool {
+                    tool_name,
+                    params,
+                    agent,
+                } => {
+                    assert_eq!(tool_name, "read_file");
+                    assert_eq!(params, r#"{"path":"README.md"}"#);
+                    assert_eq!(agent.as_deref(), Some("ops"));
+                }
+                other => panic!("unexpected run command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+
+    #[test]
+    fn test_tasks_list_accepts_all_flag() {
+        let cli = Cli::try_parse_from(["blockcell", "tasks", "list", "--all"])
+            .expect("tasks list --all should parse");
+
+        match cli.command {
+            Commands::Tasks { command } => match command {
+                TasksCommands::List { all, agent } => {
+                    assert!(all);
+                    assert!(agent.is_none());
+                }
+                other => panic!("unexpected tasks command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_channels_owner_set_accepts_account_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcell",
+            "channels",
+            "owner",
+            "set",
+            "--channel",
+            "telegram",
+            "--account",
+            "bot2",
+            "--agent",
+            "ops",
+        ])
+        .expect("channels owner set --account should parse");
+
+        match cli.command {
+            Commands::Channels { command } => match command {
+                ChannelsCommands::Owner { command } => match command {
+                    ChannelOwnerCommands::Set {
+                        channel,
+                        account,
+                        agent,
+                    } => {
+                        assert_eq!(channel, "telegram");
+                        assert_eq!(account.as_deref(), Some("bot2"));
+                        assert_eq!(agent, "ops");
+                    }
+                    other => panic!("unexpected owner command: {:?}", std::mem::discriminant(&other)),
+                },
+                other => panic!("unexpected channels command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_channels_owner_clear_accepts_account_flag() {
+        let cli = Cli::try_parse_from([
+            "blockcell",
+            "channels",
+            "owner",
+            "clear",
+            "--channel",
+            "telegram",
+            "--account",
+            "bot2",
+        ])
+        .expect("channels owner clear --account should parse");
+
+        match cli.command {
+            Commands::Channels { command } => match command {
+                ChannelsCommands::Owner { command } => match command {
+                    ChannelOwnerCommands::Clear { channel, account } => {
+                        assert_eq!(channel, "telegram");
+                        assert_eq!(account.as_deref(), Some("bot2"));
+                    }
+                    other => panic!("unexpected owner command: {:?}", std::mem::discriminant(&other)),
+                },
+                other => panic!("unexpected channels command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_tasks_list_accepts_agent_flag() {
+        let cli = Cli::try_parse_from(["blockcell", "tasks", "list", "--agent", "ops"])
+            .expect("tasks list --agent should parse");
+
+        match cli.command {
+            Commands::Tasks { command } => match command {
+                TasksCommands::List { all, agent } => {
+                    assert!(!all);
+                    assert_eq!(agent.as_deref(), Some("ops"));
+                }
+                other => panic!("unexpected tasks command: {:?}", std::mem::discriminant(&other)),
+            },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
 }

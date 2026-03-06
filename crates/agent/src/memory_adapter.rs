@@ -1,6 +1,6 @@
+use blockcell_core::Result;
 use blockcell_storage::memory::{MemoryStore, QueryParams, UpsertParams};
 use blockcell_tools::MemoryStoreOps;
-use blockcell_core::Result;
 use serde_json::Value;
 
 /// Adapter that implements the tools crate's `MemoryStoreOps` trait
@@ -47,13 +47,18 @@ impl MemoryStoreOps for MemoryStoreAdapter {
             source: Self::get_string_or(&params_json, "source", "user"),
             channel: Self::get_string(&params_json, "channel"),
             session_key: Self::get_string(&params_json, "session_key"),
-            importance: params_json.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            importance: params_json
+                .get("importance")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
             dedup_key: Self::get_string(&params_json, "dedup_key"),
             expires_at: Self::get_string(&params_json, "expires_at"),
         };
 
         let item = self.store.upsert(params)?;
-        serde_json::to_value(item).map_err(|e| blockcell_core::Error::Storage(format!("Failed to serialize memory item: {}", e)))
+        serde_json::to_value(item).map_err(|e| {
+            blockcell_core::Error::Storage(format!("Failed to serialize memory item: {}", e))
+        })
     }
 
     fn query_json(&self, params_json: Value) -> Result<Value> {
@@ -66,12 +71,20 @@ impl MemoryStoreOps for MemoryStoreAdapter {
             item_type: Self::get_string(&params_json, "type"),
             tags,
             time_range_days: params_json.get("time_range_days").and_then(|v| v.as_i64()),
-            top_k: params_json.get("top_k").and_then(|v| v.as_i64()).unwrap_or(20) as usize,
-            include_deleted: params_json.get("include_deleted").and_then(|v| v.as_bool()).unwrap_or(false),
+            top_k: params_json
+                .get("top_k")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(20) as usize,
+            include_deleted: params_json
+                .get("include_deleted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         };
 
         let results = self.store.query(&params)?;
-        serde_json::to_value(results).map_err(|e| blockcell_core::Error::Storage(format!("Failed to serialize query results: {}", e)))
+        serde_json::to_value(results).map_err(|e| {
+            blockcell_core::Error::Storage(format!("Failed to serialize query results: {}", e))
+        })
     }
 
     fn soft_delete(&self, id: &str) -> Result<bool> {
@@ -81,16 +94,21 @@ impl MemoryStoreOps for MemoryStoreAdapter {
     fn batch_soft_delete_json(&self, params_json: Value) -> Result<usize> {
         let scope = params_json.get("scope").and_then(|v| v.as_str());
         let item_type = params_json.get("type").and_then(|v| v.as_str());
-        
+
         let tags = Self::parse_tags(&params_json, "tags");
-        let tags_ref = if tags.is_empty() { None } else { Some(tags.as_slice()) };
+        let tags_ref = if tags.is_empty() {
+            None
+        } else {
+            Some(tags.as_slice())
+        };
 
         let time_before = params_json
             .get("before_days")
             .and_then(|v| v.as_i64())
             .map(|days| (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339());
 
-        self.store.batch_soft_delete(scope, item_type, tags_ref, time_before.as_deref())
+        self.store
+            .batch_soft_delete(scope, item_type, tags_ref, time_before.as_deref())
     }
 
     fn restore(&self, id: &str) -> Result<bool> {

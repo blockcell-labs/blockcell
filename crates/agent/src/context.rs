@@ -6,7 +6,20 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::intent::{needs_finance_guidelines, needs_skills_list, IntentCategory};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionMode {
+    Skill,
+    Chat,
+    General,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveSkillContext {
+    pub name: String,
+    pub prompt_md: String,
+    pub tools: Vec<String>,
+    pub fallback_message: Option<String>,
+}
 
 /// Lightweight token estimator.
 /// Chinese characters ≈ 1 token each, English words ≈ 1.3 tokens each.
@@ -174,47 +187,61 @@ impl ContextBuilder {
 
     /// Build system prompt with all content (legacy, no intent filtering).
     pub fn build_system_prompt(&self) -> String {
-        self.build_system_prompt_for_intents(
-            &[IntentCategory::Unknown],
+        self.build_system_prompt_for_mode_with_channel(
+            InteractionMode::General,
+            None,
             &HashSet::new(),
             &HashSet::new(),
+            "",
+            "",
+            &[],
         )
     }
 
-    /// Build system prompt filtered by intent categories.
-    /// This is the core optimization: only inject relevant rules, tools, and domain knowledge.
-    pub fn build_system_prompt_for_intents(
+    pub fn resolve_active_skill(
         &self,
-        intents: &[IntentCategory],
+        user_input: &str,
         disabled_skills: &HashSet<String>,
-        disabled_tools: &HashSet<String>,
-    ) -> String {
-        self.build_system_prompt_for_intents_with_channel(
-            intents,
-            disabled_skills,
-            disabled_tools,
-            "",
-            "",
-        )
+    ) -> Option<ActiveSkillContext> {
+        if user_input.is_empty() {
+            return None;
+        }
+        let manager = self.skill_manager.as_ref()?;
+        let skill = manager.match_skill(user_input, disabled_skills)?;
+        let prompt_md = skill.load_md()?;
+        Some(ActiveSkillContext {
+            name: skill.name.clone(),
+            prompt_md,
+            tools: skill.meta.effective_tools(),
+            fallback_message: skill
+                .meta
+                .fallback
+                .as_ref()
+                .and_then(|fallback| fallback.message.clone()),
+        })
     }
 
-    pub fn build_system_prompt_for_intents_with_channel(
+    pub fn skill_manager(&self) -> Option<&SkillManager> {
+        self.skill_manager.as_ref()
+    }
+
+    pub fn build_system_prompt_for_mode_with_channel(
         &self,
-        intents: &[IntentCategory],
+        mode: InteractionMode,
+        active_skill: Option<&ActiveSkillContext>,
         disabled_skills: &HashSet<String>,
         disabled_tools: &HashSet<String>,
-        channel: &str,
+        _channel: &str,
         user_query: &str,
+        tool_prompt_rules: &[String],
     ) -> String {
         let mut prompt = String::new();
-        let is_chat = intents.len() == 1 && intents[0] == IntentCategory::Chat;
+        let is_chat = matches!(mode, InteractionMode::Chat);
+        let is_skill_mode = matches!(mode, InteractionMode::Skill);
+        let is_general = matches!(mode, InteractionMode::General);
 
-        // ===== Stable prefix (benefits from provider prompt caching) =====
-
-        // Identity
         prompt.push_str("You are blockcell, an AI assistant with access to tools.\n\n");
 
-        // Load bootstrap files (stable across calls)
         if let Some(content) = self.load_file_if_exists(self.paths.agents_md()) {
             prompt.push_str("## Agent Guidelines\n");
             prompt.push_str(&content);
@@ -233,57 +260,28 @@ impl ContextBuilder {
             prompt.push_str("\n\n");
         }
 
-        // Core behavior rules (Method B: ~10 concise rules instead of ~54 verbose tool descriptions)
         if !is_chat {
             prompt.push_str("\n## Tools\n");
             prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
             prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
             prompt.push_str("- Validate tool parameters against schema.\n");
-            prompt.push_str("- Search `memory_query` before asking the user for information you might already know.\n");
+            prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
+            prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
             prompt.push_str(
                 "- Never hardcode credentials — ask the user or read from config/memory.\n",
             );
-            prompt.push_str("- **金融数据**: `finance_api` 使用东方财富(A股/港股完全免费)、CoinGecko(加密货币免费)、Alpha Vantage(美股,可选key)，**无需用户配置任何 API Key** 即可查询A股/港股/加密货币行情。\n");
-            prompt.push_str("- Always note data delays — financial data is informational only, not investment advice.\n");
-            prompt.push_str("- **Web search**: Use `web_search` for discovery. Supports Brave Search API and Baidu AI Search API. Chinese queries prefer Baidu; non-Chinese prefer Brave. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. **If `web_search` returns a config/API-key error, you MUST tell the user to configure the API key** (tools.web.search.apiKey for Brave, tools.web.search.baiduApiKey or env BAIDU_API_KEY for Baidu) — do NOT answer from memory as if search succeeded. **If results are irrelevant**: retry with rephrased query (shorter, different keywords) before concluding no results exist — never give up after just one failed search.\n");
-            prompt.push_str("- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). Use `browse` for JS-heavy sites or interactive automation. **`browse` action选择规则**: 打开网页用 `navigate`+url; 读取页面内容用 `get_content`; 查看页面结构/元素用 `snapshot`; **截图用 `screenshot`（无需指定output_path）**; 点击元素用 `click`+ref/selector; 填写表单用 `fill`; 按键用 `press_key`. **绝对禁止**调用 `browse` 时不带 `action` 参数——必须明确指定 action。\n");
-            prompt.push_str("- **信息充足性原则（避免过度抓取）**: 每次 `web_fetch` 后先评估已有信息是否满足任务需求，**够用就停止**，不要贪婪地抓取所有搜索结果。判断标准：(1) 用户要求[找N篇/N个] -> 已收集到N个独立来源即可停止；(2) 用户要求[总结/汇总] -> 有2-3个高质量来源即可，无需穷举；(3) 用户要求[最新/最全] -> 才需要多源验证。**错误做法**：搜到10条结果就逐一fetch全部。**正确做法**：fetch前几条最相关的，判断内容是否满足需求，满足则直接执行后续任务（写文件/输出等）。\n");
-            prompt.push_str("- **`browse screenshot` 路径规则**: 截图**始终**自动保存在 workspace/media/ 下，返回结果中的 `path` 字段即为可展示的路径，直接用该路径给用户展示即可。**不要**把 `output_path` 设为桌面或其他绝对路径——那样会导致 WebUI 无法显示截图。如果用户要求把截图存到某个特定位置（如桌面），工具会自动 copy 一份过去，你无需额外操作，直接用返回的 `path` 字段展示图片。\n");
-            // Media display rule depends on channel type:
-            // - WebUI (ws/cli/ghost/empty): markdown image syntax works, encourage it
-            // - IM channels (wecom/feishu/lark/telegram/slack/discord/dingtalk/whatsapp):
-            //   markdown is NOT rendered; sending media MUST go through notification tool
-            let is_im_channel = matches!(
-                channel,
-                "wecom"
-                    | "feishu"
-                    | "lark"
-                    | "telegram"
-                    | "slack"
-                    | "discord"
-                    | "dingtalk"
-                    | "whatsapp"
-            );
-            if is_im_channel {
-                prompt.push_str("- **当前渠道为 IM 聊天（不渲染 Markdown）**: 不要在回复文字中使用 markdown 图片语法（如 `![](path)`），IM 端不会渲染。若需展示图片内容，用文字描述即可。\n");
-                prompt.push_str("- **发送图片/文件给用户（⚠️ 必须调用 message 工具，否则文件不会发出）**: 当用户要求发回图片/文件时，**必须**调用 `message` 工具，参数示例：`{\"media\": [\"/root/.blockcell/workspace/media/xxx.jpg\"], \"content\": \"这是你要的图片\"}`。**绝对禁止**在不调用工具的情况下直接回复\"发送成功\"——那是幻觉，图片根本没有发出去。\n");
-            } else {
-                prompt.push_str("- **Media display**: The WebUI can render images and play audio inline. To show an image or audio file, include the full file path in your response text (e.g. `/root/.blockcell/workspace/photo.jpg`). The frontend will auto-detect media paths and render them. You can also use markdown image syntax: `![description](file_path)`. NEVER say you cannot display images — you CAN.\n");
-                prompt.push_str("- **发送图片/文件给用户（通过聊天渠道）**: 调用 `message` 工具，参数 `media=[\"<本地文件路径>\"]`。仅在回复文字中写 markdown 图片语法无法真正发送文件，必须用工具调用。\n");
+            for rule in tool_prompt_rules {
+                prompt.push_str(rule);
+                if !rule.ends_with('\n') {
+                    prompt.push('\n');
+                }
             }
-            prompt.push_str("- **发送语音给用户**: 需要先将文字合成为语音文件（TTS），再用 `message` 工具 `media=[\"<语音文件路径>\"]` 发送。TTS 能力由技能提供——如果用户要求发语音但没有 TTS 技能，请提示用户安装相应技能（如 tts 技能）。\n");
-            prompt.push_str("- **`spawn` 互斥原则**: `spawn` 只用于用户明确要求后台执行、或任务需要数分钟以上的真正异步场景。**禁止**在同一轮对话中既直接回复用户又 spawn 子任务做同样的事——二者必须二选一：能直接回答就直接回答，不能直接回答才 spawn 并告知用户「正在后台处理」。\n");
-            prompt.push_str("- When user asks to 打开/开启/启用/enable or 关闭/禁用/disable a skill or tool, use `toggle_manage` tool with action='set'. Do NOT use list_skills for this.\n");
-            prompt.push_str("- **定时任务 (cron)**: 用户要求定时执行某项任务时，**优先**检查是否有对应技能：先调用 `list_skills` 查看可用技能列表，若有名称匹配的技能（如用户说 AI新闻 -> 技能名 `ai_news`），则在 `cron` 工具中设置 `skill_name='ai_news'`，触发时直接执行技能脚本，无需 LLM 介入，最可靠。若无匹配技能，则用 `message` 参数描述任务指令。 [TIMEZONE] `cron_expr` 使用 UTC 时间，中国用户（UTC+8）说每天 9 点应填 `cron_expr='0 0 1 * * *'`（UTC 1:00 = 北京时间 9:00）。一次性任务设 `delete_after_run=true`；周期任务用 `cron_expr` 或 `every_seconds`。\n");
-            prompt.push_str("- **Community Hub 技能安装**: 用户说「安装技能」「从Hub安装」「下载技能」「install skill」时，**必须**使用 `community_hub` 工具，流程：①先调用 action='list_installed' 查本地是否已装；②调用 action='skill_info' skill_name='xxx' 查Hub上该技能信息；③调用 action='install_skill' skill_name='xxx' 下载安装。卸载用 action='uninstall_skill'，浏览用 action='trending' 或 action='search_skills'。Hub URL 和 API key 自动从配置读取，无需手动填写。\n");
-            prompt.push_str("- **Termux API (Android)**: Use `termux_api` tool to control Android devices via Termux. Requires `termux-api` package + Termux:API app. Use action='info' to check availability. Covers: battery, camera, clipboard, contacts, SMS, calls, location, sensors, notifications, TTS, speech-to-text, media player, microphone, torch, brightness, volume, WiFi, vibrate, share, dialog, wallpaper, fingerprint, infrared, keystore, job scheduler, wake lock. Only available when running on Android/Termux.\n");
-            prompt.push_str("- **MCP (Model Context Protocol)**: blockcell **已内置 MCP 客户端支持**，可连接任意 MCP 服务器（SQLite、GitHub、文件系统、数据库等）。MCP 工具会以 `<serverName>__<toolName>` 格式出现在工具列表中。若用户询问 MCP 功能或当前工具列表中无 MCP 工具，说明尚未配置 MCP 服务器，请引导用户在 `~/.blockcell/config.json` 的 `mcpServers` 字段中添加配置，示例：`{\"mcpServers\": {\"sqlite\": {\"command\": \"uvx\", \"args\": [\"mcp-server-sqlite\", \"--db-path\", \"/tmp/test.db\"]}}}`，重启后即可使用。\n");
+            if tool_prompt_rules.is_empty() {
+                prompt.push_str("- **MCP (Model Context Protocol)**: blockcell **已内置 MCP 客户端支持**，可连接任意 MCP 服务器（SQLite、GitHub、文件系统、数据库等）。MCP 工具会以 `<serverName>__<toolName>` 格式出现在工具列表中。若用户询问 MCP 功能或当前工具列表中无 MCP 工具，说明尚未配置 MCP 服务器，请引导用户在 `~/.blockcell/config.json` 的 `mcpServers` 字段中添加配置，示例：`{\"mcpServers\": {\"sqlite\": {\"command\": \"uvx\", \"args\": [\"mcp-server-sqlite\", \"--db-path\", \"/tmp/test.db\"]}}}`，重启后即可使用。\n");
+            }
             prompt.push('\n');
         }
 
-        // ===== Dynamic suffix (changes per call) =====
-
-        // Current time
         let now = chrono::Utc::now();
         prompt.push_str(&format!(
             "Current time: {}\n",
@@ -294,16 +292,11 @@ impl ContextBuilder {
             self.paths.workspace().display()
         ));
 
-        // Memory brief — query-based retrieval when possible (P1-1 optimization)
-        // For Chat intent: skip memory injection to save tokens
-        // For other intents: use FTS5 search to find relevant memories
-        if !is_chat {
+        if is_skill_mode || is_general {
             if let Some(ref store) = self.memory_store {
                 let brief_result = if !user_query.is_empty() {
-                    // Query-based: only inject memories relevant to current question
                     store.generate_brief_for_query(user_query, 8)
                 } else {
-                    // Fallback: small general brief
                     store.generate_brief(5, 3)
                 };
                 match brief_result {
@@ -329,7 +322,6 @@ impl ContextBuilder {
             }
         }
 
-        // Disabled toggles section — tell the AI what's currently off
         if !disabled_skills.is_empty() || !disabled_tools.is_empty() {
             prompt.push_str("## ⚠️ Disabled Items\n");
             prompt.push_str("The following items have been disabled by the user via toggle.\n");
@@ -361,8 +353,7 @@ impl ContextBuilder {
             prompt.push('\n');
         }
 
-        // Dynamic evolved tools brief (tools the agent has learned via evolution)
-        if !is_chat {
+        if is_skill_mode {
             if let Some(ref brief) = self.capability_brief {
                 prompt.push_str("## Dynamic Evolved Tools\n");
                 prompt.push_str("The following tools have been dynamically evolved and are available. Use `capability_evolve` tool with action='execute' to invoke them.\n");
@@ -371,338 +362,38 @@ impl ContextBuilder {
             }
         }
 
-        // Skill trigger match — inject SKILL.md when user input matches a skill's triggers.
-        // This is the primary mechanism for user-created skills to be activated.
-        // Must run BEFORE the generic skills list so the LLM sees the specific skill first.
-        // Skip disabled skills so they are never injected into the prompt.
-        if !is_chat && !user_query.is_empty() {
-            if let Some((skill_name, skill_md)) = self.match_skill(user_query) {
-                if !disabled_skills.contains(&skill_name) {
-                    prompt.push_str(&format!("## Active Skill: {}\n", skill_name));
-                    prompt.push_str("The user's input matches this skill. Follow the skill's instructions below:\n\n");
-                    prompt.push_str(&skill_md);
-                    prompt.push_str("\n\n");
-                }
+        if let Some(skill) = active_skill {
+            prompt.push_str(&format!("## Active Skill: {}\n", skill.name));
+            prompt.push_str("The user's input matches this installed skill. Follow the skill's instructions below. Prefer the skill's scoped tools and avoid unrelated tools.\n\n");
+            prompt.push_str(&skill.prompt_md);
+            prompt.push_str("\n\n");
+            if let Some(fallback_message) = &skill.fallback_message {
+                prompt.push_str("## Skill Fallback\n");
+                prompt.push_str(fallback_message);
+                prompt.push_str("\n\n");
             }
         }
 
-        // Skills list (Method D: condensed for non-relevant intents, hidden for Chat)
-        if needs_skills_list(intents) {
-            self.build_skills_section(&mut prompt, intents, disabled_skills);
-        }
-
-        // Financial Analysis Guidelines (Method C: only for Finance/Blockchain intents)
-        if needs_finance_guidelines(intents) {
-            self.build_finance_guidelines(&mut prompt);
+        if is_general {
+            prompt.push_str("## Core Tool Scope\n");
+            prompt.push_str("You currently have access to the minimal built-in tool kernel only. Specialized domain tools are activated by matching installed skills. Prefer the available core tools unless a skill is explicitly active. If the user's request would be better served by specialized domain capabilities that are not currently active, briefly remind the user that they can install the corresponding skills to extend blockcell.\n\n");
         }
 
         prompt
     }
 
-    /// Build skills section based on intent (Method D).
-    fn build_skills_section(
-        &self,
-        prompt: &mut String,
-        intents: &[IntentCategory],
-        disabled_skills: &HashSet<String>,
-    ) {
-        if let Some(ref manager) = self.skill_manager {
-            let mut skills = manager.list_available();
-            // Filter out disabled skills
-            if !disabled_skills.is_empty() {
-                skills.retain(|s| !disabled_skills.contains(&s.name));
-            }
-            skills.sort_by(|a, b| a.name.cmp(&b.name));
-            if skills.is_empty() {
-                return;
-            }
-
-            let is_unknown = intents.iter().any(|i| matches!(i, IntentCategory::Unknown));
-
-            if is_unknown {
-                // For Unknown intent: show category summary only
-                let count = skills.len();
-                prompt.push_str("## Skills Available\n");
-                prompt.push_str(&format!(
-                    "{} skills loaded. Use `list_skills query='available'` to see all.\n\n",
-                    count
-                ));
-            } else {
-                // For specific intents: show only relevant skills (max 10)
-                let relevant: Vec<_> = skills
-                    .iter()
-                    .filter(|s| !s.meta.triggers.is_empty())
-                    .filter(|s| self.skill_matches_intents(s, intents))
-                    .take(10)
-                    .collect();
-
-                if !relevant.is_empty() {
-                    prompt.push_str("## Relevant Skills\n");
-                    prompt.push_str("Skills handle complex multi-step workflows. **Prefer calling tools directly** (finance_api, web_search) for simple queries. Only use `spawn` with `skill_name` for background tasks or when you cannot answer directly.\n\n");
-                    for skill in &relevant {
-                        let triggers = skill
-                            .meta
-                            .triggers
-                            .iter()
-                            .take(4)
-                            .cloned()
-                            .collect::<Vec<String>>()
-                            .join(" | ");
-                        prompt.push_str(&format!("- **{}** — {}\n", skill.name, triggers));
-                    }
-                    prompt.push('\n');
-                }
-            }
-        }
-    }
-
-    /// Check if a skill is relevant to the given intents based on its dependencies/triggers.
-    fn skill_matches_intents(
-        &self,
-        skill: &blockcell_skills::Skill,
-        intents: &[IntentCategory],
-    ) -> bool {
-        let name = &skill.name;
-        let caps = &skill.meta.capabilities;
-        let triggers = &skill.meta.triggers;
-
-        for intent in intents {
-            let matched = match intent {
-                IntentCategory::Finance => {
-                    caps.iter().any(|c| {
-                        [
-                            "finance_api",
-                            "exchange_api",
-                            "alert_rule",
-                            "stream_subscribe",
-                        ]
-                        .contains(&c.as_str())
-                    }) || [
-                        "stock",
-                        "bond",
-                        "futures",
-                        "crypto",
-                        "portfolio",
-                        "finance",
-                        "daily_finance",
-                        "macro",
-                    ]
-                    .iter()
-                    .any(|k| name.contains(k))
-                }
-                IntentCategory::Blockchain => {
-                    caps.iter().any(|c| {
-                        [
-                            "blockchain_rpc",
-                            "blockchain_tx",
-                            "contract_security",
-                            "nft_market",
-                            "bridge_api",
-                            "multisig",
-                        ]
-                        .contains(&c.as_str())
-                    }) || [
-                        "crypto", "token", "whale", "defi", "nft", "contract", "wallet", "dao",
-                        "treasury",
-                    ]
-                    .iter()
-                    .any(|k| name.contains(k))
-                }
-                IntentCategory::SystemControl => {
-                    caps.iter().any(|c| {
-                        ["app_control", "camera_capture", "system_info"].contains(&c.as_str())
-                    }) || ["app_control", "camera"].iter().any(|k| name.contains(k))
-                }
-                IntentCategory::Media => caps.iter().any(|c| {
-                    [
-                        "audio_transcribe",
-                        "tts",
-                        "ocr",
-                        "image_understand",
-                        "video_process",
-                    ]
-                    .contains(&c.as_str())
-                }),
-                IntentCategory::Communication => caps
-                    .iter()
-                    .any(|c| ["email", "social_media", "notification"].contains(&c.as_str())),
-                _ => {
-                    // For other intents, check if any trigger keyword overlaps with the skill name
-                    // or if the skill name contains intent-relevant keywords.
-                    let intent_keywords: &[&str] = match intent {
-                        IntentCategory::Organization => &[
-                            "日程", "任务", "提醒", "记忆", "笔记", "calendar", "task", "reminder",
-                            "note", "cron",
-                        ],
-                        IntentCategory::WebSearch => {
-                            &["搜索", "网页", "浏览", "search", "web", "browse"]
-                        }
-                        IntentCategory::FileOps => {
-                            &["文件", "代码", "脚本", "file", "code", "script"]
-                        }
-                        IntentCategory::DataAnalysis => {
-                            &["数据", "图表", "统计", "data", "chart", "analysis"]
-                        }
-                        IntentCategory::DevOps => {
-                            &["部署", "服务器", "git", "cloud", "deploy", "server"]
-                        }
-                        IntentCategory::Lifestyle => {
-                            &["健康", "地图", "联系人", "health", "map", "contact"]
-                        }
-                        IntentCategory::IoT => &["智能家居", "传感器", "iot", "smart", "sensor"],
-                        _ => &[],
-                    };
-                    let name_lower = name.to_lowercase();
-                    intent_keywords.iter().any(|kw| name_lower.contains(kw))
-                        || triggers.iter().any(|t| {
-                            let t_lower = t.to_lowercase();
-                            intent_keywords.iter().any(|kw| t_lower.contains(kw))
-                        })
-                }
-            };
-            if matched {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Build financial analysis guidelines section (Method C: conditional injection).
-    fn build_finance_guidelines(&self, prompt: &mut String) {
-        prompt.push_str("\n## Financial Analysis Guidelines\n");
-        prompt.push_str("All core financial data is **free, no API key required**. Use `finance_api` as primary tool.\n\n");
-
-        prompt.push_str("### Step 0: Unknown Stock Code? Use stock_search FIRST\n");
-        prompt.push_str("**If user gives a company name (not a code), ALWAYS call `finance_api` action='stock_search' query='公司名' first to get the stock code.**\n");
-        prompt.push_str("Example: user says '分析摩尔线程' → call stock_search query='摩尔线程' → check if listed.\n");
-        prompt.push_str(
-            "- If **found**: use the returned code for stock_quote / stock_history etc.\n",
-        );
-        prompt.push_str("- If **not found / unlisted**: explicitly tell the user the company is not publicly listed, then search for **related concept stocks** using web_search or stock_screen with industry filter. Provide analysis of publicly-traded peers in the same sector.\n\n");
-
-        prompt.push_str("### Step 1: web_search Retry Strategy\n");
-        prompt.push_str("If `web_search` returns irrelevant results (wrong topic, foreign language), **do NOT give up immediately**. Try these alternatives:\n");
-        prompt.push_str(
-            "1. Rephrase query in Chinese: '公司名 公司 行业 融资' or '公司名 A股 概念股'\n",
-        );
-        prompt.push_str("2. Use shorter, more specific terms: just the company name + key noun\n");
-        prompt.push_str(
-            "3. Try web_fetch on a specific known URL (e.g. eastmoney.com, xueqiu.com)\n",
-        );
-        prompt.push_str("4. Only conclude 'no information found' after 2+ failed attempts with different queries.\n\n");
-
-        prompt.push_str("### Data Source Priority\n");
-        prompt.push_str("1. **`finance_api`** — primary (东方财富 A股/港股 free real-time, CoinGecko crypto free)\n");
-        prompt.push_str(
-            "2. **`http_request`** — advanced 东方财富 APIs (资金流向/龙虎榜/北向资金/板块)\n",
-        );
-        prompt.push_str(
-            "3. **`web_search`** + **`web_fetch`** — news, analysis articles, macro context\n\n",
-        );
-
-        prompt.push_str("### finance_api Quick Reference\n");
-        prompt.push_str("- **搜索股票代码**: action='stock_search' query='公司名' (必须先做！)\n");
-        prompt.push_str("- **行情**: action='stock_quote' symbol='601318' (A股 6位) / '00700.HK' (港股) / 'AAPL' (美股)\n");
-        prompt.push_str("- **K线**: action='stock_history' symbol='600519' interval='1d'\n");
-        prompt.push_str(
-            "- **财务**: action='financial_statement' symbol='600519' report_type='indicator'\n",
-        );
-        prompt.push_str("- **资金流向**: action='capital_flow' symbol='601318'\n");
-        prompt.push_str("- **选股(同行业)**: action='stock_screen' screen_filters={industry:'GPU芯片', board:'科创板'}\n");
-        prompt.push_str("- **龙虎榜**: action='top_list' list_type='dragon_tiger'\n");
-        prompt.push_str("- **北向资金**: action='northbound_flow'\n");
-        prompt.push_str("- **涨停板**: action='top_list' list_type='limit_up'\n");
-        prompt.push_str("- **大盘行情**: action='market_overview'\n");
-        prompt.push_str("- **行业资金**: action='industry_fund_flow'\n");
-        prompt.push_str("- **加密货币**: action='crypto_price' symbol='bitcoin'\n");
-        prompt.push_str("- **外汇**: action='forex_rate' from_currency='USD' to_currency='CNY'\n");
-        prompt.push_str("- **新闻**: action='stock_news' symbol='600519'\n");
-        prompt.push_str("- **宏观数据**: action='macro_data' indicator='gdp'|'cpi'|'pmi'|'social_financing'\n\n");
-
-        prompt.push_str("### Technical Indicators (calculate locally from K-line data)\n");
-        prompt.push_str("MA: sum(closes, N)/N | MACD: EMA12-EMA26, signal=EMA9(MACD) | RSI: 100-100/(1+avg_gain/avg_loss)\n\n");
-        prompt.push_str("### Common Stock Codes\n");
-        prompt.push_str("A股: 中国平安=601318, 贵州茅台=600519, 宁德时代=300750, 比亚迪=002594, 招商银行=600036\n");
-        prompt.push_str("港股: 腾讯=00700.HK, 阿里=09988.HK, 美团=03690.HK\n");
-        prompt.push_str("美股: AAPL, MSFT, TSLA, NVDA, AMZN\n\n");
-        prompt.push_str("### Monitoring Pipeline\n");
-        prompt.push_str("cron (periodic fetch) + alert_rule (price/change threshold) + stream_subscribe (real-time WebSocket) + notification (push alert)\n");
-        prompt.push_str("⚠️ **Risk**: Always add disclaimer — data is informational only, not investment advice.\n");
-    }
-
-    /// Try to match user input against skill triggers.
-    /// Returns the matched skill's SKILL.md content and name if found.
-    pub fn match_skill(&self, user_input: &str) -> Option<(String, String)> {
-        if let Some(ref manager) = self.skill_manager {
-            if let Some(skill) = manager.match_skill(user_input) {
-                if let Some(md_content) = skill.load_md() {
-                    return Some((skill.name.clone(), md_content));
-                }
-            }
-        }
-        None
-    }
-
-    /// Get a reference to the skill manager.
-    pub fn skill_manager(&self) -> Option<&blockcell_skills::SkillManager> {
-        self.skill_manager.as_ref()
-    }
-
-    pub fn build_messages(&self, history: &[ChatMessage], user_content: &str) -> Vec<ChatMessage> {
-        self.build_messages_with_media(history, user_content, &[])
-    }
-
-    pub fn build_messages_with_media(
+    pub fn build_messages_for_mode_with_channel(
         &self,
         history: &[ChatMessage],
         user_content: &str,
         media: &[String],
-    ) -> Vec<ChatMessage> {
-        self.build_messages_for_intents(
-            history,
-            user_content,
-            media,
-            &[IntentCategory::Unknown],
-            &HashSet::new(),
-            &HashSet::new(),
-        )
-    }
-
-    /// Build messages with intent-based filtering.
-    pub fn build_messages_for_intents(
-        &self,
-        history: &[ChatMessage],
-        user_content: &str,
-        media: &[String],
-        intents: &[IntentCategory],
-        disabled_skills: &HashSet<String>,
-        disabled_tools: &HashSet<String>,
-    ) -> Vec<ChatMessage> {
-        self.build_messages_for_intents_with_channel(
-            history,
-            user_content,
-            media,
-            intents,
-            disabled_skills,
-            disabled_tools,
-            "",
-            false,
-        )
-    }
-
-    /// Build messages with intent-based filtering and channel context.
-    /// `pending_intent`: when true the channel already sent an ack; skip image base64 embedding
-    /// so the LLM only sees the path text and asks the user what to do instead of auto-analyzing.
-    pub fn build_messages_for_intents_with_channel(
-        &self,
-        history: &[ChatMessage],
-        user_content: &str,
-        media: &[String],
-        intents: &[IntentCategory],
+        mode: InteractionMode,
+        active_skill: Option<&ActiveSkillContext>,
         disabled_skills: &HashSet<String>,
         disabled_tools: &HashSet<String>,
         channel: &str,
         pending_intent: bool,
+        tool_prompt_rules: &[String],
     ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         let is_im_channel = matches!(
@@ -717,18 +408,18 @@ impl ContextBuilder {
                 | "whatsapp"
         );
 
-        // System prompt (intent-filtered, channel-aware)
-        let system_prompt = self.build_system_prompt_for_intents_with_channel(
-            intents,
+        let system_prompt = self.build_system_prompt_for_mode_with_channel(
+            mode,
+            active_skill,
             disabled_skills,
             disabled_tools,
             channel,
             user_content,
+            tool_prompt_rules,
         );
         let system_tokens = estimate_tokens(&system_prompt);
         messages.push(ChatMessage::system(&system_prompt));
 
-        // Build current user message first (to measure its token cost)
         let user_msg = if media.is_empty() {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
             ChatMessage::user(&trimmed)
@@ -760,8 +451,6 @@ impl ContextBuilder {
         };
         let user_msg_tokens = estimate_message_tokens(&user_msg);
 
-        // Dynamic token budget for history:
-        // BUDGET = max_context - system_prompt - current_user_msg - reserved_output - safety_margin
         let max_context = self.config.agents.defaults.max_context_tokens as usize;
         let reserved_output = self.config.agents.defaults.max_tokens as usize;
         let safety_margin = 500;
@@ -771,38 +460,21 @@ impl ContextBuilder {
             .saturating_sub(reserved_output)
             .saturating_sub(safety_margin);
 
-        // History (Method E: smart compression with dynamic token budget)
         let compressed = Self::compress_history(history, history_budget);
         let safe_start = Self::find_safe_history_start(&compressed);
         for msg in &compressed[safe_start..] {
             messages.push(msg.clone());
         }
 
-        // Append current user message
-        messages.push(user_msg);
-
-        // IM channels: cap message count to keep requests small and reduce latency.
-        // Keep the system prompt (index 0) and the most recent messages.
-        if is_im_channel {
-            const MAX_IM_MESSAGES: usize = 14;
-            if messages.len() > MAX_IM_MESSAGES {
-                let system = messages.first().cloned();
-                // Naive tail slice — may start mid tool-call sequence; fix below
-                let tail_start = messages.len().saturating_sub(MAX_IM_MESSAGES - 1);
-                let mut tail = messages[tail_start..].to_vec();
-                // Re-apply safety check: skip any leading orphaned tool/assistant-tool_calls messages
-                let safe = Self::find_safe_history_start(&tail);
-                if safe > 0 {
-                    tail = tail[safe..].to_vec();
-                }
-                messages = Vec::with_capacity(1 + tail.len());
-                if let Some(s) = system {
-                    messages.push(s);
-                }
-                messages.extend(tail);
-            }
+        if is_im_channel && messages.len() > 24 {
+            let keep = 24;
+            let start = messages.len().saturating_sub(keep);
+            let mut trimmed = vec![messages[0].clone()];
+            trimmed.extend(messages[start..].iter().cloned());
+            messages = trimmed;
         }
 
+        messages.push(user_msg);
         messages
     }
 

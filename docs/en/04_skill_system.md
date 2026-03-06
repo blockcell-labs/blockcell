@@ -1,7 +1,6 @@
 # Article 04: The Skill System — Extending AI Capabilities with Rhai Scripts
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 4/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 4
 ---
 
 ## Tools vs skills — what’s the difference?

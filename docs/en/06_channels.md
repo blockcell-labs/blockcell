@@ -1,7 +1,6 @@
 # Article 06: Multi-Channel Access — Telegram/Slack/Discord/Feishu/DingTalk/WeCom and more
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 6/16
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 6
 ---
 
 ## Why multi-channel matters
@@ -47,6 +46,77 @@ Each channel implements the same interface:
 
 This way, Agent Runtime does not need to care which channel is used — behavior stays consistent.
 
+### Current routing rules
+
+- Internal entry points such as `cli`, `cron`, and `ws` go to the `default` agent
+- External channels (Telegram / Slack / Discord / Feishu / DingTalk / WeCom / Lark / WhatsApp) first check `channelAccountOwners.<channel>.<accountId>` and fall back to `channelOwners.<channel>`
+- **Every enabled external channel must have an owner**, otherwise `blockcell gateway` fails fast during startup
+- Use `blockcell channels owner list|set|clear` to manage bindings
+
+Minimal example:
+
+```json
+{
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  }
+}
+```
+
+This means Telegram falls back to `default`, but messages coming from account `bot2` are routed to `ops`.
+
+A fuller **2 bots / 2 agents** example:
+
+```json
+{
+  "agents": {
+    "list": [
+      { "id": "default", "enabled": true },
+      { "id": "ops", "enabled": true }
+    ]
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot1": "default",
+      "bot2": "ops"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "defaultAccountId": "bot1",
+      "accounts": {
+        "bot1": {
+          "enabled": true,
+          "token": "TG_TOKEN_BOT1",
+          "allowFrom": ["YOUR_USER_ID"]
+        },
+        "bot2": {
+          "enabled": true,
+          "token": "TG_TOKEN_BOT2",
+          "allowFrom": ["YOUR_USER_ID"]
+        }
+      }
+    }
+  }
+}
+```
+
+This means messages from `bot1` go to the `default` agent, while messages from `bot2` go to the `ops` agent. Because both enabled accounts are explicitly bound, you do not need an extra `channelOwners.telegram` fallback here.
+
+You can also configure the bindings from CLI:
+
+```bash
+blockcell channels owner set --channel telegram --account bot1 --agent default
+blockcell channels owner set --channel telegram --account bot2 --agent ops
+```
+
 ---
 
 ## Configure Telegram
@@ -68,11 +138,14 @@ Edit `~/.blockcell/config.json`:
 
 ```json
 {
+  "channelOwners": {
+    "telegram": "default"
+  },
   "channels": {
     "telegram": {
-      "botToken": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
-      "allowFrom": ["YOUR_USER_ID"],
-      "pollIntervalSecs": 2
+      "enabled": true,
+      "token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+      "allowFrom": ["YOUR_USER_ID"]
     }
   }
 }
@@ -115,6 +188,7 @@ Click “Install to Workspace” and obtain the Bot User OAuth Token (`xoxb-...`
 {
   "channels": {
     "slack": {
+      "enabled": true,
       "botToken": "xoxb-YOUR-BOT-TOKEN",
       "channels": ["C0123456789"],
       "allowFrom": ["U0123456789"],
@@ -156,6 +230,7 @@ Copy the generated URL, open it in a browser, and select your server.
 {
   "channels": {
     "discord": {
+      "enabled": true,
       "botToken": "YOUR_BOT_TOKEN",
       "channels": ["1234567890123456789"],
       "allowFrom": ["YOUR_DISCORD_USER_ID"]
@@ -273,10 +348,15 @@ blockcell can run multiple channels at the same time:
 
 ```json
 {
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops",
+    "discord": "default"
+  },
   "channels": {
-    "telegram": { "botToken": "..." },
-    "slack": { "botToken": "..." },
-    "discord": { "botToken": "..." }
+    "telegram": { "enabled": true, "token": "..." },
+    "slack": { "enabled": true, "botToken": "..." },
+    "discord": { "enabled": true, "botToken": "..." }
   }
 }
 ```
@@ -333,12 +413,24 @@ blockcell channels status
 Example output:
 
 ```
-Channels status:
-  telegram  ✓ running (polled 1234 times, last: 2s ago)
-  slack     ✓ running (polled 567 times, last: 5s ago)
-  discord   ✓ connected (WebSocket, latency: 45ms)
-  whatsapp  ✗ not configured
-  feishu    ✗ not configured
+Channel Status
+==============
+
+✓ telegram   running (owner: default)
+✓ slack      running (owner: ops)
+✓ discord    connected (owner: default)
+✗ whatsapp   not configured
+✗ feishu     not configured
+```
+
+To inspect or change owner bindings:
+
+```bash
+blockcell channels owner list
+blockcell channels owner set --channel telegram --agent default
+blockcell channels owner set --channel telegram --account bot2 --agent ops
+blockcell channels owner set --channel slack --agent ops
+blockcell channels owner clear --channel slack
 ```
 
 ---
@@ -357,9 +449,13 @@ Not setting an allowlist means anyone can control your AI — extremely dangerou
 
 In Gateway mode (`blockcell gateway`), the AI cannot access files outside the workspace. This is a deliberate safety boundary to prevent leaking private files through message channels.
 
-### 3) Protect the Gateway with an API token
+### 3) API token and WebUI password
 
-If your Gateway is exposed publicly, you must set an API token:
+If `gateway.apiToken` is empty, Gateway now auto-generates one on startup and persists it to `config.json`, so the API is not left completely open.
+
+If you want a stable WebUI password, set `gateway.webuiPass`; otherwise Gateway prints a temporary password at startup.
+
+If your Gateway is exposed publicly, you should still set a deliberate long-lived `apiToken`:
 
 ```json
 {

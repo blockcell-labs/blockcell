@@ -242,18 +242,18 @@ class WebSocketManager {
     }, delay);
   }
 
-  send(data: { type: string; content?: string; chat_id?: string; media?: string[]; [key: string]: unknown }) {
+  send(data: { type: string; content?: string; chat_id?: string; media?: string[]; agent_id?: string; [key: string]: unknown }) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
   }
 
-  sendChat(content: string, chatId = 'default', media: string[] = []) {
-    this.send({ type: 'chat', content, chat_id: chatId, media });
+  sendChat(content: string, chatId = 'default', media: string[] = [], agentId?: string) {
+    this.send({ type: 'chat', content, chat_id: chatId, media, agent_id: agentId });
   }
 
-  sendCancel(chatId = 'default') {
-    this.send({ type: 'cancel', chat_id: chatId });
+  sendCancel(chatId = 'default', agentId?: string) {
+    this.send({ type: 'cancel', chat_id: chatId, agent_id: agentId });
   }
 
   sendConfirmResponse(requestId: string, approved: boolean) {

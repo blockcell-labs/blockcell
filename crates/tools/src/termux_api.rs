@@ -38,69 +38,157 @@ impl Tool for TermuxApiTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- **Termux API (Android)**: Use `termux_api` tool to control Android devices via Termux. Requires `termux-api` package + Termux:API app. Use action='info' to check availability. Covers: battery, camera, clipboard, contacts, SMS, calls, location, sensors, notifications, TTS, speech-to-text, media player, microphone, torch, brightness, volume, WiFi, vibrate, share, dialog, wallpaper, fingerprint, infrared, keystore, job scheduler, wake lock. Only available when running on Android/Termux.".to_string())
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let valid_actions = [
-            "battery_status", "brightness", "camera_info", "camera_photo",
-            "clipboard_get", "clipboard_set", "contact_list", "call_log",
-            "dialog", "download", "fingerprint",
-            "infrared_frequencies", "infrared_transmit",
-            "keystore", "location", "media_player", "media_scan",
-            "microphone_record", "notification", "notification_remove",
-            "open", "open_url", "sensor", "share",
-            "sms_list", "sms_send", "speech_to_text", "storage_get",
-            "telephony_deviceinfo", "telephony_cellinfo", "telephony_call",
-            "toast", "torch", "tts_engines", "tts_speak",
-            "vibrate", "volume", "wallpaper",
-            "wifi_connectioninfo", "wifi_scaninfo", "wifi_enable",
-            "audio_info", "wake_lock", "wake_unlock", "job_scheduler",
+            "battery_status",
+            "brightness",
+            "camera_info",
+            "camera_photo",
+            "clipboard_get",
+            "clipboard_set",
+            "contact_list",
+            "call_log",
+            "dialog",
+            "download",
+            "fingerprint",
+            "infrared_frequencies",
+            "infrared_transmit",
+            "keystore",
+            "location",
+            "media_player",
+            "media_scan",
+            "microphone_record",
+            "notification",
+            "notification_remove",
+            "open",
+            "open_url",
+            "sensor",
+            "share",
+            "sms_list",
+            "sms_send",
+            "speech_to_text",
+            "storage_get",
+            "telephony_deviceinfo",
+            "telephony_cellinfo",
+            "telephony_call",
+            "toast",
+            "torch",
+            "tts_engines",
+            "tts_speak",
+            "vibrate",
+            "volume",
+            "wallpaper",
+            "wifi_connectioninfo",
+            "wifi_scaninfo",
+            "wifi_enable",
+            "audio_info",
+            "wake_lock",
+            "wake_unlock",
+            "job_scheduler",
             "info",
         ];
         if !valid_actions.contains(&action) {
-            return Err(Error::Tool(format!("Invalid action '{}'. Valid actions: {}", action, valid_actions.join(", "))));
+            return Err(Error::Tool(format!(
+                "Invalid action '{}'. Valid actions: {}",
+                action,
+                valid_actions.join(", ")
+            )));
         }
 
         // Validate required params per action
         match action {
             "sms_send" => {
-                if params.get("number").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Tool("'number' is required for sms_send".into()));
                 }
-                if params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Tool("'text' is required for sms_send".into()));
                 }
             }
             "telephony_call" => {
-                if params.get("number").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Tool("'number' is required for telephony_call".into()));
+                if params
+                    .get("number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Tool(
+                        "'number' is required for telephony_call".into(),
+                    ));
                 }
             }
             "clipboard_set" => {
-                if params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Tool("'text' is required for clipboard_set".into()));
                 }
             }
             "tts_speak" => {
-                if params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Tool("'text' is required for tts_speak".into()));
                 }
             }
             "open_url" => {
-                if params.get("url").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Tool("'url' is required for open_url".into()));
                 }
             }
             "notification_remove" => {
-                if params.get("notification_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Tool("'notification_id' is required for notification_remove".into()));
+                if params
+                    .get("notification_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Tool(
+                        "'notification_id' is required for notification_remove".into(),
+                    ));
                 }
             }
             "infrared_transmit" => {
                 if params.get("frequency").is_none() {
-                    return Err(Error::Tool("'frequency' is required for infrared_transmit".into()));
+                    return Err(Error::Tool(
+                        "'frequency' is required for infrared_transmit".into(),
+                    ));
                 }
-                if params.get("ir_pattern").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Tool("'ir_pattern' is required for infrared_transmit".into()));
+                if params
+                    .get("ir_pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Tool(
+                        "'ir_pattern' is required for infrared_transmit".into(),
+                    ));
                 }
             }
             _ => {}
@@ -110,7 +198,10 @@ impl Tool for TermuxApiTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         // First check if we're running on Termux
         if action != "info" {
@@ -118,7 +209,8 @@ impl Tool for TermuxApiTool {
                 return Err(Error::Tool(
                     "Termux API is not available. Make sure you are running on Android with \
                      'termux-api' package installed (pkg install termux-api) and the Termux:API \
-                     companion app is installed.".into()
+                     companion app is installed."
+                        .into(),
                 ));
             }
         }
@@ -205,119 +297,371 @@ fn build_schema() -> Value {
     let mut props = Map::new();
 
     // action enum
-    props.insert("action".into(), prop_str_enum(
-        "Termux API action to perform",
-        &[
-            "battery_status", "brightness", "camera_info", "camera_photo",
-            "clipboard_get", "clipboard_set", "contact_list", "call_log",
-            "dialog", "download", "fingerprint",
-            "infrared_frequencies", "infrared_transmit",
-            "keystore", "location", "media_player", "media_scan",
-            "microphone_record", "notification", "notification_remove",
-            "open", "open_url", "sensor", "share",
-            "sms_list", "sms_send", "speech_to_text", "storage_get",
-            "telephony_deviceinfo", "telephony_cellinfo", "telephony_call",
-            "toast", "torch", "tts_engines", "tts_speak",
-            "vibrate", "volume", "wallpaper",
-            "wifi_connectioninfo", "wifi_scaninfo", "wifi_enable",
-            "audio_info", "wake_lock", "wake_unlock", "job_scheduler",
-            "info",
-        ],
-    ));
+    props.insert(
+        "action".into(),
+        prop_str_enum(
+            "Termux API action to perform",
+            &[
+                "battery_status",
+                "brightness",
+                "camera_info",
+                "camera_photo",
+                "clipboard_get",
+                "clipboard_set",
+                "contact_list",
+                "call_log",
+                "dialog",
+                "download",
+                "fingerprint",
+                "infrared_frequencies",
+                "infrared_transmit",
+                "keystore",
+                "location",
+                "media_player",
+                "media_scan",
+                "microphone_record",
+                "notification",
+                "notification_remove",
+                "open",
+                "open_url",
+                "sensor",
+                "share",
+                "sms_list",
+                "sms_send",
+                "speech_to_text",
+                "storage_get",
+                "telephony_deviceinfo",
+                "telephony_cellinfo",
+                "telephony_call",
+                "toast",
+                "torch",
+                "tts_engines",
+                "tts_speak",
+                "vibrate",
+                "volume",
+                "wallpaper",
+                "wifi_connectioninfo",
+                "wifi_scaninfo",
+                "wifi_enable",
+                "audio_info",
+                "wake_lock",
+                "wake_unlock",
+                "job_scheduler",
+                "info",
+            ],
+        ),
+    );
 
     // General params
     props.insert("text".into(), prop_str("Text content for: clipboard_set, toast, tts_speak, sms_send, notification (--content), share (stdin text), dialog title"));
     props.insert("number".into(), prop_str("(sms_send, telephony_call) Phone number(s). For SMS, comma-separated for multiple recipients"));
-    props.insert("output_path".into(), prop_str("(camera_photo, microphone_record, storage_get) Output file path"));
-    props.insert("camera_id".into(), prop_int("(camera_photo) Camera ID, default 0. Use camera_info to list cameras"));
-    props.insert("brightness".into(), prop_int("(brightness) Screen brightness 0-255, or -1 for auto"));
-    props.insert("title".into(), prop_str("(notification, download, share) Title text"));
-    props.insert("url".into(), prop_str("(open_url, download, wallpaper) URL to open/download/set as wallpaper"));
-    props.insert("file_path".into(), prop_str("(open, share, media_scan, wallpaper) File path to open/share/scan/set as wallpaper"));
-    props.insert("content_type".into(), prop_str("(open, share) MIME content type"));
-    props.insert("limit".into(), prop_int("(sms_list, call_log) Max number of items. Default: 10"));
-    props.insert("offset".into(), prop_int("(sms_list, call_log) Offset in list. Default: 0"));
+    props.insert(
+        "output_path".into(),
+        prop_str("(camera_photo, microphone_record, storage_get) Output file path"),
+    );
+    props.insert(
+        "camera_id".into(),
+        prop_int("(camera_photo) Camera ID, default 0. Use camera_info to list cameras"),
+    );
+    props.insert(
+        "brightness".into(),
+        prop_int("(brightness) Screen brightness 0-255, or -1 for auto"),
+    );
+    props.insert(
+        "title".into(),
+        prop_str("(notification, download, share) Title text"),
+    );
+    props.insert(
+        "url".into(),
+        prop_str("(open_url, download, wallpaper) URL to open/download/set as wallpaper"),
+    );
+    props.insert(
+        "file_path".into(),
+        prop_str(
+            "(open, share, media_scan, wallpaper) File path to open/share/scan/set as wallpaper",
+        ),
+    );
+    props.insert(
+        "content_type".into(),
+        prop_str("(open, share) MIME content type"),
+    );
+    props.insert(
+        "limit".into(),
+        prop_int("(sms_list, call_log) Max number of items. Default: 10"),
+    );
+    props.insert(
+        "offset".into(),
+        prop_int("(sms_list, call_log) Offset in list. Default: 0"),
+    );
     props.insert("duration".into(), prop_int("(vibrate) Duration in ms, default 1000. (microphone_record) Recording limit in seconds"));
-    props.insert("enabled".into(), prop_bool("(wifi_enable, torch) true=on, false=off"));
-    props.insert("force".into(), prop_bool("(vibrate) Force vibration even in silent mode"));
-    props.insert("recursive".into(), prop_bool("(media_scan) Scan directories recursively"));
+    props.insert(
+        "enabled".into(),
+        prop_bool("(wifi_enable, torch) true=on, false=off"),
+    );
+    props.insert(
+        "force".into(),
+        prop_bool("(vibrate) Force vibration even in silent mode"),
+    );
+    props.insert(
+        "recursive".into(),
+        prop_bool("(media_scan) Scan directories recursively"),
+    );
 
     // Location
-    props.insert("provider".into(), prop_str_enum("(location) Location provider. Default: gps", &["gps", "network", "passive"]));
-    props.insert("request".into(), prop_str_enum("(location) Request type. Default: once", &["once", "last", "updates"]));
+    props.insert(
+        "provider".into(),
+        prop_str_enum(
+            "(location) Location provider. Default: gps",
+            &["gps", "network", "passive"],
+        ),
+    );
+    props.insert(
+        "request".into(),
+        prop_str_enum(
+            "(location) Request type. Default: once",
+            &["once", "last", "updates"],
+        ),
+    );
 
     // Notification
-    props.insert("notification_id".into(), prop_str("(notification, notification_remove) Notification ID"));
-    props.insert("priority".into(), prop_str_enum("(notification) Notification priority", &["high", "low", "max", "min", "default"]));
-    props.insert("sound".into(), prop_bool("(notification) Play sound with notification"));
-    props.insert("vibrate_pattern".into(), prop_str("(notification) Vibrate pattern, comma-separated ms values e.g. '500,1000,200'"));
-    props.insert("led_color".into(), prop_str("(notification) LED color as RRGGBB hex"));
-    props.insert("notification_action".into(), prop_str("(notification) Action to execute when pressing the notification"));
+    props.insert(
+        "notification_id".into(),
+        prop_str("(notification, notification_remove) Notification ID"),
+    );
+    props.insert(
+        "priority".into(),
+        prop_str_enum(
+            "(notification) Notification priority",
+            &["high", "low", "max", "min", "default"],
+        ),
+    );
+    props.insert(
+        "sound".into(),
+        prop_bool("(notification) Play sound with notification"),
+    );
+    props.insert(
+        "vibrate_pattern".into(),
+        prop_str("(notification) Vibrate pattern, comma-separated ms values e.g. '500,1000,200'"),
+    );
+    props.insert(
+        "led_color".into(),
+        prop_str("(notification) LED color as RRGGBB hex"),
+    );
+    props.insert(
+        "notification_action".into(),
+        prop_str("(notification) Action to execute when pressing the notification"),
+    );
 
     // Volume / stream
-    props.insert("stream".into(), prop_str_enum("(volume, tts_speak) Audio stream", &["alarm", "music", "notification", "ring", "system", "call"]));
-    props.insert("volume_value".into(), prop_int("(volume) Volume level to set"));
+    props.insert(
+        "stream".into(),
+        prop_str_enum(
+            "(volume, tts_speak) Audio stream",
+            &["alarm", "music", "notification", "ring", "system", "call"],
+        ),
+    );
+    props.insert(
+        "volume_value".into(),
+        prop_int("(volume) Volume level to set"),
+    );
 
     // Share
-    props.insert("share_action".into(), prop_str_enum("(share) Action to perform on shared content. Default: view", &["edit", "send", "view"]));
+    props.insert(
+        "share_action".into(),
+        prop_str_enum(
+            "(share) Action to perform on shared content. Default: view",
+            &["edit", "send", "view"],
+        ),
+    );
 
     // SMS
-    props.insert("sms_type".into(), prop_str_enum("(sms_list) Type of SMS messages to list. Default: inbox", &["all", "inbox", "sent", "draft", "outbox"]));
+    props.insert(
+        "sms_type".into(),
+        prop_str_enum(
+            "(sms_list) Type of SMS messages to list. Default: inbox",
+            &["all", "inbox", "sent", "draft", "outbox"],
+        ),
+    );
 
     // Dialog
-    props.insert("dialog_widget".into(), prop_str_enum("(dialog) Widget type for user input dialog", &["confirm", "checkbox", "counter", "date", "radio", "sheet", "spinner", "speech", "text", "time"]));
-    props.insert("dialog_values".into(), prop_str("(dialog) Comma-separated values for checkbox/radio/sheet/spinner widgets"));
+    props.insert(
+        "dialog_widget".into(),
+        prop_str_enum(
+            "(dialog) Widget type for user input dialog",
+            &[
+                "confirm", "checkbox", "counter", "date", "radio", "sheet", "spinner", "speech",
+                "text", "time",
+            ],
+        ),
+    );
+    props.insert(
+        "dialog_values".into(),
+        prop_str("(dialog) Comma-separated values for checkbox/radio/sheet/spinner widgets"),
+    );
 
     // Sensor
     props.insert("sensor_name".into(), prop_str("(sensor) Sensor name(s) to listen to (partial match). Use 'list' to see available sensors"));
-    props.insert("sensor_limit".into(), prop_int("(sensor) Number of sensor readings to take. Default: 1"));
-    props.insert("sensor_delay".into(), prop_int("(sensor) Delay between readings in ms"));
+    props.insert(
+        "sensor_limit".into(),
+        prop_int("(sensor) Number of sensor readings to take. Default: 1"),
+    );
+    props.insert(
+        "sensor_delay".into(),
+        prop_int("(sensor) Delay between readings in ms"),
+    );
 
     // TTS
-    props.insert("tts_engine".into(), prop_str("(tts_speak) TTS engine to use (see tts_engines)"));
-    props.insert("tts_language".into(), prop_str("(tts_speak) Language code for TTS"));
-    props.insert("tts_pitch".into(), prop_num("(tts_speak) Pitch multiplier, 1.0 is normal"));
-    props.insert("tts_rate".into(), prop_num("(tts_speak) Speech rate multiplier, 1.0 is normal"));
+    props.insert(
+        "tts_engine".into(),
+        prop_str("(tts_speak) TTS engine to use (see tts_engines)"),
+    );
+    props.insert(
+        "tts_language".into(),
+        prop_str("(tts_speak) Language code for TTS"),
+    );
+    props.insert(
+        "tts_pitch".into(),
+        prop_num("(tts_speak) Pitch multiplier, 1.0 is normal"),
+    );
+    props.insert(
+        "tts_rate".into(),
+        prop_num("(tts_speak) Speech rate multiplier, 1.0 is normal"),
+    );
 
     // Microphone
-    props.insert("mic_action".into(), prop_str_enum("(microphone_record) Recording action. Default: start", &["start", "info", "stop"]));
-    props.insert("encoder".into(), prop_str_enum("(microphone_record) Audio encoder", &["aac", "amr_wb", "amr_nb"]));
-    props.insert("bitrate".into(), prop_int("(microphone_record) Recording bitrate in kbps"));
-    props.insert("sample_rate".into(), prop_int("(microphone_record) Sampling rate in Hz"));
-    props.insert("channels".into(), prop_int("(microphone_record) Channel count (1=mono, 2=stereo)"));
+    props.insert(
+        "mic_action".into(),
+        prop_str_enum(
+            "(microphone_record) Recording action. Default: start",
+            &["start", "info", "stop"],
+        ),
+    );
+    props.insert(
+        "encoder".into(),
+        prop_str_enum(
+            "(microphone_record) Audio encoder",
+            &["aac", "amr_wb", "amr_nb"],
+        ),
+    );
+    props.insert(
+        "bitrate".into(),
+        prop_int("(microphone_record) Recording bitrate in kbps"),
+    );
+    props.insert(
+        "sample_rate".into(),
+        prop_int("(microphone_record) Sampling rate in Hz"),
+    );
+    props.insert(
+        "channels".into(),
+        prop_int("(microphone_record) Channel count (1=mono, 2=stereo)"),
+    );
 
     // Media player
-    props.insert("player_action".into(), prop_str_enum("(media_player) Player action", &["play", "play_file", "pause", "stop", "info"]));
+    props.insert(
+        "player_action".into(),
+        prop_str_enum(
+            "(media_player) Player action",
+            &["play", "play_file", "pause", "stop", "info"],
+        ),
+    );
 
     // Infrared
-    props.insert("frequency".into(), prop_int("(infrared_transmit) IR carrier frequency in Hz"));
-    props.insert("ir_pattern".into(), prop_str("(infrared_transmit) IR on/off pattern, comma-separated intervals e.g. '20,50,20,30'"));
+    props.insert(
+        "frequency".into(),
+        prop_int("(infrared_transmit) IR carrier frequency in Hz"),
+    );
+    props.insert(
+        "ir_pattern".into(),
+        prop_str(
+            "(infrared_transmit) IR on/off pattern, comma-separated intervals e.g. '20,50,20,30'",
+        ),
+    );
 
     // Keystore
-    props.insert("keystore_action".into(), prop_str_enum("(keystore) Keystore operation", &["list", "generate", "delete", "sign", "verify"]));
+    props.insert(
+        "keystore_action".into(),
+        prop_str_enum(
+            "(keystore) Keystore operation",
+            &["list", "generate", "delete", "sign", "verify"],
+        ),
+    );
     props.insert("key_alias".into(), prop_str("(keystore) Key alias name"));
-    props.insert("key_algorithm".into(), prop_str_enum("(keystore generate) Algorithm. Default: RSA", &["RSA", "EC"]));
-    props.insert("key_size".into(), prop_int("(keystore generate) Key size. RSA: 2048/3072/4096. EC: 256/384/521"));
-    props.insert("sign_algorithm".into(), prop_str("(keystore sign/verify) Signing algorithm e.g. 'SHA256withRSA'"));
-    props.insert("sign_data".into(), prop_str("(keystore sign) Data to sign (passed via stdin)"));
-    props.insert("signature".into(), prop_str("(keystore verify) Signature file path"));
+    props.insert(
+        "key_algorithm".into(),
+        prop_str_enum(
+            "(keystore generate) Algorithm. Default: RSA",
+            &["RSA", "EC"],
+        ),
+    );
+    props.insert(
+        "key_size".into(),
+        prop_int("(keystore generate) Key size. RSA: 2048/3072/4096. EC: 256/384/521"),
+    );
+    props.insert(
+        "sign_algorithm".into(),
+        prop_str("(keystore sign/verify) Signing algorithm e.g. 'SHA256withRSA'"),
+    );
+    props.insert(
+        "sign_data".into(),
+        prop_str("(keystore sign) Data to sign (passed via stdin)"),
+    );
+    props.insert(
+        "signature".into(),
+        prop_str("(keystore verify) Signature file path"),
+    );
 
     // Wallpaper
-    props.insert("wallpaper_lockscreen".into(), prop_bool("(wallpaper) Set wallpaper for lockscreen (Android 7+)"));
+    props.insert(
+        "wallpaper_lockscreen".into(),
+        prop_bool("(wallpaper) Set wallpaper for lockscreen (Android 7+)"),
+    );
 
     // Toast
-    props.insert("toast_bg_color".into(), prop_str("(toast) Background color name or #RRGGBB"));
-    props.insert("toast_text_color".into(), prop_str("(toast) Text color name or #RRGGBB"));
-    props.insert("toast_position".into(), prop_str_enum("(toast) Toast position. Default: middle", &["top", "middle", "bottom"]));
-    props.insert("toast_short".into(), prop_bool("(toast) Show toast for a short duration only"));
+    props.insert(
+        "toast_bg_color".into(),
+        prop_str("(toast) Background color name or #RRGGBB"),
+    );
+    props.insert(
+        "toast_text_color".into(),
+        prop_str("(toast) Text color name or #RRGGBB"),
+    );
+    props.insert(
+        "toast_position".into(),
+        prop_str_enum(
+            "(toast) Toast position. Default: middle",
+            &["top", "middle", "bottom"],
+        ),
+    );
+    props.insert(
+        "toast_short".into(),
+        prop_bool("(toast) Show toast for a short duration only"),
+    );
 
     // Job scheduler
-    props.insert("job_script".into(), prop_str("(job_scheduler) Path to script to schedule"));
+    props.insert(
+        "job_script".into(),
+        prop_str("(job_scheduler) Path to script to schedule"),
+    );
     props.insert("job_id".into(), prop_int("(job_scheduler) Job ID"));
-    props.insert("job_period_ms".into(), prop_int("(job_scheduler) Repeat period in ms (0=once)"));
-    props.insert("job_network".into(), prop_str_enum("(job_scheduler) Required network type", &["any", "unmetered", "cellular", "not_roaming", "none"]));
-    props.insert("job_charging".into(), prop_bool("(job_scheduler) Run only when charging"));
-    props.insert("job_list_pending".into(), prop_bool("(job_scheduler) List pending jobs instead of scheduling"));
+    props.insert(
+        "job_period_ms".into(),
+        prop_int("(job_scheduler) Repeat period in ms (0=once)"),
+    );
+    props.insert(
+        "job_network".into(),
+        prop_str_enum(
+            "(job_scheduler) Required network type",
+            &["any", "unmetered", "cellular", "not_roaming", "none"],
+        ),
+    );
+    props.insert(
+        "job_charging".into(),
+        prop_bool("(job_scheduler) Run only when charging"),
+    );
+    props.insert(
+        "job_list_pending".into(),
+        prop_bool("(job_scheduler) List pending jobs instead of scheduling"),
+    );
 
     let mut schema = Map::new();
     schema.insert("type".into(), json!("object"));
@@ -367,7 +711,11 @@ async fn run_termux_command(cmd: &str, args: &[&str]) -> Result<std::process::Ou
 }
 
 /// Run a termux command with stdin input.
-async fn run_termux_command_with_stdin(cmd: &str, args: &[&str], stdin_data: &str) -> Result<std::process::Output> {
+async fn run_termux_command_with_stdin(
+    cmd: &str,
+    args: &[&str],
+    stdin_data: &str,
+) -> Result<std::process::Output> {
     debug!(cmd = cmd, args = ?args, "Running termux command with stdin");
 
     use tokio::io::AsyncWriteExt;
@@ -381,12 +729,16 @@ async fn run_termux_command_with_stdin(cmd: &str, args: &[&str], stdin_data: &st
         .map_err(|e| Error::Tool(format!("Failed to spawn {}: {}", cmd, e)))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data.as_bytes()).await
+        stdin
+            .write_all(stdin_data.as_bytes())
+            .await
             .map_err(|e| Error::Tool(format!("Failed to write stdin to {}: {}", cmd, e)))?;
         drop(stdin);
     }
 
-    let output = child.wait_with_output().await
+    let output = child
+        .wait_with_output()
+        .await
         .map_err(|e| Error::Tool(format!("Failed to wait for {}: {}", cmd, e)))?;
 
     Ok(output)
@@ -472,16 +824,22 @@ async fn action_info() -> Result<Value> {
 }
 
 async fn action_camera_photo(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let camera_id = params.get("camera_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let output_path = params.get("output_path")
+    let camera_id = params
+        .get("camera_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let output_path = params
+        .get("output_path")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             let media_dir = ctx.workspace.join("media");
             let _ = std::fs::create_dir_all(&media_dir);
             let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-            media_dir.join(format!("termux_photo_{}.jpg", ts))
-                .to_string_lossy().to_string()
+            media_dir
+                .join(format!("termux_photo_{}.jpg", ts))
+                .to_string_lossy()
+                .to_string()
         });
 
     let cam_id_str = camera_id.to_string();
@@ -506,7 +864,10 @@ async fn action_camera_photo(ctx: &ToolContext, params: &Value) -> Result<Value>
         }))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(Error::Tool(format!("Camera capture failed: {}", stderr.trim())))
+        Err(Error::Tool(format!(
+            "Camera capture failed: {}",
+            stderr.trim()
+        )))
     }
 }
 
@@ -523,7 +884,8 @@ async fn action_call_log(params: &Value) -> Result<Value> {
 
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let output = run_termux_command("termux-call-log", &["-l", &limit_str, "-o", &offset_str]).await?;
+    let output =
+        run_termux_command("termux-call-log", &["-l", &limit_str, "-o", &offset_str]).await?;
     parse_termux_output("termux-call-log", &output)
 }
 
@@ -540,7 +902,10 @@ async fn action_brightness(params: &Value) -> Result<Value> {
 }
 
 async fn action_dialog(params: &Value) -> Result<Value> {
-    let widget = params.get("dialog_widget").and_then(|v| v.as_str()).unwrap_or("text");
+    let widget = params
+        .get("dialog_widget")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text");
     let title = params.get("title").and_then(|v| v.as_str());
     let values = params.get("dialog_values").and_then(|v| v.as_str());
 
@@ -582,23 +947,45 @@ async fn action_download(params: &Value) -> Result<Value> {
 }
 
 async fn action_infrared_transmit(params: &Value) -> Result<Value> {
-    let frequency = params.get("frequency").and_then(|v| v.as_i64()).unwrap_or(0);
-    let pattern = params.get("ir_pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let frequency = params
+        .get("frequency")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let pattern = params
+        .get("ir_pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let freq_str = frequency.to_string();
-    let output = run_termux_command("termux-infrared-transmit", &["-f", &freq_str, pattern]).await?;
+    let output =
+        run_termux_command("termux-infrared-transmit", &["-f", &freq_str, pattern]).await?;
     info!(freq = frequency, "📡 IR transmitted");
     parse_termux_output("termux-infrared-transmit", &output)
 }
 
 async fn action_keystore(params: &Value) -> Result<Value> {
-    let ks_action = params.get("keystore_action").and_then(|v| v.as_str()).unwrap_or("list");
-    let alias = params.get("key_alias").and_then(|v| v.as_str()).unwrap_or("");
+    let ks_action = params
+        .get("keystore_action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("list");
+    let alias = params
+        .get("key_alias")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let algorithm = params.get("key_algorithm").and_then(|v| v.as_str());
     let key_size = params.get("key_size").and_then(|v| v.as_i64());
-    let sign_algo = params.get("sign_algorithm").and_then(|v| v.as_str()).unwrap_or("");
-    let sign_data = params.get("sign_data").and_then(|v| v.as_str()).unwrap_or("");
-    let sig_file = params.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+    let sign_algo = params
+        .get("sign_algorithm")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let sign_data = params
+        .get("sign_data")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let sig_file = params
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let mut args: Vec<String> = Vec::new();
 
@@ -629,7 +1016,8 @@ async fn action_keystore(params: &Value) -> Result<Value> {
             args.push(sign_algo.to_string());
             // Data is passed via stdin
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_termux_command_with_stdin("termux-keystore", &str_args, sign_data).await?;
+            let output =
+                run_termux_command_with_stdin("termux-keystore", &str_args, sign_data).await?;
             return parse_termux_output("termux-keystore", &output);
         }
         "verify" => {
@@ -639,11 +1027,15 @@ async fn action_keystore(params: &Value) -> Result<Value> {
             args.push(sig_file.to_string());
             // Data is passed via stdin
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_termux_command_with_stdin("termux-keystore", &str_args, sign_data).await?;
+            let output =
+                run_termux_command_with_stdin("termux-keystore", &str_args, sign_data).await?;
             return parse_termux_output("termux-keystore", &output);
         }
         _ => {
-            return Err(Error::Tool(format!("Unknown keystore action: {}", ks_action)));
+            return Err(Error::Tool(format!(
+                "Unknown keystore action: {}",
+                ks_action
+            )));
         }
     }
 
@@ -653,8 +1045,14 @@ async fn action_keystore(params: &Value) -> Result<Value> {
 }
 
 async fn action_location(params: &Value) -> Result<Value> {
-    let provider = params.get("provider").and_then(|v| v.as_str()).unwrap_or("gps");
-    let request = params.get("request").and_then(|v| v.as_str()).unwrap_or("once");
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gps");
+    let request = params
+        .get("request")
+        .and_then(|v| v.as_str())
+        .unwrap_or("once");
 
     let output = run_termux_command("termux-location", &["-p", provider, "-r", request]).await?;
     info!(provider = provider, "📍 Location requested");
@@ -662,7 +1060,10 @@ async fn action_location(params: &Value) -> Result<Value> {
 }
 
 async fn action_media_player(params: &Value) -> Result<Value> {
-    let player_action = params.get("player_action").and_then(|v| v.as_str()).unwrap_or("info");
+    let player_action = params
+        .get("player_action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("info");
     let file_path = params.get("file_path").and_then(|v| v.as_str());
 
     let mut args: Vec<String> = Vec::new();
@@ -685,8 +1086,14 @@ async fn action_media_player(params: &Value) -> Result<Value> {
 }
 
 async fn action_media_scan(params: &Value) -> Result<Value> {
-    let file_path = params.get("file_path").and_then(|v| v.as_str()).unwrap_or(".");
-    let recursive = params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let file_path = params
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+    let recursive = params
+        .get("recursive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut args: Vec<String> = Vec::new();
     if recursive {
@@ -701,7 +1108,10 @@ async fn action_media_scan(params: &Value) -> Result<Value> {
 }
 
 async fn action_microphone_record(ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let mic_action = params.get("mic_action").and_then(|v| v.as_str()).unwrap_or("start");
+    let mic_action = params
+        .get("mic_action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("start");
 
     match mic_action {
         "info" => {
@@ -713,15 +1123,18 @@ async fn action_microphone_record(ctx: &ToolContext, params: &Value) -> Result<V
             return parse_termux_output("termux-microphone-record", &output);
         }
         "start" => {
-            let output_path = params.get("output_path")
+            let output_path = params
+                .get("output_path")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
                     let media_dir = ctx.workspace.join("media");
                     let _ = std::fs::create_dir_all(&media_dir);
                     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                    media_dir.join(format!("termux_recording_{}.m4a", ts))
-                        .to_string_lossy().to_string()
+                    media_dir
+                        .join(format!("termux_recording_{}.m4a", ts))
+                        .to_string_lossy()
+                        .to_string()
                 });
 
             let mut args: Vec<String> = vec!["-f".to_string(), output_path.clone()];
@@ -764,11 +1177,16 @@ async fn action_notification(params: &Value) -> Result<Value> {
     let title = params.get("title").and_then(|v| v.as_str());
     let id = params.get("notification_id").and_then(|v| v.as_str());
     let priority = params.get("priority").and_then(|v| v.as_str());
-    let sound = params.get("sound").and_then(|v| v.as_bool()).unwrap_or(false);
+    let sound = params
+        .get("sound")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let vibrate_pattern = params.get("vibrate_pattern").and_then(|v| v.as_str());
     let led_color = params.get("led_color").and_then(|v| v.as_str());
     let action = params.get("notification_action").and_then(|v| v.as_str());
-    let buttons = params.get("notification_buttons").and_then(|v| v.as_array());
+    let buttons = params
+        .get("notification_buttons")
+        .and_then(|v| v.as_array());
 
     let mut args: Vec<String> = Vec::new();
 
@@ -824,7 +1242,10 @@ async fn action_notification(params: &Value) -> Result<Value> {
 }
 
 async fn action_notification_remove(params: &Value) -> Result<Value> {
-    let id = params.get("notification_id").and_then(|v| v.as_str()).unwrap_or("");
+    let id = params
+        .get("notification_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let output = run_termux_command("termux-notification-remove", &[id]).await?;
     parse_termux_output("termux-notification-remove", &output)
 }
@@ -866,7 +1287,10 @@ async fn action_open_url(params: &Value) -> Result<Value> {
 
 async fn action_sensor(params: &Value) -> Result<Value> {
     let sensor_name = params.get("sensor_name").and_then(|v| v.as_str());
-    let limit = params.get("sensor_limit").and_then(|v| v.as_i64()).unwrap_or(1);
+    let limit = params
+        .get("sensor_limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
     let delay = params.get("sensor_delay").and_then(|v| v.as_i64());
 
     // If sensor_name is "list", list available sensors
@@ -940,18 +1364,29 @@ async fn action_share(params: &Value) -> Result<Value> {
 }
 
 async fn action_sms_list(params: &Value) -> Result<Value> {
-    let sms_type = params.get("sms_type").and_then(|v| v.as_str()).unwrap_or("inbox");
+    let sms_type = params
+        .get("sms_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("inbox");
     let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(10);
     let offset = params.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
 
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let output = run_termux_command("termux-sms-list", &[
-        "-d", "-n",
-        "-t", sms_type,
-        "-l", &limit_str,
-        "-o", &offset_str,
-    ]).await?;
+    let output = run_termux_command(
+        "termux-sms-list",
+        &[
+            "-d",
+            "-n",
+            "-t",
+            sms_type,
+            "-l",
+            &limit_str,
+            "-o",
+            &offset_str,
+        ],
+    )
+    .await?;
     parse_termux_output("termux-sms-list", &output)
 }
 
@@ -965,7 +1400,10 @@ async fn action_sms_send(params: &Value) -> Result<Value> {
 }
 
 async fn action_storage_get(params: &Value) -> Result<Value> {
-    let output_path = params.get("output_path").and_then(|v| v.as_str()).unwrap_or("/tmp/termux_storage_file");
+    let output_path = params
+        .get("output_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/tmp/termux_storage_file");
     let output = run_termux_command("termux-storage-get", &[output_path]).await?;
     let mut result = parse_termux_output("termux-storage-get", &output)?;
     result["output_path"] = json!(output_path);
@@ -980,11 +1418,17 @@ async fn action_telephony_call(params: &Value) -> Result<Value> {
 }
 
 async fn action_toast(params: &Value) -> Result<Value> {
-    let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("Hello from blockcell!");
+    let text = params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Hello from blockcell!");
     let bg_color = params.get("toast_bg_color").and_then(|v| v.as_str());
     let text_color = params.get("toast_text_color").and_then(|v| v.as_str());
     let position = params.get("toast_position").and_then(|v| v.as_str());
-    let short = params.get("toast_short").and_then(|v| v.as_bool()).unwrap_or(false);
+    let short = params
+        .get("toast_short")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut args: Vec<String> = Vec::new();
 
@@ -1012,7 +1456,10 @@ async fn action_toast(params: &Value) -> Result<Value> {
 }
 
 async fn action_torch(params: &Value) -> Result<Value> {
-    let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = params
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let arg = if enabled { "on" } else { "off" };
     let output = run_termux_command("termux-torch", &[arg]).await?;
     info!(state = arg, "🔦 Torch");
@@ -1057,8 +1504,14 @@ async fn action_tts_speak(params: &Value) -> Result<Value> {
 }
 
 async fn action_vibrate(params: &Value) -> Result<Value> {
-    let duration = params.get("duration").and_then(|v| v.as_i64()).unwrap_or(1000);
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let duration = params
+        .get("duration")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1000);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let duration_str = duration.to_string();
     let mut args: Vec<&str> = vec!["-d", &duration_str];
@@ -1093,7 +1546,10 @@ async fn action_volume(params: &Value) -> Result<Value> {
 async fn action_wallpaper(params: &Value) -> Result<Value> {
     let file_path = params.get("file_path").and_then(|v| v.as_str());
     let url = params.get("url").and_then(|v| v.as_str());
-    let lockscreen = params.get("wallpaper_lockscreen").and_then(|v| v.as_bool()).unwrap_or(false);
+    let lockscreen = params
+        .get("wallpaper_lockscreen")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut args: Vec<String> = Vec::new();
 
@@ -1108,7 +1564,9 @@ async fn action_wallpaper(params: &Value) -> Result<Value> {
         args.push("-u".to_string());
         args.push(u.to_string());
     } else {
-        return Err(Error::Tool("Either 'file_path' or 'url' is required for wallpaper".into()));
+        return Err(Error::Tool(
+            "Either 'file_path' or 'url' is required for wallpaper".into(),
+        ));
     }
 
     let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -1118,7 +1576,10 @@ async fn action_wallpaper(params: &Value) -> Result<Value> {
 }
 
 async fn action_wifi_enable(params: &Value) -> Result<Value> {
-    let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = params
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let arg = if enabled { "true" } else { "false" };
     let output = run_termux_command("termux-wifi-enable", &[arg]).await?;
     info!(enabled = enabled, "📶 WiFi");
@@ -1126,7 +1587,10 @@ async fn action_wifi_enable(params: &Value) -> Result<Value> {
 }
 
 async fn action_job_scheduler(params: &Value) -> Result<Value> {
-    let list_pending = params.get("job_list_pending").and_then(|v| v.as_bool()).unwrap_or(false);
+    let list_pending = params
+        .get("job_list_pending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if list_pending {
         let output = run_termux_command("termux-job-scheduler", &["--pending", "true"]).await?;
@@ -1198,7 +1662,9 @@ mod tests {
         assert!(tool.validate(&json!({"action": "info"})).is_ok());
         assert!(tool.validate(&json!({"action": "toast"})).is_ok());
         assert!(tool.validate(&json!({"action": "vibrate"})).is_ok());
-        assert!(tool.validate(&json!({"action": "wifi_connectioninfo"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "wifi_connectioninfo"}))
+            .is_ok());
     }
 
     #[test]
@@ -1212,52 +1678,74 @@ mod tests {
     fn test_termux_api_validate_sms_send_requires_number_and_text() {
         let tool = TermuxApiTool;
         assert!(tool.validate(&json!({"action": "sms_send"})).is_err());
-        assert!(tool.validate(&json!({"action": "sms_send", "number": "123"})).is_err());
-        assert!(tool.validate(&json!({"action": "sms_send", "text": "hello"})).is_err());
-        assert!(tool.validate(&json!({"action": "sms_send", "number": "123", "text": "hello"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "sms_send", "number": "123"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "sms_send", "text": "hello"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "sms_send", "number": "123", "text": "hello"}))
+            .is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_telephony_call_requires_number() {
         let tool = TermuxApiTool;
         assert!(tool.validate(&json!({"action": "telephony_call"})).is_err());
-        assert!(tool.validate(&json!({"action": "telephony_call", "number": "123"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "telephony_call", "number": "123"}))
+            .is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_clipboard_set_requires_text() {
         let tool = TermuxApiTool;
         assert!(tool.validate(&json!({"action": "clipboard_set"})).is_err());
-        assert!(tool.validate(&json!({"action": "clipboard_set", "text": "hello"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "clipboard_set", "text": "hello"}))
+            .is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_tts_speak_requires_text() {
         let tool = TermuxApiTool;
         assert!(tool.validate(&json!({"action": "tts_speak"})).is_err());
-        assert!(tool.validate(&json!({"action": "tts_speak", "text": "hello"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "tts_speak", "text": "hello"}))
+            .is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_open_url_requires_url() {
         let tool = TermuxApiTool;
         assert!(tool.validate(&json!({"action": "open_url"})).is_err());
-        assert!(tool.validate(&json!({"action": "open_url", "url": "https://example.com"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "open_url", "url": "https://example.com"}))
+            .is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_infrared_transmit_requires_params() {
         let tool = TermuxApiTool;
-        assert!(tool.validate(&json!({"action": "infrared_transmit"})).is_err());
-        assert!(tool.validate(&json!({"action": "infrared_transmit", "frequency": 38000})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "infrared_transmit"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "infrared_transmit", "frequency": 38000}))
+            .is_err());
         assert!(tool.validate(&json!({"action": "infrared_transmit", "frequency": 38000, "ir_pattern": "20,50,20,30"})).is_ok());
     }
 
     #[test]
     fn test_termux_api_validate_notification_remove_requires_id() {
         let tool = TermuxApiTool;
-        assert!(tool.validate(&json!({"action": "notification_remove"})).is_err());
-        assert!(tool.validate(&json!({"action": "notification_remove", "notification_id": "my-notif"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "notification_remove"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "notification_remove", "notification_id": "my-notif"}))
+            .is_ok());
     }
 
     #[test]

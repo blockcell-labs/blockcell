@@ -1,3 +1,4 @@
+use crate::account::discord_account_id;
 use blockcell_core::{Config, Error, InboundMessage, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -229,7 +230,10 @@ impl DiscordChannel {
                         if let Some(interval) = d.get("heartbeat_interval").and_then(|v| v.as_u64())
                         {
                             heartbeat_interval_ms = interval;
-                            debug!(interval_ms = interval, "Received Hello with heartbeat interval");
+                            debug!(
+                                interval_ms = interval,
+                                "Received Hello with heartbeat interval"
+                            );
                         }
                     }
                 }
@@ -370,12 +374,10 @@ impl DiscordChannel {
             None => return Err(Error::Channel("Attachment has no URL".to_string())),
         };
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| Error::Channel(format!("Discord attachment download failed: {}", e)))?;
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                Error::Channel(format!("Discord attachment download failed: {}", e))
+            })?;
 
         if !resp.status().is_success() {
             return Err(Error::Channel(format!(
@@ -470,18 +472,22 @@ impl DiscordChannel {
 
         // When content is empty but attachments exist, generate a descriptive fallback
         let content = if content.is_empty() && !media_paths.is_empty() {
-            let descs: Vec<String> = msg.attachments.iter().map(|a| {
-                let ct = a.content_type.as_deref().unwrap_or("");
-                if ct.starts_with("image/") {
-                    "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string()
-                } else if ct.starts_with("audio/") || ct.starts_with("video/ogg") {
-                    "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string()
-                } else if ct.starts_with("video/") {
-                    "[视频，已下载到本地]".to_string()
-                } else {
-                    format!("[文件: {}，已下载到本地，可用 read_file 读取]", a.filename)
-                }
-            }).collect();
+            let descs: Vec<String> = msg
+                .attachments
+                .iter()
+                .map(|a| {
+                    let ct = a.content_type.as_deref().unwrap_or("");
+                    if ct.starts_with("image/") {
+                        "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string()
+                    } else if ct.starts_with("audio/") || ct.starts_with("video/ogg") {
+                        "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string()
+                    } else if ct.starts_with("video/") {
+                        "[视频，已下载到本地]".to_string()
+                    } else {
+                        format!("[文件: {}，已下载到本地，可用 read_file 读取]", a.filename)
+                    }
+                })
+                .collect();
             descs.join("\n")
         } else {
             content
@@ -491,6 +497,7 @@ impl DiscordChannel {
 
         let inbound = InboundMessage {
             channel: "discord".to_string(),
+            account_id: discord_account_id(&self.config),
             sender_id: msg.author.id.clone(),
             chat_id: msg.channel_id.clone(),
             content,
@@ -546,7 +553,10 @@ pub async fn send_message_reply(
         }
 
         let response = client
-            .post(format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
+            .post(format!(
+                "{}/channels/{}/messages",
+                DISCORD_API_BASE, chat_id
+            ))
             .header("Authorization", format!("Bot {}", token))
             .json(&body)
             .send()
@@ -629,7 +639,10 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
     info!(file_path = %file_path, "Discord: sending media attachment");
 
     let resp = client
-        .post(format!("{}/channels/{}/messages", DISCORD_API_BASE, chat_id))
+        .post(format!(
+            "{}/channels/{}/messages",
+            DISCORD_API_BASE, chat_id
+        ))
         .header("Authorization", format!("Bot {}", token))
         .multipart(form)
         .send()
@@ -638,7 +651,10 @@ pub async fn send_media_message(config: &Config, chat_id: &str, file_path: &str)
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(Error::Channel(format!("Discord send media error: {}", body)));
+        return Err(Error::Channel(format!(
+            "Discord send media error: {}",
+            body
+        )));
     }
     Ok(())
 }

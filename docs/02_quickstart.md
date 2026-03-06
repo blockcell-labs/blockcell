@@ -1,7 +1,6 @@
 # 第02篇：5分钟上手 blockcell —— 从安装到第一次对话
 
-> 系列文章：《blockcell 开源项目深度解析》第 2/14 篇
-
+> 系列文章：《blockcell 开源项目深度解析》第 2 篇
 ---
 
 ## 前言
@@ -16,13 +15,14 @@
 
 ## 5分钟最短路径（照做就能跑起来）
 
-如果你只想最快跑通一次,按下面 3 步即可:
+如果你只想最快跑通一次，按下面 4 步即可：
 
-1. 安装:运行安装脚本
-2. 配置:`blockcell setup`(交互式向导,自动完成初始化和配置)
-3. 启动:`blockcell agent`,随便发一句话测试
-4. 启动:`blockcell gateway`,浏览器打开http://127.0.0.1:18792:, 查看webui
-后面的内容会更详细（多 Provider 选择、常用命令、FAQ、部署建议），你可以在跑通后再慢慢看。
+1. 安装：运行安装脚本
+2. 配置：`blockcell setup`（交互式向导，自动完成初始化和基础校验）
+3. 启动：`blockcell agent`，随便发一句话测试
+4. 启动：`blockcell gateway`，浏览器打开 `http://127.0.0.1:18791` 查看 WebUI
+
+后面的内容会更详细（多 Provider 选择、多 Agent、常用命令、FAQ、部署建议），你可以在跑通后再慢慢看。
 
 ---
 
@@ -69,12 +69,14 @@ blockcell --version
 blockcell setup
 ```
 
-这个命令会:
+这个命令会：
 1. 创建 `~/.blockcell/` 目录结构
-2. 引导你选择 LLM provider(DeepSeek/OpenAI/Kimi/Anthropic/Gemini/Zhipu/MiniMax/Ollama)
+2. 引导你选择 LLM provider（DeepSeek/OpenAI/Kimi/Anthropic/Gemini/Zhipu/MiniMax/Ollama）
 3. 配置 API Key 和模型
-4. 可选:配置一个消息渠道(Telegram/飞书/企业微信/钉钉/Lark)
+4. 可选：配置一个消息渠道（Telegram/飞书/企业微信/钉钉/Lark）
 5. 自动验证配置是否有效
+6. 如果你配置了外部渠道但还没绑定 owner，会自动把该渠道绑定到 `default` agent
+7. 如果后续要把同一渠道下的某个账号 / 机器人单独分配给其它 agent，可继续配置 `channelAccountOwners.<channel>.<accountId>`
 
 **支持的 provider:**
 - `deepseek` - 推荐,便宜且性能好
@@ -111,13 +113,21 @@ blockcell onboard
 ```
 ~/.blockcell/
 ├── config.json          # 主配置文件
-└── workspace/           # AI 的工作目录
-    ├── memory/          # 记忆数据库
-    ├── sessions/        # 会话历史
-    ├── skills/          # 用户安装的技能
-    ├── media/           # 截图、音频等媒体文件
-    └── audit/           # 操作审计日志
+├── sessions/            # default agent 的会话历史
+├── audit/               # default agent 的审计日志
+├── workspace/           # default agent 的工作目录
+│   ├── memory/          # 记忆数据库
+│   ├── skills/          # 用户安装的技能
+│   ├── media/           # 截图、音频等媒体文件
+│   └── tasks.json       # 全局后台任务快照
+└── agents/              # 非 default agent 的独立目录（按需创建）
+    └── ops/
+        ├── sessions/
+        ├── audit/
+        └── workspace/
 ```
+
+说明：`default` agent 直接使用 `~/.blockcell/` 根目录；其它 agent 使用 `~/.blockcell/agents/<ID>/` 下的独立工作区。
 
 ---
 
@@ -423,9 +433,18 @@ blockcell doctor
     "webuiPort": 18791,
     "apiToken": "你的访问令牌（可选）"
   },
+  "channelOwners": {
+    "telegram": "default"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  },
   "channels": {
     "telegram": {
-      "botToken": "你的Bot Token",
+      "enabled": true,
+      "token": "你的 Bot Token",
       "allowFrom": ["你的用户ID"]
     }
   }

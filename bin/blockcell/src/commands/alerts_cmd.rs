@@ -22,7 +22,10 @@ pub async fn list() -> anyhow::Result<()> {
     println!();
     println!("🔔 Alert rules ({} total)", rules.len());
     println!();
-    println!("  {:<10} {:<20} {:<10} {:<12} Condition", "ID", "Name", "Enabled", "Operator");
+    println!(
+        "  {:<10} {:<20} {:<10} {:<12} Condition",
+        "ID", "Name", "Enabled", "Operator"
+    );
     println!("  {}", "-".repeat(70));
 
     for rule in &rules {
@@ -71,7 +74,11 @@ pub async fn history(limit: usize) -> anyhow::Result<()> {
     let recent = &entries[entries.len().saturating_sub(limit)..];
 
     println!();
-    println!("📜 Alert trigger history (showing {}, {} total)", show_count, entries.len());
+    println!(
+        "📜 Alert trigger history (showing {}, {} total)",
+        show_count,
+        entries.len()
+    );
     println!();
 
     for entry in recent.iter().rev() {
@@ -109,7 +116,10 @@ pub async fn evaluate() -> anyhow::Result<()> {
     let content = std::fs::read_to_string(&rules_file)?;
     let rules: Vec<Value> = serde_json::from_str(&content).unwrap_or_default();
 
-    let enabled_count = rules.iter().filter(|r| r["enabled"].as_bool().unwrap_or(true)).count();
+    let enabled_count = rules
+        .iter()
+        .filter(|r| r["enabled"].as_bool().unwrap_or(true))
+        .count();
     println!("⏳ Evaluating {} enabled alert rules...", enabled_count);
     println!();
     println!("Note: Real-time data sources are not available in CLI mode.");
@@ -150,8 +160,8 @@ pub async fn add(
     };
 
     // Parse threshold as number or string
-    let threshold_val: Value = serde_json::from_str(threshold)
-        .unwrap_or_else(|_| Value::String(threshold.to_string()));
+    let threshold_val: Value =
+        serde_json::from_str(threshold).unwrap_or_else(|_| Value::String(threshold.to_string()));
 
     let id = uuid::Uuid::new_v4().to_string();
     let rule = serde_json::json!({
@@ -170,7 +180,11 @@ pub async fn add(
     let content = serde_json::to_string_pretty(&rules)?;
     std::fs::write(&rules_file, content)?;
 
-    println!("✓ Alert rule created: {} ({})", name, &id.chars().take(8).collect::<String>());
+    println!(
+        "✓ Alert rule created: {} ({})",
+        name,
+        &id.chars().take(8).collect::<String>()
+    );
     Ok(())
 }
 

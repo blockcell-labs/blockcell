@@ -1,7 +1,6 @@
 # Article 10: Finance in Practice — Monitoring Stocks and Crypto with blockcell
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 10/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 10
 ---
 
 ## Why finance is a great fit for AI agents

@@ -178,102 +178,151 @@ pub(super) fn print_startup_banner(
     let ch = &config.channels;
 
     struct ChannelInfo {
+        id: &'static str,
         name: &'static str,
         enabled: bool,
         configured: bool,
         detail: String,
     }
 
+    #[derive(Clone)]
+    struct ChannelRouteLine {
+        text: String,
+    }
+
+    fn owner_for(config: &Config, channel: &str, account_id: Option<&str>) -> String {
+        if let Some(account_id) = account_id {
+            if let Some(owner) = config
+                .channel_account_owners
+                .get(channel)
+                .and_then(|m| m.get(account_id))
+                .filter(|s| !s.trim().is_empty())
+            {
+                return owner.clone();
+            }
+        }
+
+        config
+            .channel_owners
+            .get(channel)
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    fn default_marker(default_account_id: Option<&String>, account_id: Option<&str>) -> &'static str {
+        if default_account_id.map(|s| s.as_str()) == account_id {
+            " [default]"
+        } else {
+            ""
+        }
+    }
+
+    fn route_text(channel_name: &str, account_id: Option<&str>, owner: &str, detail: &str, suffix: &str) -> String {
+        match account_id {
+            Some(account) => format!(
+                "● {}:{}{} -> agent={}{}{}",
+                channel_name,
+                account,
+                suffix,
+                owner,
+                if detail.is_empty() { "" } else { "  " },
+                detail
+            ),
+            None => format!(
+                "● {} -> agent={}{}{}",
+                channel_name,
+                owner,
+                if detail.is_empty() { "" } else { "  " },
+                detail
+            ),
+        }
+    }
+
     let channels = vec![
         ChannelInfo {
+            id: "telegram",
             name: "Telegram",
             enabled: ch.telegram.enabled,
-            configured: !ch.telegram.token.is_empty(),
-            detail: if ch.telegram.enabled && !ch.telegram.token.is_empty() {
+            configured: blockcell_channels::account::channel_configured(config, "telegram"),
+            detail: if !ch.telegram.token.is_empty() {
                 format!("allow_from: {:?}", ch.telegram.allow_from)
-            } else if !ch.telegram.token.is_empty() {
-                "token set but not enabled".into()
             } else {
                 "no token configured".into()
             },
         },
         ChannelInfo {
+            id: "slack",
             name: "Slack",
             enabled: ch.slack.enabled,
-            configured: !ch.slack.bot_token.is_empty(),
-            detail: if ch.slack.enabled && !ch.slack.bot_token.is_empty() {
+            configured: blockcell_channels::account::channel_configured(config, "slack"),
+            detail: if !ch.slack.bot_token.is_empty() {
                 format!("channels: {:?}", ch.slack.channels)
-            } else if !ch.slack.bot_token.is_empty() {
-                "bot_token set but not enabled".into()
             } else {
                 "no bot_token configured".into()
             },
         },
         ChannelInfo {
+            id: "discord",
             name: "Discord",
             enabled: ch.discord.enabled,
-            configured: !ch.discord.bot_token.is_empty(),
-            detail: if ch.discord.enabled && !ch.discord.bot_token.is_empty() {
+            configured: blockcell_channels::account::channel_configured(config, "discord"),
+            detail: if !ch.discord.bot_token.is_empty() {
                 format!("channels: {:?}", ch.discord.channels)
-            } else if !ch.discord.bot_token.is_empty() {
-                "bot_token set but not enabled".into()
             } else {
                 "no bot_token configured".into()
             },
         },
         ChannelInfo {
+            id: "feishu",
             name: "Feishu",
             enabled: ch.feishu.enabled,
-            configured: !ch.feishu.app_id.is_empty(),
-            detail: if ch.feishu.enabled && !ch.feishu.app_id.is_empty() {
-                "connected".into()
-            } else if !ch.feishu.app_id.is_empty() {
-                "app_id set but not enabled".into()
+            configured: blockcell_channels::account::channel_configured(config, "feishu"),
+            detail: if !ch.feishu.app_id.is_empty() {
+                format!("app_id: {}", ch.feishu.app_id)
             } else {
                 "no app_id configured".into()
             },
         },
         ChannelInfo {
+            id: "lark",
             name: "Lark",
             enabled: ch.lark.enabled,
-            configured: !ch.lark.app_id.is_empty(),
-            detail: if ch.lark.enabled && !ch.lark.app_id.is_empty() {
-                "webhook: POST /webhook/lark".into()
-            } else if !ch.lark.app_id.is_empty() {
-                "app_id set but not enabled".into()
+            configured: blockcell_channels::account::channel_configured(config, "lark"),
+            detail: if !ch.lark.app_id.is_empty() {
+                format!("app_id: {}", ch.lark.app_id)
             } else {
                 "no app_id configured".into()
             },
         },
         ChannelInfo {
+            id: "dingtalk",
             name: "DingTalk",
             enabled: ch.dingtalk.enabled,
-            configured: !ch.dingtalk.app_key.is_empty(),
-            detail: if ch.dingtalk.enabled && !ch.dingtalk.app_key.is_empty() {
+            configured: blockcell_channels::account::channel_configured(config, "dingtalk"),
+            detail: if !ch.dingtalk.app_key.is_empty() {
                 format!("robot_code: {}", ch.dingtalk.robot_code)
-            } else if !ch.dingtalk.app_key.is_empty() {
-                "app_key set but not enabled".into()
             } else {
                 "no app_key configured".into()
             },
         },
         ChannelInfo {
+            id: "wecom",
             name: "WeCom",
             enabled: ch.wecom.enabled,
-            configured: !ch.wecom.corp_id.is_empty(),
-            detail: if ch.wecom.enabled && !ch.wecom.corp_id.is_empty() {
+            configured: blockcell_channels::account::channel_configured(config, "wecom"),
+            detail: if !ch.wecom.corp_id.is_empty() {
                 format!("agent_id: {}", ch.wecom.agent_id)
-            } else if !ch.wecom.corp_id.is_empty() {
-                "corp_id set but not enabled".into()
             } else {
                 "no corp_id configured".into()
             },
         },
         ChannelInfo {
+            id: "whatsapp",
             name: "WhatsApp",
             enabled: ch.whatsapp.enabled,
-            configured: true, // always has default bridge_url
-            detail: if ch.whatsapp.enabled {
+            configured: blockcell_channels::account::channel_configured(config, "whatsapp"),
+            detail: if !ch.whatsapp.bridge_url.is_empty() {
                 format!("bridge: {}", ch.whatsapp.bridge_url)
             } else {
                 "not enabled".into()
@@ -281,28 +330,89 @@ pub(super) fn print_startup_banner(
         },
     ];
 
+    let mut enabled_routes: Vec<ChannelRouteLine> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
+
+    for ch_info in &channels {
+        let listener_labels = blockcell_channels::account::listener_labels(config, ch_info.id);
+        if ch_info.enabled && ch_info.configured {
+            if listener_labels.is_empty() {
+                let owner = owner_for(config, ch_info.id, None);
+                enabled_routes.push(ChannelRouteLine {
+                    text: route_text(ch_info.name, None, &owner, &ch_info.detail, ""),
+                });
+            } else {
+                for label in listener_labels {
+                    let account_id = label.split_once(':').map(|(_, account)| account);
+                    let owner = owner_for(config, ch_info.id, account_id);
+                    let detail = match (ch_info.id, account_id) {
+                        ("telegram", Some(account)) => config.channels.telegram.accounts.get(account)
+                            .map(|acc| format!("allow_from: {:?}", acc.allow_from))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("slack", Some(account)) => config.channels.slack.accounts.get(account)
+                            .map(|acc| format!("channels: {:?}", acc.channels))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("discord", Some(account)) => config.channels.discord.accounts.get(account)
+                            .map(|acc| format!("channels: {:?}", acc.channels))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("feishu", Some(account)) => config.channels.feishu.accounts.get(account)
+                            .map(|acc| format!("app_id: {}", acc.app_id))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("lark", Some(account)) => config.channels.lark.accounts.get(account)
+                            .map(|acc| format!("app_id: {}", acc.app_id))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("dingtalk", Some(account)) => config.channels.dingtalk.accounts.get(account)
+                            .map(|acc| format!("robot_code: {}", acc.robot_code))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("wecom", Some(account)) => config.channels.wecom.accounts.get(account)
+                            .map(|acc| format!("agent_id: {}", acc.agent_id))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("whatsapp", Some(account)) => config.channels.whatsapp.accounts.get(account)
+                            .map(|acc| format!("bridge: {}", acc.bridge_url))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
+                        _ => ch_info.detail.clone(),
+                    };
+                    let suffix = match ch_info.id {
+                        "telegram" => default_marker(config.channels.telegram.default_account_id.as_ref(), account_id),
+                        "slack" => default_marker(config.channels.slack.default_account_id.as_ref(), account_id),
+                        "discord" => default_marker(config.channels.discord.default_account_id.as_ref(), account_id),
+                        "feishu" => default_marker(config.channels.feishu.default_account_id.as_ref(), account_id),
+                        "lark" => default_marker(config.channels.lark.default_account_id.as_ref(), account_id),
+                        "dingtalk" => default_marker(config.channels.dingtalk.default_account_id.as_ref(), account_id),
+                        "wecom" => default_marker(config.channels.wecom.default_account_id.as_ref(), account_id),
+                        "whatsapp" => default_marker(config.channels.whatsapp.default_account_id.as_ref(), account_id),
+                        _ => "",
+                    };
+                    enabled_routes.push(ChannelRouteLine {
+                        text: route_text(ch_info.name, account_id, &owner, &detail, suffix),
+                    });
+                }
+            }
+        } else {
+            disabled.push(format!("○ {}  — {}", ch_info.name, ch_info.detail));
+        }
+    }
+
     // Enabled channels box (green)
-    let enabled: Vec<&ChannelInfo> = channels
-        .iter()
-        .filter(|c| c.enabled && c.configured)
-        .collect();
-    if !enabled.is_empty() {
-        let box_w = 62;
+    if !enabled_routes.is_empty() {
+        let content_width = enabled_routes
+            .iter()
+            .map(|line| display_width(&format!("  {}", line.text)))
+            .max()
+            .unwrap_or(0);
+        let box_w = content_width.max(62);
         eprintln!("  {}┌{}┐{}", ansi::GREEN, "─".repeat(box_w), ansi::RESET);
-        for ch_info in &enabled {
-            let line = format!("  ● {}  {}", ch_info.name, ch_info.detail);
-            let pad = box_w.saturating_sub(display_width(&line));
+        for line in &enabled_routes {
+            let rendered = format!("  {}", line.text);
+            let pad = box_w.saturating_sub(display_width(&rendered));
             eprintln!(
-                "  {}│{} {}{}● {}{} {}{}{}│{}",
+                "  {}│{} {}{}{}{}│{}",
                 ansi::GREEN,
                 ansi::RESET,
                 ansi::BOLD,
-                ansi::GREEN,
-                ch_info.name,
+                line.text,
                 ansi::RESET,
-                ch_info.detail,
                 " ".repeat(pad),
-                ansi::GREEN,
                 ansi::RESET,
             );
         }
@@ -310,19 +420,9 @@ pub(super) fn print_startup_banner(
     }
 
     // Disabled/unconfigured channels (dim, no box)
-    let disabled: Vec<&ChannelInfo> = channels
-        .iter()
-        .filter(|c| !c.enabled || !c.configured)
-        .collect();
     if !disabled.is_empty() {
-        for ch_info in &disabled {
-            eprintln!(
-                "  {}  ○ {}  — {}{}",
-                ansi::DIM,
-                ch_info.name,
-                ch_info.detail,
-                ansi::RESET,
-            );
+        for line in &disabled {
+            eprintln!("  {}  {}{}", ansi::DIM, line, ansi::RESET);
         }
     }
 

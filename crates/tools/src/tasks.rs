@@ -36,9 +36,10 @@ impl Tool for ListTasksTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let tm = ctx.task_manager.as_ref().ok_or_else(|| {
-            Error::Tool("Task manager not available".to_string())
-        })?;
+        let tm = ctx
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| Error::Tool("Task manager not available".to_string()))?;
 
         // If a specific task_id is requested
         if let Some(task_id) = params.get("task_id").and_then(|v| v.as_str()) {
@@ -49,10 +50,13 @@ impl Tool for ListTasksTool {
         }
 
         // List tasks with optional status filter
-        let status_filter = params
-            .get("status")
-            .and_then(|v| v.as_str())
-            .and_then(|s| if s == "all" { None } else { Some(s.to_string()) });
+        let status_filter = params.get("status").and_then(|v| v.as_str()).and_then(|s| {
+            if s == "all" {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
 
         let tasks = tm.list_tasks_json(status_filter).await;
         let summary = tm.summary_json().await;

@@ -30,7 +30,8 @@ impl Tool for SystemInfoTool {
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        params.get("category")
+        params
+            .get("category")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Validation("Missing required parameter: category".to_string()))?;
         Ok(())
@@ -107,7 +108,12 @@ async fn probe_hardware() -> Value {
     hw["microphone"] = json!(mic);
 
     // USB devices
-    if let Ok(output) = run_command_optional("system_profiler", &["SPUSBDataType", "-detailLevel", "mini"]).await {
+    if let Ok(output) = run_command_optional(
+        "system_profiler",
+        &["SPUSBDataType", "-detailLevel", "mini"],
+    )
+    .await
+    {
         hw["usb_summary"] = json!(truncate_output(&output, 500));
     }
 
@@ -317,7 +323,9 @@ async fn detect_camera() -> bool {
     if cfg!(target_os = "macos") {
         // Check if any camera device exists
         if let Ok(output) = run_command("system_profiler", &["SPCameraDataType"]).await {
-            return output.contains("FaceTime") || output.contains("Camera") || output.contains("camera");
+            return output.contains("FaceTime")
+                || output.contains("Camera")
+                || output.contains("camera");
         }
     } else if cfg!(target_os = "linux") {
         // Check for /dev/video* devices
@@ -337,7 +345,9 @@ async fn detect_camera() -> bool {
 async fn detect_microphone() -> bool {
     if cfg!(target_os = "macos") {
         if let Ok(output) = run_command("system_profiler", &["SPAudioDataType"]).await {
-            return output.contains("Input") || output.contains("Microphone") || output.contains("microphone");
+            return output.contains("Input")
+                || output.contains("Microphone")
+                || output.contains("microphone");
         }
     } else if cfg!(target_os = "linux") {
         // Check for ALSA capture devices
@@ -383,7 +393,8 @@ async fn check_internet() -> bool {
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio::net::TcpStream::connect("1.1.1.1:53"),
-        ).await,
+        )
+        .await,
         Ok(Ok(_))
     )
 }
@@ -440,23 +451,41 @@ impl Tool for CapabilityEvolveTool {
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        let action = params.get("action")
+        let action = params
+            .get("action")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Validation("Missing required parameter: action".to_string()))?;
 
         if action == "request" {
-            params.get("capability_id")
+            params
+                .get("capability_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::Validation("Missing required parameter: capability_id for 'request' action".to_string()))?;
-            params.get("description")
+                .ok_or_else(|| {
+                    Error::Validation(
+                        "Missing required parameter: capability_id for 'request' action"
+                            .to_string(),
+                    )
+                })?;
+            params
+                .get("description")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::Validation("Missing required parameter: description for 'request' action".to_string()))?;
+                .ok_or_else(|| {
+                    Error::Validation(
+                        "Missing required parameter: description for 'request' action".to_string(),
+                    )
+                })?;
         }
 
         if action == "execute" {
-            params.get("capability_id")
+            params
+                .get("capability_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::Validation("Missing required parameter: capability_id for 'execute' action".to_string()))?;
+                .ok_or_else(|| {
+                    Error::Validation(
+                        "Missing required parameter: capability_id for 'execute' action"
+                            .to_string(),
+                    )
+                })?;
         }
 
         Ok(())
@@ -513,7 +542,7 @@ impl Tool for CapabilityEvolveTool {
                             "capability_id": cap_id,
                             "status": "error",
                             "error": format!("{}", e)
-                        }))
+                        })),
                     }
                 } else {
                     Ok(json!({"error": "Tool evolution registry not initialized"}))
@@ -522,19 +551,21 @@ impl Tool for CapabilityEvolveTool {
             "request" => {
                 let cap_id = params["capability_id"].as_str().unwrap();
                 let description = params["description"].as_str().unwrap();
-                let provider_type = params.get("provider_type")
+                let provider_type = params
+                    .get("provider_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("script");
 
                 if let Some(ref core_evo_handle) = ctx.core_evolution {
                     let core_evo = core_evo_handle.lock().await;
-                    match core_evo.request_capability(cap_id, description, provider_type).await {
+                    match core_evo
+                        .request_capability(cap_id, description, provider_type)
+                        .await
+                    {
                         Ok(result) => Ok(result),
-                        Err(e) => {
-                            Ok(json!({
-                                "error": format!("Failed to request tool evolution: {}", e)
-                            }))
-                        }
+                        Err(e) => Ok(json!({
+                            "error": format!("Failed to request tool evolution: {}", e)
+                        })),
                     }
                 } else {
                     Ok(json!({
@@ -542,9 +573,7 @@ impl Tool for CapabilityEvolveTool {
                     }))
                 }
             }
-            _ => {
-                Ok(json!({"error": format!("Unknown action: {}", action)}))
-            }
+            _ => Ok(json!({"error": format!("Unknown action: {}", action)})),
         }
     }
 }
@@ -580,7 +609,9 @@ mod tests {
     fn test_capability_evolve_validate() {
         let tool = CapabilityEvolveTool;
         assert!(tool.validate(&json!({"action": "list"})).is_ok());
-        assert!(tool.validate(&json!({"action": "status", "capability_id": "test.tool"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "status", "capability_id": "test.tool"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "request", "capability_id": "test.tool", "description": "do stuff"})).is_ok());
         assert!(tool.validate(&json!({"action": "request"})).is_err());
         assert!(tool.validate(&json!({"action": "execute"})).is_err());

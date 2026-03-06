@@ -76,6 +76,16 @@ In Blockcell's configuration file, modify the `slack` section:
 - `channels`: List of channel IDs the bot is allowed to respond in (string array). If left empty `[]`, the bot will respond in all joined channels.
 - `allowFrom`: List of allowed user IDs (string array). If left empty `[]`, anyone can call the bot in group chats or private messages.
 
+> If you enable this external channel through `blockcell gateway`, you also need an owner binding in `config.json`, for example:
+>
+> ```json
+> { "channelOwners": { "slack": "default" } }
+> ```
+>
+> If the same channel carries multiple accounts / bots, you can further add `channelAccountOwners.slack.<accountId> = "ops"` so one account routes to a different agent.
+>
+> Otherwise Gateway refuses to start because the enabled external channel has no owner.
+
 ## 7. Interaction Methods
 
 - **Private Chat (DM)**: Find your bot in the Apps section and send messages directly.

@@ -1,7 +1,6 @@
 # Article 14: Name Origin — A Tribute to *Stargate* and Digital Life
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 14/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 14
 ---
 
 Before closing this series, I want to share the story behind the name **blockcell**.

@@ -13,32 +13,44 @@ pub struct ToolCallRequest {
 }
 
 impl Serialize for ToolCallRequest {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(3))?;
         map.serialize_entry("id", &self.id)?;
         map.serialize_entry("type", "function")?;
-        map.serialize_entry("function", &serde_json::json!({
-            "name": self.name,
-            "arguments": self.arguments.to_string()
-        }))?;
+        map.serialize_entry(
+            "function",
+            &serde_json::json!({
+                "name": self.name,
+                "arguments": self.arguments.to_string()
+            }),
+        )?;
         map.end()
     }
 }
 
 impl<'de> Deserialize<'de> for ToolCallRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let obj = value.as_object().ok_or_else(|| serde::de::Error::custom("expected object"))?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object"))?;
 
-        let id = obj.get("id")
+        let id = obj
+            .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
         // New format: {id, type, function: {name, arguments}}
         if let Some(func) = obj.get("function").and_then(|v| v.as_object()) {
-            let name = func.get("name")
+            let name = func
+                .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
@@ -66,11 +78,13 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
         }
 
         // Old flat format: {id, name, arguments}
-        let name = obj.get("name")
+        let name = obj
+            .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let arguments = obj.get("arguments")
+        let arguments = obj
+            .get("arguments")
             .cloned()
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 

@@ -1,6 +1,6 @@
 use blockcell_core::Paths;
-use blockcell_storage::MemoryStore;
 use blockcell_storage::memory::QueryParams;
+use blockcell_storage::MemoryStore;
 
 /// List recent memory items.
 pub async fn list(item_type: Option<String>, limit: usize) -> anyhow::Result<()> {
@@ -25,7 +25,8 @@ pub async fn list(item_type: Option<String>, limit: usize) -> anyhow::Result<()>
         include_deleted: false,
     };
 
-    let results = store.query(&params)
+    let results = store
+        .query(&params)
         .map_err(|e| anyhow::anyhow!("Failed to query: {}", e))?;
 
     println!();
@@ -37,8 +38,19 @@ pub async fn list(item_type: Option<String>, limit: usize) -> anyhow::Result<()>
         println!();
         for (i, r) in results.iter().enumerate() {
             let title = r.item.title.as_deref().unwrap_or("(untitled)");
-            let scope_icon = if r.item.scope == "long_term" { "📌" } else { "💬" };
-            println!("  {}. {} [{}] {} #{}", i + 1, scope_icon, r.item.item_type, title, &r.item.id.chars().take(8).collect::<String>());
+            let scope_icon = if r.item.scope == "long_term" {
+                "📌"
+            } else {
+                "💬"
+            };
+            println!(
+                "  {}. {} [{}] {} #{}",
+                i + 1,
+                scope_icon,
+                r.item.item_type,
+                title,
+                &r.item.id.chars().take(8).collect::<String>()
+            );
             let preview: String = r.item.content.chars().take(100).collect();
             if r.item.content.chars().count() > 100 {
                 println!("     {}...", preview);
@@ -139,7 +151,8 @@ pub async fn stats() -> anyhow::Result<()> {
     let store = MemoryStore::open(&db_path)
         .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
 
-    let stats = store.stats()
+    let stats = store
+        .stats()
         .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
 
     println!();
@@ -153,7 +166,12 @@ pub async fn stats() -> anyhow::Result<()> {
 }
 
 /// Search memory items.
-pub async fn search(query: &str, scope: Option<String>, item_type: Option<String>, top_k: usize) -> anyhow::Result<()> {
+pub async fn search(
+    query: &str,
+    scope: Option<String>,
+    item_type: Option<String>,
+    top_k: usize,
+) -> anyhow::Result<()> {
     let paths = Paths::default();
     let db_path = paths.workspace().join("memory").join("memory.db");
 
@@ -166,7 +184,11 @@ pub async fn search(query: &str, scope: Option<String>, item_type: Option<String
         .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
 
     let params = QueryParams {
-        query: if query.is_empty() { None } else { Some(query.to_string()) },
+        query: if query.is_empty() {
+            None
+        } else {
+            Some(query.to_string())
+        },
         scope,
         item_type,
         tags: None,
@@ -175,7 +197,8 @@ pub async fn search(query: &str, scope: Option<String>, item_type: Option<String
         include_deleted: false,
     };
 
-    let results = store.query(&params)
+    let results = store
+        .query(&params)
         .map_err(|e| anyhow::anyhow!("Failed to query: {}", e))?;
 
     println!();
@@ -186,8 +209,19 @@ pub async fn search(query: &str, scope: Option<String>, item_type: Option<String
         println!();
         for (i, r) in results.iter().enumerate() {
             let title = r.item.title.as_deref().unwrap_or("(untitled)");
-            let scope_icon = if r.item.scope == "long_term" { "📌" } else { "💬" };
-            println!("  {}. {} [{}] {} (score: {:.2})", i + 1, scope_icon, r.item.item_type, title, r.score);
+            let scope_icon = if r.item.scope == "long_term" {
+                "📌"
+            } else {
+                "💬"
+            };
+            println!(
+                "  {}. {} [{}] {} (score: {:.2})",
+                i + 1,
+                scope_icon,
+                r.item.item_type,
+                title,
+                r.score
+            );
 
             // Show truncated content
             let content = &r.item.content;
@@ -199,7 +233,13 @@ pub async fn search(query: &str, scope: Option<String>, item_type: Option<String
             }
 
             if !r.item.tags.is_empty() {
-                let tags: Vec<&str> = r.item.tags.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                let tags: Vec<&str> = r
+                    .item
+                    .tags
+                    .iter()
+                    .map(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 if !tags.is_empty() {
                     println!("     🏷️  {}", tags.join(", "));
                 }
@@ -223,10 +263,14 @@ pub async fn maintenance(recycle_days: i64) -> anyhow::Result<()> {
     let store = MemoryStore::open(&db_path)
         .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
 
-    let (expired, purged) = store.maintenance(recycle_days)
+    let (expired, purged) = store
+        .maintenance(recycle_days)
         .map_err(|e| anyhow::anyhow!("Failed to run maintenance: {}", e))?;
 
-    println!("✅ Maintenance complete: {} expired records cleaned, {} recycle bin records purged", expired, purged);
+    println!(
+        "✅ Maintenance complete: {} expired records cleaned, {} recycle bin records purged",
+        expired, purged
+    );
     Ok(())
 }
 
@@ -243,7 +287,8 @@ pub async fn clear(scope: Option<String>) -> anyhow::Result<()> {
     let store = MemoryStore::open(&db_path)
         .map_err(|e| anyhow::anyhow!("Failed to open memory db: {}", e))?;
 
-    let count = store.batch_soft_delete(scope.as_deref(), None, None, None)
+    let count = store
+        .batch_soft_delete(scope.as_deref(), None, None, None)
         .map_err(|e| anyhow::anyhow!("Failed to clear: {}", e))?;
 
     let scope_desc = scope.as_deref().unwrap_or("all");

@@ -42,7 +42,7 @@ struct StreamSubscription {
     id: String,
     url: String,
     protocol: String, // "websocket" | "sse"
-    status: String,    // "connecting" | "connected" | "disconnected" | "error"
+    status: String,   // "connecting" | "connected" | "disconnected" | "error"
     /// Number of messages received so far.
     message_count: u64,
     /// Last N messages buffered for retrieval.
@@ -91,7 +91,9 @@ impl StreamManager {
     }
 
     fn persistence_path(&self) -> Option<PathBuf> {
-        self.workspace.as_ref().map(|ws| ws.join("streams").join("subscriptions.json"))
+        self.workspace
+            .as_ref()
+            .map(|ws| ws.join("streams").join("subscriptions.json"))
     }
 
     /// Save all auto_restore subscriptions to disk.
@@ -100,7 +102,9 @@ impl StreamManager {
             Some(p) => p,
             None => return,
         };
-        let rules: Vec<SubscriptionRule> = self.subscriptions.values()
+        let rules: Vec<SubscriptionRule> = self
+            .subscriptions
+            .values()
             .filter(|s| s.auto_restore)
             .map(|s| SubscriptionRule {
                 id: s.id.clone(),
@@ -137,12 +141,10 @@ impl StreamManager {
             None => return vec![],
         };
         match std::fs::read_to_string(&path) {
-            Ok(json) => {
-                serde_json::from_str(&json).unwrap_or_else(|e| {
-                    warn!(error = %e, "Failed to parse persisted subscriptions");
-                    vec![]
-                })
-            }
+            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                warn!(error = %e, "Failed to parse persisted subscriptions");
+                vec![]
+            }),
             Err(_) => vec![], // File doesn't exist yet
         }
     }
@@ -234,15 +236,30 @@ impl Tool for StreamSubscribeTool {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         match action {
             "subscribe" => {
-                let has_url = !params.get("url").and_then(|v| v.as_str()).unwrap_or("").is_empty();
-                let has_preset = !params.get("preset").and_then(|v| v.as_str()).unwrap_or("").is_empty();
+                let has_url = !params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty();
+                let has_preset = !params
+                    .get("preset")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty();
                 if !has_url && !has_preset {
-                    return Err(Error::Validation("'url' or 'preset' is required for subscribe".into()));
+                    return Err(Error::Validation(
+                        "'url' or 'preset' is required for subscribe".into(),
+                    ));
                 }
             }
             "restore" => {}
             "unsubscribe" | "read" | "send" | "status" => {
-                if params.get("stream_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("stream_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Validation("'stream_id' is required".into()));
                 }
             }
@@ -250,9 +267,14 @@ impl Tool for StreamSubscribeTool {
             _ => return Err(Error::Validation(format!("Unknown action: {}", action))),
         }
         if action == "send"
-            && params.get("message").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                return Err(Error::Validation("'message' is required for send".into()));
-            }
+            && params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(Error::Validation("'message' is required for send".into()));
+        }
         Ok(())
     }
 
@@ -290,7 +312,10 @@ impl Tool for StreamSubscribeTool {
 }
 
 /// Resolve a CEX/blockchain stream preset into (url, init_message, filter).
-fn resolve_preset(preset: &str, symbol_override: Option<&str>) -> Result<(String, Option<String>, Option<String>)> {
+fn resolve_preset(
+    preset: &str,
+    symbol_override: Option<&str>,
+) -> Result<(String, Option<String>, Option<String>)> {
     let parts: Vec<&str> = preset.split(':').collect();
     if parts.is_empty() {
         return Err(Error::Tool("Empty preset string".into()));
@@ -298,7 +323,8 @@ fn resolve_preset(preset: &str, symbol_override: Option<&str>) -> Result<(String
 
     let exchange = parts[0].to_lowercase();
     let stream_type = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
-    let symbol_part = symbol_override.map(|s| s.to_lowercase())
+    let symbol_part = symbol_override
+        .map(|s| s.to_lowercase())
         .or_else(|| parts.get(2).map(|s| s.to_lowercase()))
         .unwrap_or_default();
     let extra = parts.get(3).map(|s| s.to_lowercase());
@@ -437,35 +463,65 @@ fn resolve_preset(preset: &str, symbol_override: Option<&str>) -> Result<(String
 
 async fn action_subscribe(params: &Value) -> Result<Value> {
     // Resolve preset if provided
-    let (url, init_message, filter) = if let Some(preset) = params.get("preset").and_then(|v| v.as_str()) {
+    let (url, init_message, filter) = if let Some(preset) =
+        params.get("preset").and_then(|v| v.as_str())
+    {
         if !preset.is_empty() {
             let symbol_override = params.get("symbol").and_then(|v| v.as_str());
             let (preset_url, preset_init, preset_filter) = resolve_preset(preset, symbol_override)?;
             // Allow explicit overrides
-            let url = params.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-                .map(|s| s.to_string()).unwrap_or(preset_url);
-            let init = params.get("init_message").and_then(|v| v.as_str()).map(|s| s.to_string())
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or(preset_url);
+            let init = params
+                .get("init_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
                 .or(preset_init);
-            let filt = params.get("filter").and_then(|v| v.as_str()).map(|s| s.to_string())
+            let filt = params
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
                 .or(preset_filter);
             (url, init, filt)
         } else {
             (
                 params["url"].as_str().unwrap().to_string(),
-                params.get("init_message").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                params.get("filter").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                params
+                    .get("init_message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                params
+                    .get("filter")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             )
         }
     } else {
         (
             params["url"].as_str().unwrap().to_string(),
-            params.get("init_message").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            params.get("filter").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            params
+                .get("init_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            params
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         )
     };
 
-    let protocol = params.get("protocol").and_then(|v| v.as_str()).unwrap_or("auto");
-    let buffer_size = params.get("buffer_size").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let protocol = params
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    let buffer_size = params
+        .get("buffer_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100) as usize;
 
     let mut headers = HashMap::new();
     if let Some(h) = params.get("headers").and_then(|v| v.as_object()) {
@@ -487,11 +543,24 @@ async fn action_subscribe(params: &Value) -> Result<Value> {
         protocol
     };
 
-    let stream_id = format!("stream_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
+    let stream_id = format!(
+        "stream_{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("x")
+    );
     let now = chrono::Utc::now().timestamp_millis();
 
-    let auto_restore = params.get("auto_restore").and_then(|v| v.as_bool()).unwrap_or(true);
-    let max_reconnect = params.get("max_reconnect").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let auto_restore = params
+        .get("auto_restore")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let max_reconnect = params
+        .get("max_reconnect")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
 
     let sub = StreamSubscription {
         id: stream_id.clone(),
@@ -528,13 +597,22 @@ async fn action_subscribe(params: &Value) -> Result<Value> {
     let headers_clone = headers.clone();
     match detected_protocol {
         "websocket" => {
-            tokio::spawn(run_websocket_stream(sid, url_clone, headers_clone, init_message, cancel_rx));
+            tokio::spawn(run_websocket_stream(
+                sid,
+                url_clone,
+                headers_clone,
+                init_message,
+                cancel_rx,
+            ));
         }
         "sse" => {
             tokio::spawn(run_sse_stream(sid, url_clone, headers_clone, cancel_rx));
         }
         _ => {
-            return Err(Error::Tool(format!("Unknown protocol: {}", detected_protocol)));
+            return Err(Error::Tool(format!(
+                "Unknown protocol: {}",
+                detected_protocol
+            )));
         }
     }
 
@@ -565,14 +643,15 @@ async fn run_websocket_stream(
 
         // Build request with custom headers
         let mut request = match url.parse::<tokio_tungstenite::tungstenite::http::Uri>() {
-            Ok(uri) => {
-                tokio_tungstenite::tungstenite::http::Request::builder()
-                    .uri(uri)
-                    .header("Connection", "Upgrade")
-                    .header("Upgrade", "websocket")
-                    .header("Sec-WebSocket-Version", "13")
-                    .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
-            }
+            Ok(uri) => tokio_tungstenite::tungstenite::http::Request::builder()
+                .uri(uri)
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header(
+                    "Sec-WebSocket-Key",
+                    tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+                ),
             Err(e) => {
                 set_stream_error(&stream_id, &format!("Invalid URL: {}", e)).await;
                 return;
@@ -599,11 +678,27 @@ async fn run_websocket_stream(
                     reconnect_attempt += 1;
                     let delay = reconnect_delay(reconnect_attempt);
                     update_reconnect_count(&stream_id, reconnect_attempt).await;
-                    set_stream_error(&stream_id, &format!("Connect failed (attempt {}), retrying in {}s: {}", reconnect_attempt, delay.as_secs(), e)).await;
+                    set_stream_error(
+                        &stream_id,
+                        &format!(
+                            "Connect failed (attempt {}), retrying in {}s: {}",
+                            reconnect_attempt,
+                            delay.as_secs(),
+                            e
+                        ),
+                    )
+                    .await;
                     tokio::time::sleep(delay).await;
                     continue 'reconnect;
                 } else {
-                    set_stream_error(&stream_id, &format!("WebSocket connect failed (gave up after {} attempts): {}", reconnect_attempt, e)).await;
+                    set_stream_error(
+                        &stream_id,
+                        &format!(
+                            "WebSocket connect failed (gave up after {} attempts): {}",
+                            reconnect_attempt, e
+                        ),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -625,10 +720,18 @@ async fn run_websocket_stream(
         }
 
         // Store write half for send action
-        let write_handle: Arc<Mutex<Option<futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-            WsMessage
-        >>>> = Arc::new(Mutex::new(Some(write)));
+        let write_handle: Arc<
+            Mutex<
+                Option<
+                    futures::stream::SplitSink<
+                        tokio_tungstenite::WebSocketStream<
+                            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                        >,
+                        WsMessage,
+                    >,
+                >,
+            >,
+        > = Arc::new(Mutex::new(Some(write)));
 
         {
             let mut ws_writers = WS_WRITERS.lock().await;
@@ -702,10 +805,27 @@ async fn run_websocket_stream(
 }
 
 /// Global WebSocket write handles for the send action.
-static WS_WRITERS: Lazy<Arc<Mutex<HashMap<String, Arc<Mutex<Option<futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    WsMessage
->>>>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static WS_WRITERS: Lazy<
+    Arc<
+        Mutex<
+            HashMap<
+                String,
+                Arc<
+                    Mutex<
+                        Option<
+                            futures::stream::SplitSink<
+                                tokio_tungstenite::WebSocketStream<
+                                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                                >,
+                                WsMessage,
+                            >,
+                        >,
+                    >,
+                >,
+            >,
+        >,
+    >,
+> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 async fn run_sse_stream(
     stream_id: String,
@@ -719,7 +839,8 @@ async fn run_sse_stream(
         info!(stream_id = %stream_id, url = %url, attempt = reconnect_attempt, "SSE stream connecting");
 
         let client = reqwest::Client::new();
-        let mut req = client.get(&url)
+        let mut req = client
+            .get(&url)
             .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache");
 
@@ -735,11 +856,27 @@ async fn run_sse_stream(
                     reconnect_attempt += 1;
                     let delay = reconnect_delay(reconnect_attempt);
                     update_reconnect_count(&stream_id, reconnect_attempt).await;
-                    set_stream_error(&stream_id, &format!("SSE connect failed (attempt {}), retrying in {}s: {}", reconnect_attempt, delay.as_secs(), e)).await;
+                    set_stream_error(
+                        &stream_id,
+                        &format!(
+                            "SSE connect failed (attempt {}), retrying in {}s: {}",
+                            reconnect_attempt,
+                            delay.as_secs(),
+                            e
+                        ),
+                    )
+                    .await;
                     tokio::time::sleep(delay).await;
                     continue 'reconnect;
                 } else {
-                    set_stream_error(&stream_id, &format!("SSE connect failed (gave up after {} attempts): {}", reconnect_attempt, e)).await;
+                    set_stream_error(
+                        &stream_id,
+                        &format!(
+                            "SSE connect failed (gave up after {} attempts): {}",
+                            reconnect_attempt, e
+                        ),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -751,7 +888,16 @@ async fn run_sse_stream(
                 reconnect_attempt += 1;
                 let delay = reconnect_delay(reconnect_attempt);
                 update_reconnect_count(&stream_id, reconnect_attempt).await;
-                set_stream_error(&stream_id, &format!("SSE HTTP {} (attempt {}), retrying in {}s", status, reconnect_attempt, delay.as_secs())).await;
+                set_stream_error(
+                    &stream_id,
+                    &format!(
+                        "SSE HTTP {} (attempt {}), retrying in {}s",
+                        status,
+                        reconnect_attempt,
+                        delay.as_secs()
+                    ),
+                )
+                .await;
                 tokio::time::sleep(delay).await;
                 continue 'reconnect;
             } else {
@@ -963,15 +1109,20 @@ async fn action_read(params: &Value) -> Result<Value> {
     let since = params.get("since_timestamp").and_then(|v| v.as_i64());
 
     let mgr = STREAM_MANAGER.lock().await;
-    let sub = mgr.subscriptions.get(stream_id)
+    let sub = mgr
+        .subscriptions
+        .get(stream_id)
         .ok_or_else(|| Error::Tool(format!("Stream '{}' not found", stream_id)))?;
 
     // Collect filtered messages, then take last N
-    let filtered: Vec<&StreamMessage> = sub.buffer.iter()
+    let filtered: Vec<&StreamMessage> = sub
+        .buffer
+        .iter()
         .filter(|m| since.is_none_or(|ts| m.timestamp > ts))
         .collect();
     let skip = filtered.len().saturating_sub(limit);
-    let messages: Vec<Value> = filtered.into_iter()
+    let messages: Vec<Value> = filtered
+        .into_iter()
         .skip(skip)
         .map(|m| {
             // Try to parse as JSON for cleaner output
@@ -1001,25 +1152,35 @@ async fn action_send(params: &Value) -> Result<Value> {
     // Check protocol
     {
         let mgr = STREAM_MANAGER.lock().await;
-        let sub = mgr.subscriptions.get(stream_id)
+        let sub = mgr
+            .subscriptions
+            .get(stream_id)
             .ok_or_else(|| Error::Tool(format!("Stream '{}' not found", stream_id)))?;
         if sub.protocol != "websocket" {
-            return Err(Error::Tool("Can only send messages to WebSocket streams".into()));
+            return Err(Error::Tool(
+                "Can only send messages to WebSocket streams".into(),
+            ));
         }
         if sub.status != "connected" {
-            return Err(Error::Tool(format!("Stream is not connected (status: {})", sub.status)));
+            return Err(Error::Tool(format!(
+                "Stream is not connected (status: {})",
+                sub.status
+            )));
         }
     }
 
     let ws_writers = WS_WRITERS.lock().await;
-    let writer_handle = ws_writers.get(stream_id)
+    let writer_handle = ws_writers
+        .get(stream_id)
         .ok_or_else(|| Error::Tool("WebSocket writer not available".into()))?
         .clone();
     drop(ws_writers);
 
     let mut writer_guard = writer_handle.lock().await;
     if let Some(ref mut writer) = *writer_guard {
-        writer.send(WsMessage::Text(message.to_string())).await
+        writer
+            .send(WsMessage::Text(message.to_string()))
+            .await
             .map_err(|e| Error::Tool(format!("Failed to send: {}", e)))?;
         Ok(json!({
             "stream_id": stream_id,
@@ -1033,21 +1194,25 @@ async fn action_send(params: &Value) -> Result<Value> {
 
 async fn action_list() -> Result<Value> {
     let mgr = STREAM_MANAGER.lock().await;
-    let streams: Vec<Value> = mgr.subscriptions.values().map(|sub| {
-        json!({
-            "stream_id": sub.id,
-            "url": sub.url,
-            "protocol": sub.protocol,
-            "status": sub.status,
-            "message_count": sub.message_count,
-            "buffered": sub.buffer.len(),
-            "created_at": sub.created_at,
-            "last_message_at": sub.last_message_at,
-            "error": sub.error,
-            "auto_restore": sub.auto_restore,
-            "reconnect_count": sub.reconnect_count,
+    let streams: Vec<Value> = mgr
+        .subscriptions
+        .values()
+        .map(|sub| {
+            json!({
+                "stream_id": sub.id,
+                "url": sub.url,
+                "protocol": sub.protocol,
+                "status": sub.status,
+                "message_count": sub.message_count,
+                "buffered": sub.buffer.len(),
+                "created_at": sub.created_at,
+                "last_message_at": sub.last_message_at,
+                "error": sub.error,
+                "auto_restore": sub.auto_restore,
+                "reconnect_count": sub.reconnect_count,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(json!({
         "streams": streams,
@@ -1058,7 +1223,9 @@ async fn action_list() -> Result<Value> {
 async fn action_status(params: &Value) -> Result<Value> {
     let stream_id = params["stream_id"].as_str().unwrap();
     let mgr = STREAM_MANAGER.lock().await;
-    let sub = mgr.subscriptions.get(stream_id)
+    let sub = mgr
+        .subscriptions
+        .get(stream_id)
         .ok_or_else(|| Error::Tool(format!("Stream '{}' not found", stream_id)))?;
 
     Ok(json!({
@@ -1136,7 +1303,13 @@ async fn restore_all_subscriptions() -> Result<Value> {
 
         match protocol.as_str() {
             "websocket" => {
-                tokio::spawn(run_websocket_stream(sid, url, headers, init_message, cancel_rx));
+                tokio::spawn(run_websocket_stream(
+                    sid,
+                    url,
+                    headers,
+                    init_message,
+                    cancel_rx,
+                ));
             }
             "sse" => {
                 tokio::spawn(run_sse_stream(sid, url, headers, cancel_rx));
@@ -1167,7 +1340,9 @@ async fn action_restore() -> Result<Value> {
 
 /// List all active stream subscriptions (for gateway /v1/streams endpoint).
 pub async fn list_streams() -> Value {
-    action_list().await.unwrap_or_else(|_| json!({"streams": [], "count": 0}))
+    action_list()
+        .await
+        .unwrap_or_else(|_| json!({"streams": [], "count": 0}))
 }
 
 /// Get buffered data for a specific stream (for gateway /v1/streams/:id/data endpoint).
@@ -1238,9 +1413,9 @@ mod tests {
 
     #[test]
     fn test_reconnect_delay() {
-        assert_eq!(reconnect_delay(1).as_secs(), 2);  // 2^1
-        assert_eq!(reconnect_delay(2).as_secs(), 4);  // 2^2
-        assert_eq!(reconnect_delay(3).as_secs(), 8);  // 2^3
+        assert_eq!(reconnect_delay(1).as_secs(), 2); // 2^1
+        assert_eq!(reconnect_delay(2).as_secs(), 4); // 2^2
+        assert_eq!(reconnect_delay(3).as_secs(), 8); // 2^3
         assert_eq!(reconnect_delay(4).as_secs(), 16); // 2^4
         assert_eq!(reconnect_delay(5).as_secs(), 30); // 2^5=32, capped at 30
         assert_eq!(reconnect_delay(10).as_secs(), 30); // capped
@@ -1274,14 +1449,19 @@ mod tests {
         assert!(mgr.persistence_path().is_none());
         mgr.workspace = Some(PathBuf::from("/tmp/test_workspace"));
         let path = mgr.persistence_path().unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/test_workspace/streams/subscriptions.json"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/test_workspace/streams/subscriptions.json")
+        );
     }
 
     #[test]
     fn test_validate_subscribe_with_preset() {
         let tool = StreamSubscribeTool;
         // preset alone should be valid
-        assert!(tool.validate(&json!({"action": "subscribe", "preset": "binance:trade:btcusdt"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "subscribe", "preset": "binance:trade:btcusdt"}))
+            .is_ok());
         // neither url nor preset should fail
         assert!(tool.validate(&json!({"action": "subscribe"})).is_err());
     }

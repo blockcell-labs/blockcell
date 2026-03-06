@@ -21,12 +21,7 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(
-        api_base: Option<&str>,
-        model: &str,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> Self {
+    pub fn new(api_base: Option<&str>, model: &str, max_tokens: u32, temperature: f32) -> Self {
         Self::new_with_proxy(api_base, model, max_tokens, temperature, None, None, &[])
     }
 
@@ -86,13 +81,16 @@ impl OllamaProvider {
                             }
                             "image_url" => {
                                 // Extract base64 data from data:mime;base64,xxx
-                                if let Some(url) = block.get("image_url")
+                                if let Some(url) = block
+                                    .get("image_url")
                                     .and_then(|v| v.get("url"))
                                     .and_then(|v| v.as_str())
                                 {
                                     if let Some(rest) = url.strip_prefix("data:") {
                                         if let Some(semi) = rest.find(';') {
-                                            if let Some(data) = rest[semi..].strip_prefix(";base64,") {
+                                            if let Some(data) =
+                                                rest[semi..].strip_prefix(";base64,")
+                                            {
                                                 images.push(data.to_string());
                                             }
                                         }
@@ -106,7 +104,11 @@ impl OllamaProvider {
                         role: msg.role.clone(),
                         content: text_parts.join("\n"),
                         tool_calls: None,
-                        images: if images.is_empty() { None } else { Some(images) },
+                        images: if images.is_empty() {
+                            None
+                        } else {
+                            Some(images)
+                        },
                     }
                 } else {
                     let content = msg.content.as_str().unwrap_or("").to_string();
@@ -139,8 +141,14 @@ impl OllamaProvider {
 
         for tool in tools {
             if let Some(func) = tool.get("function") {
-                let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let desc = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let name = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let desc = func
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let params = func.get("parameters").cloned().unwrap_or(Value::Null);
                 s.push_str(&format!("### {}\n{}\n", name, desc));
                 if !params.is_null() {
@@ -186,7 +194,9 @@ impl OllamaProvider {
                         call_index += 1;
                     } else {
                         warn!(json = %json_str, "Failed to parse tool_call JSON from Ollama");
-                        remaining.push_str(&rest[start..start + "<tool_call>".len() + end + "</tool_call>".len()]);
+                        remaining.push_str(
+                            &rest[start..start + "<tool_call>".len() + end + "</tool_call>".len()],
+                        );
                     }
                     rest = &after_tag[end + "</tool_call>".len()..];
                 } else {
@@ -328,7 +338,11 @@ impl OllamaProvider {
     }
 
     /// Fallback: inject tools into system prompt as text for models without native tool support.
-    async fn chat_text_tools(&self, messages: &[ChatMessage], tools: &[Value]) -> Result<LLMResponse> {
+    async fn chat_text_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Value],
+    ) -> Result<LLMResponse> {
         let tools_prompt = Self::build_tools_prompt(tools);
 
         // Inject tools into system message
@@ -376,9 +390,8 @@ impl OllamaProvider {
             )));
         }
 
-        let resp: OllamaChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            Error::Provider(format!("Failed to parse Ollama response: {}", e))
-        })?;
+        let resp: OllamaChatResponse = serde_json::from_str(&raw_body)
+            .map_err(|e| Error::Provider(format!("Failed to parse Ollama response: {}", e)))?;
 
         let (remaining, tool_calls) = Self::parse_text_tool_calls(&resp.message.content);
 
@@ -469,10 +482,7 @@ mod tests {
     #[test]
     fn test_normalize_model() {
         assert_eq!(OllamaProvider::normalize_model("ollama/llama3"), "llama3");
-        assert_eq!(
-            OllamaProvider::normalize_model("qwen2.5:7b"),
-            "qwen2.5:7b"
-        );
+        assert_eq!(OllamaProvider::normalize_model("qwen2.5:7b"), "qwen2.5:7b");
     }
 
     #[test]

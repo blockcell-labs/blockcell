@@ -70,30 +70,46 @@ impl Tool for FileOpsTool {
         match action {
             "delete" | "read_pdf" | "file_info" => {
                 if params.get("path").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter: path".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter: path".to_string(),
+                    ));
                 }
             }
             "rename" | "move" | "copy" => {
                 if params.get("path").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter: path".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter: path".to_string(),
+                    ));
                 }
                 if params.get("destination").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter: destination".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter: destination".to_string(),
+                    ));
                 }
             }
             "compress" => {
                 let has_path = params.get("path").and_then(|v| v.as_str()).is_some();
-                let has_paths = params.get("paths").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+                let has_paths = params
+                    .get("paths")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
                 if !has_path && !has_paths {
-                    return Err(Error::Validation("compress requires 'path' or 'paths'".to_string()));
+                    return Err(Error::Validation(
+                        "compress requires 'path' or 'paths'".to_string(),
+                    ));
                 }
                 if params.get("destination").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter: destination (archive output path)".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter: destination (archive output path)".to_string(),
+                    ));
                 }
             }
             "decompress" => {
                 if params.get("path").and_then(|v| v.as_str()).is_none() {
-                    return Err(Error::Validation("Missing required parameter: path (archive to decompress)".to_string()));
+                    return Err(Error::Validation(
+                        "Missing required parameter: path (archive to decompress)".to_string(),
+                    ));
                 }
             }
             _ => {
@@ -140,10 +156,16 @@ impl Tool for FileOpsTool {
 
 async fn action_delete(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
-    let recursive = params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let recursive = params
+        .get("recursive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if !path.exists() {
-        return Err(Error::NotFound(format!("Path not found: {}", path.display())));
+        return Err(Error::NotFound(format!(
+            "Path not found: {}",
+            path.display()
+        )));
     }
 
     if path.is_dir() {
@@ -169,7 +191,10 @@ async fn action_move(workspace: &Path, params: &Value) -> Result<Value> {
     let dst = expand_path(params["destination"].as_str().unwrap(), workspace);
 
     if !src.exists() {
-        return Err(Error::NotFound(format!("Source not found: {}", src.display())));
+        return Err(Error::NotFound(format!(
+            "Source not found: {}",
+            src.display()
+        )));
     }
 
     // Create parent directories for destination
@@ -203,7 +228,10 @@ async fn action_copy(workspace: &Path, params: &Value) -> Result<Value> {
     let dst = expand_path(params["destination"].as_str().unwrap(), workspace);
 
     if !src.exists() {
-        return Err(Error::NotFound(format!("Source not found: {}", src.display())));
+        return Err(Error::NotFound(format!(
+            "Source not found: {}",
+            src.display()
+        )));
     }
 
     if let Some(parent) = dst.parent() {
@@ -264,7 +292,10 @@ fn count_files_recursive(path: &PathBuf) -> usize {
 }
 
 fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
-    let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("zip");
+    let format = params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("zip");
     let dst_str = params["destination"].as_str().unwrap();
     let dst = expand_path(dst_str, workspace);
 
@@ -284,7 +315,10 @@ fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
     // Verify all sources exist
     for src in &sources {
         if !src.exists() {
-            return Err(Error::NotFound(format!("Source not found: {}", src.display())));
+            return Err(Error::NotFound(format!(
+                "Source not found: {}",
+                src.display()
+            )));
         }
     }
 
@@ -305,7 +339,11 @@ fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
                 if src.is_dir() {
                     file_count += zip_add_dir(&mut zip, src, src, options)?;
                 } else {
-                    let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = src
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     zip.start_file(&name, options)
                         .map_err(|e| Error::Tool(format!("Zip error: {}", e)))?;
                     let data = std::fs::read(src)?;
@@ -313,7 +351,8 @@ fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
                     file_count += 1;
                 }
             }
-            zip.finish().map_err(|e| Error::Tool(format!("Zip finish error: {}", e)))?;
+            zip.finish()
+                .map_err(|e| Error::Tool(format!("Zip finish error: {}", e)))?;
         }
         "tar_gz" => {
             let file = std::fs::File::create(&dst)
@@ -323,18 +362,27 @@ fn action_compress(workspace: &Path, params: &Value) -> Result<Value> {
 
             for src in &sources {
                 if src.is_dir() {
-                    let dir_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let dir_name = src
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     tar.append_dir_all(&dir_name, src)
                         .map_err(|e| Error::Tool(format!("Tar error: {}", e)))?;
                     file_count += count_files_recursive(src) as u64;
                 } else {
-                    let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = src
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     tar.append_path_with_name(src, &name)
                         .map_err(|e| Error::Tool(format!("Tar error: {}", e)))?;
                     file_count += 1;
                 }
             }
-            tar.finish().map_err(|e| Error::Tool(format!("Tar finish error: {}", e)))?;
+            tar.finish()
+                .map_err(|e| Error::Tool(format!("Tar finish error: {}", e)))?;
         }
         _ => return Err(Error::Validation(format!("Unknown format: {}", format))),
     }
@@ -357,12 +405,17 @@ fn zip_add_dir(
     options: zip::write::SimpleFileOptions,
 ) -> Result<u64> {
     let mut count = 0u64;
-    let base_name = base.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let base_name = base
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
-        let relative = path.strip_prefix(base)
+        let relative = path
+            .strip_prefix(base)
             .map_err(|e| Error::Tool(format!("Path strip error: {}", e)))?;
         let archive_name = format!("{}/{}", base_name, relative.display());
 
@@ -386,7 +439,10 @@ fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
     let src = expand_path(src_str, workspace);
 
     if !src.exists() {
-        return Err(Error::NotFound(format!("Archive not found: {}", src.display())));
+        return Err(Error::NotFound(format!(
+            "Archive not found: {}",
+            src.display()
+        )));
     }
 
     let dst = if let Some(d) = params.get("destination").and_then(|v| v.as_str()) {
@@ -398,8 +454,16 @@ fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
 
     std::fs::create_dir_all(&dst)?;
 
-    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let name = src.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let name = src
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
 
     let mut file_count = 0u64;
 
@@ -410,7 +474,8 @@ fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
             .map_err(|e| Error::Tool(format!("Failed to read zip: {}", e)))?;
 
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i)
+            let mut entry = archive
+                .by_index(i)
                 .map_err(|e| Error::Tool(format!("Zip entry error: {}", e)))?;
             let out_path = dst.join(entry.mangled_name());
 
@@ -431,9 +496,14 @@ fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
         let dec = flate2::read::GzDecoder::new(file);
         let mut archive = tar::Archive::new(dec);
 
-        for entry in archive.entries().map_err(|e| Error::Tool(format!("Tar error: {}", e)))? {
+        for entry in archive
+            .entries()
+            .map_err(|e| Error::Tool(format!("Tar error: {}", e)))?
+        {
             let mut entry = entry.map_err(|e| Error::Tool(format!("Tar entry error: {}", e)))?;
-            entry.unpack_in(&dst).map_err(|e| Error::Tool(format!("Tar unpack error: {}", e)))?;
+            entry
+                .unpack_in(&dst)
+                .map_err(|e| Error::Tool(format!("Tar unpack error: {}", e)))?;
             file_count += 1;
         }
     } else if ext == "tar" {
@@ -441,9 +511,14 @@ fn action_decompress(workspace: &Path, params: &Value) -> Result<Value> {
             .map_err(|e| Error::Tool(format!("Failed to open archive: {}", e)))?;
         let mut archive = tar::Archive::new(file);
 
-        for entry in archive.entries().map_err(|e| Error::Tool(format!("Tar error: {}", e)))? {
+        for entry in archive
+            .entries()
+            .map_err(|e| Error::Tool(format!("Tar error: {}", e)))?
+        {
             let mut entry = entry.map_err(|e| Error::Tool(format!("Tar entry error: {}", e)))?;
-            entry.unpack_in(&dst).map_err(|e| Error::Tool(format!("Tar unpack error: {}", e)))?;
+            entry
+                .unpack_in(&dst)
+                .map_err(|e| Error::Tool(format!("Tar unpack error: {}", e)))?;
             file_count += 1;
         }
     } else {
@@ -465,7 +540,10 @@ fn action_read_pdf(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
 
     if !path.exists() {
-        return Err(Error::NotFound(format!("File not found: {}", path.display())));
+        return Err(Error::NotFound(format!(
+            "File not found: {}",
+            path.display()
+        )));
     }
 
     // Use pdf-extract crate to extract text
@@ -500,7 +578,10 @@ async fn action_file_info(workspace: &Path, params: &Value) -> Result<Value> {
     let path = expand_path(params["path"].as_str().unwrap(), workspace);
 
     if !path.exists() {
-        return Err(Error::NotFound(format!("Path not found: {}", path.display())));
+        return Err(Error::NotFound(format!(
+            "Path not found: {}",
+            path.display()
+        )));
     }
 
     let metadata = tokio::fs::metadata(&path).await?;
@@ -551,35 +632,45 @@ mod tests {
     #[test]
     fn test_validate_delete() {
         let tool = FileOpsTool;
-        assert!(tool.validate(&json!({"action": "delete", "path": "/tmp/test"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "delete", "path": "/tmp/test"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "delete"})).is_err());
     }
 
     #[test]
     fn test_validate_compress() {
         let tool = FileOpsTool;
-        assert!(tool.validate(&json!({
-            "action": "compress",
-            "path": "/tmp/test",
-            "destination": "/tmp/test.zip"
-        })).is_ok());
-        assert!(tool.validate(&json!({
-            "action": "compress",
-            "destination": "/tmp/test.zip"
-        })).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "compress",
+                "path": "/tmp/test",
+                "destination": "/tmp/test.zip"
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({
+                "action": "compress",
+                "destination": "/tmp/test.zip"
+            }))
+            .is_err());
     }
 
     #[test]
     fn test_validate_move() {
         let tool = FileOpsTool;
-        assert!(tool.validate(&json!({
-            "action": "move",
-            "path": "/tmp/a",
-            "destination": "/tmp/b"
-        })).is_ok());
-        assert!(tool.validate(&json!({
-            "action": "move",
-            "path": "/tmp/a"
-        })).is_err());
+        assert!(tool
+            .validate(&json!({
+                "action": "move",
+                "path": "/tmp/a",
+                "destination": "/tmp/b"
+            }))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({
+                "action": "move",
+                "path": "/tmp/a"
+            }))
+            .is_err());
     }
 }

@@ -1,7 +1,6 @@
 # Article 08: Gateway Mode — Turning AI into a Service
 
-> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — 8/14
-
+> Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 8
 ---
 
 ## Two runtime modes
@@ -15,8 +14,9 @@ blockcell has two ways to run:
 
 **`blockcell gateway`** — daemon mode
 - Runs continuously in the background
-- Provides HTTP API and WebSocket interfaces
-- Listens on message channels (Telegram/Slack/Discord)
+- Provides HTTP API, WebSocket, and a WebUI
+- Maintains a runtime pool segmented by agent
+- Listens on external channels (Telegram/Slack/Discord/etc.)
 - Runs scheduled tasks (Cron)
 - The AI keeps working even when you’re not present
 
@@ -45,6 +45,26 @@ After it starts, you’ll see logs like:
 Default ports:
 - **18790**: API server (HTTP)
 - **18791**: WebUI (browser UI)
+
+Default routing rules:
+- Internal requests from CLI / WebSocket / WebUI go to the `default` agent
+- External channel traffic first checks `channelAccountOwners.<channel>.<accountId>` and falls back to `channelOwners.<channel>`
+- Any enabled external channel without an owner makes Gateway fail fast at startup
+
+For example, a **2-bot / 2-agent Telegram** setup can be routed like this:
+
+```json
+{
+  "channelAccountOwners": {
+    "telegram": {
+      "bot1": "default",
+      "bot2": "ops"
+    }
+  }
+}
+```
+
+In that case, Gateway dispatches messages from `bot1` to the `default` runtime and messages from `bot2` to the `ops` runtime, even though both belong to the same `telegram` channel.
 
 ---
 
@@ -141,6 +161,15 @@ ws.onmessage = (event) => {
 
 WebSocket supports **streaming output**, so the AI’s reply arrives chunk by chunk for a smoother experience.
 
+Gateway also exposes:
+
+- `GET /v1/channels/status` — current channel connection status
+- `GET /v1/channel-owners` — inspect channel and account-level owner bindings
+- `PUT /v1/channel-owners/:channel` — change a channel fallback owner
+- `DELETE /v1/channel-owners/:channel` — remove a channel fallback owner
+- `PUT /v1/channel-owners/:channel/accounts/:account_id` — set an account-level owner
+- `DELETE /v1/channel-owners/:channel/accounts/:account_id` — clear an account-level owner
+
 ---
 
 ## WebUI
@@ -174,12 +203,13 @@ Main features:
 
 ## API authentication
 
-If your Gateway is exposed publicly, you **must** set an API token:
+In the current implementation, if `gateway.apiToken` is empty, Gateway **auto-generates one on first startup and persists it to `config.json`**. That means the API is not left fully open by default, but for public deployments you should still set a deliberate long-lived token yourself.
 
 ```json
 {
   "gateway": {
-    "apiToken": "a long random string (at least 32 chars)"
+    "apiToken": "a long random string (at least 32 chars)",
+    "webuiPass": "optional dedicated WebUI password"
   }
 }
 ```
@@ -196,14 +226,11 @@ Or use a query parameter (useful for WebSocket):
 ws://YOUR_HOST:18790/v1/ws?token=YOUR_TOKEN
 ```
 
-WebUI login uses the same token as the password.
+WebUI authentication is now separate from the API token:
 
-If no token is configured, Gateway prints a warning on startup:
-
-```
-⚠️  WARNING: No API token configured. Gateway is open to anyone!
-    Set gateway.apiToken in config.json to secure your instance.
-```
+- if `gateway.webuiPass` is set, WebUI uses that stable password
+- otherwise Gateway prints a temporary password at startup
+- `apiToken` continues to protect API and WebSocket access
 
 ---
 

@@ -1,6 +1,6 @@
-use chrono::{TimeZone, Utc};
 use blockcell_core::Paths;
 use blockcell_scheduler::{CronJob, CronService, JobPayload, JobSchedule, JobState, ScheduleKind};
+use chrono::{TimeZone, Utc};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -17,7 +17,10 @@ pub async fn list(show_all: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<8} {:<20} {:<10} {:<20} Schedule", "ID", "Name", "Enabled", "Next Run");
+    println!(
+        "{:<8} {:<20} {:<10} {:<20} Schedule",
+        "ID", "Name", "Enabled", "Next Run"
+    );
     println!("{}", "-".repeat(80));
 
     for job in jobs {
@@ -149,12 +152,20 @@ pub async fn remove(job_id: &str) -> anyhow::Result<()> {
         1 => {
             let job = matching[0];
             service.remove_job(&job.id).await?;
-            println!("Removed job: {} ({})", job.name, &job.id.chars().take(8).collect::<String>());
+            println!(
+                "Removed job: {} ({})",
+                job.name,
+                &job.id.chars().take(8).collect::<String>()
+            );
         }
         _ => {
             println!("Multiple jobs match '{}'. Be more specific:", job_id);
             for job in matching {
-                println!("  {} - {}", &job.id.chars().take(8).collect::<String>(), job.name);
+                println!(
+                    "  {} - {}",
+                    &job.id.chars().take(8).collect::<String>(),
+                    job.name
+                );
             }
         }
     }
@@ -203,14 +214,22 @@ pub async fn run_job(job_id: &str, _force: bool) -> anyhow::Result<()> {
         }
         1 => {
             let job = matching[0];
-            println!("Running job: {} ({})", job.name, &job.id.chars().take(8).collect::<String>());
+            println!(
+                "Running job: {} ({})",
+                job.name,
+                &job.id.chars().take(8).collect::<String>()
+            );
             println!("Message: {}", job.payload.message);
             // In a real implementation, this would trigger the job through the agent
         }
         _ => {
             println!("Multiple jobs match '{}'. Be more specific:", job_id);
             for job in matching {
-                println!("  {} - {}", &job.id.chars().take(8).collect::<String>(), job.name);
+                println!(
+                    "  {} - {}",
+                    &job.id.chars().take(8).collect::<String>(),
+                    job.name
+                );
             }
         }
     }

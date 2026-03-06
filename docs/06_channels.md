@@ -1,7 +1,6 @@
 # 第06篇：多渠道接入 —— Telegram/Slack/Discord/飞书/钉钉/企业微信等都能用
 
-> 系列文章：《blockcell 开源项目深度解析》第 6/16 篇
-
+> 系列文章：《blockcell 开源项目深度解析》第 6 篇
 ---
 
 ## 为什么需要多渠道
@@ -47,6 +46,77 @@ blockcell 目前支持 8 个消息渠道：
 
 这样 Agent Runtime 不需要关心具体是哪个渠道，处理逻辑完全统一。
 
+### 当前版本的路由规则
+
+- `cli`、`cron`、`ws` 这类内部入口默认进入 `default` agent
+- Telegram / Slack / Discord / 飞书 / 钉钉 / 企业微信 / Lark / WhatsApp 这类外部渠道，启动后会优先按 `channelAccountOwners.<channel>.<accountId>` 路由到目标 agent，未命中时回退到 `channelOwners.<channel>`
+- **已启用的外部渠道必须配置 owner**：要么配置 `channelOwners.<channel>` 作为整渠道兜底 owner，要么为该渠道的每个启用账号配置 `channelAccountOwners.<channel>.<accountId>`
+- 可用 `blockcell channels owner list|set|clear` 管理 owner 绑定
+
+一个最小示例：
+
+```json
+{
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops"
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot2": "ops"
+    }
+  }
+}
+```
+
+这表示 `telegram` 默认走 `default`，但来自 `bot2` 账号的消息会改走 `ops`。
+
+一个更完整的 **2 个 bot / 2 个 agent** 示例：
+
+```json
+{
+  "agents": {
+    "list": [
+      { "id": "default", "enabled": true },
+      { "id": "ops", "enabled": true }
+    ]
+  },
+  "channelAccountOwners": {
+    "telegram": {
+      "bot1": "default",
+      "bot2": "ops"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "defaultAccountId": "bot1",
+      "accounts": {
+        "bot1": {
+          "enabled": true,
+          "token": "TG_TOKEN_BOT1",
+          "allowFrom": ["你的用户ID"]
+        },
+        "bot2": {
+          "enabled": true,
+          "token": "TG_TOKEN_BOT2",
+          "allowFrom": ["你的用户ID"]
+        }
+      }
+    }
+  }
+}
+```
+
+这表示 `bot1` 的消息进入 `default` agent，`bot2` 的消息进入 `ops` agent。因为两个启用账号都已经显式绑定 owner，这里可以不再额外写 `channelOwners.telegram`。
+
+也可以用 CLI 直接设置：
+
+```bash
+blockcell channels owner set --channel telegram --account bot1 --agent default
+blockcell channels owner set --channel telegram --account bot2 --agent ops
+```
+
 ---
 
 ## 配置 Telegram
@@ -68,11 +138,14 @@ blockcell 目前支持 8 个消息渠道：
 
 ```json
 {
+  "channelOwners": {
+    "telegram": "default"
+  },
   "channels": {
     "telegram": {
-      "botToken": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
-      "allowFrom": ["你的用户ID"],
-      "pollIntervalSecs": 2
+      "enabled": true,
+      "token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+      "allowFrom": ["你的用户ID"]
     }
   }
 }
@@ -115,6 +188,7 @@ blockcell gateway
 {
   "channels": {
     "slack": {
+      "enabled": true,
       "botToken": "xoxb-你的Bot-Token",
       "channels": ["C0123456789"],
       "allowFrom": ["U0123456789"],
@@ -156,6 +230,7 @@ blockcell gateway
 {
   "channels": {
     "discord": {
+      "enabled": true,
       "botToken": "你的Bot-Token",
       "channels": ["1234567890123456789"],
       "allowFrom": ["你的Discord用户ID"]
@@ -273,10 +348,15 @@ blockcell 支持同时运行多个渠道：
 
 ```json
 {
+  "channelOwners": {
+    "telegram": "default",
+    "slack": "ops",
+    "discord": "default"
+  },
   "channels": {
-    "telegram": { "botToken": "..." },
-    "slack": { "botToken": "..." },
-    "discord": { "botToken": "..." }
+    "telegram": { "enabled": true, "token": "..." },
+    "slack": { "enabled": true, "botToken": "..." },
+    "discord": { "enabled": true, "botToken": "..." }
   }
 }
 ```
@@ -332,12 +412,24 @@ blockcell channels status
 
 输出：
 ```
-Channels status:
-  telegram  ✓ running (polled 1234 times, last: 2s ago)
-  slack     ✓ running (polled 567 times, last: 5s ago)
-  discord   ✓ connected (WebSocket, latency: 45ms)
-  whatsapp  ✗ not configured
-  feishu    ✗ not configured
+Channel Status
+==============
+
+✓ telegram   running (owner: default)
+✓ slack      running (owner: ops)
+✓ discord    connected (owner: default)
+✗ whatsapp   not configured
+✗ feishu     not configured
+```
+
+如需查看或修改 owner 绑定：
+
+```bash
+blockcell channels owner list
+blockcell channels owner set --channel telegram --agent default
+blockcell channels owner set --channel telegram --account bot2 --agent ops
+blockcell channels owner set --channel slack --agent ops
+blockcell channels owner clear --channel slack
 ```
 
 ---
@@ -356,9 +448,13 @@ Channels status:
 
 在 Gateway 模式下（`blockcell gateway`），AI 无法访问工作目录外的文件。这是设计上的安全限制，防止通过消息渠道访问你的私人文件。
 
-### 3. API Token 保护
+### 3. API Token 与 WebUI 密码
 
-如果你的 Gateway 有公网地址，一定要设置 API Token：
+如果 `gateway.apiToken` 为空，Gateway 会在启动时自动生成一个 token 并写回 `config.json`，这样 API 不会处于“完全裸奔”状态。
+
+如果你希望 WebUI 使用固定密码，请显式配置 `gateway.webuiPass`；否则启动时会打印一个临时密码。
+
+如果你的 Gateway 有公网地址，仍然建议主动设置稳定的 `apiToken`：
 
 ```json
 {

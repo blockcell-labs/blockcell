@@ -69,55 +69,84 @@ impl Tool for AppControlTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let valid = [
-            "activate", "screenshot", "type", "press_key",
-            "read_ui", "click_menu", "get_windows",
-            "click_ui_element", "list_apps", "get_frontmost",
+            "activate",
+            "screenshot",
+            "type",
+            "press_key",
+            "read_ui",
+            "click_menu",
+            "get_windows",
+            "click_ui_element",
+            "list_apps",
+            "get_frontmost",
             "wait",
         ];
         if !valid.contains(&action) {
             return Err(Error::Validation(format!(
-                "Invalid action '{}'. Valid: {:?}", action, valid
+                "Invalid action '{}'. Valid: {:?}",
+                action, valid
             )));
         }
 
         // Actions that need an app name
         let needs_app = [
-            "activate", "screenshot", "type", "press_key",
-            "read_ui", "click_menu", "get_windows", "click_ui_element",
+            "activate",
+            "screenshot",
+            "type",
+            "press_key",
+            "read_ui",
+            "click_menu",
+            "get_windows",
+            "click_ui_element",
         ];
         if needs_app.contains(&action) && params.get("app").and_then(|v| v.as_str()).is_none() {
             return Err(Error::Validation(format!(
-                "'app' is required for '{}' action", action
+                "'app' is required for '{}' action",
+                action
             )));
         }
 
         if action == "type" && params.get("text").and_then(|v| v.as_str()).is_none() {
-            return Err(Error::Validation("'text' is required for type action".to_string()));
+            return Err(Error::Validation(
+                "'text' is required for type action".to_string(),
+            ));
         }
         if action == "press_key" && params.get("text").and_then(|v| v.as_str()).is_none() {
-            return Err(Error::Validation("'text' (key combo) is required for press_key action".to_string()));
+            return Err(Error::Validation(
+                "'text' (key combo) is required for press_key action".to_string(),
+            ));
         }
         if action == "click_menu" && params.get("text").and_then(|v| v.as_str()).is_none() {
-            return Err(Error::Validation("'text' (menu path) is required for click_menu action".to_string()));
+            return Err(Error::Validation(
+                "'text' (menu path) is required for click_menu action".to_string(),
+            ));
         }
-        if action == "click_ui_element" && params.get("ui_path").and_then(|v| v.as_str()).is_none() {
-            return Err(Error::Validation("'ui_path' is required for click_ui_element action".to_string()));
+        if action == "click_ui_element" && params.get("ui_path").and_then(|v| v.as_str()).is_none()
+        {
+            return Err(Error::Validation(
+                "'ui_path' is required for click_ui_element action".to_string(),
+            ));
         }
 
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list_apps");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list_apps");
         let app = params.get("app").and_then(|v| v.as_str()).unwrap_or("");
 
         match action {
             "activate" => action_activate(app).await,
             "screenshot" => {
-                let default_path = ctx.workspace.join("media").join(
-                    format!("app_{}.png", chrono::Utc::now().format("%Y%m%d_%H%M%S"))
-                );
-                let path = params.get("screenshot_path")
+                let default_path = ctx.workspace.join("media").join(format!(
+                    "app_{}.png",
+                    chrono::Utc::now().format("%Y%m%d_%H%M%S")
+                ));
+                let path = params
+                    .get("screenshot_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| default_path.to_str().unwrap_or("screenshot.png"));
                 action_screenshot(app, path).await
@@ -147,7 +176,10 @@ impl Tool for AppControlTool {
             "list_apps" => action_list_apps().await,
             "get_frontmost" => action_get_frontmost().await,
             "wait" => {
-                let ms = params.get("amount").and_then(|v| v.as_u64()).unwrap_or(1000);
+                let ms = params
+                    .get("amount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1000);
                 sleep(Duration::from_millis(ms)).await;
                 Ok(json!({"action": "wait", "waited_ms": ms}))
             }
@@ -362,8 +394,11 @@ async fn action_type(app: &str, text: &str) -> Result<Value> {
 
     // Activate the app
     let escaped_app = escape_applescript(app);
-    let activate = format!(r#"tell application "{}" to activate
-delay 0.2"#, escaped_app);
+    let activate = format!(
+        r#"tell application "{}" to activate
+delay 0.2"#,
+        escaped_app
+    );
     run_applescript(&activate).await?;
 
     let process_name = resolve_process_name(app).await?;
@@ -393,8 +428,11 @@ async fn action_press_key(app: &str, key: &str) -> Result<Value> {
 
     // Activate the app
     let escaped_app = escape_applescript(app);
-    let activate = format!(r#"tell application "{}" to activate
-delay 0.2"#, escaped_app);
+    let activate = format!(
+        r#"tell application "{}" to activate
+delay 0.2"#,
+        escaped_app
+    );
     run_applescript(&activate).await?;
 
     let process_name = resolve_process_name(app).await?;
@@ -465,10 +503,18 @@ fn build_key_action(key: &str) -> Result<String> {
     };
 
     let mut modifiers = Vec::new();
-    if has_cmd { modifiers.push("command down"); }
-    if has_shift { modifiers.push("shift down"); }
-    if has_alt { modifiers.push("option down"); }
-    if has_ctrl { modifiers.push("control down"); }
+    if has_cmd {
+        modifiers.push("command down");
+    }
+    if has_shift {
+        modifiers.push("shift down");
+    }
+    if has_alt {
+        modifiers.push("option down");
+    }
+    if has_ctrl {
+        modifiers.push("control down");
+    }
 
     let modifier_str = if modifiers.is_empty() {
         String::new()
@@ -589,8 +635,11 @@ async fn action_click_menu(app: &str, menu_path: &str) -> Result<Value> {
 
     // Activate the app first
     let escaped_app = escape_applescript(app);
-    let activate = format!(r#"tell application "{}" to activate
-delay 0.3"#, escaped_app);
+    let activate = format!(
+        r#"tell application "{}" to activate
+delay 0.3"#,
+        escaped_app
+    );
     run_applescript(&activate).await?;
 
     let process_name = resolve_process_name(app).await?;
@@ -635,7 +684,7 @@ end tell"#,
         ),
         _ => {
             return Err(Error::Validation(
-                "Menu path too deep (max 3 levels: 'Menu > Submenu > Item')".to_string()
+                "Menu path too deep (max 3 levels: 'Menu > Submenu > Item')".to_string(),
             ));
         }
     };
@@ -717,8 +766,11 @@ async fn action_click_ui_element(app: &str, ui_path: &str) -> Result<Value> {
 
     // Activate the app first
     let escaped_app = escape_applescript(app);
-    let activate = format!(r#"tell application "{}" to activate
-delay 0.2"#, escaped_app);
+    let activate = format!(
+        r#"tell application "{}" to activate
+delay 0.2"#,
+        escaped_app
+    );
     run_applescript(&activate).await?;
 
     let process_name = resolve_process_name(app).await?;
@@ -753,8 +805,7 @@ delay 0.2"#, escaped_app);
         return elRole & "|" & elDesc
     end tell
 end tell"#,
-        escaped_process,
-        element_ref
+        escaped_process, element_ref
     );
 
     let result = run_applescript(&script).await?;
@@ -866,22 +917,44 @@ mod tests {
         assert!(tool.validate(&json!({"action": "wait"})).is_ok());
 
         // Actions that need app
-        assert!(tool.validate(&json!({"action": "activate", "app": "Finder"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "activate", "app": "Finder"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "activate"})).is_err());
         assert!(tool.validate(&json!({"action": "screenshot"})).is_err());
-        assert!(tool.validate(&json!({"action": "screenshot", "app": "Windsurf"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "screenshot", "app": "Windsurf"}))
+            .is_ok());
 
         // Actions that need text
-        assert!(tool.validate(&json!({"action": "type", "app": "Windsurf", "text": "hello"})).is_ok());
-        assert!(tool.validate(&json!({"action": "type", "app": "Windsurf"})).is_err());
-        assert!(tool.validate(&json!({"action": "press_key", "app": "Windsurf", "text": "cmd+p"})).is_ok());
-        assert!(tool.validate(&json!({"action": "press_key", "app": "Windsurf"})).is_err());
-        assert!(tool.validate(&json!({"action": "click_menu", "app": "Windsurf", "text": "File > Save"})).is_ok());
-        assert!(tool.validate(&json!({"action": "click_menu", "app": "Windsurf"})).is_err());
+        assert!(tool
+            .validate(&json!({"action": "type", "app": "Windsurf", "text": "hello"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "type", "app": "Windsurf"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "press_key", "app": "Windsurf", "text": "cmd+p"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "press_key", "app": "Windsurf"}))
+            .is_err());
+        assert!(tool
+            .validate(&json!({"action": "click_menu", "app": "Windsurf", "text": "File > Save"}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "click_menu", "app": "Windsurf"}))
+            .is_err());
 
         // click_ui_element needs ui_path
-        assert!(tool.validate(&json!({"action": "click_ui_element", "app": "Windsurf", "ui_path": "button 1"})).is_ok());
-        assert!(tool.validate(&json!({"action": "click_ui_element", "app": "Windsurf"})).is_err());
+        assert!(tool
+            .validate(
+                &json!({"action": "click_ui_element", "app": "Windsurf", "ui_path": "button 1"})
+            )
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"action": "click_ui_element", "app": "Windsurf"}))
+            .is_err());
 
         // Invalid action
         assert!(tool.validate(&json!({"action": "invalid"})).is_err());

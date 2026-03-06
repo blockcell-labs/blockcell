@@ -104,7 +104,8 @@ impl SessionManager {
         headed: bool,
         profile_path: Option<&str>,
     ) -> Result<&mut BrowserSession, String> {
-        self.get_or_create_with_engine(session_name, headed, profile_path, BrowserEngine::Chrome).await
+        self.get_or_create_with_engine(session_name, headed, profile_path, BrowserEngine::Chrome)
+            .await
     }
 
     /// Get or create a session with a specific browser engine.
@@ -119,7 +120,9 @@ impl SessionManager {
             return Ok(self.sessions.get_mut(session_name).unwrap());
         }
 
-        let session = self.launch_browser(session_name, headed, profile_path, engine).await?;
+        let session = self
+            .launch_browser(session_name, headed, profile_path, engine)
+            .await?;
         self.sessions.insert(session_name.to_string(), session);
         Ok(self.sessions.get_mut(session_name).unwrap())
     }
@@ -169,9 +172,7 @@ impl SessionManager {
         let user_data_dir = if let Some(profile) = profile_path {
             PathBuf::from(profile)
         } else {
-            self.base_dir
-                .join("sessions")
-                .join(session_name)
+            self.base_dir.join("sessions").join(session_name)
         };
 
         // Ensure directory exists
@@ -296,9 +297,12 @@ pub fn find_browser_binary(engine: BrowserEngine) -> Option<String> {
                 ]
             } else if cfg!(target_os = "linux") {
                 vec![
-                    "google-chrome", "google-chrome-stable",
-                    "chromium", "chromium-browser",
-                    "/usr/bin/google-chrome", "/usr/bin/chromium",
+                    "google-chrome",
+                    "google-chrome-stable",
+                    "chromium",
+                    "chromium-browser",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
                 ]
             } else {
                 vec![
@@ -311,7 +315,11 @@ pub fn find_browser_binary(engine: BrowserEngine) -> Option<String> {
             if cfg!(target_os = "macos") {
                 vec!["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
             } else if cfg!(target_os = "linux") {
-                vec!["microsoft-edge", "microsoft-edge-stable", "/usr/bin/microsoft-edge"]
+                vec![
+                    "microsoft-edge",
+                    "microsoft-edge-stable",
+                    "/usr/bin/microsoft-edge",
+                ]
             } else {
                 vec![
                     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -337,10 +345,10 @@ pub fn find_browser_binary(engine: BrowserEngine) -> Option<String> {
         if std::path::Path::new(candidate).exists() {
             return Some(candidate.to_string());
         }
-        if !candidate.contains('/') && !candidate.contains('\\')
-            && which::which(candidate).is_ok() {
-                return Some(candidate.to_string());
-            }
+        if !candidate.contains('/') && !candidate.contains('\\') && which::which(candidate).is_ok()
+        {
+            return Some(candidate.to_string());
+        }
     }
     None
 }
@@ -348,7 +356,11 @@ pub fn find_browser_binary(engine: BrowserEngine) -> Option<String> {
 /// List all available browser engines on the system.
 pub fn list_available_browsers() -> Vec<(BrowserEngine, String)> {
     let mut result = Vec::new();
-    for engine in [BrowserEngine::Chrome, BrowserEngine::Edge, BrowserEngine::Firefox] {
+    for engine in [
+        BrowserEngine::Chrome,
+        BrowserEngine::Edge,
+        BrowserEngine::Firefox,
+    ] {
         if let Some(path) = find_browser_binary(engine) {
             result.push((engine, path));
         }
@@ -386,8 +398,7 @@ async fn wait_for_cdp_ready(port: u16, timeout_secs: u64) -> Result<String, Stri
 
         if let Ok(resp) = reqwest::get(&url).await {
             if let Ok(body) = resp.json::<Value>().await {
-                if let Some(ws_url) = body.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
-                {
+                if let Some(ws_url) = body.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
                     return Ok(ws_url.to_string());
                 }
             }
@@ -450,10 +461,7 @@ pub async fn get_target_ws_url(port: u16, target_id: &str) -> Result<String, Str
 
         for target in &targets {
             if target.get("targetId").and_then(|v| v.as_str()) == Some(target_id) {
-                if let Some(ws_url) = target
-                    .get("webSocketDebuggerUrl")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(ws_url) = target.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
                     return Ok(ws_url.to_string());
                 }
             }

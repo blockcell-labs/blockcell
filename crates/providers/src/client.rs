@@ -51,7 +51,10 @@ fn extract_host(url: &str) -> Option<String> {
     // 去掉端口
     let host = if host.starts_with('[') {
         // IPv6
-        host.split(']').next().map(|s| s.trim_start_matches('['))?.to_string()
+        host.split(']')
+            .next()
+            .map(|s| s.trim_start_matches('['))?
+            .to_string()
     } else {
         host.split(':').next()?.to_string()
     };
@@ -116,17 +119,15 @@ pub fn build_http_client(
     let mut builder = Client::builder().timeout(timeout);
 
     match resolve_proxy(provider_proxy, global_proxy, no_proxy, api_base) {
-        ProxyResolution::UseProxy(proxy_url) => {
-            match Proxy::all(&proxy_url) {
-                Ok(p) => {
-                    info!(proxy = %proxy_url, api_base = %api_base, "LLM provider using proxy");
-                    builder = builder.proxy(p);
-                }
-                Err(e) => {
-                    warn!(error = %e, proxy = %proxy_url, "Invalid proxy URL, falling back to direct connect");
-                }
+        ProxyResolution::UseProxy(proxy_url) => match Proxy::all(&proxy_url) {
+            Ok(p) => {
+                info!(proxy = %proxy_url, api_base = %api_base, "LLM provider using proxy");
+                builder = builder.proxy(p);
             }
-        }
+            Err(e) => {
+                warn!(error = %e, proxy = %proxy_url, "Invalid proxy URL, falling back to direct connect");
+            }
+        },
         ProxyResolution::ForceDirectConnect => {
             // no_proxy() 禁用所有代理（包括环境变量），实现强制直连
             info!(api_base = %api_base, "LLM provider forced to direct connect (proxy disabled)");
@@ -174,9 +175,18 @@ mod tests {
 
     #[test]
     fn test_extract_host() {
-        assert_eq!(extract_host("https://api.openai.com/v1"), Some("api.openai.com".to_string()));
-        assert_eq!(extract_host("http://localhost:11434"), Some("localhost".to_string()));
-        assert_eq!(extract_host("https://user:pass@proxy.local:8080/path"), Some("proxy.local".to_string()));
+        assert_eq!(
+            extract_host("https://api.openai.com/v1"),
+            Some("api.openai.com".to_string())
+        );
+        assert_eq!(
+            extract_host("http://localhost:11434"),
+            Some("localhost".to_string())
+        );
+        assert_eq!(
+            extract_host("https://user:pass@proxy.local:8080/path"),
+            Some("proxy.local".to_string())
+        );
     }
 
     #[test]

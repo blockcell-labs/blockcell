@@ -25,7 +25,7 @@ Blockcell 支持通过 Telegram 机器人与智能体进行交互。Telegram 渠
   "channels": {
     "telegram": {
       "enabled": true,
-      "botToken": "你的_BOT_TOKEN",
+      "token": "你的_BOT_TOKEN",
       "allowFrom": ["你的_USER_ID", "其他_USER_ID"]
     }
   }
@@ -35,8 +35,51 @@ Blockcell 支持通过 Telegram 机器人与智能体进行交互。Telegram 渠
 ### 配置项说明
 
 - `enabled`: 是否启用 Telegram 渠道（`true` 或 `false`）。
-- `botToken`: 在 BotFather 处获取的 API Token。
+- `token`: 在 BotFather 处获取的 API Token。
 - `allowFrom`: 允许访问的用户 ID 列表（字符串数组）。如果留空 `[]`，则允许任何人在群聊或私聊中调用机器人。建议在生产环境中配置特定的 ID。
+
+> 如果你通过 `blockcell gateway` 启用 Telegram，还需要在 `config.json` 中补一条 owner 绑定，例如：
+>
+> ```json
+> { "channelOwners": { "telegram": "default" } }
+> ```
+>
+> 如果同一渠道配置了多个账号 / 机器人，可以进一步使用 `channels.telegram.accounts` 配合 `channelAccountOwners.telegram.<accountId>`，例如：
+>
+> ```json
+> {
+>   "channelAccountOwners": {
+>     "telegram": {
+>       "bot1": "default",
+>       "bot2": "ops"
+>     }
+>   },
+>   "channels": {
+>     "telegram": {
+>       "enabled": true,
+>       "defaultAccountId": "bot1",
+>       "accounts": {
+>         "bot1": {
+>           "enabled": true,
+>           "token": "BOT1_TOKEN",
+>           "allowFrom": ["你的_USER_ID"]
+>         },
+>         "bot2": {
+>           "enabled": true,
+>           "token": "BOT2_TOKEN",
+>           "allowFrom": ["你的_USER_ID"]
+>         }
+>       }
+>     }
+>   }
+> }
+> ```
+>
+> 这样 `bot1` 会进入 `default` agent，`bot2` 会进入 `ops` agent。因为两个启用账号都已经显式绑定 owner，这里可以不再额外写 `channelOwners.telegram`。
+>
+> 也可以用 CLI 直接设置：`blockcell channels owner set --channel telegram --account bot1 --agent default`、`blockcell channels owner set --channel telegram --account bot2 --agent ops`。
+>
+> 否则 Gateway 会因为“enabled channel has no owner”而拒绝启动。
 
 ## 4. 交互方式
 

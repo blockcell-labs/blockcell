@@ -2,7 +2,7 @@ use crate::service::{EvolutionService, EvolutionServiceConfig};
 use crate::versioning::{VersionManager, VersionSource};
 use blockcell_core::{Paths, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{debug, info};
 
@@ -21,7 +21,11 @@ pub struct SkillMeta {
     /// Trigger phrases — when user input matches any of these, this skill is activated.
     #[serde(default)]
     pub triggers: Vec<String>,
-    /// Capabilities this skill depends on (capability IDs from the registry).
+    /// Explicit tools this skill may use when activated.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Legacy compatibility field. Older skills stored visible tools here.
+    /// New skills should use `tools`.
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// Output format hint (e.g. "markdown", "json", "table").
@@ -55,6 +59,16 @@ pub struct SkillFallback {
 
 fn default_fallback_strategy() -> String {
     "degrade".to_string()
+}
+
+impl SkillMeta {
+    pub fn effective_tools(&self) -> Vec<String> {
+        if !self.tools.is_empty() {
+            self.tools.clone()
+        } else {
+            self.capabilities.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,11 +181,12 @@ impl SkillManager {
     pub fn get_missing_capabilities(&self) -> Vec<(String, String)> {
         let mut missing = Vec::new();
         for skill in self.skills.values() {
-            for cap_id in &skill.meta.capabilities {
-                if !self.available_capabilities.contains(cap_id)
-                    && !crate::service::is_builtin_tool(cap_id)
+            for tool_name in skill.meta.effective_tools() {
+                if !self.available_capabilities.contains(&tool_name)
+                    && !crate::service::is_builtin_tool(&tool_name)
+                    && !tool_name.contains("__")
                 {
-                    missing.push((skill.name.clone(), cap_id.clone()));
+                    missing.push((skill.name.clone(), tool_name));
                 }
             }
         }
@@ -219,7 +234,9 @@ impl SkillManager {
     pub fn reload_skills(&mut self, paths: &Paths) -> Result<Vec<String>> {
         let before: std::collections::HashSet<String> = self.skills.keys().cloned().collect();
         self.load_from_paths(paths)?;
-        let new_skills: Vec<String> = self.skills.keys()
+        let new_skills: Vec<String> = self
+            .skills
+            .keys()
             .filter(|k| !before.contains(*k))
             .cloned()
             .collect();
@@ -237,17 +254,21 @@ impl SkillManager {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_dir() {
                 if let Some(skill) = self.load_skill(&path)? {
                     let skill_name = skill.name.clone();
-                    
+
                     // Workspace skills override built-in skills
                     if is_workspace || !self.skills.contains_key(&skill_name) {
-                        let source = if is_workspace { "workspace" } else { "built-in" };
+                        let source = if is_workspace {
+                            "workspace"
+                        } else {
+                            "built-in"
+                        };
                         debug!(
-                            name = %skill_name, 
-                            available = skill.available, 
+                            name = %skill_name,
+                            available = skill.available,
                             source = source,
                             "Loaded skill"
                         );
@@ -281,7 +302,11 @@ impl SkillManager {
         };
 
         Ok(Some(Skill {
-            name: if meta.name.is_empty() { name } else { meta.name.clone() },
+            name: if meta.name.is_empty() {
+                name
+            } else {
+                meta.name.clone()
+            },
             path: skill_dir.to_path_buf(),
             meta,
             available,
@@ -324,13 +349,16 @@ impl SkillManager {
             }
         }
 
-        // Check required capabilities from the registry
-        // Skip capability IDs that match built-in tool names (those are always available)
-        for cap_id in &meta.capabilities {
-            if !crate::service::is_builtin_tool(cap_id)
-                && !self.available_capabilities.contains(cap_id)
+        // Check required tools / legacy capabilities from the registry.
+        // Built-in tool ids are always available here; evolved capabilities must exist.
+        for tool_name in meta.effective_tools() {
+            if tool_name.contains("__") {
+                continue;
+            }
+            if !crate::service::is_builtin_tool(&tool_name)
+                && !self.available_capabilities.contains(&tool_name)
             {
-                return (false, Some(format!("Missing capability: {}", cap_id)));
+                return (false, Some(format!("Missing capability: {}", tool_name)));
             }
         }
 
@@ -341,10 +369,7 @@ impl SkillManager {
         let mut xml = String::from("<skills>\n");
 
         for skill in self.skills.values() {
-            xml.push_str(&format!(
-                "  <skill available=\"{}\">\n",
-                skill.available
-            ));
+            xml.push_str(&format!("  <skill available=\"{}\">\n", skill.available));
             xml.push_str(&format!("    <name>{}</name>\n", skill.name));
             xml.push_str(&format!(
                 "    <description>{}</description>\n",
@@ -354,13 +379,13 @@ impl SkillManager {
                 "    <location>{}/SKILL.md</location>\n",
                 skill.path.display()
             ));
-            
+
             if !skill.available {
                 if let Some(reason) = &skill.unavailable_reason {
                     xml.push_str(&format!("    <requires>{}</requires>\n", reason));
                 }
             }
-            
+
             xml.push_str("  </skill>\n");
         }
 
@@ -380,15 +405,22 @@ impl SkillManager {
     }
 
     /// Find a skill whose trigger phrases match the user input.
+    /// Disabled skills are skipped during candidate selection.
     /// Returns the first matching skill.
-    pub fn match_skill(&self, user_input: &str) -> Option<&Skill> {
+    pub fn match_skill(&self, user_input: &str, disabled_skills: &HashSet<String>) -> Option<&Skill> {
         let input_lower = user_input.to_lowercase();
-        self.skills.values()
-            .filter(|s| s.available && !s.meta.triggers.is_empty())
+        self.skills
+            .values()
+            .filter(|s| {
+                s.available
+                    && !s.meta.triggers.is_empty()
+                    && !disabled_skills.contains(&s.name)
+            })
             .find(|s| {
-                s.meta.triggers.iter().any(|trigger| {
-                    input_lower.contains(&trigger.to_lowercase())
-                })
+                s.meta
+                    .triggers
+                    .iter()
+                    .any(|trigger| input_lower.contains(&trigger.to_lowercase()))
             })
     }
 
@@ -406,9 +438,10 @@ impl SkillManager {
         source: VersionSource,
         changelog: Option<String>,
     ) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.create_version(skill_name, source, changelog)?;
         info!(skill = %skill_name, "Created new skill version");
         Ok(())
@@ -416,35 +449,39 @@ impl SkillManager {
 
     /// 切换到指定版本
     pub fn switch_version(&self, skill_name: &str, version: &str) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.switch_to_version(skill_name, version)?;
         Ok(())
     }
 
     /// 回滚到上一个版本
     pub fn rollback_version(&self, skill_name: &str) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.rollback(skill_name)?;
         Ok(())
     }
 
     /// 列出技能的所有版本
     pub fn list_versions(&self, skill_name: &str) -> Result<Vec<crate::versioning::SkillVersion>> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.list_versions(skill_name)
     }
 
     /// 清理旧版本
     pub fn cleanup_old_versions(&self, skill_name: &str, keep_count: usize) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.cleanup_old_versions(skill_name, keep_count)?;
         Ok(())
     }
@@ -456,9 +493,10 @@ impl SkillManager {
         version1: &str,
         version2: &str,
     ) -> Result<String> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.diff_versions(skill_name, version1, version2)
     }
 
@@ -469,22 +507,20 @@ impl SkillManager {
         version: &str,
         output_path: &std::path::Path,
     ) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.export_version(skill_name, version, output_path)?;
         Ok(())
     }
 
     /// 导入版本
-    pub fn import_version(
-        &self,
-        skill_name: &str,
-        archive_path: &std::path::Path,
-    ) -> Result<()> {
-        let vm = self.version_manager.as_ref()
-            .ok_or_else(|| blockcell_core::Error::Other("Version manager not initialized".to_string()))?;
-        
+    pub fn import_version(&self, skill_name: &str, archive_path: &std::path::Path) -> Result<()> {
+        let vm = self.version_manager.as_ref().ok_or_else(|| {
+            blockcell_core::Error::Other("Version manager not initialized".to_string())
+        })?;
+
         vm.import_version(skill_name, archive_path)?;
         Ok(())
     }
@@ -493,5 +529,92 @@ impl SkillManager {
 impl Default for SkillManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn test_skill_meta_prefers_tools_over_capabilities() {
+        let meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: stock_analysis
+tools:
+  - finance_api
+  - chart_generate
+capabilities:
+  - web_fetch
+"#,
+        )
+        .expect("meta should parse");
+
+        assert_eq!(
+            meta.effective_tools(),
+            vec!["finance_api".to_string(), "chart_generate".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_skill_meta_falls_back_to_capabilities_when_tools_missing() {
+        let meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: weather
+capabilities:
+  - web_fetch
+  - web_search
+"#,
+        )
+        .expect("legacy meta should parse");
+
+        assert_eq!(
+            meta.effective_tools(),
+            vec!["web_fetch".to_string(), "web_search".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_match_skill_skips_disabled_matching_skill_and_returns_next_candidate() {
+        let mut manager = SkillManager::new();
+        manager.skills = HashMap::from([
+            (
+                "disabled_skill".to_string(),
+                Skill {
+                    name: "disabled_skill".to_string(),
+                    path: PathBuf::from("/tmp/disabled_skill"),
+                    meta: SkillMeta {
+                        name: "disabled_skill".to_string(),
+                        triggers: vec!["deploy".to_string()],
+                        ..SkillMeta::default()
+                    },
+                    available: true,
+                    unavailable_reason: None,
+                    current_version: None,
+                },
+            ),
+            (
+                "active_skill".to_string(),
+                Skill {
+                    name: "active_skill".to_string(),
+                    path: PathBuf::from("/tmp/active_skill"),
+                    meta: SkillMeta {
+                        name: "active_skill".to_string(),
+                        triggers: vec!["deploy".to_string()],
+                        ..SkillMeta::default()
+                    },
+                    available: true,
+                    unavailable_reason: None,
+                    current_version: None,
+                },
+            ),
+        ]);
+
+        let disabled_skills = HashSet::from(["disabled_skill".to_string()]);
+        let matched = manager.match_skill("please deploy the release", &disabled_skills);
+
+        assert_eq!(matched.map(|skill| skill.name.as_str()), Some("active_skill"));
     }
 }

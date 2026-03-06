@@ -27,13 +27,13 @@ cargo build -p blockcell --release
 
 ## 2）生成配置
 
-首次运行初始化：
+首次运行推荐直接使用配置向导：
 
 ```bash
-blockcell onboard
+blockcell setup
 ```
 
-然后编辑 `~/.blockcell/config.json`，至少填入一个模型服务商的 API Key（例如 `providers.openrouter.apiKey`）。
+它会自动创建 `~/.blockcell/`、写入 provider 配置，并在你启用外部渠道时自动补 `channelOwners` 的默认绑定。若你后续需要把同一渠道的不同账号路由到不同 agent，可以再手动补 `channelAccountOwners`。若你更喜欢旧流程，也仍可执行 `blockcell onboard` 后手动编辑 `~/.blockcell/config.json`。
 
 ## 3）交互模式运行
 
@@ -63,7 +63,13 @@ blockcell gateway
 如果配置了 `gateway.apiToken`：
 
 - HTTP 调用：`Authorization: Bearer <token>`（或 `?token=<token>`）
-- WebUI 登录：密码就是同一个 token
+- WebSocket：也可用 `?token=<token>`
+
+WebUI 登录密码与 API token 现在分离：
+
+- 若设置了 `gateway.webuiPass`，WebUI 使用该固定密码
+- 若未设置，Gateway 启动时会打印一个临时密码
+- 若 `gateway.apiToken` 为空，Gateway 会自动生成并持久化一个 token
 
 ## 项目截图
 

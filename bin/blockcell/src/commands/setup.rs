@@ -26,6 +26,10 @@ pub async fn run(
         Config::default()
     };
 
+    if config.intent_router.is_none() {
+        config.intent_router = Config::default().intent_router;
+    }
+
     println!("blockcell setup");
     println!("==============");
     println!("Config file: {}", config_path.display());
@@ -58,6 +62,7 @@ pub async fn run(
 
     if channel_name != "skip" {
         configure_channel(&mut config, &channel_name)?;
+        ensure_channel_owner(&mut config, &channel_name);
     } else {
         println!("Skipped channel setup (WebUI only).");
     }
@@ -305,6 +310,21 @@ fn configure_channel(config: &mut Config, channel: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_channel_owner(config: &mut Config, channel: &str) {
+    if config.resolve_channel_owner(channel).is_some() {
+        return;
+    }
+    let owner = config
+        .known_agent_ids()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "default".to_string());
+    config
+        .channel_owners
+        .insert(channel.to_string(), owner.clone());
+    println!("Assigned channel owner: {} -> {}", channel, owner);
 }
 
 fn prompt_provider(config: &Config) -> anyhow::Result<String> {
@@ -560,7 +580,10 @@ mod tests {
         )
         .expect("configure_provider should succeed");
 
-        assert_eq!(config.agents.defaults.provider, Some("deepseek".to_string()));
+        assert_eq!(
+            config.agents.defaults.provider,
+            Some("deepseek".to_string())
+        );
         assert_eq!(config.agents.defaults.model, "deepseek-chat");
         assert_eq!(config.agents.defaults.model_pool.len(), 1);
         let entry = &config.agents.defaults.model_pool[0];
@@ -568,5 +591,28 @@ mod tests {
         assert_eq!(entry.model, "deepseek-chat");
         assert_eq!(entry.weight, 1);
         assert_eq!(entry.priority, 1);
+    }
+
+    #[test]
+    fn test_ensure_channel_owner_defaults_to_default_agent() {
+        let mut config = Config::default();
+        ensure_channel_owner(&mut config, "telegram");
+        assert_eq!(
+            config.channel_owners.get("telegram").map(|s| s.as_str()),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn test_ensure_channel_owner_keeps_existing() {
+        let mut config = Config::default();
+        config
+            .channel_owners
+            .insert("telegram".to_string(), "ops".to_string());
+        ensure_channel_owner(&mut config, "telegram");
+        assert_eq!(
+            config.channel_owners.get("telegram").map(|s| s.as_str()),
+            Some("ops")
+        );
     }
 }

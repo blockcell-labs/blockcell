@@ -123,21 +123,28 @@ impl Tool for DataProcessTool {
                     return Err(Error::Validation("write_csv requires 'path'".to_string()));
                 }
                 if params.get("data").and_then(|v| v.as_array()).is_none() {
-                    return Err(Error::Validation("write_csv requires 'data' array".to_string()));
+                    return Err(Error::Validation(
+                        "write_csv requires 'data' array".to_string(),
+                    ));
                 }
             }
             "query" | "transform" => {
                 let has_data = params.get("data").and_then(|v| v.as_array()).is_some();
                 let has_path = params.get("path").and_then(|v| v.as_str()).is_some();
                 if !has_data && !has_path {
-                    return Err(Error::Validation(format!("{} requires 'data' array or 'path' to a CSV", action)));
+                    return Err(Error::Validation(format!(
+                        "{} requires 'data' array or 'path' to a CSV",
+                        action
+                    )));
                 }
             }
             "stats" => {
                 let has_data = params.get("data").and_then(|v| v.as_array()).is_some();
                 let has_path = params.get("path").and_then(|v| v.as_str()).is_some();
                 if !has_data && !has_path {
-                    return Err(Error::Validation("stats requires 'data' array or 'path' to a CSV".to_string()));
+                    return Err(Error::Validation(
+                        "stats requires 'data' array or 'path' to a CSV".to_string(),
+                    ));
                 }
             }
             _ => return Err(Error::Validation(format!("Unknown action: {}", action))),
@@ -197,8 +204,14 @@ fn load_data(workspace: &Path, params: &Value) -> Result<Vec<Value>> {
     }
     if let Some(path_str) = params.get("path").and_then(|v| v.as_str()) {
         let path = expand_path(path_str, workspace);
-        let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-        let has_header = params.get("has_header").and_then(|v| v.as_bool()).unwrap_or(true);
+        let delimiter = params
+            .get("delimiter")
+            .and_then(|v| v.as_str())
+            .unwrap_or(",");
+        let has_header = params
+            .get("has_header")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         return read_csv_to_json(&path, delimiter, has_header);
     }
     Err(Error::Tool("No data source provided".to_string()))
@@ -206,7 +219,10 @@ fn load_data(workspace: &Path, params: &Value) -> Result<Vec<Value>> {
 
 fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result<Vec<Value>> {
     if !path.exists() {
-        return Err(Error::NotFound(format!("CSV file not found: {}", path.display())));
+        return Err(Error::NotFound(format!(
+            "CSV file not found: {}",
+            path.display()
+        )));
     }
 
     let content = std::fs::read_to_string(path)?;
@@ -248,7 +264,10 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
             let record = result.map_err(|e| Error::Tool(format!("CSV parse error: {}", e)))?;
             let mut row = serde_json::Map::new();
             for (i, field) in record.iter().enumerate() {
-                let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
+                let key = headers
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("col{}", i));
                 row.insert(key, try_parse_value(field));
             }
             rows.push(Value::Object(row));
@@ -258,7 +277,10 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
             let record = result.map_err(|e| Error::Tool(format!("CSV parse error: {}", e)))?;
             let mut row = serde_json::Map::new();
             for (i, field) in record.iter().enumerate() {
-                let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
+                let key = headers
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("col{}", i));
                 row.insert(key, try_parse_value(field));
             }
             rows.push(Value::Object(row));
@@ -292,8 +314,14 @@ fn try_parse_value(s: &str) -> Value {
 fn action_read_csv(workspace: &Path, params: &Value) -> Result<Value> {
     let path_str = params["path"].as_str().unwrap();
     let path = expand_path(path_str, workspace);
-    let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-    let has_header = params.get("has_header").and_then(|v| v.as_bool()).unwrap_or(true);
+    let delimiter = params
+        .get("delimiter")
+        .and_then(|v| v.as_str())
+        .unwrap_or(",");
+    let has_header = params
+        .get("has_header")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let limit = params.get("limit").and_then(|v| v.as_u64());
 
     let mut rows = read_csv_to_json(&path, delimiter, has_header)?;
@@ -304,7 +332,8 @@ fn action_read_csv(workspace: &Path, params: &Value) -> Result<Value> {
     }
 
     // Extract column names from first row
-    let columns: Vec<String> = rows.first()
+    let columns: Vec<String> = rows
+        .first()
         .and_then(|r| r.as_object())
         .map(|obj| obj.keys().cloned().collect())
         .unwrap_or_default();
@@ -321,7 +350,10 @@ fn action_read_csv(workspace: &Path, params: &Value) -> Result<Value> {
 fn action_write_csv(workspace: &Path, params: &Value) -> Result<Value> {
     let path_str = params["path"].as_str().unwrap();
     let path = expand_path(path_str, workspace);
-    let delimiter = params.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
+    let delimiter = params
+        .get("delimiter")
+        .and_then(|v| v.as_str())
+        .unwrap_or(",");
     let data = params["data"].as_array().unwrap();
 
     if data.is_empty() {
@@ -368,20 +400,22 @@ fn write_json_to_csv(path: &PathBuf, data: &[Value], delimiter: &str) -> Result<
 
     // Write rows
     for row in data {
-        let record: Vec<String> = columns.iter().map(|col| {
-            match row.get(col) {
+        let record: Vec<String> = columns
+            .iter()
+            .map(|col| match row.get(col) {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
                 Some(Value::Bool(b)) => b.to_string(),
                 Some(Value::Null) | None => String::new(),
                 Some(v) => v.to_string(),
-            }
-        }).collect();
+            })
+            .collect();
         wtr.write_record(&record)
             .map_err(|e| Error::Tool(format!("CSV row write error: {}", e)))?;
     }
 
-    wtr.flush().map_err(|e| Error::Tool(format!("CSV flush error: {}", e)))?;
+    wtr.flush()
+        .map_err(|e| Error::Tool(format!("CSV flush error: {}", e)))?;
     Ok(())
 }
 
@@ -406,7 +440,11 @@ fn action_query(workspace: &Path, params: &Value) -> Result<Value> {
             let va = a.get(sort_col);
             let vb = b.get(sort_col);
             let cmp = compare_values(va, vb);
-            if desc { cmp.reverse() } else { cmp }
+            if desc {
+                cmp.reverse()
+            } else {
+                cmp
+            }
         });
     }
 
@@ -414,17 +452,20 @@ fn action_query(workspace: &Path, params: &Value) -> Result<Value> {
     if let Some(cols) = params.get("columns").and_then(|v| v.as_array()) {
         let col_names: Vec<&str> = cols.iter().filter_map(|c| c.as_str()).collect();
         if !col_names.is_empty() {
-            data = data.into_iter().map(|row| {
-                let mut new_row = serde_json::Map::new();
-                if let Some(obj) = row.as_object() {
-                    for col in &col_names {
-                        if let Some(v) = obj.get(*col) {
-                            new_row.insert(col.to_string(), v.clone());
+            data = data
+                .into_iter()
+                .map(|row| {
+                    let mut new_row = serde_json::Map::new();
+                    if let Some(obj) = row.as_object() {
+                        for col in &col_names {
+                            if let Some(v) = obj.get(*col) {
+                                new_row.insert(col.to_string(), v.clone());
+                            }
                         }
                     }
-                }
-                Value::Object(new_row)
-            }).collect();
+                    Value::Object(new_row)
+                })
+                .collect();
         }
     }
 
@@ -451,48 +492,40 @@ fn action_query(workspace: &Path, params: &Value) -> Result<Value> {
 fn match_filter(val: Option<&Value>, condition: &Value) -> bool {
     match condition {
         // Direct equality: {"column": "value"}
-        Value::String(s) => {
-            val.map(|v| match v {
+        Value::String(s) => val
+            .map(|v| match v {
                 Value::String(vs) => vs == s,
                 _ => v.to_string().trim_matches('"') == s.as_str(),
-            }).unwrap_or(false)
-        }
-        Value::Number(n) => {
-            val.map(|v| v.as_f64() == n.as_f64()).unwrap_or(false)
-        }
-        Value::Bool(b) => {
-            val.map(|v| v.as_bool() == Some(*b)).unwrap_or(false)
-        }
+            })
+            .unwrap_or(false),
+        Value::Number(n) => val.map(|v| v.as_f64() == n.as_f64()).unwrap_or(false),
+        Value::Bool(b) => val.map(|v| v.as_bool() == Some(*b)).unwrap_or(false),
         // Operator conditions: {"column": {"gt": 18, "contains": "foo"}}
         Value::Object(ops) => {
             ops.iter().all(|(op, target)| {
                 match op.as_str() {
                     "eq" => val.map(|v| v == target).unwrap_or(false),
                     "ne" | "neq" => val.map(|v| v != target).unwrap_or(true),
-                    "gt" => {
-                        val.and_then(|v| v.as_f64())
-                            .zip(target.as_f64())
-                            .map(|(a, b)| a > b)
-                            .unwrap_or(false)
-                    }
-                    "gte" | "ge" => {
-                        val.and_then(|v| v.as_f64())
-                            .zip(target.as_f64())
-                            .map(|(a, b)| a >= b)
-                            .unwrap_or(false)
-                    }
-                    "lt" => {
-                        val.and_then(|v| v.as_f64())
-                            .zip(target.as_f64())
-                            .map(|(a, b)| a < b)
-                            .unwrap_or(false)
-                    }
-                    "lte" | "le" => {
-                        val.and_then(|v| v.as_f64())
-                            .zip(target.as_f64())
-                            .map(|(a, b)| a <= b)
-                            .unwrap_or(false)
-                    }
+                    "gt" => val
+                        .and_then(|v| v.as_f64())
+                        .zip(target.as_f64())
+                        .map(|(a, b)| a > b)
+                        .unwrap_or(false),
+                    "gte" | "ge" => val
+                        .and_then(|v| v.as_f64())
+                        .zip(target.as_f64())
+                        .map(|(a, b)| a >= b)
+                        .unwrap_or(false),
+                    "lt" => val
+                        .and_then(|v| v.as_f64())
+                        .zip(target.as_f64())
+                        .map(|(a, b)| a < b)
+                        .unwrap_or(false),
+                    "lte" | "le" => val
+                        .and_then(|v| v.as_f64())
+                        .zip(target.as_f64())
+                        .map(|(a, b)| a <= b)
+                        .unwrap_or(false),
                     "contains" => {
                         let target_str = target.as_str().unwrap_or("");
                         val.map(|v| {
@@ -501,7 +534,8 @@ fn match_filter(val: Option<&Value>, condition: &Value) -> bool {
                                 _ => v.to_string(),
                             };
                             s.contains(target_str)
-                        }).unwrap_or(false)
+                        })
+                        .unwrap_or(false)
                     }
                     "starts_with" => {
                         let target_str = target.as_str().unwrap_or("");
@@ -572,12 +606,18 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
 
     let group_by = params.get("group_by").and_then(|v| v.as_str());
     let agg_column = params.get("agg_column").and_then(|v| v.as_str());
-    let agg_func = params.get("agg_func").and_then(|v| v.as_str()).unwrap_or("count");
+    let agg_func = params
+        .get("agg_func")
+        .and_then(|v| v.as_str())
+        .unwrap_or("count");
 
     // Special case: correlation without group_by
     if agg_func == "correlation" {
-        let col_a = agg_column.ok_or_else(|| Error::Tool("correlation requires 'agg_column'".into()))?;
-        let col_b = params.get("correlation_column").and_then(|v| v.as_str())
+        let col_a =
+            agg_column.ok_or_else(|| Error::Tool("correlation requires 'agg_column'".into()))?;
+        let col_b = params
+            .get("correlation_column")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Tool("correlation requires 'correlation_column'".into()))?;
         let corr = compute_correlation(&data, col_a, col_b);
         return Ok(json!({
@@ -597,13 +637,22 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
 
     // Special case: percentile without group_by
     if agg_func == "percentile" {
-        let col = agg_column.ok_or_else(|| Error::Tool("percentile requires 'agg_column'".into()))?;
-        let p_val = params.get("percentile_value").and_then(|v| v.as_f64()).unwrap_or(50.0);
-        let mut values: Vec<f64> = data.iter()
+        let col =
+            agg_column.ok_or_else(|| Error::Tool("percentile requires 'agg_column'".into()))?;
+        let p_val = params
+            .get("percentile_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(50.0);
+        let mut values: Vec<f64> = data
+            .iter()
             .filter_map(|row| row.get(col).and_then(|v| v.as_f64()))
             .collect();
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let result_val = if values.is_empty() { None } else { Some(compute_percentile_sorted(&values, p_val)) };
+        let result_val = if values.is_empty() {
+            None
+        } else {
+            Some(compute_percentile_sorted(&values, p_val))
+        };
         return Ok(json!({
             "total_rows": data.len(),
             "agg_func": "percentile",
@@ -615,9 +664,11 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
 
     if let Some(group_col) = group_by {
         // Grouped aggregation
-        let mut groups: std::collections::HashMap<String, Vec<&Value>> = std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<String, Vec<&Value>> =
+            std::collections::HashMap::new();
         for row in &data {
-            let key = row.get(group_col)
+            let key = row
+                .get(group_col)
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     _ => v.to_string(),
@@ -626,18 +677,26 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
             groups.entry(key).or_default().push(row);
         }
 
-        let percentile_val = params.get("percentile_value").and_then(|v| v.as_f64()).unwrap_or(50.0);
+        let percentile_val = params
+            .get("percentile_value")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(50.0);
 
         let mut results = Vec::new();
         for (key, rows) in &groups {
             let agg_val = if let Some(col) = agg_column {
                 match agg_func {
                     "percentile" => {
-                        let mut vals: Vec<f64> = rows.iter()
+                        let mut vals: Vec<f64> = rows
+                            .iter()
                             .filter_map(|row| row.get(col).and_then(|v| v.as_f64()))
                             .collect();
                         vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        if vals.is_empty() { json!(null) } else { json!(compute_percentile_sorted(&vals, percentile_val)) }
+                        if vals.is_empty() {
+                            json!(null)
+                        } else {
+                            json!(compute_percentile_sorted(&vals, percentile_val))
+                        }
                     }
                     _ => compute_agg(rows, col, agg_func),
                 }
@@ -672,14 +731,16 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
         Ok(result)
     } else {
         // Overall statistics for all numeric columns
-        let columns: Vec<String> = data.first()
+        let columns: Vec<String> = data
+            .first()
             .and_then(|r| r.as_object())
             .map(|obj| obj.keys().cloned().collect())
             .unwrap_or_default();
 
         let mut col_stats = serde_json::Map::new();
         for col in &columns {
-            let values: Vec<f64> = data.iter()
+            let values: Vec<f64> = data
+                .iter()
                 .filter_map(|row| row.get(col).and_then(|v| v.as_f64()))
                 .collect();
 
@@ -708,21 +769,25 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
                 let p75 = compute_percentile_sorted(&sorted, 75.0);
                 let p90 = compute_percentile_sorted(&sorted, 90.0);
 
-                col_stats.insert(col.clone(), json!({
-                    "count": count,
-                    "sum": sum,
-                    "avg": (avg * 1000.0).round() / 1000.0,
-                    "min": min,
-                    "max": max,
-                    "median": median,
-                    "std_dev": (std_dev * 1000.0).round() / 1000.0,
-                    "p25": p25,
-                    "p75": p75,
-                    "p90": p90
-                }));
+                col_stats.insert(
+                    col.clone(),
+                    json!({
+                        "count": count,
+                        "sum": sum,
+                        "avg": (avg * 1000.0).round() / 1000.0,
+                        "min": min,
+                        "max": max,
+                        "median": median,
+                        "std_dev": (std_dev * 1000.0).round() / 1000.0,
+                        "p25": p25,
+                        "p75": p75,
+                        "p90": p90
+                    }),
+                );
             } else {
                 // Non-numeric column: count distinct values
-                let distinct: std::collections::HashSet<String> = data.iter()
+                let distinct: std::collections::HashSet<String> = data
+                    .iter()
                     .filter_map(|row| row.get(col))
                     .map(|v| match v {
                         Value::String(s) => s.clone(),
@@ -730,16 +795,20 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
                         _ => v.to_string(),
                     })
                     .collect();
-                let null_count = data.iter()
+                let null_count = data
+                    .iter()
                     .filter(|row| row.get(col).is_none() || row.get(col) == Some(&Value::Null))
                     .count();
 
-                col_stats.insert(col.clone(), json!({
-                    "type": "categorical",
-                    "count": data.len(),
-                    "distinct": distinct.len(),
-                    "null_count": null_count
-                }));
+                col_stats.insert(
+                    col.clone(),
+                    json!({
+                        "type": "categorical",
+                        "count": data.len(),
+                        "distinct": distinct.len(),
+                        "null_count": null_count
+                    }),
+                );
             }
         }
 
@@ -752,7 +821,8 @@ fn action_stats(workspace: &Path, params: &Value) -> Result<Value> {
 }
 
 fn compute_agg(rows: &[&Value], column: &str, func: &str) -> Value {
-    let values: Vec<f64> = rows.iter()
+    let values: Vec<f64> = rows
+        .iter()
         .filter_map(|row| row.get(column).and_then(|v| v.as_f64()))
         .collect();
 
@@ -767,18 +837,25 @@ fn compute_agg(rows: &[&Value], column: &str, func: &str) -> Value {
                 json!((avg * 1000.0).round() / 1000.0)
             }
         }
-        "min" => {
-            values.iter().cloned().fold(None, |min: Option<f64>, v| {
+        "min" => values
+            .iter()
+            .cloned()
+            .fold(None, |min: Option<f64>, v| {
                 Some(min.map_or(v, |m: f64| m.min(v)))
-            }).map(|v| json!(v)).unwrap_or(json!(null))
-        }
-        "max" => {
-            values.iter().cloned().fold(None, |max: Option<f64>, v| {
+            })
+            .map(|v| json!(v))
+            .unwrap_or(json!(null)),
+        "max" => values
+            .iter()
+            .cloned()
+            .fold(None, |max: Option<f64>, v| {
                 Some(max.map_or(v, |m: f64| m.max(v)))
-            }).map(|v| json!(v)).unwrap_or(json!(null))
-        }
+            })
+            .map(|v| json!(v))
+            .unwrap_or(json!(null)),
         "distinct" => {
-            let distinct: std::collections::HashSet<String> = rows.iter()
+            let distinct: std::collections::HashSet<String> = rows
+                .iter()
                 .filter_map(|row| row.get(column))
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
@@ -830,7 +907,8 @@ fn compute_percentile_sorted(sorted: &[f64], p: f64) -> f64 {
 
 /// Compute Pearson correlation coefficient between two columns.
 fn compute_correlation(data: &[Value], col_a: &str, col_b: &str) -> Option<f64> {
-    let pairs: Vec<(f64, f64)> = data.iter()
+    let pairs: Vec<(f64, f64)> = data
+        .iter()
         .filter_map(|row| {
             let a = row.get(col_a).and_then(|v| v.as_f64())?;
             let b = row.get(col_b).and_then(|v| v.as_f64())?;
@@ -871,7 +949,8 @@ fn compute_correlation(data: &[Value], col_a: &str, col_b: &str) -> Option<f64> 
 fn action_transform(workspace: &Path, params: &Value) -> Result<Value> {
     let mut data = load_data(workspace, params)?;
 
-    let ops = params.get("transform_ops")
+    let ops = params
+        .get("transform_ops")
         .and_then(|v| v.as_array())
         .ok_or_else(|| Error::Validation("transform requires 'transform_ops' array".to_string()))?;
 
@@ -882,42 +961,54 @@ fn action_transform(workspace: &Path, params: &Value) -> Result<Value> {
                 let from = op_def.get("from").and_then(|v| v.as_str()).unwrap_or("");
                 let to = op_def.get("to").and_then(|v| v.as_str()).unwrap_or("");
                 if !from.is_empty() && !to.is_empty() {
-                    data = data.into_iter().map(|mut row| {
-                        if let Some(obj) = row.as_object_mut() {
-                            if let Some(val) = obj.remove(from) {
-                                obj.insert(to.to_string(), val);
+                    data = data
+                        .into_iter()
+                        .map(|mut row| {
+                            if let Some(obj) = row.as_object_mut() {
+                                if let Some(val) = obj.remove(from) {
+                                    obj.insert(to.to_string(), val);
+                                }
                             }
-                        }
-                        row
-                    }).collect();
+                            row
+                        })
+                        .collect();
                 }
             }
             "drop" => {
                 if let Some(cols) = op_def.get("columns").and_then(|v| v.as_array()) {
                     let drop_cols: Vec<&str> = cols.iter().filter_map(|c| c.as_str()).collect();
-                    data = data.into_iter().map(|mut row| {
-                        if let Some(obj) = row.as_object_mut() {
-                            for col in &drop_cols {
-                                obj.remove(*col);
+                    data = data
+                        .into_iter()
+                        .map(|mut row| {
+                            if let Some(obj) = row.as_object_mut() {
+                                for col in &drop_cols {
+                                    obj.remove(*col);
+                                }
                             }
-                        }
-                        row
-                    }).collect();
+                            row
+                        })
+                        .collect();
                 }
             }
             "fill_null" => {
                 let column = op_def.get("column").and_then(|v| v.as_str()).unwrap_or("");
-                let fill_value = op_def.get("value").cloned().unwrap_or(Value::String(String::new()));
+                let fill_value = op_def
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(Value::String(String::new()));
                 if !column.is_empty() {
-                    data = data.into_iter().map(|mut row| {
-                        if let Some(obj) = row.as_object_mut() {
-                            let is_null = obj.get(column).map(|v| v.is_null()).unwrap_or(true);
-                            if is_null {
-                                obj.insert(column.to_string(), fill_value.clone());
+                    data = data
+                        .into_iter()
+                        .map(|mut row| {
+                            if let Some(obj) = row.as_object_mut() {
+                                let is_null = obj.get(column).map(|v| v.is_null()).unwrap_or(true);
+                                if is_null {
+                                    obj.insert(column.to_string(), fill_value.clone());
+                                }
                             }
-                        }
-                        row
-                    }).collect();
+                            row
+                        })
+                        .collect();
                 }
             }
             "dedup" => {
@@ -925,7 +1016,8 @@ fn action_transform(workspace: &Path, params: &Value) -> Result<Value> {
                 let mut seen = std::collections::HashSet::new();
                 data.retain(|row| {
                     let key = if let Some(cols) = cols {
-                        let parts: Vec<String> = cols.iter()
+                        let parts: Vec<String> = cols
+                            .iter()
                             .filter_map(|c| c.as_str())
                             .map(|c| row.get(c).map(|v| v.to_string()).unwrap_or_default())
                             .collect();
@@ -940,38 +1032,44 @@ fn action_transform(workspace: &Path, params: &Value) -> Result<Value> {
                 let name = op_def.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let value = op_def.get("value").cloned().unwrap_or(Value::Null);
                 if !name.is_empty() {
-                    data = data.into_iter().map(|mut row| {
-                        if let Some(obj) = row.as_object_mut() {
-                            obj.insert(name.to_string(), value.clone());
-                        }
-                        row
-                    }).collect();
+                    data = data
+                        .into_iter()
+                        .map(|mut row| {
+                            if let Some(obj) = row.as_object_mut() {
+                                obj.insert(name.to_string(), value.clone());
+                            }
+                            row
+                        })
+                        .collect();
                 }
             }
             "to_number" => {
                 let column = op_def.get("column").and_then(|v| v.as_str()).unwrap_or("");
                 if !column.is_empty() {
-                    data = data.into_iter().map(|mut row| {
-                        if let Some(obj) = row.as_object_mut() {
-                            if let Some(val) = obj.get(column).cloned() {
-                                let num = match &val {
-                                    Value::String(s) => {
-                                        let trimmed = s.trim().replace(',', "");
-                                        if let Ok(i) = trimmed.parse::<i64>() {
-                                            json!(i)
-                                        } else if let Ok(f) = trimmed.parse::<f64>() {
-                                            json!(f)
-                                        } else {
-                                            val
+                    data = data
+                        .into_iter()
+                        .map(|mut row| {
+                            if let Some(obj) = row.as_object_mut() {
+                                if let Some(val) = obj.get(column).cloned() {
+                                    let num = match &val {
+                                        Value::String(s) => {
+                                            let trimmed = s.trim().replace(',', "");
+                                            if let Ok(i) = trimmed.parse::<i64>() {
+                                                json!(i)
+                                            } else if let Ok(f) = trimmed.parse::<f64>() {
+                                                json!(f)
+                                            } else {
+                                                val
+                                            }
                                         }
-                                    }
-                                    _ => val,
-                                };
-                                obj.insert(column.to_string(), num);
+                                        _ => val,
+                                    };
+                                    obj.insert(column.to_string(), num);
+                                }
                             }
-                        }
-                        row
-                    }).collect();
+                            row
+                        })
+                        .collect();
                 }
             }
             _ => {
@@ -1007,9 +1105,13 @@ mod tests {
     #[test]
     fn test_validate() {
         let tool = DataProcessTool;
-        assert!(tool.validate(&json!({"action": "read_csv", "path": "test.csv"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "read_csv", "path": "test.csv"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "read_csv"})).is_err());
-        assert!(tool.validate(&json!({"action": "write_csv", "path": "out.csv", "data": []})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "write_csv", "path": "out.csv", "data": []}))
+            .is_ok());
     }
 
     #[test]
@@ -1039,9 +1141,18 @@ mod tests {
 
     #[test]
     fn test_compare_values() {
-        assert_eq!(compare_values(Some(&json!(1)), Some(&json!(2))), std::cmp::Ordering::Less);
-        assert_eq!(compare_values(Some(&json!(2)), Some(&json!(1))), std::cmp::Ordering::Greater);
-        assert_eq!(compare_values(Some(&json!("a")), Some(&json!("b"))), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_values(Some(&json!(1)), Some(&json!(2))),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_values(Some(&json!(2)), Some(&json!(1))),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(Some(&json!("a")), Some(&json!("b"))),
+            std::cmp::Ordering::Less
+        );
     }
 
     #[test]

@@ -125,7 +125,9 @@ impl CapabilityVersionManager {
         }
 
         // Set current to previous
-        let prev = history.versions.last()
+        let prev = history
+            .versions
+            .last()
             .ok_or_else(|| Error::Other("No previous version".to_string()))?;
         history.current_version = prev.version.clone();
         let restore_path = prev.artifact_path.clone();
@@ -250,23 +252,27 @@ mod tests {
         let artifact = artifacts_dir.join("test_cap.sh");
         std::fs::write(&artifact, "#!/bin/bash\necho ok").unwrap();
 
-        let v1 = vm.create_version(
-            "test.cap",
-            artifact.to_str().unwrap(),
-            CapabilityVersionSource::Evolution,
-            Some("Initial version".to_string()),
-        ).unwrap();
+        let v1 = vm
+            .create_version(
+                "test.cap",
+                artifact.to_str().unwrap(),
+                CapabilityVersionSource::Evolution,
+                Some("Initial version".to_string()),
+            )
+            .unwrap();
 
         assert_eq!(v1.version, "v1");
 
         // Create v2
         std::fs::write(&artifact, "#!/bin/bash\necho ok v2").unwrap();
-        let v2 = vm.create_version(
-            "test.cap",
-            artifact.to_str().unwrap(),
-            CapabilityVersionSource::HotReplace,
-            None,
-        ).unwrap();
+        let v2 = vm
+            .create_version(
+                "test.cap",
+                artifact.to_str().unwrap(),
+                CapabilityVersionSource::HotReplace,
+                None,
+            )
+            .unwrap();
         assert_eq!(v2.version, "v2");
 
         let versions = vm.list_versions("test.cap").unwrap();
@@ -289,11 +295,23 @@ mod tests {
 
         // v1
         std::fs::write(&artifact, "#!/bin/bash\necho v1").unwrap();
-        vm.create_version("rollback.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap();
+        vm.create_version(
+            "rollback.cap",
+            artifact.to_str().unwrap(),
+            CapabilityVersionSource::Evolution,
+            None,
+        )
+        .unwrap();
 
         // v2
         std::fs::write(&artifact, "#!/bin/bash\necho v2").unwrap();
-        vm.create_version("rollback.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap();
+        vm.create_version(
+            "rollback.cap",
+            artifact.to_str().unwrap(),
+            CapabilityVersionSource::Evolution,
+            None,
+        )
+        .unwrap();
 
         // Rollback
         let restored = vm.rollback("rollback.cap").unwrap();
@@ -322,7 +340,13 @@ mod tests {
 
         for i in 1..=5 {
             std::fs::write(&artifact, format!("#!/bin/bash\necho v{}", i)).unwrap();
-            vm.create_version("cleanup.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap();
+            vm.create_version(
+                "cleanup.cap",
+                artifact.to_str().unwrap(),
+                CapabilityVersionSource::Evolution,
+                None,
+            )
+            .unwrap();
         }
 
         let removed = vm.cleanup_old_versions("cleanup.cap", 2).unwrap();

@@ -84,6 +84,16 @@ Edit `~/.blockcell/config.json`:
 | `verificationToken` | Verification Token (currently for recording, will be used for request verification in future versions) |
 | `allowFrom` | Allowed user open_id allowlist, empty array allows everyone |
 
+> If you enable this external channel through `blockcell gateway`, you also need an owner binding in `config.json`, for example:
+>
+> ```json
+> { "channelOwners": { "lark": "default" } }
+>
+> If you configure multiple accounts / bots for the same channel, you can additionally set `channelAccountOwners.lark.<accountId> = "ops"` to route one specific account to a different agent.
+> ```
+>
+> Otherwise Gateway refuses to start because the enabled external channel has no owner.
+
 ### 7. Start Gateway
 
 ```bash

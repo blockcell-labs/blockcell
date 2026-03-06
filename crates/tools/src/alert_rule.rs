@@ -18,7 +18,10 @@ struct AlertStore {
 
 impl Default for AlertStore {
     fn default() -> Self {
-        Self { version: 1, rules: Vec::new() }
+        Self {
+            version: 1,
+            rules: Vec::new(),
+        }
     }
 }
 
@@ -81,7 +84,9 @@ struct AlertAction {
     require_confirm: bool,
 }
 
-fn default_confirm() -> bool { true }
+fn default_confirm() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AlertState {
@@ -220,29 +225,60 @@ impl Tool for AlertRuleTool {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         match action {
             "create" => {
-                if params.get("name").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Validation("'name' is required for create".into()));
                 }
                 if params.get("source").is_none() {
                     return Err(Error::Validation("'source' is required for create".into()));
                 }
-                if params.get("metric_path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Validation("'metric_path' is required for create".into()));
+                if params
+                    .get("metric_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Validation(
+                        "'metric_path' is required for create".into(),
+                    ));
                 }
-                if params.get("operator").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                    return Err(Error::Validation("'operator' is required for create".into()));
+                if params
+                    .get("operator")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    return Err(Error::Validation(
+                        "'operator' is required for create".into(),
+                    ));
                 }
                 if params.get("threshold").is_none() {
-                    return Err(Error::Validation("'threshold' is required for create".into()));
+                    return Err(Error::Validation(
+                        "'threshold' is required for create".into(),
+                    ));
                 }
             }
             "get" | "delete" | "evaluate" | "history" => {
-                if params.get("rule_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("rule_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Validation("'rule_id' is required".into()));
                 }
             }
             "update" => {
-                if params.get("rule_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                if params
+                    .get("rule_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     return Err(Error::Validation("'rule_id' is required for update".into()));
                 }
             }
@@ -285,19 +321,33 @@ impl Tool for AlertRuleTool {
 fn action_create(paths: &Paths, params: &Value) -> Result<Value> {
     let mut store = load_store(paths)?;
     let now = Utc::now().timestamp_millis();
-    let rule_id = format!("alert_{}", Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
+    let rule_id = format!(
+        "alert_{}",
+        Uuid::new_v4().to_string().split('-').next().unwrap_or("x")
+    );
 
     // Parse on_trigger actions
-    let on_trigger: Vec<AlertAction> = params.get("on_trigger")
+    let on_trigger: Vec<AlertAction> = params
+        .get("on_trigger")
         .and_then(|v| v.as_array())
         .map(|arr| {
-            arr.iter().filter_map(|item| {
-                let tool = item.get("tool").and_then(|v| v.as_str())?.to_string();
-                let action_params = item.get("params").cloned().unwrap_or(json!({}));
-                let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
-                let require_confirm = item.get("require_confirm").and_then(|v| v.as_bool()).unwrap_or(true);
-                Some(AlertAction { tool, params: action_params, label, require_confirm })
-            }).collect()
+            arr.iter()
+                .filter_map(|item| {
+                    let tool = item.get("tool").and_then(|v| v.as_str())?.to_string();
+                    let action_params = item.get("params").cloned().unwrap_or(json!({}));
+                    let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
+                    let require_confirm = item
+                        .get("require_confirm")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    Some(AlertAction {
+                        tool,
+                        params: action_params,
+                        label,
+                        require_confirm,
+                    })
+                })
+                .collect()
         })
         .unwrap_or_default();
 
@@ -310,11 +360,24 @@ fn action_create(paths: &Paths, params: &Value) -> Result<Value> {
         operator: params["operator"].as_str().unwrap().to_string(),
         threshold: params["threshold"].as_f64().unwrap(),
         threshold2: params.get("threshold2").and_then(|v| v.as_f64()),
-        cooldown_secs: params.get("cooldown_secs").and_then(|v| v.as_u64()).unwrap_or(3600),
-        check_interval_secs: params.get("check_interval_secs").and_then(|v| v.as_u64()).unwrap_or(300),
+        cooldown_secs: params
+            .get("cooldown_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600),
+        check_interval_secs: params
+            .get("check_interval_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300),
         notify: AlertNotify {
-            channel: params.get("notify_channel").and_then(|v| v.as_str()).unwrap_or("desktop").to_string(),
-            template: params.get("notify_template").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            channel: params
+                .get("notify_channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("desktop")
+                .to_string(),
+            template: params
+                .get("notify_template")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             params: params.get("notify_params").cloned(),
         },
         on_trigger,
@@ -343,20 +406,24 @@ fn action_create(paths: &Paths, params: &Value) -> Result<Value> {
 
 fn action_list(paths: &Paths) -> Result<Value> {
     let store = load_store(paths)?;
-    let rules: Vec<Value> = store.rules.iter().map(|r| {
-        json!({
-            "rule_id": r.id,
-            "name": r.name,
-            "enabled": r.enabled,
-            "operator": r.operator,
-            "threshold": r.threshold,
-            "check_interval_secs": r.check_interval_secs,
-            "last_value": r.state.last_value,
-            "trigger_count": r.state.trigger_count,
-            "last_triggered_at": r.state.last_triggered_at,
-            "last_error": r.state.last_error,
+    let rules: Vec<Value> = store
+        .rules
+        .iter()
+        .map(|r| {
+            json!({
+                "rule_id": r.id,
+                "name": r.name,
+                "enabled": r.enabled,
+                "operator": r.operator,
+                "threshold": r.threshold,
+                "check_interval_secs": r.check_interval_secs,
+                "last_value": r.state.last_value,
+                "trigger_count": r.state.trigger_count,
+                "last_triggered_at": r.state.last_triggered_at,
+                "last_error": r.state.last_error,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(json!({
         "rules": rules,
@@ -367,7 +434,10 @@ fn action_list(paths: &Paths) -> Result<Value> {
 fn action_get(paths: &Paths, params: &Value) -> Result<Value> {
     let store = load_store(paths)?;
     let rule_id = params["rule_id"].as_str().unwrap();
-    let rule = store.rules.iter().find(|r| r.id == rule_id)
+    let rule = store
+        .rules
+        .iter()
+        .find(|r| r.id == rule_id)
         .ok_or_else(|| Error::Tool(format!("Rule '{}' not found", rule_id)))?;
 
     Ok(serde_json::to_value(rule).unwrap_or(json!({"error": "serialize failed"})))
@@ -378,7 +448,10 @@ fn action_update(paths: &Paths, params: &Value) -> Result<Value> {
     let rule_id = params["rule_id"].as_str().unwrap();
     let now = Utc::now().timestamp_millis();
 
-    let rule = store.rules.iter_mut().find(|r| r.id == rule_id)
+    let rule = store
+        .rules
+        .iter_mut()
+        .find(|r| r.id == rule_id)
         .ok_or_else(|| Error::Tool(format!("Rule '{}' not found", rule_id)))?;
 
     if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
@@ -418,13 +491,24 @@ fn action_update(paths: &Paths, params: &Value) -> Result<Value> {
         rule.notify.params = Some(np.clone());
     }
     if let Some(ot) = params.get("on_trigger").and_then(|v| v.as_array()) {
-        rule.on_trigger = ot.iter().filter_map(|item| {
-            let tool = item.get("tool").and_then(|v| v.as_str())?.to_string();
-            let action_params = item.get("params").cloned().unwrap_or(json!({}));
-            let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
-            let require_confirm = item.get("require_confirm").and_then(|v| v.as_bool()).unwrap_or(true);
-            Some(AlertAction { tool, params: action_params, label, require_confirm })
-        }).collect();
+        rule.on_trigger = ot
+            .iter()
+            .filter_map(|item| {
+                let tool = item.get("tool").and_then(|v| v.as_str())?.to_string();
+                let action_params = item.get("params").cloned().unwrap_or(json!({}));
+                let label = item.get("label").and_then(|v| v.as_str()).map(String::from);
+                let require_confirm = item
+                    .get("require_confirm")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                Some(AlertAction {
+                    tool,
+                    params: action_params,
+                    label,
+                    require_confirm,
+                })
+            })
+            .collect();
     }
     rule.updated_at = now;
 
@@ -461,14 +545,24 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
     let rule_id = params["rule_id"].as_str().unwrap();
     let now = Utc::now().timestamp_millis();
 
-    let rule_idx = store.rules.iter().position(|r| r.id == rule_id)
+    let rule_idx = store
+        .rules
+        .iter()
+        .position(|r| r.id == rule_id)
         .ok_or_else(|| Error::Tool(format!("Rule '{}' not found", rule_id)))?;
 
     // Extract what we need before mutable borrow
-    let tool_name = store.rules[rule_idx].source.get("tool").and_then(|v| v.as_str())
+    let tool_name = store.rules[rule_idx]
+        .source
+        .get("tool")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("source.tool is required".into()))?
         .to_string();
-    let tool_params = store.rules[rule_idx].source.get("params").cloned().unwrap_or(json!({}));
+    let tool_params = store.rules[rule_idx]
+        .source
+        .get("params")
+        .cloned()
+        .unwrap_or(json!({}));
     let metric_path = store.rules[rule_idx].metric_path.clone();
     let operator = store.rules[rule_idx].operator.clone();
     let threshold = store.rules[rule_idx].threshold;
@@ -480,7 +574,9 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
 
     // Execute the source tool call
     let tool_registry = crate::ToolRegistry::with_defaults();
-    let result = tool_registry.execute(&tool_name, ctx.clone(), tool_params).await;
+    let result = tool_registry
+        .execute(&tool_name, ctx.clone(), tool_params)
+        .await;
 
     let result_val = match result {
         Ok(v) => v,
@@ -502,7 +598,10 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
         Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
         _ => {
-            store.rules[rule_idx].state.last_error = Some(format!("metric_path '{}' not found or not numeric", metric_path));
+            store.rules[rule_idx].state.last_error = Some(format!(
+                "metric_path '{}' not found or not numeric",
+                metric_path
+            ));
             store.rules[rule_idx].state.last_check_at = Some(now);
             save_store(paths, &store)?;
             return Ok(json!({
@@ -515,13 +614,7 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
     };
 
     // Evaluate condition
-    let triggered = evaluate_condition(
-        &operator,
-        current_value,
-        threshold,
-        threshold2,
-        prev_value,
-    );
+    let triggered = evaluate_condition(&operator, current_value, threshold, threshold2, prev_value);
 
     // Check cooldown
     let in_cooldown = last_triggered_at
@@ -562,12 +655,14 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
         let template = rule.notify.template.clone().unwrap_or_else(|| {
             "⚠️ 预警: {name} — 当前值 {value} {operator} 阈值 {threshold}".to_string()
         });
-        Some(template
-            .replace("{name}", &rule.name)
-            .replace("{value}", &value_str)
-            .replace("{threshold}", &threshold_str)
-            .replace("{operator}", op_desc)
-            .replace("{time}", &time_str))
+        Some(
+            template
+                .replace("{name}", &rule.name)
+                .replace("{value}", &value_str)
+                .replace("{threshold}", &threshold_str)
+                .replace("{operator}", op_desc)
+                .replace("{time}", &time_str),
+        )
     } else {
         None
     };
@@ -594,7 +689,8 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
                 .replace("{threshold}", &threshold_str)
                 .replace("{name}", &rule_name_for_actions)
                 .replace("{time}", &time_str);
-            let action_params: Value = serde_json::from_str(&substituted).unwrap_or(action.params.clone());
+            let action_params: Value =
+                serde_json::from_str(&substituted).unwrap_or(action.params.clone());
 
             let label = action.label.as_deref().unwrap_or(&action.tool);
 
@@ -609,7 +705,10 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
                 }));
             } else {
                 // Auto-execute non-confirm actions (e.g. notifications, logging)
-                match tool_registry.execute(&action.tool, ctx.clone(), action_params.clone()).await {
+                match tool_registry
+                    .execute(&action.tool, ctx.clone(), action_params.clone())
+                    .await
+                {
                     Ok(result) => {
                         action_results.push(json!({
                             "tool": action.tool,
@@ -649,7 +748,10 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
 fn action_history(paths: &Paths, params: &Value) -> Result<Value> {
     let store = load_store(paths)?;
     let rule_id = params["rule_id"].as_str().unwrap();
-    let rule = store.rules.iter().find(|r| r.id == rule_id)
+    let rule = store
+        .rules
+        .iter()
+        .find(|r| r.id == rule_id)
         .ok_or_else(|| Error::Tool(format!("Rule '{}' not found", rule_id)))?;
 
     Ok(json!({
@@ -770,31 +872,79 @@ mod tests {
 
     #[test]
     fn test_evaluate_condition_change_pct() {
-        assert!(evaluate_condition("change_pct", 110.0, 5.0, None, Some(100.0)));
-        assert!(!evaluate_condition("change_pct", 103.0, 5.0, None, Some(100.0)));
+        assert!(evaluate_condition(
+            "change_pct",
+            110.0,
+            5.0,
+            None,
+            Some(100.0)
+        ));
+        assert!(!evaluate_condition(
+            "change_pct",
+            103.0,
+            5.0,
+            None,
+            Some(100.0)
+        ));
         // No previous value → false
         assert!(!evaluate_condition("change_pct", 110.0, 5.0, None, None));
     }
 
     #[test]
     fn test_evaluate_condition_cross_above() {
-        assert!(evaluate_condition("cross_above", 201.0, 200.0, None, Some(199.0)));
-        assert!(!evaluate_condition("cross_above", 201.0, 200.0, None, Some(200.5)));
-        assert!(!evaluate_condition("cross_above", 199.0, 200.0, None, Some(198.0)));
+        assert!(evaluate_condition(
+            "cross_above",
+            201.0,
+            200.0,
+            None,
+            Some(199.0)
+        ));
+        assert!(!evaluate_condition(
+            "cross_above",
+            201.0,
+            200.0,
+            None,
+            Some(200.5)
+        ));
+        assert!(!evaluate_condition(
+            "cross_above",
+            199.0,
+            200.0,
+            None,
+            Some(198.0)
+        ));
     }
 
     #[test]
     fn test_evaluate_condition_cross_below() {
-        assert!(evaluate_condition("cross_below", 199.0, 200.0, None, Some(201.0)));
-        assert!(!evaluate_condition("cross_below", 199.0, 200.0, None, Some(198.0)));
+        assert!(evaluate_condition(
+            "cross_below",
+            199.0,
+            200.0,
+            None,
+            Some(201.0)
+        ));
+        assert!(!evaluate_condition(
+            "cross_below",
+            199.0,
+            200.0,
+            None,
+            Some(198.0)
+        ));
     }
 
     #[test]
     fn test_extract_json_path() {
         let data = json!({"data": {"price": 150.5, "items": [{"name": "a"}, {"name": "b"}]}});
         assert_eq!(extract_json_path(&data, "data.price"), Some(&json!(150.5)));
-        assert_eq!(extract_json_path(&data, "data.items.0.name"), Some(&json!("a")));
-        assert_eq!(extract_json_path(&data, "data.items.1.name"), Some(&json!("b")));
+        assert_eq!(
+            extract_json_path(&data, "data.items.0.name"),
+            Some(&json!("a"))
+        );
+        assert_eq!(
+            extract_json_path(&data, "data.items.1.name"),
+            Some(&json!("b"))
+        );
         assert_eq!(extract_json_path(&data, "nonexistent"), None);
     }
 

@@ -158,7 +158,10 @@ impl CapabilityDescriptor {
     }
 
     pub fn is_available(&self) -> bool {
-        matches!(self.status, CapabilityStatus::Available | CapabilityStatus::Active)
+        matches!(
+            self.status,
+            CapabilityStatus::Available | CapabilityStatus::Active
+        )
     }
 }
 
@@ -179,8 +182,7 @@ pub enum CapabilityLifecycle {
 }
 
 /// 生存不变量 — 对应文档第 7 节 Meta-Evolution 的关键不变量
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SurvivalInvariants {
     /// 是否还能编译新代码？
     pub can_compile: bool,
@@ -196,7 +198,6 @@ pub struct SurvivalInvariants {
     pub diagnostics: HashMap<String, String>,
 }
 
-
 impl SurvivalInvariants {
     /// 所有不变量是否都满足？
     pub fn all_healthy(&self) -> bool {
@@ -206,10 +207,18 @@ impl SurvivalInvariants {
     /// 返回不满足的不变量列表
     pub fn violations(&self) -> Vec<&str> {
         let mut v = Vec::new();
-        if !self.can_compile { v.push("cannot compile new code"); }
-        if !self.can_load_capabilities { v.push("cannot load new capabilities"); }
-        if !self.can_communicate { v.push("cannot communicate with owner"); }
-        if !self.can_evolve { v.push("cannot continue evolution"); }
+        if !self.can_compile {
+            v.push("cannot compile new code");
+        }
+        if !self.can_load_capabilities {
+            v.push("cannot load new capabilities");
+        }
+        if !self.can_communicate {
+            v.push("cannot communicate with owner");
+        }
+        if !self.can_evolve {
+            v.push("cannot continue evolution");
+        }
         v
     }
 }
@@ -226,8 +235,9 @@ mod tests {
             "Observe the environment through camera",
             CapabilityType::Hardware,
             ProviderKind::DynamicLibrary,
-        ).with_privilege(PrivilegeLevel::Full)
-         .with_status(CapabilityStatus::Available);
+        )
+        .with_privilege(PrivilegeLevel::Full)
+        .with_status(CapabilityStatus::Available);
 
         assert_eq!(cap.id, "vision.observe");
         assert!(cap.is_available());

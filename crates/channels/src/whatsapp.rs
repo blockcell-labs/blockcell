@@ -1,16 +1,13 @@
-use futures::{SinkExt, StreamExt};
+use crate::account::whatsapp_account_id;
 use blockcell_core::{Config, Error, InboundMessage, Result};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message as WsMessage,
-    WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 type WsSink = futures::stream::SplitSink<
@@ -94,9 +91,9 @@ impl WhatsAppChannel {
         // Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
         let phone = sender.split('@').next().unwrap_or(sender);
 
-        allow_from.iter().any(|allowed| {
-            allowed == sender || allowed == phone
-        })
+        allow_from
+            .iter()
+            .any(|allowed| allowed == sender || allowed == phone)
     }
 
     pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
@@ -195,7 +192,9 @@ impl WhatsAppChannel {
         match msg.msg_type.as_str() {
             "message" | "media" => {
                 let sender = msg.sender.as_deref().unwrap_or("");
-                if sender.is_empty() { return Ok(()); }
+                if sender.is_empty() {
+                    return Ok(());
+                }
 
                 if !self.is_allowed(sender) {
                     debug!(sender = %sender, "Sender not in allowlist, ignoring");
@@ -204,13 +203,17 @@ impl WhatsAppChannel {
 
                 let content_raw = msg.content.as_deref().unwrap_or("");
                 let has_media = msg.media_type.is_some() && msg.media_data.is_some();
-                if content_raw.is_empty() && !has_media { return Ok(()); }
+                if content_raw.is_empty() && !has_media {
+                    return Ok(());
+                }
 
                 // Dedup by message id
                 let dedup_key = if let Some(id) = msg.id.as_deref() {
                     format!("id:{}", id)
                 } else {
-                    let ts = msg.timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                    let ts = msg
+                        .timestamp
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
                     format!("fallback:{}:{}:{}", sender, ts, content_raw)
                 };
                 {
@@ -222,7 +225,9 @@ impl WhatsAppChannel {
                     seen.insert(dedup_key);
                     if seen.len() > 1000 {
                         let to_remove: Vec<_> = seen.iter().take(100).cloned().collect();
-                        for k in to_remove { seen.remove(&k); }
+                        for k in to_remove {
+                            seen.remove(&k);
+                        }
                     }
                 }
 
@@ -233,7 +238,10 @@ impl WhatsAppChannel {
                 {
                     let filename = msg.media_filename.as_deref();
                     let mime = msg.mime_type.as_deref();
-                    match self.save_media_base64(media_type, media_data, filename, mime).await {
+                    match self
+                        .save_media_base64(media_type, media_data, filename, mime)
+                        .await
+                    {
                         Ok(path) => media_paths.push(path),
                         Err(e) => error!(error = %e, "Failed to save WhatsApp media"),
                     }
@@ -241,10 +249,18 @@ impl WhatsAppChannel {
 
                 let content_text = if content_raw.is_empty() {
                     match msg.media_type.as_deref().unwrap_or("media") {
-                        "image" => "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string(),
-                        "audio" | "ptt" => "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]".to_string(),
+                        "image" => {
+                            "[图片，已下载到本地，可直接查看或用 read_file 读取]".to_string()
+                        }
+                        "audio" | "ptt" => {
+                            "[语音消息，已下载到本地，请用 audio_transcribe 工具转写后回复]"
+                                .to_string()
+                        }
                         "video" => "[视频，已下载到本地]".to_string(),
-                        "document" => format!("[文件: {}，已下载到本地，可用 read_file 读取]", msg.media_filename.as_deref().unwrap_or("unknown")),
+                        "document" => format!(
+                            "[文件: {}，已下载到本地，可用 read_file 读取]",
+                            msg.media_filename.as_deref().unwrap_or("unknown")
+                        ),
                         other => format!("[{}，已下载到本地]", other),
                     }
                 } else {
@@ -254,6 +270,7 @@ impl WhatsAppChannel {
                 let chat_id = sender.to_string();
                 let inbound = InboundMessage {
                     channel: "whatsapp".to_string(),
+                    account_id: whatsapp_account_id(&self.config),
                     sender_id: sender.to_string(),
                     chat_id,
                     content: content_text,
@@ -263,7 +280,9 @@ impl WhatsAppChannel {
                         "is_group": msg.is_group.unwrap_or(false),
                         "media_type": msg.media_type,
                     }),
-                    timestamp_ms: msg.timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+                    timestamp_ms: msg
+                        .timestamp
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
                 };
 
                 self.inbound_tx
@@ -372,11 +391,23 @@ fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> {
     while i + 3 < bytes.len() {
         let b0 = *table.get(&bytes[i]).ok_or("invalid base64 char")?;
         let b1 = *table.get(&bytes[i + 1]).ok_or("invalid base64 char")?;
-        let b2 = if bytes[i + 2] == b'=' { 0 } else { *table.get(&bytes[i + 2]).ok_or("invalid base64 char")? };
-        let b3 = if bytes[i + 3] == b'=' { 0 } else { *table.get(&bytes[i + 3]).ok_or("invalid base64 char")? };
+        let b2 = if bytes[i + 2] == b'=' {
+            0
+        } else {
+            *table.get(&bytes[i + 2]).ok_or("invalid base64 char")?
+        };
+        let b3 = if bytes[i + 3] == b'=' {
+            0
+        } else {
+            *table.get(&bytes[i + 3]).ok_or("invalid base64 char")?
+        };
         out.push((b0 << 2) | (b1 >> 4));
-        if bytes[i + 2] != b'=' { out.push((b1 << 4) | (b2 >> 2)); }
-        if bytes[i + 3] != b'=' { out.push((b2 << 6) | b3); }
+        if bytes[i + 2] != b'=' {
+            out.push((b1 << 4) | (b2 >> 2));
+        }
+        if bytes[i + 3] != b'=' {
+            out.push((b2 << 6) | b3);
+        }
         i += 4;
     }
     Ok(out)
@@ -414,7 +445,11 @@ async fn send_message_inner(
     sink: Option<&Mutex<Option<WsSink>>>,
 ) -> Result<()> {
     let json = {
-        let msg = SendMessage { msg_type: "send", to: chat_id, text };
+        let msg = SendMessage {
+            msg_type: "send",
+            to: chat_id,
+            text,
+        };
         serde_json::to_string(&msg)
             .map_err(|e| Error::Channel(format!("Failed to serialize message: {}", e)))?
     };

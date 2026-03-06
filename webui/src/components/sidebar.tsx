@@ -6,8 +6,8 @@ import {
   PackageOpen, ChevronDown, User, Cpu, Plug, Puzzle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useSidebarStore, useChatStore, useThemeStore } from '@/lib/store';
-import { getSessionsPage, deleteSession, logout, type SessionInfo } from '@/lib/api';
+import { useSidebarStore, useChatStore, useThemeStore, useAgentStore, type AgentOption } from '@/lib/store';
+import { getSessionsPage, deleteSession, getConfig, logout, type SessionInfo } from '@/lib/api';
 import { useT } from '@/lib/i18n';
 import { BlockcellLogo } from './blockcell-logo';
 
@@ -37,6 +37,7 @@ export function Sidebar() {
   const { isOpen, activePage, toggle, setActivePage } = useSidebarStore();
   const { sessions, setSessions, currentSessionId, setCurrentSession, isConnected } = useChatStore();
   const { theme, setTheme } = useThemeStore();
+  const { selectedAgentId, agents, setSelectedAgent, setAgents } = useAgentStore();
   const t = useT();
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
@@ -48,13 +49,40 @@ export function Sidebar() {
   sessionsRef.current = sessions;
 
   useEffect(() => {
-    loadSessions();
+    loadAgents();
   }, []);
+
+  useEffect(() => {
+    loadSessions();
+  }, [selectedAgentId]);
+
+  function newSessionId(agentId: string) {
+    return `ws_${agentId}_${Date.now()}`;
+  }
+
+  async function loadAgents() {
+    try {
+      const config = await getConfig();
+      const derivedAgents: AgentOption[] = [
+        { id: 'default', name: 'default' },
+        ...((config?.agents?.list || [])
+          .filter((agent: any) => agent?.enabled !== false && typeof agent?.id === 'string' && agent.id.trim() && agent.id !== 'default')
+          .map((agent: any) => ({ id: agent.id.trim(), name: agent.name?.trim() || agent.id.trim() }))),
+      ];
+      setAgents(derivedAgents);
+      if (!derivedAgents.some((agent) => agent.id === selectedAgentId)) {
+        setSelectedAgent('default');
+        setCurrentSession(newSessionId('default'));
+      }
+    } catch {
+      setAgents([{ id: 'default', name: 'default' }]);
+    }
+  }
 
   async function loadSessions() {
     setLoadingSessions(true);
     try {
-      const data = await getSessionsPage({ limit: 12, cursor: 0 });
+      const data = await getSessionsPage({ limit: 12, cursor: 0, agent: selectedAgentId });
       setSessions(data.sessions);
       setNextCursor(data.next_cursor);
     } catch {
@@ -70,7 +98,7 @@ export function Sidebar() {
 
     setLoadingMoreSessions(true);
     try {
-      const data = await getSessionsPage({ limit: 12, cursor: nextCursor });
+      const data = await getSessionsPage({ limit: 12, cursor: nextCursor, agent: selectedAgentId });
       if (data.sessions?.length) {
         setSessions([...sessionsRef.current, ...data.sessions]);
       }
@@ -98,10 +126,10 @@ export function Sidebar() {
     if (!deleteConfirm) return;
     const id = deleteConfirm.id;
     try {
-      await deleteSession(id);
+      await deleteSession(id, selectedAgentId);
       setSessions(sessions.filter((s) => s.id !== id));
       if (currentSessionId === id) {
-        setCurrentSession(`ws_${Date.now()}`);
+        setCurrentSession(newSessionId(selectedAgentId));
       }
     } catch {
       // ignore
@@ -111,7 +139,7 @@ export function Sidebar() {
   }
 
   function handleNewChat() {
-    setCurrentSession(`ws_${Date.now()}`);
+    setCurrentSession(newSessionId(selectedAgentId));
     setActivePage('chat');
   }
 
@@ -144,6 +172,29 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto py-2">
+        {isOpen && (
+          <div className="px-3 pb-3">
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              {t('common.agent')}
+            </div>
+            <select
+              value={selectedAgentId}
+              onChange={(e) => {
+                const nextAgentId = e.target.value;
+                setSelectedAgent(nextAgentId);
+                setSessions([]);
+                setCurrentSession(newSessionId(nextAgentId));
+              }}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            >
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         {/* Primary nav items */}
         {primaryNavItems.map((item) => (
           <NavButton key={item.id} item={item} activePage={activePage} isOpen={isOpen} setActivePage={setActivePage} t={t} />

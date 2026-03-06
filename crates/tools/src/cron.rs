@@ -300,6 +300,10 @@ impl Tool for CronTool {
         }
     }
 
+    fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
+        Some("- **定时任务 (cron)**: 用户要求定时执行某项任务时，**优先**检查是否有对应技能：先调用 `list_skills` 查看可用技能列表，若有名称匹配的技能（如用户说 AI新闻 -> 技能名 `ai_news`），则在 `cron` 工具中设置 `skill_name='ai_news'`，触发时直接执行技能脚本，无需 LLM 介入，最可靠。若无匹配技能，则用 `message` 参数描述任务指令。 [TIMEZONE] `cron_expr` 使用 UTC 时间，中国用户（UTC+8）说每天 9 点应填 `cron_expr='0 0 1 * * *'`（UTC 1:00 = 北京时间 9:00）。一次性任务设 `delete_after_run=true`；周期任务用 `cron_expr` 或 `every_seconds`。".to_string())
+    }
+
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params
             .get("action")
@@ -369,7 +373,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        root.push(format!("blockcell_cron_tool_{}_{}_{}", tag, std::process::id(), now_ns));
+        root.push(format!(
+            "blockcell_cron_tool_{}_{}_{}",
+            tag,
+            std::process::id(),
+            now_ns
+        ));
         std::fs::create_dir_all(&root).expect("create temp cron dir");
         Paths::with_base(root)
     }

@@ -1,5 +1,5 @@
 use blockcell_core::{Error, Result};
-use rhai::{Engine, AST, Scope, Dynamic, EvalAltResult};
+use rhai::{Dynamic, Engine, EvalAltResult, Scope, AST};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -183,7 +183,11 @@ impl SkillExecutor {
         }
     }
 
-    pub fn execute_script(&self, script: &str, variables: Vec<(&str, Dynamic)>) -> Result<ExecutionResult> {
+    pub fn execute_script(
+        &self,
+        script: &str,
+        variables: Vec<(&str, Dynamic)>,
+    ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
         let ast = self.engine.compile(script)?;
@@ -202,9 +206,15 @@ impl SkillExecutor {
             Ok(v) => v,
             Err(e) => {
                 if let rhai::EvalAltResult::ErrorTerminated(ref reason, _) = *e {
-                    return Err(blockcell_core::Error::Skill(format!("Script terminated: {}", reason)));
+                    return Err(blockcell_core::Error::Skill(format!(
+                        "Script terminated: {}",
+                        reason
+                    )));
                 }
-                return Err(blockcell_core::Error::Skill(format!("Runtime error: {}", e)));
+                return Err(blockcell_core::Error::Skill(format!(
+                    "Runtime error: {}",
+                    e
+                )));
             }
         };
 
@@ -215,7 +225,11 @@ impl SkillExecutor {
         })
     }
 
-    pub fn execute_file(&self, path: &std::path::Path, variables: Vec<(&str, Dynamic)>) -> Result<ExecutionResult> {
+    pub fn execute_file(
+        &self,
+        path: &std::path::Path,
+        variables: Vec<(&str, Dynamic)>,
+    ) -> Result<ExecutionResult> {
         let script = std::fs::read_to_string(path)
             .map_err(|e| Error::Skill(format!("Failed to read script file: {}", e)))?;
 
@@ -244,7 +258,10 @@ mod tests {
     fn test_with_variables() {
         let executor = SkillExecutor::default();
         let result = executor
-            .execute_script("a + b", vec![("a", Dynamic::from(10_i64)), ("b", Dynamic::from(20_i64))])
+            .execute_script(
+                "a + b",
+                vec![("a", Dynamic::from(10_i64)), ("b", Dynamic::from(20_i64))],
+            )
             .unwrap();
         assert_eq!(result.value.as_int().unwrap(), 30);
     }

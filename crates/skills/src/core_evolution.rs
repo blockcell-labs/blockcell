@@ -1,9 +1,11 @@
-use crate::capability_provider::{CapabilityExecutor, CapabilityRegistryHandle, ProcessProvider, ScriptProvider};
+use crate::capability_provider::{
+    CapabilityExecutor, CapabilityRegistryHandle, ProcessProvider, ScriptProvider,
+};
 use crate::capability_versioning::{CapabilityVersionManager, CapabilityVersionSource};
 use crate::evolution::LLMProvider;
 use blockcell_core::{
-    CapabilityDescriptor, CapabilityStatus, CapabilityType,
-    Error, ProviderKind, PrivilegeLevel, Result,
+    CapabilityDescriptor, CapabilityStatus, CapabilityType, Error, PrivilegeLevel, ProviderKind,
+    Result,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -123,7 +125,11 @@ pub struct CoreEvolution {
 }
 
 impl CoreEvolution {
-    pub fn new(base_dir: PathBuf, registry: CapabilityRegistryHandle, llm_timeout_secs: u64) -> Self {
+    pub fn new(
+        base_dir: PathBuf,
+        registry: CapabilityRegistryHandle,
+        llm_timeout_secs: u64,
+    ) -> Self {
         let artifacts_dir = base_dir.join("tool_artifacts");
         let records_dir = base_dir.join("tool_evolution_records");
         let version_manager = CapabilityVersionManager::new(base_dir);
@@ -160,7 +166,8 @@ impl CoreEvolution {
         };
 
         let records = self.list_records()?;
-        let pending: Vec<_> = records.iter()
+        let pending: Vec<_> = records
+            .iter()
             .filter(|r| r.status == CoreEvolutionStatus::Requested)
             .collect();
 
@@ -358,7 +365,7 @@ impl CoreEvolution {
         }
 
         let evolution_id = format!(
-            "core_evo_{}_{}", 
+            "core_evo_{}_{}",
             capability_id.replace('.', "_"),
             chrono::Utc::now().timestamp()
         );
@@ -428,7 +435,9 @@ impl CoreEvolution {
             let (code, raw_response) = self.generate_code(&record, llm_provider).await?;
             record.source_code = Some(code.clone());
             // Extract input/output schema from the raw LLM response
-            if let Some((input_schema, output_schema)) = self.extract_schema_from_response(&raw_response) {
+            if let Some((input_schema, output_schema)) =
+                self.extract_schema_from_response(&raw_response)
+            {
                 record.input_schema = Some(input_schema);
                 record.output_schema = Some(output_schema);
             }
@@ -486,7 +495,9 @@ impl CoreEvolution {
             record.validation = Some(validation.clone());
 
             if !validation.passed {
-                let issues: Vec<String> = validation.checks.iter()
+                let issues: Vec<String> = validation
+                    .checks
+                    .iter()
                     .filter(|c| !c.passed)
                     .map(|c| format!("[{}] {}", c.name, c.message))
                     .collect();
@@ -569,10 +580,15 @@ impl CoreEvolution {
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(self.llm_timeout_secs),
-            llm_provider.generate(&prompt)
+            llm_provider.generate(&prompt),
         )
         .await
-        .map_err(|_| Error::Evolution(format!("LLM call timed out after {} seconds", self.llm_timeout_secs)))?
+        .map_err(|_| {
+            Error::Evolution(format!(
+                "LLM call timed out after {} seconds",
+                self.llm_timeout_secs
+            ))
+        })?
         .map_err(|e| Error::Evolution(format!("LLM generation failed: {}", e)))?;
         let code = self.extract_code_from_response(&response, &record.provider_kind)?;
 
@@ -589,13 +605,20 @@ impl CoreEvolution {
     fn build_generation_prompt(&self, record: &CoreEvolutionRecord) -> Result<String> {
         let mut prompt = String::new();
 
-        prompt.push_str("You are a capability evolution engine for the blockcell self-augmenting agent.\n");
-        prompt.push_str("Your task is to generate executable code that implements a new capability.\n\n");
+        prompt.push_str(
+            "You are a capability evolution engine for the blockcell self-augmenting agent.\n",
+        );
+        prompt.push_str(
+            "Your task is to generate executable code that implements a new capability.\n\n",
+        );
 
         prompt.push_str("## Capability Request\n");
         prompt.push_str(&format!("- **ID**: {}\n", record.capability_id));
         prompt.push_str(&format!("- **Description**: {}\n", record.description));
-        prompt.push_str(&format!("- **Provider Type**: {:?}\n\n", record.provider_kind));
+        prompt.push_str(&format!(
+            "- **Provider Type**: {:?}\n\n",
+            record.provider_kind
+        ));
 
         match record.provider_kind {
             ProviderKind::Process => {
@@ -605,7 +628,9 @@ impl CoreEvolution {
                 prompt.push_str("2. Performs the requested operation\n");
                 prompt.push_str("3. Outputs JSON result to stdout\n");
                 prompt.push_str("4. Returns exit code 0 on success, non-zero on failure\n\n");
-                prompt.push_str("The script should be self-contained and use only standard system tools.\n");
+                prompt.push_str(
+                    "The script should be self-contained and use only standard system tools.\n",
+                );
                 prompt.push_str("Use `#!/bin/bash` as the shebang.\n\n");
                 prompt.push_str("## Output Format\n");
                 prompt.push_str("Output ONLY the shell script in a ```bash code block.\n");
@@ -613,10 +638,13 @@ impl CoreEvolution {
             ProviderKind::ExternalApi => {
                 prompt.push_str("## Requirements\n");
                 prompt.push_str("Generate a Python script that:\n");
-                prompt.push_str("1. Reads JSON input from the CAPABILITY_INPUT environment variable\n");
+                prompt.push_str(
+                    "1. Reads JSON input from the CAPABILITY_INPUT environment variable\n",
+                );
                 prompt.push_str("2. Performs the requested API call\n");
                 prompt.push_str("3. Prints JSON result to stdout\n");
-                prompt.push_str("4. Uses only standard library modules (json, urllib, os, sys)\n\n");
+                prompt
+                    .push_str("4. Uses only standard library modules (json, urllib, os, sys)\n\n");
                 prompt.push_str("## Output Format\n");
                 prompt.push_str("Output ONLY the Python script in a ```python code block.\n");
             }
@@ -633,7 +661,9 @@ impl CoreEvolution {
 
         // Request input/output schema alongside the code
         prompt.push_str("\n## Schema Requirement\n");
-        prompt.push_str("After the code block, output a JSON block describing the input and output schema.\n");
+        prompt.push_str(
+            "After the code block, output a JSON block describing the input and output schema.\n",
+        );
         prompt.push_str("Format:\n```json\n{\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": { ... },\n    \"required\": [ ... ]\n  },\n  \"output_schema\": {\n    \"type\": \"object\",\n    \"properties\": { ... }\n  }\n}\n```\n");
         prompt.push_str("This schema helps the agent understand how to call this capability.\n\n");
 
@@ -641,9 +671,15 @@ impl CoreEvolution {
         if !record.feedback_history.is_empty() {
             prompt.push_str("\n## Previous Attempts (FAILED — fix these issues)\n");
             for entry in &record.feedback_history {
-                prompt.push_str(&format!("### Attempt #{} ({} failure)\n", entry.attempt, entry.stage));
+                prompt.push_str(&format!(
+                    "### Attempt #{} ({} failure)\n",
+                    entry.attempt, entry.stage
+                ));
                 prompt.push_str(&format!("**Issue**: {}\n", entry.feedback));
-                prompt.push_str(&format!("**Previous code**:\n```\n{}\n```\n\n", entry.previous_code));
+                prompt.push_str(&format!(
+                    "**Previous code**:\n```\n{}\n```\n\n",
+                    entry.previous_code
+                ));
             }
             prompt.push_str("Fix ALL the issues above. Do NOT repeat the same mistakes.\n");
         }
@@ -651,7 +687,11 @@ impl CoreEvolution {
         Ok(prompt)
     }
 
-    fn extract_code_from_response(&self, response: &str, provider_kind: &ProviderKind) -> Result<String> {
+    fn extract_code_from_response(
+        &self,
+        response: &str,
+        provider_kind: &ProviderKind,
+    ) -> Result<String> {
         // Try language-specific code blocks first
         let markers = match provider_kind {
             ProviderKind::Process | ProviderKind::BuiltIn => vec!["```bash", "```sh", "```shell"],
@@ -671,11 +711,14 @@ impl CoreEvolution {
         // Fallback: generic code block
         if let Some(start) = response.find("```") {
             let after = start + 3;
-            let content_start = response[after..].find('\n')
+            let content_start = response[after..]
+                .find('\n')
                 .map(|i| after + i + 1)
                 .unwrap_or(after);
             if let Some(end) = response[content_start..].find("```") {
-                return Ok(response[content_start..content_start + end].trim().to_string());
+                return Ok(response[content_start..content_start + end]
+                    .trim()
+                    .to_string());
             }
         }
 
@@ -685,7 +728,9 @@ impl CoreEvolution {
 
     /// Compile / prepare the artifact
     async fn compile_artifact(&self, record: &CoreEvolutionRecord) -> Result<String> {
-        let code = record.source_code.as_ref()
+        let code = record
+            .source_code
+            .as_ref()
             .ok_or_else(|| Error::Evolution("No source code to compile".to_string()))?;
 
         std::fs::create_dir_all(&self.artifacts_dir)?;
@@ -786,7 +831,10 @@ impl CoreEvolution {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(Error::Evolution(format!("Rust compilation error:\n{}", stderr)));
+                    return Err(Error::Evolution(format!(
+                        "Rust compilation error:\n{}",
+                        stderr
+                    )));
                 }
 
                 Ok(output_path.to_string_lossy().to_string())
@@ -796,7 +844,9 @@ impl CoreEvolution {
 
     /// Validate the compiled artifact
     async fn validate_artifact(&self, record: &CoreEvolutionRecord) -> Result<ValidationResult> {
-        let artifact_path = record.artifact_path.as_ref()
+        let artifact_path = record
+            .artifact_path
+            .as_ref()
             .ok_or_else(|| Error::Evolution("No artifact to validate".to_string()))?;
 
         let mut checks = Vec::new();
@@ -814,7 +864,10 @@ impl CoreEvolution {
         });
 
         if !exists {
-            return Ok(ValidationResult { passed: false, checks });
+            return Ok(ValidationResult {
+                passed: false,
+                checks,
+            });
         }
 
         // Check 2: File is not empty
@@ -852,13 +905,16 @@ impl CoreEvolution {
                         let result = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
                             child.wait_with_output(),
-                        ).await;
+                        )
+                        .await;
 
                         match result {
                             Ok(Ok(output)) => {
                                 let stdout = String::from_utf8_lossy(&output.stdout);
                                 let exit_ok = output.status.success();
-                                let is_json = serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok();
+                                let is_json =
+                                    serde_json::from_str::<serde_json::Value>(stdout.trim())
+                                        .is_ok();
                                 // Require both: successful exit AND valid JSON output
                                 let passed = exit_ok && is_json;
                                 checks.push(ValidationCheck {
@@ -911,7 +967,10 @@ impl CoreEvolution {
                 checks.push(ValidationCheck {
                     name: "type_check".to_string(),
                     passed: true,
-                    message: format!("Provider kind {:?} — basic validation passed", record.provider_kind),
+                    message: format!(
+                        "Provider kind {:?} — basic validation passed",
+                        record.provider_kind
+                    ),
                 });
             }
         }
@@ -925,7 +984,9 @@ impl CoreEvolution {
 
     /// Load the capability into the registry
     async fn load_capability(&self, record: &CoreEvolutionRecord) -> Result<()> {
-        let artifact_path = record.artifact_path.as_ref()
+        let artifact_path = record
+            .artifact_path
+            .as_ref()
             .ok_or_else(|| Error::Evolution("No artifact to load".to_string()))?;
 
         let capability_type = Self::infer_capability_type(&record.capability_id);
@@ -950,28 +1011,22 @@ impl CoreEvolution {
         }
 
         let executor: Arc<dyn CapabilityExecutor> = match record.provider_kind {
-            ProviderKind::Process | ProviderKind::BuiltIn => {
-                Arc::new(ProcessProvider::new(&record.capability_id, "bash")
-                    .with_args(vec![artifact_path.to_string()]))
-            }
-            ProviderKind::ExternalApi => {
-                Arc::new(ScriptProvider::new(
-                    &record.capability_id,
-                    PathBuf::from(artifact_path),
-                ))
-            }
-            ProviderKind::RhaiScript => {
-                Arc::new(ScriptProvider::new(
-                    &record.capability_id,
-                    PathBuf::from(artifact_path),
-                ))
-            }
+            ProviderKind::Process | ProviderKind::BuiltIn => Arc::new(
+                ProcessProvider::new(&record.capability_id, "bash")
+                    .with_args(vec![artifact_path.to_string()]),
+            ),
+            ProviderKind::ExternalApi => Arc::new(ScriptProvider::new(
+                &record.capability_id,
+                PathBuf::from(artifact_path),
+            )),
+            ProviderKind::RhaiScript => Arc::new(ScriptProvider::new(
+                &record.capability_id,
+                PathBuf::from(artifact_path),
+            )),
             ProviderKind::DynamicLibrary => {
                 // Dynamic library loading would use libloading
                 // For now, wrap as a process that runs the .dylib via a helper
-                warn!(
-                    "🧬 [核心进化] 动态库加载暂未完全实现，使用进程模式作为后备"
-                );
+                warn!("🧬 [核心进化] 动态库加载暂未完全实现，使用进程模式作为后备");
                 Arc::new(ProcessProvider::new(&record.capability_id, artifact_path))
             }
         };
@@ -1007,9 +1062,7 @@ impl CoreEvolution {
             "system" | "fs" | "process" | "network" | "clipboard" | "notify" => {
                 CapabilityType::System
             }
-            "api" | "llm" | "search" | "external" | "web" => {
-                CapabilityType::External
-            }
+            "api" | "llm" | "search" | "external" | "web" => CapabilityType::External,
             _ => CapabilityType::Internal,
         }
     }
@@ -1052,7 +1105,10 @@ impl CoreEvolution {
     }
 
     /// Extract input/output schema from LLM response (after the code block)
-    fn extract_schema_from_response(&self, response: &str) -> Option<(serde_json::Value, serde_json::Value)> {
+    fn extract_schema_from_response(
+        &self,
+        response: &str,
+    ) -> Option<(serde_json::Value, serde_json::Value)> {
         // Look for ```json block after the code block
         let json_marker = "```json";
         if let Some(start) = response.rfind(json_marker) {
@@ -1090,9 +1146,17 @@ impl CoreEvolution {
             .unwrap_or("sh");
 
         let executor: Arc<dyn CapabilityExecutor> = match ext {
-            "py" => Arc::new(ScriptProvider::new(capability_id, std::path::PathBuf::from(&restored_path))),
-            "rhai" => Arc::new(ScriptProvider::new(capability_id, std::path::PathBuf::from(&restored_path))),
-            _ => Arc::new(ProcessProvider::new(capability_id, "bash").with_args(vec![restored_path.clone()])),
+            "py" => Arc::new(ScriptProvider::new(
+                capability_id,
+                std::path::PathBuf::from(&restored_path),
+            )),
+            "rhai" => Arc::new(ScriptProvider::new(
+                capability_id,
+                std::path::PathBuf::from(&restored_path),
+            )),
+            _ => Arc::new(
+                ProcessProvider::new(capability_id, "bash").with_args(vec![restored_path.clone()]),
+            ),
         };
 
         let new_version = self.version_manager.get_current_version(capability_id)?;
@@ -1146,8 +1210,11 @@ mod tests {
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
         let evo = CoreEvolution::new(dir, registry, 300);
 
-        let response = "Here's the script:\n```bash\n#!/bin/bash\necho '{\"ok\": true}'\n```\nDone.";
-        let code = evo.extract_code_from_response(response, &ProviderKind::Process).unwrap();
+        let response =
+            "Here's the script:\n```bash\n#!/bin/bash\necho '{\"ok\": true}'\n```\nDone.";
+        let code = evo
+            .extract_code_from_response(response, &ProviderKind::Process)
+            .unwrap();
         assert!(code.contains("#!/bin/bash"));
         assert!(code.contains("echo"));
     }
@@ -1159,7 +1226,9 @@ mod tests {
         let evo = CoreEvolution::new(dir, registry, 300);
 
         let response = "```python\nimport json\nprint(json.dumps({\"ok\": True}))\n```";
-        let code = evo.extract_code_from_response(response, &ProviderKind::ExternalApi).unwrap();
+        let code = evo
+            .extract_code_from_response(response, &ProviderKind::ExternalApi)
+            .unwrap();
         assert!(code.contains("import json"));
     }
 
@@ -1171,13 +1240,22 @@ mod tests {
         let evo = CoreEvolution::new(dir.clone(), registry, 300);
 
         // First request creates a new record
-        let id1 = evo.request_capability("test.cap", "test", ProviderKind::Process).await.unwrap();
+        let id1 = evo
+            .request_capability("test.cap", "test", ProviderKind::Process)
+            .await
+            .unwrap();
         // Second request for same capability should return the same id (idempotent)
-        let id2 = evo.request_capability("test.cap", "test again", ProviderKind::Process).await.unwrap();
+        let id2 = evo
+            .request_capability("test.cap", "test again", ProviderKind::Process)
+            .await
+            .unwrap();
         assert_eq!(id1, id2);
 
         // Different capability should create a new record
-        let id3 = evo.request_capability("test.other", "other", ProviderKind::Process).await.unwrap();
+        let id3 = evo
+            .request_capability("test.other", "other", ProviderKind::Process)
+            .await
+            .unwrap();
         assert_ne!(id1, id3);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1213,7 +1291,9 @@ mod tests {
         }
 
         // Next request should be blocked
-        let result = evo.request_capability("test.fail", "retry", ProviderKind::Process).await;
+        let result = evo
+            .request_capability("test.fail", "retry", ProviderKind::Process)
+            .await;
         assert!(result.is_err());
         assert!(evo.is_blocked("test.fail").unwrap());
 

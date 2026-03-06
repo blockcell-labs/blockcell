@@ -55,9 +55,9 @@ pub async fn info(tool_name: &str) -> anyhow::Result<()> {
     let registry = ToolRegistry::with_defaults();
     let schemas = registry.get_tool_schemas();
 
-    let schema = schemas.iter().find(|s: &&Value| {
-        schema_function(s)["name"].as_str() == Some(tool_name)
-    });
+    let schema = schemas
+        .iter()
+        .find(|s: &&Value| schema_function(s)["name"].as_str() == Some(tool_name));
 
     match schema {
         Some(s) => {
@@ -65,7 +65,10 @@ pub async fn info(tool_name: &str) -> anyhow::Result<()> {
             println!();
             println!("🔧 {}", func["name"].as_str().unwrap_or(""));
             println!();
-            println!("  Description: {}", func["description"].as_str().unwrap_or(""));
+            println!(
+                "  Description: {}",
+                func["description"].as_str().unwrap_or("")
+            );
             println!();
 
             if let Some(params) = func.get("parameters") {
@@ -73,20 +76,29 @@ pub async fn info(tool_name: &str) -> anyhow::Result<()> {
                 let params_obj: &Value = params;
                 if let Some(props) = params_obj.get("properties") {
                     if let Some(obj) = props.as_object() {
-                        let required: Vec<&str> = params_obj.get("required")
+                        let required: Vec<&str> = params_obj
+                            .get("required")
                             .and_then(|r: &Value| r.as_array())
                             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<&str>>())
                             .unwrap_or_default();
 
                         for (key, val) in obj {
                             let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("any");
-                            let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                            let req = if required.contains(&key.as_str()) { " (required)" } else { "" };
+                            let desc = val
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("");
+                            let req = if required.contains(&key.as_str()) {
+                                " (required)"
+                            } else {
+                                ""
+                            };
 
                             // Show enum values if present
                             let enum_str = if let Some(enums) = val.get("enum") {
                                 if let Some(arr) = enums.as_array() {
-                                    let vals: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                                    let vals: Vec<&str> =
+                                        arr.iter().filter_map(|v| v.as_str()).collect();
                                     format!(" [{}]", vals.join("|"))
                                 } else {
                                     String::new()
@@ -127,7 +139,8 @@ pub async fn test(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
     let registry = ToolRegistry::with_defaults();
     let paths = Paths::new();
 
-    let tool = registry.get(tool_name)
+    let tool = registry
+        .get(tool_name)
         .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found", tool_name))?;
 
     let params: Value = serde_json::from_str(params_json)
@@ -145,6 +158,7 @@ pub async fn test(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
         config: blockcell_core::Config::load_or_default(&paths)?,
         session_key: "cli:test".to_string(),
         channel: String::new(),
+        account_id: None,
         chat_id: String::new(),
         permissions: blockcell_core::types::PermissionSet::new(),
         outbound_tx: None,
@@ -188,7 +202,10 @@ pub async fn toggle(tool_name: &str, enable: bool) -> anyhow::Result<()> {
     // Verify tool exists
     let registry = ToolRegistry::with_defaults();
     if registry.get(tool_name).is_none() {
-        eprintln!("⚠ Tool '{}' not found in registry, but toggle state will be recorded.", tool_name);
+        eprintln!(
+            "⚠ Tool '{}' not found in registry, but toggle state will be recorded.",
+            tool_name
+        );
     }
 
     if store.get("tools").is_none() {
@@ -218,7 +235,7 @@ fn categorize_tool(name: &str) -> &'static str {
         "exec" => "Execution",
         "web_search" | "web_fetch" | "browse" | "http_request" => "Web/Browser",
         "app_control" => "GUI Automation",
-        "message" | "spawn" | "list_tasks" | "notification" | "email" => "Communication",
+        "message" | "spawn" | "list_tasks" | "email" => "Communication",
         "cron" => "Scheduling",
         "memory_query" | "memory_upsert" | "memory_forget" => "Memory",
         "list_skills" | "toggle_manage" => "Skill Management",
@@ -226,11 +243,7 @@ fn categorize_tool(name: &str) -> &'static str {
         "camera_capture" | "ocr" | "image_understand" | "tts" | "audio_transcribe" => "Media",
         "chart_generate" | "office_write" | "data_process" => "Data/Documents",
         "video_process" => "Video",
-        "finance_api" | "exchange_api" | "alert_rule" | "stream_subscribe" => "Finance/Trading",
-        "blockchain_rpc" | "blockchain_tx" | "contract_security" | "bridge_api" | "nft_market" | "multisig" => "Blockchain",
-        "calendar_api" | "contacts" | "social_media" => "Business API",
-        "cloud_api" | "git_api" => "DevOps",
-        "map_api" | "health_api" | "iot_control" => "Lifestyle/IoT",
+        "alert_rule" | "stream_subscribe" => "Finance/Trading",
         "encrypt" | "network_monitor" => "Security/Network",
         "knowledge_graph" => "Knowledge Graph",
         _ => "Other",

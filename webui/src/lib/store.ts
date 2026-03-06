@@ -314,6 +314,33 @@ export const useThemeStore = create<ThemeState>((set) => ({
   },
 }));
 
+export interface AgentOption {
+  id: string;
+  name: string;
+}
+
+interface AgentState {
+  selectedAgentId: string;
+  agents: AgentOption[];
+  setSelectedAgent: (id: string) => void;
+  setAgents: (agents: AgentOption[]) => void;
+}
+
+function resolveInitialAgentId(): string {
+  if (typeof window === 'undefined') return 'default';
+  return localStorage.getItem('blockcell_selected_agent') || 'default';
+}
+
+export const useAgentStore = create<AgentState>((set) => ({
+  selectedAgentId: resolveInitialAgentId(),
+  agents: [{ id: 'default', name: 'default' }],
+  setSelectedAgent: (id) => {
+    localStorage.setItem('blockcell_selected_agent', id);
+    set({ selectedAgentId: id });
+  },
+  setAgents: (agents) => set({ agents }),
+}));
+
 // ── Sidebar Store ──
 interface SidebarState {
   isOpen: boolean;

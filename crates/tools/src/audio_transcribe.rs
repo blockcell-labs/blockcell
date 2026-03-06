@@ -63,36 +63,68 @@ impl Tool for AudioTranscribeTool {
     fn validate(&self, params: &Value) -> Result<()> {
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if !["transcribe", "info", "extract_audio"].contains(&action) {
-            return Err(Error::Tool("action must be 'transcribe', 'info', or 'extract_audio'".into()));
+            return Err(Error::Tool(
+                "action must be 'transcribe', 'info', or 'extract_audio'".into(),
+            ));
         }
         if (action == "transcribe" || action == "extract_audio")
-            && params.get("path").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
-                return Err(Error::Tool("'path' is required for transcribe/extract_audio".into()));
-            }
+            && params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(Error::Tool(
+                "'path' is required for transcribe/extract_audio".into(),
+            ));
+        }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("info");
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
 
         match action {
             "transcribe" => {
                 let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let path = expand_path(path, &ctx);
                 let language = params.get("language").and_then(|v| v.as_str());
-                let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("base");
-                let backend = params.get("backend").and_then(|v| v.as_str()).unwrap_or("auto");
-                let format = params.get("format").and_then(|v| v.as_str()).unwrap_or("txt");
-                let output_path = params.get("output_path")
+                let model = params
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("base");
+                let backend = params
+                    .get("backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto");
+                let format = params
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("txt");
+                let output_path = params
+                    .get("output_path")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                action_transcribe(&path, language, model, backend, format, output_path.as_deref(), &ctx).await
+                action_transcribe(
+                    &path,
+                    language,
+                    model,
+                    backend,
+                    format,
+                    output_path.as_deref(),
+                    &ctx,
+                )
+                .await
             }
             "extract_audio" => {
                 let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let path = expand_path(path, &ctx);
-                let output_path = params.get("output_path")
+                let output_path = params
+                    .get("output_path")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 action_extract_audio(&path, output_path.as_deref(), &ctx).await
@@ -118,8 +150,7 @@ fn expand_path(path: &str, ctx: &ToolContext) -> String {
 /// Check available transcription backends.
 async fn action_info() -> Result<Value> {
     let has_whisper = which::which("whisper").is_ok();
-    let has_whisper_cpp = which::which("whisper-cpp").is_ok()
-        || which::which("main").is_ok(); // whisper.cpp binary is often named 'main'
+    let has_whisper_cpp = which::which("whisper-cpp").is_ok() || which::which("main").is_ok(); // whisper.cpp binary is often named 'main'
     let has_ffmpeg = which::which("ffmpeg").is_ok();
 
     let mut backends = Vec::new();
@@ -200,12 +231,16 @@ async fn action_transcribe(
             // Try local backends first, then API
             if which::which("whisper").is_ok() {
                 let r = try_whisper(path, language, model, format, output_path, ctx).await;
-                if r.is_ok() { return r; }
+                if r.is_ok() {
+                    return r;
+                }
                 debug!("whisper failed, trying whisper_cpp");
             }
             if which::which("whisper-cpp").is_ok() || which::which("main").is_ok() {
                 let r = try_whisper_cpp(path, language, model, format, output_path, ctx).await;
-                if r.is_ok() { return r; }
+                if r.is_ok() {
+                    return r;
+                }
                 debug!("whisper_cpp failed, trying API");
             }
             // Fallback: try API
@@ -229,7 +264,10 @@ async fn try_whisper(
         if let Some(parent) = std::path::Path::new(op).parent() {
             parent.to_string_lossy().to_string()
         } else {
-            ctx.workspace.join("transcripts").to_string_lossy().to_string()
+            ctx.workspace
+                .join("transcripts")
+                .to_string_lossy()
+                .to_string()
         }
     } else {
         let dir = ctx.workspace.join("transcripts");
@@ -253,12 +291,17 @@ async fn try_whisper(
 
     info!(model = %model, "🎤 Running whisper CLI");
 
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("whisper command failed: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!("whisper failed: {}", truncate(&stderr, 500))));
+        return Err(Error::Tool(format!(
+            "whisper failed: {}",
+            truncate(&stderr, 500)
+        )));
     }
 
     // Find the output file
@@ -328,11 +371,18 @@ async fn try_whisper_cpp(
 
     // Model path — whisper.cpp expects model files in specific location
     let model_name = format!("ggml-{}.bin", model);
-    let model_paths = [format!("/usr/local/share/whisper-cpp/models/{}", model_name),
-        format!("{}/.local/share/whisper-cpp/models/{}", dirs::home_dir().unwrap_or_default().display(), model_name),
-        format!("/opt/homebrew/share/whisper-cpp/models/{}", model_name)];
+    let model_paths = [
+        format!("/usr/local/share/whisper-cpp/models/{}", model_name),
+        format!(
+            "{}/.local/share/whisper-cpp/models/{}",
+            dirs::home_dir().unwrap_or_default().display(),
+            model_name
+        ),
+        format!("/opt/homebrew/share/whisper-cpp/models/{}", model_name),
+    ];
 
-    let model_path = model_paths.iter()
+    let model_path = model_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .cloned()
         .unwrap_or_else(|| model_name.clone());
@@ -346,17 +396,28 @@ async fn try_whisper_cpp(
     }
 
     match format {
-        "srt" => { cmd.arg("--output-srt"); }
-        "vtt" => { cmd.arg("--output-vtt"); }
-        _ => { cmd.arg("--output-txt"); }
+        "srt" => {
+            cmd.arg("--output-srt");
+        }
+        "vtt" => {
+            cmd.arg("--output-vtt");
+        }
+        _ => {
+            cmd.arg("--output-txt");
+        }
     }
 
-    let output = cmd.output().await
+    let output = cmd
+        .output()
+        .await
         .map_err(|e| Error::Tool(format!("whisper.cpp failed: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!("whisper.cpp failed: {}", truncate(&stderr, 500))));
+        return Err(Error::Tool(format!(
+            "whisper.cpp failed: {}",
+            truncate(&stderr, 500)
+        )));
     }
 
     let transcript = String::from_utf8_lossy(&output.stdout).to_string();
@@ -371,9 +432,15 @@ async fn try_whisper_cpp(
     } else {
         let dir = ctx.workspace.join("transcripts");
         let _ = std::fs::create_dir_all(&dir);
-        let stem = std::path::Path::new(path).file_stem()
-            .and_then(|s| s.to_str()).unwrap_or("output");
-        let ext = match format { "srt" => "srt", "vtt" => "vtt", _ => "txt" };
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let ext = match format {
+            "srt" => "srt",
+            "vtt" => "vtt",
+            _ => "txt",
+        };
         let out = dir.join(format!("{}.{}", stem, ext));
         let _ = std::fs::write(&out, &transcript);
         out.to_string_lossy().to_string()
@@ -450,11 +517,17 @@ async fn try_api_transcribe(
         .map_err(|e| Error::Tool(format!("API request failed: {}", e)))?;
 
     let status = response.status();
-    let body: String = response.text().await
+    let body: String = response
+        .text()
+        .await
         .map_err(|e| Error::Tool(format!("Failed to read API response: {}", e)))?;
 
     if !status.is_success() {
-        return Err(Error::Tool(format!("OpenAI API error ({}): {}", status, truncate(&body, 500))));
+        return Err(Error::Tool(format!(
+            "OpenAI API error ({}): {}",
+            status,
+            truncate(&body, 500)
+        )));
     }
 
     let result: Value = serde_json::from_str(&body)
@@ -465,12 +538,17 @@ async fn try_api_transcribe(
     // Save to file
     let dir = ctx.workspace.join("transcripts");
     let _ = std::fs::create_dir_all(&dir);
-    let stem = std::path::Path::new(path).file_stem()
-        .and_then(|s| s.to_str()).unwrap_or("output");
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
     let out_path = dir.join(format!("{}.txt", stem));
     let _ = std::fs::write(&out_path, transcript);
 
-    info!(chars = transcript.len(), "🎤 Transcription complete (OpenAI API)");
+    info!(
+        chars = transcript.len(),
+        "🎤 Transcription complete (OpenAI API)"
+    );
 
     Ok(json!({
         "success": true,
@@ -484,13 +562,19 @@ async fn try_api_transcribe(
 }
 
 /// Extract audio track from video file using ffmpeg.
-async fn action_extract_audio(path: &str, output_path: Option<&str>, ctx: &ToolContext) -> Result<Value> {
+async fn action_extract_audio(
+    path: &str,
+    output_path: Option<&str>,
+    ctx: &ToolContext,
+) -> Result<Value> {
     if !std::path::Path::new(path).exists() {
         return Err(Error::Tool(format!("File not found: {}", path)));
     }
 
     if which::which("ffmpeg").is_err() {
-        return Err(Error::Tool("ffmpeg not installed. Install via: brew install ffmpeg".into()));
+        return Err(Error::Tool(
+            "ffmpeg not installed. Install via: brew install ffmpeg".into(),
+        ));
     }
 
     let out = if let Some(op) = output_path {
@@ -498,9 +582,13 @@ async fn action_extract_audio(path: &str, output_path: Option<&str>, ctx: &ToolC
     } else {
         let dir = ctx.workspace.join("audio");
         let _ = std::fs::create_dir_all(&dir);
-        let stem = std::path::Path::new(path).file_stem()
-            .and_then(|s| s.to_str()).unwrap_or("output");
-        dir.join(format!("{}.wav", stem)).to_string_lossy().to_string()
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        dir.join(format!("{}.wav", stem))
+            .to_string_lossy()
+            .to_string()
     };
 
     if let Some(parent) = std::path::Path::new(&out).parent() {
@@ -510,14 +598,29 @@ async fn action_extract_audio(path: &str, output_path: Option<&str>, ctx: &ToolC
     info!(input = %path, output = %out, "🎤 Extracting audio");
 
     let output = tokio::process::Command::new("ffmpeg")
-        .args(["-i", path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", &out])
+        .args([
+            "-i",
+            path,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-y",
+            &out,
+        ])
         .output()
         .await
         .map_err(|e| Error::Tool(format!("ffmpeg failed: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!("ffmpeg extract failed: {}", truncate(&stderr, 500))));
+        return Err(Error::Tool(format!(
+            "ffmpeg extract failed: {}",
+            truncate(&stderr, 500)
+        )));
     }
 
     let file_size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
@@ -546,13 +649,17 @@ async fn ensure_wav(path: &str, ctx: &ToolContext) -> Result<String> {
     }
 
     if which::which("ffmpeg").is_err() {
-        return Err(Error::Tool("ffmpeg needed to convert audio to WAV. Install: brew install ffmpeg".into()));
+        return Err(Error::Tool(
+            "ffmpeg needed to convert audio to WAV. Install: brew install ffmpeg".into(),
+        ));
     }
 
     let tmp_dir = ctx.workspace.join("tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
-    let stem = std::path::Path::new(path).file_stem()
-        .and_then(|s| s.to_str()).unwrap_or("audio");
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
     let wav_path = tmp_dir.join(format!("{}_tmp.wav", stem));
     let wav_str = wav_path.to_string_lossy().to_string();
 
@@ -564,7 +671,10 @@ async fn ensure_wav(path: &str, ctx: &ToolContext) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!("Audio conversion failed: {}", truncate(&stderr, 300))));
+        return Err(Error::Tool(format!(
+            "Audio conversion failed: {}",
+            truncate(&stderr, 300)
+        )));
     }
 
     Ok(wav_str)
@@ -593,7 +703,9 @@ mod tests {
     #[test]
     fn test_validate_transcribe() {
         let tool = AudioTranscribeTool;
-        assert!(tool.validate(&json!({"action": "transcribe", "path": "/tmp/test.mp3"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "transcribe", "path": "/tmp/test.mp3"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "transcribe"})).is_err());
         assert!(tool.validate(&json!({"action": "info"})).is_ok());
         assert!(tool.validate(&json!({"action": "invalid"})).is_err());
@@ -602,7 +714,9 @@ mod tests {
     #[test]
     fn test_validate_extract() {
         let tool = AudioTranscribeTool;
-        assert!(tool.validate(&json!({"action": "extract_audio", "path": "/tmp/video.mp4"})).is_ok());
+        assert!(tool
+            .validate(&json!({"action": "extract_audio", "path": "/tmp/video.mp4"}))
+            .is_ok());
         assert!(tool.validate(&json!({"action": "extract_audio"})).is_err());
     }
 

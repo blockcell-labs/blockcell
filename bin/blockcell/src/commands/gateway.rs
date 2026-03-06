@@ -124,12 +124,12 @@ struct GatewayState {
     /// Pending path-confirmation requests waiting for non-ws channel user reply (keyed by "channel:chat_id")
     #[allow(dead_code)]
     pending_channel_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
-    /// Session store for session CRUD
-    session_store: Arc<SessionStore>,
-    /// Cron service for cron CRUD
-    cron_service: Arc<CronService>,
-    /// Memory store handle
+    /// Default agent memory store handle
     memory_store: Option<MemoryStoreHandle>,
+    /// Agent-scoped memory store handles
+    memory_stores: Arc<HashMap<String, MemoryStoreHandle>>,
+    /// Agent-scoped cron services
+    cron_services: Arc<HashMap<String, Arc<CronService>>>,
     /// Tool registry for listing tools
     tool_registry: Arc<ToolRegistry>,
     /// Password for WebUI login (configured or auto-generated)
@@ -138,6 +138,12 @@ struct GatewayState {
     channel_manager: Arc<blockcell_channels::ChannelManager>,
     /// Shared EvolutionService for trigger/delete/status handlers
     evolution_service: Arc<Mutex<EvolutionService>>,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct AgentScopedQuery {
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 fn secure_eq(a: &str, b: &str) -> bool {
@@ -251,6 +257,390 @@ fn active_model_and_provider(config: &Config) -> (String, Option<String>, &'stat
         config.agents.defaults.provider.clone(),
         "agents.defaults",
     )
+}
+
+const EXTERNAL_CHANNELS: [&str; 8] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark",
+];
+
+fn known_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
+    let mut ids = match channel {
+        "telegram" => config.channels.telegram.accounts.keys().cloned().collect::<Vec<_>>(),
+        "whatsapp" => config.channels.whatsapp.accounts.keys().cloned().collect::<Vec<_>>(),
+        "feishu" => config.channels.feishu.accounts.keys().cloned().collect::<Vec<_>>(),
+        "slack" => config.channels.slack.accounts.keys().cloned().collect::<Vec<_>>(),
+        "discord" => config.channels.discord.accounts.keys().cloned().collect::<Vec<_>>(),
+        "dingtalk" => config.channels.dingtalk.accounts.keys().cloned().collect::<Vec<_>>(),
+        "wecom" => config.channels.wecom.accounts.keys().cloned().collect::<Vec<_>>(),
+        "lark" => config.channels.lark.accounts.keys().cloned().collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids
+}
+
+fn enabled_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
+    let mut ids = match channel {
+        "telegram" => config
+            .channels
+            .telegram
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.token.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "whatsapp" => config
+            .channels
+            .whatsapp
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.bridge_url.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "feishu" => config
+            .channels
+            .feishu
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "slack" => config
+            .channels
+            .slack
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.bot_token.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "discord" => config
+            .channels
+            .discord
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.bot_token.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "dingtalk" => config
+            .channels
+            .dingtalk
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.app_key.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "wecom" => config
+            .channels
+            .wecom
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.corp_id.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "lark" => config
+            .channels
+            .lark
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids
+}
+
+fn validate_channel_owner_bindings(config: &Config) -> anyhow::Result<()> {
+    for channel in EXTERNAL_CHANNELS {
+        let account_owner_bindings = config.channel_account_owners.get(channel);
+        let known_account_ids = known_channel_account_ids(config, channel);
+
+        if let Some(bindings) = account_owner_bindings {
+            for (account_id, owner) in bindings {
+                let account_id = account_id.trim();
+                let owner = owner.trim();
+                if account_id.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Channel '{}' has an empty account id in channelAccountOwners.",
+                        channel
+                    ));
+                }
+                if owner.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Channel '{}' account '{}' has a blank owner agent.",
+                        channel,
+                        account_id
+                    ));
+                }
+                if !known_account_ids.iter().any(|id| id == account_id) {
+                    return Err(anyhow::anyhow!(
+                        "Channel '{}' account '{}' is not defined under channels.{}.accounts.",
+                        channel,
+                        account_id,
+                        channel
+                    ));
+                }
+                if !config.agent_exists(owner) {
+                    return Err(anyhow::anyhow!(
+                        "Channel '{}' account owner '{}' does not exist in agents.list.",
+                        channel,
+                        owner
+                    ));
+                }
+            }
+        }
+
+        if !config.is_external_channel_enabled(channel) {
+            continue;
+        }
+
+        if let Some(owner) = config.resolve_channel_owner(channel) {
+            if !config.agent_exists(owner) {
+                return Err(anyhow::anyhow!(
+                    "Channel '{}' owner '{}' does not exist in agents.list.",
+                    channel,
+                    owner
+                ));
+            }
+            continue;
+        }
+
+        let enabled_account_ids = enabled_channel_account_ids(config, channel);
+        if enabled_account_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Channel '{}' is enabled but has no owner agent. Set channelOwners.{} in config.",
+                channel,
+                channel
+            ));
+        }
+
+        for account_id in enabled_account_ids {
+            if config
+                .resolve_channel_account_owner(channel, &account_id)
+                .is_none()
+            {
+                return Err(anyhow::anyhow!(
+                    "Channel '{}' is enabled but missing owner binding for enabled account '{}'. Set channelAccountOwners.{}.{} or channelOwners.{}.",
+                    channel,
+                    account_id,
+                    channel,
+                    account_id,
+                    channel
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_internal_channel(channel: &str) -> bool {
+    matches!(
+        channel,
+        "ws" | "cli" | "cron" | "system" | "subagent" | "heartbeat" | "ghost"
+    )
+}
+
+fn metadata_route_agent_id(msg: &InboundMessage) -> Option<String> {
+    msg.metadata
+        .get("route_agent_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_runtime_agent_id(config: &Config, msg: &InboundMessage) -> Option<String> {
+    if let Some(agent_id) = metadata_route_agent_id(msg) {
+        return config.agent_exists(&agent_id).then_some(agent_id);
+    }
+
+    if is_internal_channel(&msg.channel) {
+        return Some("default".to_string());
+    }
+
+    let owner = config.resolve_effective_channel_owner(&msg.channel, msg.account_id.as_deref())?;
+    config.agent_exists(owner).then(|| owner.to_string())
+}
+
+fn resolve_requested_agent_id(
+    config: &Config,
+    requested: Option<&str>,
+) -> std::result::Result<String, String> {
+    let agent_id = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+
+    if config.agent_exists(agent_id) {
+        Ok(agent_id.to_string())
+    } else {
+        Err(format!("Unknown agent '{}'", agent_id))
+    }
+}
+
+fn memory_store_for_agent(
+    state: &GatewayState,
+    requested: Option<&str>,
+) -> std::result::Result<(String, MemoryStoreHandle), String> {
+    let agent_id = resolve_requested_agent_id(&state.config, requested)?;
+    let store = state
+        .memory_stores
+        .get(&agent_id)
+        .cloned()
+        .ok_or_else(|| format!("Memory store not available for agent '{}'", agent_id))?;
+    Ok((agent_id, store))
+}
+
+fn cron_service_for_agent(
+    state: &GatewayState,
+    requested: Option<&str>,
+) -> std::result::Result<(String, Arc<CronService>), String> {
+    let agent_id = resolve_requested_agent_id(&state.config, requested)?;
+    let service = state
+        .cron_services
+        .get(&agent_id)
+        .cloned()
+        .ok_or_else(|| format!("Cron service not available for agent '{}'", agent_id))?;
+    Ok((agent_id, service))
+}
+
+fn with_route_agent_id(mut msg: InboundMessage, agent_id: &str) -> InboundMessage {
+    let mut metadata = if msg.metadata.is_object() {
+        msg.metadata
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("route_agent_id".to_string(), serde_json::json!(agent_id));
+        if !is_internal_channel(&msg.channel) {
+            obj.entry("route_match_level".to_string())
+                .or_insert_with(|| serde_json::json!("channel_owner"));
+        }
+    }
+
+    msg.metadata = metadata;
+    msg
+}
+
+fn open_agent_memory_store(paths: &Paths) -> Option<MemoryStoreHandle> {
+    let memory_db_path = paths.memory_dir().join("memory.db");
+    match MemoryStore::open(&memory_db_path) {
+        Ok(store) => {
+            if let Err(e) = store.migrate_from_files(&paths.memory_dir()) {
+                warn!(agent_base = %paths.base.display(), error = %e, "Memory migration failed");
+            }
+            let adapter = MemoryStoreAdapter::new(store);
+            Some(Arc::new(adapter))
+        }
+        Err(e) => {
+            warn!(
+                agent_base = %paths.base.display(),
+                error = %e,
+                "Failed to open memory store; memory tools will be unavailable"
+            );
+            None
+        }
+    }
+}
+
+async fn spawn_agent_runtime(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    outbound_tx: mpsc::Sender<OutboundMessage>,
+    confirm_tx: mpsc::Sender<ConfirmRequest>,
+    ws_broadcast_tx: broadcast::Sender<String>,
+    shutdown_tx: broadcast::Sender<()>,
+    task_manager: TaskManager,
+) -> anyhow::Result<(
+    mpsc::Sender<InboundMessage>,
+    tokio::task::JoinHandle<()>,
+    Option<MemoryStoreHandle>,
+)> {
+    let agent_config = config
+        .config_for_agent(agent_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown agent '{}'", agent_id))?;
+    let agent_paths = paths.for_agent(agent_id);
+    agent_paths.ensure_dirs()?;
+
+    let provider_pool = blockcell_providers::ProviderPool::from_config(&agent_config)?;
+    let memory_store_handle = open_agent_memory_store(&agent_paths);
+
+    let cap_registry_dir = agent_paths.evolved_tools_dir();
+    let cap_registry_raw = new_registry_handle(cap_registry_dir);
+    {
+        let mut reg = cap_registry_raw.lock().await;
+        let _ = reg.load();
+        let rehydrated = reg.rehydrate_executors();
+        if rehydrated > 0 {
+            info!(agent_id = %agent_id, rehydrated, "Rehydrated evolved tool executors");
+        }
+    }
+
+    let llm_timeout_secs = 300u64;
+    let mut core_evo = CoreEvolution::new(
+        agent_paths.workspace().to_path_buf(),
+        cap_registry_raw.clone(),
+        llm_timeout_secs,
+    );
+    if let Some((_, evo_provider)) = provider_pool.acquire() {
+        let llm_bridge = Arc::new(ProviderLLMBridge::new_arc(evo_provider));
+        core_evo.set_llm_provider(llm_bridge);
+        info!(agent_id = %agent_id, "Core evolution LLM provider configured");
+    }
+    let core_evo_raw = Arc::new(Mutex::new(core_evo));
+
+    let cap_registry_adapter = CapabilityRegistryAdapter::new(cap_registry_raw.clone());
+    let cap_registry_handle: CapabilityRegistryHandle = Arc::new(Mutex::new(cap_registry_adapter));
+
+    let core_evo_adapter = CoreEvolutionAdapter::new(core_evo_raw.clone());
+    let core_evo_handle: CoreEvolutionHandle = Arc::new(Mutex::new(core_evo_adapter));
+
+    let mut runtime = AgentRuntime::new(
+        agent_config.clone(),
+        agent_paths.clone(),
+        Arc::clone(&provider_pool),
+        ToolRegistry::with_defaults(),
+    )?;
+    runtime.mount_mcp_servers().await;
+    runtime.validate_intent_router()?;
+
+    if agent_config.agents.defaults.evolution_model.is_some()
+        || agent_config.agents.defaults.evolution_provider.is_some()
+    {
+        match super::provider::create_evolution_provider(&agent_config) {
+            Ok(evo_provider) => {
+                runtime.set_evolution_provider(evo_provider);
+                info!(agent_id = %agent_id, "Evolution provider configured with independent model");
+            }
+            Err(e) => {
+                warn!(agent_id = %agent_id, error = %e, "Failed to create evolution provider; using main provider");
+            }
+        }
+    }
+
+    runtime.set_outbound(outbound_tx);
+    runtime.set_confirm(confirm_tx);
+    runtime.set_task_manager(task_manager);
+    runtime.set_agent_id(Some(agent_id.to_string()));
+    if let Some(ref store) = memory_store_handle {
+        runtime.set_memory_store(store.clone());
+    }
+    runtime.set_capability_registry(cap_registry_handle);
+    runtime.set_core_evolution(core_evo_handle);
+    runtime.set_event_tx(ws_broadcast_tx);
+
+    let (agent_inbound_tx, agent_inbound_rx) = mpsc::channel::<InboundMessage>(100);
+    let runtime_shutdown_rx = shutdown_tx.subscribe();
+    let runtime_handle = tokio::spawn(async move {
+        runtime
+            .run_loop(agent_inbound_rx, Some(runtime_shutdown_rx))
+            .await;
+    });
+
+    Ok((agent_inbound_tx, runtime_handle, memory_store_handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -415,60 +805,11 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         }
     }
 
+    // Enforce simplified routing invariant:
+    // every enabled external channel must be bound to exactly one owner agent.
+    validate_channel_owner_bindings(&config)?;
+
     info!(host = %host, port = port, "Starting blockcell gateway");
-
-    // ── Multi-provider dispatch (same logic as agent CLI) ──
-    let provider_pool = blockcell_providers::ProviderPool::from_config(&config)?;
-
-    // ── Initialize memory store (SQLite + FTS5) ──
-    let memory_db_path = paths.memory_dir().join("memory.db");
-    let memory_store_handle: Option<MemoryStoreHandle> = match MemoryStore::open(&memory_db_path) {
-        Ok(store) => {
-            if let Err(e) = store.migrate_from_files(&paths.memory_dir()) {
-                warn!("Memory migration failed: {}", e);
-            }
-            let adapter = MemoryStoreAdapter::new(store);
-            Some(Arc::new(adapter))
-        }
-        Err(e) => {
-            warn!(
-                "Failed to open memory store: {}. Memory tools will be unavailable.",
-                e
-            );
-            None
-        }
-    };
-
-    // ── Initialize tool evolution registry and core evolution engine ──
-    let cap_registry_dir = paths.evolved_tools_dir();
-    let cap_registry_raw = new_registry_handle(cap_registry_dir);
-    {
-        let mut reg = cap_registry_raw.lock().await;
-        let _ = reg.load();
-        let rehydrated = reg.rehydrate_executors();
-        if rehydrated > 0 {
-            info!("Rehydrated {} evolved tool executors from disk", rehydrated);
-        }
-    }
-
-    let llm_timeout_secs = 300u64;
-    let mut core_evo = CoreEvolution::new(
-        paths.workspace().to_path_buf(),
-        cap_registry_raw.clone(),
-        llm_timeout_secs,
-    );
-    if let Ok(evo_provider) = super::provider::create_provider(&config) {
-        let llm_bridge = Arc::new(ProviderLLMBridge::new(evo_provider));
-        core_evo.set_llm_provider(llm_bridge);
-        info!("Core evolution LLM provider configured");
-    }
-    let core_evo_raw = Arc::new(Mutex::new(core_evo));
-
-    let cap_registry_adapter = CapabilityRegistryAdapter::new(cap_registry_raw.clone());
-    let cap_registry_handle: CapabilityRegistryHandle = Arc::new(Mutex::new(cap_registry_adapter));
-
-    let core_evo_adapter = CoreEvolutionAdapter::new(core_evo_raw.clone());
-    let core_evo_handle: CoreEvolutionHandle = Arc::new(Mutex::new(core_evo_adapter));
 
     // ── Create message bus ──
     let bus = MessageBus::new(100);
@@ -481,38 +822,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     // ── Create shared task manager ──
-    let task_manager = TaskManager::new();
+    let task_manager = TaskManager::with_persistence(paths.workspace().join("tasks.json"));
 
     // ── Create tool registry (shared for listing tools) ──
-    let tool_registry = ToolRegistry::with_defaults();
-    let tool_registry_shared = Arc::new(tool_registry.clone());
-
-    // ── Create agent runtime with full component wiring ──
-    let mut runtime = AgentRuntime::new(
-        config.clone(),
-        paths.clone(),
-        std::sync::Arc::clone(&provider_pool),
-        tool_registry,
-    )?;
-    runtime.mount_mcp_servers().await;
-
-    // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider
-    if config.agents.defaults.evolution_model.is_some()
-        || config.agents.defaults.evolution_provider.is_some()
-    {
-        match super::provider::create_evolution_provider(&config) {
-            Ok(evo_provider) => {
-                runtime.set_evolution_provider(evo_provider);
-                info!("Evolution provider configured with independent model");
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to create evolution provider: {}, using main provider",
-                    e
-                );
-            }
-        }
-    }
+    let tool_registry_shared = Arc::new(ToolRegistry::with_defaults());
 
     // ── Set up path confirmation channel (channel-aware) ──
     // pending_ws_confirms: keyed by request_id, for WebUI (ws) confirmations
@@ -522,9 +835,8 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let pending_channel_confirms: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<ConfirmRequest>(16);
-    runtime.set_confirm(confirm_tx);
 
-    // Clone outbound_tx before it is moved into the runtime, so the confirm
+    // Clone outbound_tx before it is moved into runtime tasks, so the confirm
     // handler can send confirmation prompts to non-ws channels.
     let outbound_tx_for_confirm = outbound_tx.clone();
 
@@ -534,10 +846,18 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let pending_ws_for_handler = Arc::clone(&pending_ws_confirms);
     let pending_ch_for_handler = Arc::clone(&pending_channel_confirms);
     let ws_broadcast_for_confirm = ws_broadcast_tx.clone();
-    tokio::spawn(async move {
-        while let Some(req) = confirm_rx.recv().await {
+    let mut confirm_handler_shutdown_rx = shutdown_tx.subscribe();
+    let confirm_handler_handle = tokio::spawn(async move {
+        loop {
+            let req = tokio::select! {
+                req = confirm_rx.recv() => match req {
+                    Some(req) => req,
+                    None => break,
+                },
+                _ = confirm_handler_shutdown_rx.recv() => break,
+            };
+
             if req.channel == "ws" {
-                // WebUI: broadcast structured event, wait for confirm_response WS message
                 let request_id = format!("confirm_{}", chrono::Utc::now().timestamp_millis());
                 {
                     let mut map = pending_ws_for_handler.lock().await;
@@ -546,30 +866,29 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 let event = serde_json::json!({
                     "type": "confirm_request",
                     "request_id": request_id,
-                    "tool": req.tool_name,
+                    "tool_name": req.tool_name,
                     "paths": req.paths,
+                    "channel": req.channel,
+                    "chat_id": req.chat_id,
                 });
                 let _ = ws_broadcast_for_confirm.send(event.to_string());
-                info!(request_id = %request_id, tool = %req.tool_name, "Sent confirm_request to WebUI");
             } else {
-                // Non-ws channel (lark, telegram, etc.): send text prompt to the
-                // originating channel and wait for the user's text reply.
                 let confirm_key = format!("{}:{}", req.channel, req.chat_id);
-                let paths_display: Vec<String> =
-                    req.paths.iter().map(|p| format!("  📁 {}", p)).collect();
-                let prompt = format!(
-                    "⚠️ 安全确认: 工具 `{}` 需要访问工作区外的路径:\n{}\n\n回复 \"允许\" 或 \"y\" 授权，回复其他内容拒绝。",
-                    req.tool_name,
-                    paths_display.join("\n"),
-                );
                 {
                     let mut map = pending_ch_for_handler.lock().await;
                     map.insert(confirm_key.clone(), req.response_tx);
                 }
-                let outbound_msg = OutboundMessage::new(&req.channel, &req.chat_id, &prompt);
-                if let Err(e) = outbound_tx_for_confirm.send(outbound_msg).await {
-                    warn!(confirm_key = %confirm_key, error = %e, "Failed to send confirm prompt to channel");
-                    // Remove the pending entry since we couldn't send
+                let prompt = format!(
+                    "⚠️ 工具 {} 需要访问以下路径：
+{}
+
+回复 yes / y / 允许 / 同意 进行确认，其他任意内容将拒绝。",
+                    req.tool_name,
+                    req.paths.join("\n")
+                );
+                let mut outbound = OutboundMessage::new(&req.channel, &req.chat_id, &prompt);
+                outbound.metadata = serde_json::json!({"confirm_request": true});
+                if outbound_tx_for_confirm.send(outbound).await.is_err() {
                     let mut map = pending_ch_for_handler.lock().await;
                     if let Some(tx) = map.remove(&confirm_key) {
                         let _ = tx.send(false);
@@ -581,24 +900,60 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         }
     });
 
-    runtime.set_outbound(outbound_tx);
-    runtime.set_task_manager(task_manager.clone());
-    if let Some(ref store) = memory_store_handle {
-        runtime.set_memory_store(store.clone());
+    // ── Create one runtime per resolved agent ──
+    let resolved_agents = config.resolved_agents();
+    let mut runtime_senders: HashMap<String, mpsc::Sender<InboundMessage>> = HashMap::new();
+    let mut runtime_handles: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
+    let mut agent_memory_stores: HashMap<String, MemoryStoreHandle> = HashMap::new();
+    for agent in &resolved_agents {
+        let agent_id = agent.id.clone();
+        let (agent_tx, agent_handle, memory_store_handle) = spawn_agent_runtime(
+            &config,
+            &paths,
+            &agent_id,
+            outbound_tx.clone(),
+            confirm_tx.clone(),
+            ws_broadcast_tx.clone(),
+            shutdown_tx.clone(),
+            task_manager.clone(),
+        )
+        .await?;
+        if let Some(memory_store_handle) = memory_store_handle {
+            agent_memory_stores.insert(agent_id.clone(), memory_store_handle);
+        }
+        runtime_senders.insert(agent_id.clone(), agent_tx);
+        runtime_handles.push((format!("runtime:{}", agent_id), agent_handle));
     }
-    runtime.set_capability_registry(cap_registry_handle.clone());
-    runtime.set_core_evolution(core_evo_handle.clone());
-    runtime.set_event_tx(ws_broadcast_tx.clone());
+    let default_memory_store_handle = agent_memory_stores.get("default").cloned();
 
     // ── Create channel manager for outbound dispatch ──
     let channel_manager = ChannelManager::new(config.clone(), paths.clone(), inbound_tx.clone());
 
-    // ── Create session store ──
-    let session_store = Arc::new(SessionStore::new(paths.clone()));
-
     // ── Create scheduler services ──
-    let cron_service = Arc::new(CronService::new(paths.clone(), inbound_tx.clone()));
-    cron_service.load().await?;
+    let mut cron_services_map: HashMap<String, Arc<CronService>> = HashMap::new();
+    let mut cron_handles: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
+    for agent in &resolved_agents {
+        let agent_id = agent.id.clone();
+        let cron_service = Arc::new(CronService::new_with_agent(
+            paths.for_agent(&agent_id),
+            inbound_tx.clone(),
+            if agent_id == "default" {
+                None
+            } else {
+                Some(agent_id.clone())
+            },
+        ));
+        cron_service.load().await?;
+        let shutdown_rx = shutdown_tx.subscribe();
+        let cron = cron_service.clone();
+        cron_handles.push((
+            format!("cron:{}", agent_id),
+            tokio::spawn(async move {
+                cron.run_loop(shutdown_rx).await;
+            }),
+        ));
+        cron_services_map.insert(agent_id, cron_service);
+    }
 
     let heartbeat_service = Arc::new(HeartbeatService::new(paths.clone(), inbound_tx.clone()));
 
@@ -664,11 +1019,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 _ = interceptor_shutdown_rx.recv() => break,
             };
             // Check if this message is a reply to a pending channel confirm
-            if msg.channel != "ws"
-                && msg.channel != "cli"
-                && msg.channel != "cron"
-                && msg.channel != "system"
-            {
+            if !is_internal_channel(&msg.channel) {
                 let confirm_key = format!("{}:{}", msg.channel, msg.chat_id);
                 let maybe_tx = {
                     let mut map = pending_ch_for_interceptor.lock().await;
@@ -693,19 +1044,44 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                     continue; // Don't forward this message to the runtime
                 }
             }
-            // Not a confirm reply — forward to runtime
+
+            // Not a confirm reply — forward to the runtime dispatcher
             if filtered_inbound_tx.send(msg).await.is_err() {
                 break;
             }
         }
     });
 
-    // ── Spawn core tasks ──
-    let runtime_shutdown_rx = shutdown_tx.subscribe();
-    let runtime_handle = tokio::spawn(async move {
-        runtime
-            .run_loop(filtered_inbound_rx, Some(runtime_shutdown_rx))
-            .await;
+    // ── Spawn runtime dispatcher ──
+    let config_for_dispatch = config.clone();
+    let runtime_senders_for_dispatch = runtime_senders.clone();
+    let mut dispatcher_shutdown_rx = shutdown_tx.subscribe();
+    let dispatcher_handle = tokio::spawn(async move {
+        let mut filtered_inbound_rx = filtered_inbound_rx;
+        loop {
+            let msg = tokio::select! {
+                msg = filtered_inbound_rx.recv() => match msg {
+                    Some(m) => m,
+                    None => break,
+                },
+                _ = dispatcher_shutdown_rx.recv() => break,
+            };
+
+            let Some(agent_id) = resolve_runtime_agent_id(&config_for_dispatch, &msg) else {
+                warn!(channel = %msg.channel, chat_id = %msg.chat_id, "Dropping inbound message: unable to resolve target agent");
+                continue;
+            };
+
+            let Some(agent_tx) = runtime_senders_for_dispatch.get(&agent_id) else {
+                warn!(agent_id = %agent_id, channel = %msg.channel, chat_id = %msg.chat_id, "Dropping inbound message: runtime sender missing");
+                continue;
+            };
+
+            let routed_msg = with_route_agent_id(msg, &agent_id);
+            if agent_tx.send(routed_msg).await.is_err() {
+                warn!(agent_id = %agent_id, "Agent runtime channel closed; dropping inbound message");
+            }
+        }
     });
 
     // Wrap channel_manager in Arc so it can be shared between the outbound bridge and gateway state
@@ -725,14 +1101,6 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .await;
     });
 
-    let cron_handle = {
-        let cron = cron_service.clone();
-        let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            cron.run_loop(shutdown_rx).await;
-        })
-    };
-
     let heartbeat_handle = {
         let heartbeat = heartbeat_service.clone();
         let shutdown_rx = shutdown_tx.subscribe();
@@ -749,68 +1117,98 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     };
 
     // ── Start messaging channels ──
+    let mut channel_handles: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
+
     #[cfg(feature = "telegram")]
-    let telegram_handle = {
-        let telegram = Arc::new(TelegramChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::telegram_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let telegram = Arc::new(TelegramChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            telegram.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                telegram.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "whatsapp")]
-    let whatsapp_handle = {
-        let whatsapp = Arc::new(WhatsAppChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::whatsapp_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let whatsapp = Arc::new(WhatsAppChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            whatsapp.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                whatsapp.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "feishu")]
-    let feishu_handle = {
-        let feishu = Arc::new(FeishuChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::feishu_scoped_configs(&config) {
+        let listener_name = listener.label.clone();
+        let feishu = Arc::new(FeishuChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            feishu.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                feishu.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "slack")]
-    let slack_handle = {
-        let slack = Arc::new(SlackChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::slack_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let slack = Arc::new(SlackChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            slack.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                slack.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "discord")]
-    let discord_handle = {
-        let discord = Arc::new(DiscordChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::discord_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let discord = Arc::new(DiscordChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            discord.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                discord.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "dingtalk")]
-    let dingtalk_handle = {
-        let dingtalk = Arc::new(DingTalkChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::dingtalk_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let dingtalk = Arc::new(DingTalkChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            dingtalk.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                dingtalk.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     #[cfg(feature = "wecom")]
-    let wecom_handle = {
-        let wecom = Arc::new(WeComChannel::new(config.clone(), inbound_tx.clone()));
+    for listener in blockcell_channels::account::wecom_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        let wecom = Arc::new(WeComChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            wecom.run_loop(shutdown_rx).await;
-        })
-    };
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                wecom.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
 
     // ── Build HTTP/WebSocket server ──
     // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above
@@ -864,9 +1262,9 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         ws_broadcast: ws_broadcast_tx.clone(),
         pending_confirms: Arc::clone(&pending_ws_confirms),
         pending_channel_confirms: Arc::clone(&pending_channel_confirms),
-        session_store,
-        cron_service: cron_service.clone(),
-        memory_store: memory_store_handle.clone(),
+        memory_store: default_memory_store_handle.clone(),
+        memory_stores: Arc::new(agent_memory_stores),
+        cron_services: Arc::new(cron_services_map),
         tool_registry: tool_registry_shared,
         web_password: web_password.clone(),
         channel_manager: Arc::clone(&channel_manager),
@@ -946,6 +1344,15 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         .route("/v1/channels/status", get(handle_channels_status))
         .route("/v1/channels", get(handle_channels_list))
         .route("/v1/channels/:id", put(handle_channel_update))
+        .route("/v1/channel-owners", get(handle_channel_owners_get))
+        .route(
+            "/v1/channel-owners/:channel",
+            put(handle_channel_owner_put).delete(handle_channel_owner_delete),
+        )
+        .route(
+            "/v1/channel-owners/:channel/accounts/:account_id",
+            put(handle_channel_account_owner_put).delete(handle_channel_account_owner_delete),
+        )
         .route("/v1/skills/:name", delete(handle_skill_delete))
         .route("/v1/hub/skills", get(handle_hub_skills))
         .route(
@@ -1067,40 +1474,21 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     drop(inbound_tx);
     // Drop local services that still hold inbound_tx clones so runtime can observe
     // channel closure and exit promptly.
-    drop(cron_service);
     drop(heartbeat_service);
 
-    let mut handles: Vec<(&str, tokio::task::JoinHandle<()>)> = vec![
-        ("http_server", http_handle),
-        ("webui_server", webui_handle),
-        ("runtime", runtime_handle),
-        ("outbound", outbound_handle),
-        ("interceptor", interceptor_handle),
-        ("cron", cron_handle),
-        ("heartbeat", heartbeat_handle),
-        ("ghost", ghost_handle),
+    let mut handles: Vec<(String, tokio::task::JoinHandle<()>)> = vec![
+        ("http_server".to_string(), http_handle),
+        ("webui_server".to_string(), webui_handle),
+        ("confirm_handler".to_string(), confirm_handler_handle),
+        ("dispatcher".to_string(), dispatcher_handle),
+        ("outbound".to_string(), outbound_handle),
+        ("interceptor".to_string(), interceptor_handle),
+        ("heartbeat".to_string(), heartbeat_handle),
+        ("ghost".to_string(), ghost_handle),
     ];
-
-    #[cfg(feature = "telegram")]
-    handles.push(("telegram", telegram_handle));
-
-    #[cfg(feature = "whatsapp")]
-    handles.push(("whatsapp", whatsapp_handle));
-
-    #[cfg(feature = "feishu")]
-    handles.push(("feishu", feishu_handle));
-
-    #[cfg(feature = "slack")]
-    handles.push(("slack", slack_handle));
-
-    #[cfg(feature = "discord")]
-    handles.push(("discord", discord_handle));
-
-    #[cfg(feature = "dingtalk")]
-    handles.push(("dingtalk", dingtalk_handle));
-
-    #[cfg(feature = "wecom")]
-    handles.push(("wecom", wecom_handle));
+    handles.extend(runtime_handles);
+    handles.extend(cron_handles);
+    handles.extend(channel_handles);
 
     let total = handles.len();
     let graceful_timeout = std::time::Duration::from_secs(30);
@@ -1122,7 +1510,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     for (name, handle) in &handles {
         if !handle.is_finished() {
             warn!(
-                task = *name,
+                task = %name,
                 "Task did not exit in graceful window, aborting"
             );
             handle.abort();
@@ -1135,10 +1523,10 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         match handle.await {
             Ok(()) => {}
             Err(e) if e.is_cancelled() => {
-                debug!(task = name, "Task cancelled during shutdown");
+                debug!(task = %name, "Task cancelled during shutdown");
             }
             Err(e) => {
-                error!(task = name, error = %e, "Task panicked during shutdown");
+                error!(task = %name, error = %e, "Task panicked during shutdown");
                 failed += 1;
             }
         }
@@ -1165,4 +1553,290 @@ fn build_api_cors_layer(config: &Config) -> CorsLayer {
 fn build_webui_cors_layer(config: &Config) -> CorsLayer {
     let _ = config;
     CorsLayer::permissive().allow_credentials(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_channel_owner_bindings_requires_owner_for_enabled_channel() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "token".to_string();
+
+        let err = validate_channel_owner_bindings(&config)
+            .expect_err("enabled external channel without owner should fail");
+        assert!(
+            err.to_string().contains("has no owner agent"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_channel_owner_bindings_requires_existing_agent() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "token".to_string();
+        config
+            .channel_owners
+            .insert("telegram".to_string(), "ghost-agent".to_string());
+
+        let err = validate_channel_owner_bindings(&config)
+            .expect_err("owner must exist in agents.list or default fallback");
+        assert!(
+            err.to_string().contains("does not exist in agents.list"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_channel_owner_bindings_accepts_complete_account_owner_coverage() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.accounts.insert(
+            "bot1".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot1".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.channels.telegram.accounts.insert(
+            "bot2".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot2".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.agents.list.push(blockcell_core::config::AgentProfileConfig {
+            id: "ops".to_string(),
+            enabled: true,
+            ..Default::default()
+        });
+        config.channel_account_owners.insert(
+            "telegram".to_string(),
+            std::collections::HashMap::from([
+                ("bot1".to_string(), "default".to_string()),
+                ("bot2".to_string(), "ops".to_string()),
+            ]),
+        );
+
+        validate_channel_owner_bindings(&config)
+            .expect("complete account owner coverage should pass without channel fallback owner");
+    }
+
+    #[test]
+    fn test_validate_channel_owner_bindings_requires_complete_account_owner_coverage_without_fallback() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.accounts.insert(
+            "bot1".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot1".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.channels.telegram.accounts.insert(
+            "bot2".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot2".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.channel_account_owners.insert(
+            "telegram".to_string(),
+            std::collections::HashMap::from([("bot1".to_string(), "default".to_string())]),
+        );
+
+        let err = validate_channel_owner_bindings(&config)
+            .expect_err("missing account owner coverage should fail without fallback owner");
+        assert!(
+            err.to_string().contains("missing owner binding for enabled account 'bot2'"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_channel_owner_bindings_rejects_unknown_account_owner_agent() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.accounts.insert(
+            "bot1".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot1".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.channel_account_owners.insert(
+            "telegram".to_string(),
+            std::collections::HashMap::from([(
+                "bot1".to_string(),
+                "ghost-agent".to_string(),
+            )]),
+        );
+
+        let err = validate_channel_owner_bindings(&config)
+            .expect_err("account owner agent must exist");
+        assert!(
+            err.to_string().contains("account owner 'ghost-agent' does not exist"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_channel_owner_bindings_accepts_valid_owner() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "token".to_string();
+        config
+            .channel_owners
+            .insert("telegram".to_string(), "default".to_string());
+
+        validate_channel_owner_bindings(&config)
+            .expect("enabled channel with valid owner should pass");
+    }
+
+    #[test]
+    fn test_route_agent_prefers_default_for_internal_channels() {
+        let config = Config::default();
+        let msg = InboundMessage::cli("hello");
+
+        assert_eq!(
+            resolve_runtime_agent_id(&config, &msg).as_deref(),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn test_route_agent_uses_account_owner_for_external_channels() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.accounts.insert(
+            "bot2".to_string(),
+            blockcell_core::config::TelegramAccountConfig {
+                enabled: true,
+                token: "tg-bot2".to_string(),
+                allow_from: vec![],
+                proxy: None,
+            },
+        );
+        config.channel_owners.insert("telegram".to_string(), "default".to_string());
+        config.agents.list.push(blockcell_core::config::AgentProfileConfig {
+            id: "ops".to_string(),
+            enabled: true,
+            ..Default::default()
+        });
+        config.channel_account_owners.insert(
+            "telegram".to_string(),
+            std::collections::HashMap::from([("bot2".to_string(), "ops".to_string())]),
+        );
+
+        let msg = InboundMessage {
+            channel: "telegram".to_string(),
+            account_id: Some("bot2".to_string()),
+            sender_id: "u1".to_string(),
+            chat_id: "c1".to_string(),
+            content: "hello".to_string(),
+            media: vec![],
+            metadata: serde_json::Value::Null,
+            timestamp_ms: 1,
+        };
+
+        assert_eq!(
+            resolve_runtime_agent_id(&config, &msg).as_deref(),
+            Some("ops")
+        );
+    }
+
+    #[test]
+    fn test_route_agent_uses_channel_owner_for_external_channels() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "token".to_string();
+        config
+            .channel_owners
+            .insert("telegram".to_string(), "ops".to_string());
+        config
+            .agents
+            .list
+            .push(blockcell_core::config::AgentProfileConfig {
+                id: "ops".to_string(),
+                enabled: true,
+                name: None,
+                intent_profile: Some("ops".to_string()),
+                model: None,
+                provider: None,
+                model_pool: Vec::new(),
+                max_tokens: None,
+                temperature: None,
+                max_tool_iterations: None,
+                llm_max_retries: None,
+                llm_retry_delay_ms: None,
+                max_context_tokens: None,
+                evolution_model: None,
+                evolution_provider: None,
+            });
+
+        let msg = InboundMessage {
+            channel: "telegram".to_string(),
+            account_id: None,
+            sender_id: "u1".to_string(),
+            chat_id: "c1".to_string(),
+            content: "hello".to_string(),
+            media: vec![],
+            metadata: serde_json::Value::Null,
+            timestamp_ms: 1,
+        };
+
+        assert_eq!(
+            resolve_runtime_agent_id(&config, &msg).as_deref(),
+            Some("ops")
+        );
+    }
+    #[test]
+    fn test_resolve_requested_agent_defaults_to_default() {
+        let config = Config::default();
+        assert_eq!(
+            resolve_requested_agent_id(&config, None).as_deref(),
+            Ok("default")
+        );
+    }
+
+    #[test]
+    fn test_resolve_requested_agent_accepts_enabled_agent() {
+        let mut config = Config::default();
+        config
+            .agents
+            .list
+            .push(blockcell_core::config::AgentProfileConfig {
+                id: "ops".to_string(),
+                enabled: true,
+                ..Default::default()
+            });
+
+        assert_eq!(
+            resolve_requested_agent_id(&config, Some("ops")).as_deref(),
+            Ok("ops")
+        );
+    }
+
+    #[test]
+    fn test_resolve_requested_agent_rejects_missing_agent() {
+        let config = Config::default();
+        assert!(resolve_requested_agent_id(&config, Some("ghost")).is_err());
+    }
 }

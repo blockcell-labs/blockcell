@@ -8,12 +8,16 @@ pub(super) struct ChatRequest {
     content: String,
     #[serde(default = "default_channel")]
     channel: String,
+    #[serde(default)]
+    account_id: Option<String>,
     #[serde(default = "default_sender")]
     sender_id: String,
     #[serde(default = "default_chat")]
     chat_id: String,
     #[serde(default)]
     media: Vec<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 fn default_channel() -> String {
@@ -95,12 +99,29 @@ pub(super) async fn handle_chat(
 ) -> impl IntoResponse {
     let inbound = InboundMessage {
         channel: req.channel,
+        account_id: req.account_id,
         sender_id: req.sender_id,
         chat_id: req.chat_id,
         content: req.content,
         media: req.media,
         metadata: serde_json::Value::Null,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
+    };
+
+    let inbound = match req.agent_id.as_deref() {
+        Some(requested) => match resolve_requested_agent_id(&state.config, Some(requested)) {
+            Ok(agent_id) => with_route_agent_id(inbound, &agent_id),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ChatResponse {
+                        status: "error".to_string(),
+                        message: err,
+                    }),
+                )
+            }
+        },
+        None => inbound,
     };
 
     match state.inbound_tx.send(inbound).await {
