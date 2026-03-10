@@ -1,6 +1,9 @@
 use blockcell_core::Config;
 
-use crate::{AnthropicProvider, GeminiProvider, OllamaProvider, OpenAIProvider, Provider};
+use crate::{
+    AnthropicProvider, GeminiProvider, OllamaProvider, OpenAIProvider,
+    OpenAIResponsesProvider, Provider,
+};
 
 /// 默认的 OpenAI 兼容 provider 的 api_base
 fn default_api_base(provider_name: &str) -> &'static str {
@@ -203,6 +206,22 @@ pub fn create_provider(
                         .or(Some("http://localhost:11434"));
                     Ok(Box::new(OllamaProvider::new_with_proxy(
                         api_base,
+                        model,
+                        max_tokens,
+                        temperature,
+                        provider_proxy,
+                        global_proxy,
+                        no_proxy,
+                    )) as Box<dyn Provider>)
+                }
+                "openai_responses" => {
+                    let api_base = resolved_cfg
+                        .api_base
+                        .as_deref()
+                        .unwrap_or_else(|| default_api_base(effective_provider));
+                    Ok(Box::new(OpenAIResponsesProvider::new_with_proxy(
+                        &resolved_cfg.api_key,
+                        Some(api_base),
                         model,
                         max_tokens,
                         temperature,

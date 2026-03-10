@@ -954,6 +954,10 @@ impl AgentRuntime {
         })
     }
 
+    pub fn context_builder(&self) -> &ContextBuilder {
+        &self.context_builder
+    }
+
     pub fn set_outbound(&mut self, tx: mpsc::Sender<OutboundMessage>) {
         self.outbound_tx = Some(tx);
     }

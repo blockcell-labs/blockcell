@@ -4,6 +4,7 @@ pub mod factory;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod openai_responses;
 pub mod pool;
 
 use async_trait::async_trait;
@@ -23,4 +24,5 @@ pub use factory::{
 pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
+pub use openai_responses::OpenAIResponsesProvider;
 pub use pool::{CallResult, PoolEntryStatus, ProviderPool};

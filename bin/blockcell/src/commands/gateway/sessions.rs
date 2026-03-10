@@ -1,5 +1,6 @@
 use super::*;
 use blockcell_core::{resolve_session_key_from_id, session_file_stem, session_id_from_file_stem, session_title_from_id};
+use blockcell_storage::SessionStore;
 // ---------------------------------------------------------------------------
 // P0: Session management endpoints
 // ---------------------------------------------------------------------------
@@ -163,7 +164,9 @@ pub(super) async fn handle_session_get(
     let session_stems = session_file_stems(&agent_paths.sessions_dir());
     let session_key = resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
     let session_store = SessionStore::new(agent_paths);
-    match session_store.load(&session_key) {
+    let loaded_messages: blockcell_core::Result<Vec<blockcell_core::types::ChatMessage>> =
+        session_store.load(&session_key);
+    match loaded_messages {
         Ok(messages) if !messages.is_empty() => {
             let msgs: Vec<serde_json::Value> = messages
                 .iter()

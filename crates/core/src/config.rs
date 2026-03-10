@@ -19,7 +19,7 @@ pub struct ProviderConfig {
     /// 格式："http://host:port" 或 "socks5://host:port"
     #[serde(default)]
     pub proxy: Option<String>,
-    /// API 接口类型："openai" | "anthropic" | "gemini" | "ollama"
+    /// API 接口类型："openai" | "openai_responses" | "anthropic" | "gemini" | "ollama"
     /// 用于前端显示和接口兼容性标识，默认 "openai"（序列化时省略默认值）
     #[serde(
         default = "default_api_type",
