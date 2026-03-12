@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 use blockcell_core::config::ToolCallMode;
-use blockcell_core::types::{ChatMessage, LLMResponse, ToolCallRequest};
+use blockcell_core::types::{ChatMessage, LLMResponse, StreamChunk, ToolCallAccumulator, ToolCallRequest};
 use blockcell_core::{Error, Result};
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::client::build_http_client;
@@ -816,6 +819,53 @@ struct FunctionCall {
     arguments: String,
 }
 
+/// SSE 流式响应结构
+#[derive(Debug, Deserialize)]
+struct StreamResponse {
+    choices: Vec<StreamChoice>,
+    usage: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+    reasoning_content: Option<String>,
+    tool_calls: Option<Vec<StreamToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCall {
+    index: usize,
+    id: Option<String>,
+    function: StreamFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionCall {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+/// 流式请求体
+#[derive(Debug, Serialize)]
+struct StreamRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn chat(&self, messages: &[ChatMessage], tools: &[Value]) -> Result<LLMResponse> {
@@ -935,6 +985,220 @@ impl Provider for OpenAIProvider {
             finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".to_string()),
             usage: chat_response.usage.unwrap_or(Value::Null),
         })
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Value],
+    ) -> Result<mpsc::Receiver<StreamChunk>> {
+        let url = format!("{}/chat/completions", self.api_base);
+        let mode = Self::mode_from_u8(self.tool_call_mode.load(Ordering::Relaxed));
+
+        let (api_messages, api_tools) = if !tools.is_empty()
+            && !matches!(mode, ToolCallMode::Text | ToolCallMode::None)
+        {
+            (messages.to_vec(), tools.to_vec())
+        } else if !tools.is_empty() {
+            (Self::inject_tools_into_messages(messages, tools), vec![])
+        } else {
+            (messages.to_vec(), vec![])
+        };
+
+        let request = StreamRequest {
+            model: self.model.clone(),
+            messages: api_messages,
+            tools: api_tools,
+            tool_choice: if !tools.is_empty()
+                && !matches!(mode, ToolCallMode::Text | ToolCallMode::None)
+            {
+                Some("auto".to_string())
+            } else {
+                None
+            },
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            stream: true,
+        };
+
+        info!(url = %url, model = %self.model, "Starting streaming LLM call");
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("Stream request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Provider(format!(
+                "Stream API error {}: {}",
+                status, body
+            )));
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut tool_calls: HashMap<usize, ToolCallAccumulator> = HashMap::new();
+            let mut accumulated_content = String::new();
+            let mut accumulated_reasoning = String::new();
+            let mut finish_reason = "stop".to_string();
+            let mut usage = Value::Null;
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // 处理 SSE 行
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].trim().to_string();
+                            buffer = buffer[pos + 1..].to_string();
+
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    // 构建最终响应
+                                    let final_tool_calls: Vec<ToolCallRequest> = tool_calls
+                                        .into_iter()
+                                        .map(|(_, acc)| acc.to_tool_call_request())
+                                        .collect();
+
+                                    let response = LLMResponse {
+                                        content: if accumulated_content.is_empty() {
+                                            None
+                                        } else {
+                                            Some(accumulated_content)
+                                        },
+                                        reasoning_content: if accumulated_reasoning.is_empty() {
+                                            None
+                                        } else {
+                                            Some(accumulated_reasoning)
+                                        },
+                                        tool_calls: final_tool_calls,
+                                        finish_reason,
+                                        usage,
+                                    };
+                                    let _ = tx.send(StreamChunk::Done { response }).await;
+                                    return;
+                                }
+
+                                // 解析 JSON
+                                if let Ok(chunk) = serde_json::from_str::<StreamResponse>(data) {
+                                    if let Some(choice) = chunk.choices.first() {
+                                        // 处理文本增量
+                                        if let Some(content) = &choice.delta.content {
+                                            accumulated_content.push_str(content);
+                                            let _ = tx
+                                                .send(StreamChunk::TextDelta {
+                                                    delta: content.clone(),
+                                                })
+                                                .await;
+                                        }
+
+                                        // 处理推理内容
+                                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                                            accumulated_reasoning.push_str(reasoning);
+                                            let _ = tx
+                                                .send(StreamChunk::ReasoningDelta {
+                                                    delta: reasoning.clone(),
+                                                })
+                                                .await;
+                                        }
+
+                                        // 处理工具调用
+                                        if let Some(tool_call_deltas) = &choice.delta.tool_calls {
+                                            for tc in tool_call_deltas {
+                                                let idx = tc.index;
+
+                                                let acc =
+                                                    tool_calls.entry(idx).or_default();
+                                                if let Some(id) = &tc.id {
+                                                    acc.id = id.clone();
+                                                    let _ = tx
+                                                        .send(StreamChunk::ToolCallStart {
+                                                            index: idx,
+                                                            id: id.clone(),
+                                                            name: tc
+                                                                .function
+                                                                .name
+                                                                .clone()
+                                                                .unwrap_or_default(),
+                                                        })
+                                                        .await;
+                                                }
+                                                if let Some(name) = &tc.function.name {
+                                                    acc.name = name.clone();
+                                                }
+                                                if let Some(args_delta) = &tc.function.arguments {
+                                                    acc.arguments.push_str(args_delta);
+                                                    let _ = tx
+                                                        .send(StreamChunk::ToolCallDelta {
+                                                            index: idx,
+                                                            id: acc.id.clone(),
+                                                            delta: args_delta.clone(),
+                                                        })
+                                                        .await;
+                                                }
+                                            }
+                                        }
+
+                                        // 更新 finish_reason
+                                        if let Some(fr) = &choice.finish_reason {
+                                            finish_reason = fr.clone();
+                                        }
+                                    }
+
+                                    if let Some(u) = &chunk.usage {
+                                        usage = u.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(StreamChunk::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            // 如果流结束但没有收到 [DONE]，也发送完成事件
+            let final_tool_calls: Vec<ToolCallRequest> = tool_calls
+                .into_iter()
+                .map(|(_, acc)| acc.to_tool_call_request())
+                .collect();
+
+            let response = LLMResponse {
+                content: if accumulated_content.is_empty() {
+                    None
+                } else {
+                    Some(accumulated_content)
+                },
+                reasoning_content: if accumulated_reasoning.is_empty() {
+                    None
+                } else {
+                    Some(accumulated_reasoning)
+                },
+                tool_calls: final_tool_calls,
+                finish_reason,
+                usage,
+            };
+            let _ = tx.send(StreamChunk::Done { response }).await;
+        });
+
+        Ok(rx)
     }
 }
 

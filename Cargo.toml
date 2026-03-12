@@ -31,7 +31,7 @@ serde_yaml = "0.9"
 json5 = "0.4"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart", "stream"], default-features = false }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -48,6 +48,7 @@ anyhow = "1.0"
 # Async utilities
 async-trait = "0.1"
 futures = "0.3"
+bytes = "1.5"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # JSON Schema

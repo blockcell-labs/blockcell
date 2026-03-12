@@ -374,6 +374,44 @@ pub async fn run(
         runtime.set_capability_registry(cap_registry_handle.clone());
         runtime.set_core_evolution(core_evo_handle.clone());
 
+        // Create event broadcast channel for streaming output
+        let (event_tx, mut event_rx) = broadcast::channel::<String>(256);
+        runtime.set_event_tx(event_tx.clone());
+
+        // Spawn event handler for streaming token output
+        let event_handler = tokio::spawn(async move {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            while let Ok(event_str) = event_rx.recv().await {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&event_str) {
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match event_type {
+                        "token" => {
+                            if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                                print!("{}", delta);
+                                let _ = stdout.flush();
+                            }
+                        }
+                        "thinking" => {
+                            if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                                print!("{}", content);
+                                let _ = stdout.flush();
+                            }
+                        }
+                        "tool_call_start" => {
+                            if let Some(tool) = event.get("tool").and_then(|v| v.as_str()) {
+                                eprintln!("\n🔧 Calling tool: {}...", tool);
+                            }
+                        }
+                        "message_done" => {
+                            println!();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
         let inbound = InboundMessage {
             channel: "cli".to_string(),
             account_id: None,
@@ -386,7 +424,12 @@ pub async fn run(
         };
 
         let response = runtime.process_message(inbound).await?;
-        println!("{}", response);
+        // Event handler already printed streaming output, just print final newline if needed
+        if !response.is_empty() {
+            println!();
+        }
+        // Clean up event handler
+        event_handler.abort();
     } else {
         // Interactive mode with CronService
         println!("blockcell interactive mode (Ctrl+C to exit)");
@@ -507,10 +550,14 @@ pub async fn run(
             }
         }
 
+        // Create event broadcast channel for streaming output
+        let (event_tx, mut event_rx) = broadcast::channel::<String>(256);
+
         runtime.set_outbound(outbound_tx);
         runtime.set_confirm(confirm_tx);
         runtime.set_task_manager(task_manager.clone());
         runtime.set_agent_id(Some(agent_id.clone()));
+        runtime.set_event_tx(event_tx.clone());
         if let Some(ref store) = memory_store_handle {
             runtime.set_memory_store(store.clone());
         }
@@ -530,6 +577,47 @@ pub async fn run(
                 cron.run_loop(shutdown_rx).await;
             })
         };
+
+        // Spawn event handler for streaming token output
+        let event_handler_handle = tokio::spawn(async move {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            while let Ok(event_str) = event_rx.recv().await {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&event_str) {
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match event_type {
+                        "token" => {
+                            // Streaming text token - print immediately
+                            if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                                print!("{}", delta);
+                                let _ = stdout.flush();
+                            }
+                        }
+                        "thinking" => {
+                            // Thinking/reasoning content
+                            if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                                print!("{}", content);
+                                let _ = stdout.flush();
+                            }
+                        }
+                        "tool_call_start" => {
+                            // Tool call started
+                            if let (Some(tool), Some(_call_id)) = (
+                                event.get("tool").and_then(|v| v.as_str()),
+                                event.get("call_id").and_then(|v| v.as_str()),
+                            ) {
+                                println!("\n🔧 Calling tool: {}...", tool);
+                            }
+                        }
+                        "message_done" => {
+                            // Message complete - print newline
+                            println!();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
 
         // Spawn runtime loop
         let runtime_handle = tokio::spawn(async move {
@@ -828,6 +916,7 @@ pub async fn run(
             printer_handle,
             confirm_handle,
             outbound_dispatch_handle,
+            event_handler_handle,
         ];
         handles.extend(channel_handles);
 
