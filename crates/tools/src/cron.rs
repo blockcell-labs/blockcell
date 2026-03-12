@@ -29,16 +29,6 @@ fn resolve_skill_payload_kind(paths: &Paths, skill_name: Option<&str>) -> &'stat
     }
 }
 
-fn execute_cron_action(
-    action: &str,
-    params: &Value,
-    origin_channel: &str,
-    origin_chat_id: &str,
-) -> Result<Value> {
-    let paths = Paths::new();
-    execute_cron_action_with_paths(&paths, action, params, origin_channel, origin_chat_id)
-}
-
 fn execute_cron_action_with_paths(
     paths: &Paths,
     action: &str,
@@ -394,8 +384,15 @@ impl Tool for CronTool {
         let action = params["action"].as_str().unwrap().to_string();
         let origin_channel = ctx.channel.clone();
         let origin_chat_id = ctx.chat_id.clone();
+        // Derive agent-specific paths from the workspace directory.
+        // ctx.workspace = <base>/workspace, so parent() = <base> (e.g. ~/.blockcell/agents/<id>).
+        let paths = if let Some(base) = ctx.workspace.parent() {
+            Paths::with_base(base.to_path_buf())
+        } else {
+            Paths::new()
+        };
         tokio::task::spawn_blocking(move || {
-            execute_cron_action(&action, &params, &origin_channel, &origin_chat_id)
+            execute_cron_action_with_paths(&paths, &action, &params, &origin_channel, &origin_chat_id)
         })
         .await
         .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?

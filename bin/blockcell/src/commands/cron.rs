@@ -1,11 +1,12 @@
 use blockcell_core::Paths;
-use blockcell_scheduler::{CronJob, CronService, JobPayload, JobSchedule, JobState, ScheduleKind};
+use blockcell_scheduler::{CronService, ScheduleKind};
 use chrono::{TimeZone, Utc};
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
-pub async fn list(show_all: bool) -> anyhow::Result<()> {
-    let paths = Paths::new();
+/// List cron jobs for a given agent (read-only, reads from disk).
+/// agent_id: agent to query; empty string or "default" uses the default agent path.
+pub async fn list(show_all: bool, agent_id: &str) -> anyhow::Result<()> {
+    let paths = Paths::new().for_agent(agent_id);
     let (tx, _rx) = mpsc::channel(1);
     let service = CronService::new(paths, tx);
     service.load().await?;
@@ -13,17 +14,24 @@ pub async fn list(show_all: bool) -> anyhow::Result<()> {
     let jobs = service.list_jobs().await;
 
     if jobs.is_empty() {
-        println!("No cron jobs configured.");
+        if agent_id.is_empty() || agent_id == "default" {
+            println!("No cron jobs configured.");
+        } else {
+            println!("No cron jobs for agent '{}'.", agent_id);
+        }
         return Ok(());
     }
 
+    if agent_id != "default" && !agent_id.is_empty() {
+        println!("Agent: {}", agent_id);
+    }
     println!(
-        "{:<8} {:<20} {:<10} {:<20} Schedule",
-        "ID", "Name", "Enabled", "Next Run"
+        "{:<8} {:<22} {:<8} {:<18} {}",
+        "ID", "Name", "Enabled", "Next Run", "Schedule"
     );
     println!("{}", "-".repeat(80));
 
-    for job in jobs {
+    for job in &jobs {
         if !show_all && !job.enabled {
             continue;
         }
@@ -34,207 +42,41 @@ pub async fn list(show_all: bool) -> anyhow::Result<()> {
             .map(|ms| {
                 Utc.timestamp_millis_opt(ms)
                     .single()
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| "invalid".to_string())
             })
             .unwrap_or_else(|| "-".to_string());
 
         let schedule = match job.schedule.kind {
-            ScheduleKind::At => format!("at: {}", job.schedule.at_ms.unwrap_or(0)),
+            ScheduleKind::At => {
+                let ms = job.schedule.at_ms.unwrap_or(0);
+                let dt = Utc
+                    .timestamp_millis_opt(ms)
+                    .single()
+                    .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| ms.to_string());
+                format!("at {}", dt)
+            }
             ScheduleKind::Every => {
                 let secs = job.schedule.every_ms.unwrap_or(0) / 1000;
-                format!("every: {}s", secs)
+                format!("every {}s", secs)
             }
-            ScheduleKind::Cron => format!("cron: {}", job.schedule.expr.as_deref().unwrap_or("-")),
+            ScheduleKind::Cron => {
+                format!("cron: {}", job.schedule.expr.as_deref().unwrap_or("-"))
+            }
         };
 
         println!(
-            "{:<8} {:<20} {:<10} {:<20} {}",
+            "{:<8} {:<22} {:<8} {:<18} {}",
             &job.id.chars().take(8).collect::<String>(),
-            truncate(&job.name, 20),
+            truncate(&job.name, 22),
             if job.enabled { "yes" } else { "no" },
             next_run,
             schedule
         );
     }
 
-    Ok(())
-}
-
-pub async fn add(
-    name: String,
-    message: String,
-    every: Option<u64>,
-    cron_expr: Option<String>,
-    at: Option<String>,
-    deliver: bool,
-    to: Option<String>,
-    channel: Option<String>,
-) -> anyhow::Result<()> {
-    let paths = Paths::new();
-    let (tx, _rx) = mpsc::channel(1);
-    let service = CronService::new(paths, tx);
-    service.load().await?;
-
-    let now_ms = Utc::now().timestamp_millis();
-
-    let schedule = if let Some(secs) = every {
-        JobSchedule {
-            kind: ScheduleKind::Every,
-            at_ms: None,
-            every_ms: Some((secs * 1000) as i64),
-            expr: None,
-            tz: None,
-        }
-    } else if let Some(expr) = cron_expr {
-        JobSchedule {
-            kind: ScheduleKind::Cron,
-            at_ms: None,
-            every_ms: None,
-            expr: Some(expr),
-            tz: None,
-        }
-    } else if let Some(at_str) = at {
-        let at_time = chrono::DateTime::parse_from_rfc3339(&at_str)
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or(now_ms);
-        JobSchedule {
-            kind: ScheduleKind::At,
-            at_ms: Some(at_time),
-            every_ms: None,
-            expr: None,
-            tz: None,
-        }
-    } else {
-        anyhow::bail!("Must specify --every, --cron, or --at");
-    };
-
-    let job = CronJob {
-        id: Uuid::new_v4().to_string(),
-        name: name.clone(),
-        enabled: true,
-        schedule,
-        payload: JobPayload {
-            kind: "reminder".to_string(),
-            message,
-            deliver,
-            channel,
-            to,
-            script_kind: None,
-            skill_name: None,
-        },
-        state: JobState::default(),
-        created_at_ms: now_ms,
-        updated_at_ms: now_ms,
-        delete_after_run: false,
-    };
-
-    let job_id = job.id.clone();
-    service.add_job(job).await?;
-
-    println!("Created job: {} ({})", name, &job_id[..8]);
-    Ok(())
-}
-
-pub async fn remove(job_id: &str) -> anyhow::Result<()> {
-    let paths = Paths::new();
-    let (tx, _rx) = mpsc::channel(1);
-    let service = CronService::new(paths, tx);
-    service.load().await?;
-
-    // Find job by prefix
-    let jobs = service.list_jobs().await;
-    let matching: Vec<_> = jobs.iter().filter(|j| j.id.starts_with(job_id)).collect();
-
-    match matching.len() {
-        0 => {
-            println!("No job found with ID starting with: {}", job_id);
-        }
-        1 => {
-            let job = matching[0];
-            service.remove_job(&job.id).await?;
-            println!(
-                "Removed job: {} ({})",
-                job.name,
-                &job.id.chars().take(8).collect::<String>()
-            );
-        }
-        _ => {
-            println!("Multiple jobs match '{}'. Be more specific:", job_id);
-            for job in matching {
-                println!(
-                    "  {} - {}",
-                    &job.id.chars().take(8).collect::<String>(),
-                    job.name
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub async fn enable(job_id: &str, enabled: bool) -> anyhow::Result<()> {
-    let paths = Paths::new();
-    let (tx, _rx) = mpsc::channel(1);
-    let service = CronService::new(paths, tx);
-    service.load().await?;
-
-    match service.update_job_enabled(job_id, enabled).await {
-        Ok(Some(name)) => {
-            println!(
-                "Job {} ({}) {}",
-                &job_id.chars().take(8).collect::<String>(),
-                name,
-                if enabled { "enabled" } else { "disabled" }
-            );
-        }
-        Ok(None) => {
-            println!("No job found with ID starting with: {}", job_id);
-        }
-        Err(e) => {
-            println!("Error: {}", e);
-        }
-    }
-
-    Ok(())
-}
-
-pub async fn run_job(job_id: &str, _force: bool) -> anyhow::Result<()> {
-    let paths = Paths::new();
-    let (tx, _rx) = mpsc::channel(1);
-    let service = CronService::new(paths, tx);
-    service.load().await?;
-
-    let jobs = service.list_jobs().await;
-    let matching: Vec<_> = jobs.iter().filter(|j| j.id.starts_with(job_id)).collect();
-
-    match matching.len() {
-        0 => {
-            println!("No job found with ID starting with: {}", job_id);
-        }
-        1 => {
-            let job = matching[0];
-            println!(
-                "Running job: {} ({})",
-                job.name,
-                &job.id.chars().take(8).collect::<String>()
-            );
-            println!("Message: {}", job.payload.message);
-            // In a real implementation, this would trigger the job through the agent
-        }
-        _ => {
-            println!("Multiple jobs match '{}'. Be more specific:", job_id);
-            for job in matching {
-                println!(
-                    "  {} - {}",
-                    &job.id.chars().take(8).collect::<String>(),
-                    job.name
-                );
-            }
-        }
-    }
-
+    println!("\nTotal: {} job(s)", jobs.iter().filter(|j| show_all || j.enabled).count());
     Ok(())
 }
 

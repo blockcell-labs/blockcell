@@ -557,69 +557,14 @@ enum ChannelOwnerCommands {
 
 #[derive(Subcommand)]
 enum CronCommands {
-    /// List all cron jobs
+    /// List cron jobs (read-only; manage jobs via the WebUI or chat channels)
     List {
         /// Show all jobs including disabled
         #[arg(long)]
         all: bool,
-    },
-    /// Pause (disable) a cron job
-    Pause {
-        /// Job ID
-        job_id: String,
-    },
-    /// Resume (enable) a paused cron job
-    Resume {
-        /// Job ID
-        job_id: String,
-    },
-    /// Add a new cron job
-    Add {
-        /// Job name
-        #[arg(long)]
-        name: String,
-        /// Message to send
-        #[arg(long)]
-        message: String,
-        /// Run every N seconds
-        #[arg(long)]
-        every: Option<u64>,
-        /// Cron expression
-        #[arg(long)]
-        cron: Option<String>,
-        /// Run at specific time (ISO format)
-        #[arg(long)]
-        at: Option<String>,
-        /// Deliver output to channel
-        #[arg(long)]
-        deliver: bool,
-        /// Target chat ID for delivery
-        #[arg(long)]
-        to: Option<String>,
-        /// Target channel for delivery
-        #[arg(long)]
-        channel: Option<String>,
-    },
-    /// Remove a cron job
-    Remove {
-        /// Job ID
-        job_id: String,
-    },
-    /// Enable or disable a cron job
-    Enable {
-        /// Job ID
-        job_id: String,
-        /// Disable instead of enable
-        #[arg(long)]
-        disable: bool,
-    },
-    /// Run a cron job immediately
-    Run {
-        /// Job ID
-        job_id: String,
-        /// Force run even if disabled
-        #[arg(long)]
-        force: bool,
+        /// Agent ID to query (default: "default")
+        #[arg(long, default_value = "default")]
+        agent: String,
     },
 }
 
@@ -1028,35 +973,8 @@ async fn main() -> anyhow::Result<()> {
             },
         },
         Commands::Cron { command } => match command {
-            CronCommands::List { all } => {
-                commands::cron::list(all).await?;
-            }
-            CronCommands::Pause { job_id } => {
-                commands::cron::enable(&job_id, false).await?;
-            }
-            CronCommands::Resume { job_id } => {
-                commands::cron::enable(&job_id, true).await?;
-            }
-            CronCommands::Add {
-                name,
-                message,
-                every,
-                cron,
-                at,
-                deliver,
-                to,
-                channel,
-            } => {
-                commands::cron::add(name, message, every, cron, at, deliver, to, channel).await?;
-            }
-            CronCommands::Remove { job_id } => {
-                commands::cron::remove(&job_id).await?;
-            }
-            CronCommands::Enable { job_id, disable } => {
-                commands::cron::enable(&job_id, !disable).await?;
-            }
-            CronCommands::Run { job_id, force } => {
-                commands::cron::run_job(&job_id, force).await?;
+            CronCommands::List { all, agent } => {
+                commands::cron::list(all, &agent).await?;
             }
         },
         Commands::Upgrade { check, command } => {

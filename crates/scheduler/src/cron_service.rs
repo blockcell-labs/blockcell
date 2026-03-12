@@ -113,8 +113,23 @@ impl CronService {
         let content = tokio::fs::read_to_string(&path).await?;
         let store: JobStore = serde_json::from_str(&content)?;
 
+        let now_ms = Utc::now().timestamp_millis();
+        let all_count = store.jobs.len();
+        let valid_jobs: Vec<CronJob> = store.jobs.into_iter().filter(|j| {
+            // One-time (At) jobs whose scheduled time has already passed are expired:
+            // this includes jobs that ran before shutdown and jobs missed during downtime.
+            if j.schedule.kind == ScheduleKind::At {
+                return j.schedule.at_ms.map(|t| t > now_ms).unwrap_or(false);
+            }
+            true
+        }).collect();
+        let expired = all_count - valid_jobs.len();
+        if expired > 0 {
+            info!(count = expired, "Filtered expired one-time jobs on load");
+        }
+
         let mut jobs = self.jobs.write().await;
-        *jobs = store.jobs;
+        *jobs = valid_jobs;
 
         debug!(count = jobs.len(), "Loaded cron jobs");
         Ok(())
@@ -209,11 +224,78 @@ impl CronService {
         }
     }
 
+    /// Reload from disk while preserving in-memory execution state (next_run_at_ms /
+    /// last_run_at_ms) for jobs that have already been initialized this session.
+    /// This avoids the old `load()` bug where a full replace would clobber in-memory
+    /// scheduling state and could cause jobs to re-fire or never fire.
+    async fn merge_load(&self) -> Result<()> {
+        let path = self.paths.cron_jobs_file();
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        let store: JobStore = serde_json::from_str(&content)?;
+
+        let mut mem_jobs = self.jobs.write().await;
+        // Capture execution state for existing jobs by ID.
+        let mem_state: std::collections::HashMap<String, (Option<i64>, Option<i64>)> = mem_jobs
+            .iter()
+            .map(|j| (j.id.clone(), (j.state.next_run_at_ms, j.state.last_run_at_ms)))
+            .collect();
+
+        // Filter expired one-time jobs (same logic as load()).
+        let now_ms = Utc::now().timestamp_millis();
+        let mut new_jobs: Vec<CronJob> = store.jobs.into_iter().filter(|j| {
+            if j.schedule.kind == ScheduleKind::At {
+                return j.schedule.at_ms.map(|t| t > now_ms).unwrap_or(false);
+            }
+            true
+        }).collect();
+
+        // Replace with disk state, restoring in-memory scheduling state where present.
+        for job in new_jobs.iter_mut() {
+            if let Some((next_run, last_run)) = mem_state.get(&job.id) {
+                if next_run.is_some() {
+                    job.state.next_run_at_ms = *next_run;
+                }
+                if last_run.is_some() {
+                    job.state.last_run_at_ms = *last_run;
+                }
+            }
+        }
+        *mem_jobs = new_jobs;
+        debug!(count = mem_jobs.len(), "Loaded cron jobs (merged with in-memory state)");
+        Ok(())
+    }
+
+    /// Pick up any new jobs written to disk (e.g. by CronTool) since the last load.
+    /// Only adds jobs whose IDs are not already in memory; never modifies existing ones.
+    /// Called just before save() to close the race window.
+    async fn sync_new_from_disk(&self) -> Result<()> {
+        let path = self.paths.cron_jobs_file();
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        let store: JobStore = serde_json::from_str(&content)?;
+
+        let mut mem_jobs = self.jobs.write().await;
+        let existing_ids: std::collections::HashSet<String> =
+            mem_jobs.iter().map(|j| j.id.clone()).collect();
+        for disk_job in store.jobs {
+            if !existing_ids.contains(&disk_job.id) {
+                debug!(job_id = %disk_job.id, "Picked up new cron job from disk");
+                mem_jobs.push(disk_job);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn run_tick(&self) -> Result<()> {
-        // Reload jobs from disk to pick up changes made by CronTool.
-        // 注意：只在内存中没有 next_run_at_ms 的 job 才需要从磁盘重新初始化；
-        // 已经在内存中运行过的 job 状态以内存为准，避免磁盘旧状态覆盖导致重复触发。
-        if let Err(e) = self.load().await {
+        // Reload from disk, merging in-memory execution state for already-initialized jobs.
+        // New jobs added by CronTool (disk-only) are picked up; existing job scheduling
+        // state (next_run_at_ms / last_run_at_ms) is preserved to avoid double-firing.
+        if let Err(e) = self.merge_load().await {
             error!(error = %e.to_string(), "Failed to reload cron jobs from disk");
         }
 
@@ -283,6 +365,12 @@ impl CronService {
         }
 
         drop(jobs);
+
+        // Pick up any new jobs written by CronTool between the merge_load above and now.
+        // This closes the race window: without this, save() would overwrite those new jobs.
+        if let Err(e) = self.sync_new_from_disk().await {
+            error!(error = %e.to_string(), "Failed to sync new cron jobs from disk");
+        }
 
         // Save state changes to disk BEFORE executing jobs
         // This ensures the next tick won't re-fire disabled/deleted jobs
