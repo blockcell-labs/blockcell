@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"l:/my_new_20241022/AI_____/ai_agent_rust/blockcell/CLAUDE.md\")",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)"
+    ]
+  }
+}

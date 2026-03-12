@@ -1,10 +1,13 @@
 use async_trait::async_trait;
-use blockcell_core::types::{ChatMessage, LLMResponse, ToolCallRequest};
+use blockcell_core::types::{ChatMessage, LLMResponse, StreamChunk, ToolCallAccumulator, ToolCallRequest};
 use blockcell_core::{Error, Result};
+use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::client::build_http_client;
@@ -454,6 +457,253 @@ impl Provider for AnthropicProvider {
             usage,
         })
     }
+
+    async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Value],
+    ) -> Result<mpsc::Receiver<StreamChunk>> {
+        let url = format!("{}/messages", self.api_base);
+        let model = Self::normalize_model(&self.model);
+
+        let (system, anthropic_messages) = Self::convert_messages(messages);
+        let anthropic_tools = Self::convert_tools(tools);
+
+        let mut request = serde_json::json!({
+            "model": model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": anthropic_messages,
+            "stream": true,
+        });
+
+        if let Some(sys) = &system {
+            request["system"] = Value::String(sys.clone());
+        }
+
+        if !anthropic_tools.is_empty() {
+            request["tools"] = Value::Array(anthropic_tools);
+        }
+
+        info!(url = %url, model = %model, "Starting Anthropic streaming call");
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("Anthropic stream request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Provider(format!(
+                "Anthropic stream API error {}: {}",
+                status, body
+            )));
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut tool_calls: HashMap<String, ToolCallAccumulator> = HashMap::new();
+            // index -> tool_id 映射，用于正确路由 delta 事件
+            let mut tool_index_to_id: HashMap<usize, String> = HashMap::new();
+            let mut accumulated_content = String::new();
+            let mut finish_reason = "stop".to_string();
+            let mut usage = Value::Null;
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // 处理 SSE 行
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].trim().to_string();
+                            buffer = buffer[pos + 1..].to_string();
+
+                            // 解析 event 类型（SSE 规范要求，但我们通过 data 中的 type 字段判断事件类型）
+                            if let Some(_event_type) = line.strip_prefix("event: ") {
+                                // 继续读取下一行的 data
+                                continue;
+                            }
+
+                            // 解析 data
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data.is_empty() {
+                                    continue;
+                                }
+
+                                // 解析 Anthropic 流式事件
+                                if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                                    match event.event_type.as_str() {
+                                        "content_block_delta" => {
+                                            if let Some(delta) = &event.delta {
+                                                match delta.delta_type.as_str() {
+                                                    "text_delta" => {
+                                                        if let Some(text) = &delta.text {
+                                                            accumulated_content.push_str(text);
+                                                            let _ = tx
+                                                                .send(StreamChunk::TextDelta {
+                                                                    delta: text.clone(),
+                                                                })
+                                                                .await;
+                                                        }
+                                                    }
+                                                    "input_json_delta" => {
+                                                        // 工具调用参数增量 - 使用 event.index 直接定位
+                                                        if let (Some(partial), Some(idx)) = (&delta.partial_json, event.index) {
+                                                            // 使用事件的 index 字段直接查找对应的工具
+                                                            if let Some(tool_id) = tool_index_to_id.get(&idx) {
+                                                                if let Some(acc) = tool_calls.get_mut(tool_id) {
+                                                                    acc.arguments.push_str(partial);
+                                                                    let _ = tx
+                                                                        .send(StreamChunk::ToolCallDelta {
+                                                                            index: idx,
+                                                                            id: tool_id.clone(),
+                                                                            delta: partial.clone(),
+                                                                        })
+                                                                        .await;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        "content_block_start" => {
+                                            if let Some(content_block) = &event.content_block {
+                                                match content_block.block_type.as_str() {
+                                                    "tool_use" => {
+                                                        if let (Some(id), Some(name), Some(idx)) =
+                                                            (&content_block.id, &content_block.name, event.index)
+                                                        {
+                                                            // 建立 index -> id 映射
+                                                            tool_index_to_id.insert(idx, id.clone());
+
+                                                            let acc = tool_calls
+                                                                .entry(id.clone())
+                                                                .or_insert_with(|| ToolCallAccumulator {
+                                                                    id: id.clone(),
+                                                                    name: name.clone(),
+                                                                    arguments: String::new(),
+                                                                });
+                                                            acc.id = id.clone();
+                                                            acc.name = name.clone();
+
+                                                            let _ = tx
+                                                                .send(StreamChunk::ToolCallStart {
+                                                                    index: idx,
+                                                                    id: id.clone(),
+                                                                    name: name.clone(),
+                                                                })
+                                                                .await;
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        "content_block_stop" => {
+                                            // 内容块结束
+                                        }
+                                        "message_delta" => {
+                                            if let Some(delta) = &event.delta {
+                                                if let Some(fr) = &delta.stop_reason {
+                                                    finish_reason = match fr.as_str() {
+                                                        "end_turn" => "stop".to_string(),
+                                                        "tool_use" => "tool_calls".to_string(),
+                                                        "max_tokens" => "length".to_string(),
+                                                        other => other.to_string(),
+                                                    };
+                                                }
+                                            }
+                                            if let Some(u) = &event.usage {
+                                                usage = serde_json::json!({
+                                                    "prompt_tokens": u.input_tokens,
+                                                    "completion_tokens": u.output_tokens,
+                                                });
+                                            }
+                                        }
+                                        "message_stop" => {
+                                            // 消息结束
+                                            let final_tool_calls: Vec<ToolCallRequest> = tool_calls
+                                                .into_iter()
+                                                .map(|(_, acc)| acc.to_tool_call_request())
+                                                .collect();
+
+                                            let response = LLMResponse {
+                                                content: if accumulated_content.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(accumulated_content)
+                                                },
+                                                reasoning_content: None,
+                                                tool_calls: final_tool_calls,
+                                                finish_reason,
+                                                usage,
+                                            };
+                                            let _ = tx.send(StreamChunk::Done { response }).await;
+                                            return;
+                                        }
+                                        "error" => {
+                                            if let Some(err) = &event.error {
+                                                let _ = tx
+                                                    .send(StreamChunk::Error {
+                                                        message: err.message.clone(),
+                                                    })
+                                                    .await;
+                                            }
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(StreamChunk::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            // 如果流结束但没有收到 message_stop，也发送完成事件
+            let final_tool_calls: Vec<ToolCallRequest> = tool_calls
+                .into_iter()
+                .map(|(_, acc)| acc.to_tool_call_request())
+                .collect();
+
+            let response = LLMResponse {
+                content: if accumulated_content.is_empty() {
+                    None
+                } else {
+                    Some(accumulated_content)
+                },
+                reasoning_content: None,
+                tool_calls: final_tool_calls,
+                finish_reason,
+                usage,
+            };
+            let _ = tx.send(StreamChunk::Done { response }).await;
+        });
+
+        Ok(rx)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,6 +733,60 @@ struct ContentBlock {
 struct AnthropicUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+}
+
+/// Anthropic 流式事件
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    delta: Option<AnthropicStreamDelta>,
+    #[serde(default)]
+    content_block: Option<AnthropicStreamContentBlock>,
+    #[serde(default)]
+    usage: Option<AnthropicStreamUsage>,
+    #[serde(default)]
+    error: Option<AnthropicStreamError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamDelta {
+    #[serde(rename = "type", default)]
+    delta_type: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    partial_json: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamError {
+    #[serde(rename = "type")]
+    #[allow(dead_code)] // 用于 serde 反序列化，API 返回但当前未使用
+    error_type: String,
+    #[allow(dead_code)] // 用于 serde 反序列化，用于错误处理
+    message: String,
 }
 
 #[cfg(test)]

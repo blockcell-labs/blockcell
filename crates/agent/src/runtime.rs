@@ -1,6 +1,6 @@
 use blockcell_core::path_policy::{PathOp, PathPolicy, PolicyAction};
 use blockcell_core::system_event::{EventPriority, EventScope, SessionSummary, SystemEvent};
-use blockcell_core::types::{ChatMessage, ToolCallRequest};
+use blockcell_core::types::{ChatMessage, LLMResponse, StreamChunk, ToolCallAccumulator, ToolCallRequest};
 use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
 use blockcell_providers::{CallResult, Provider, ProviderPool};
 use blockcell_storage::{AuditLogger, SessionStore};
@@ -2138,21 +2138,183 @@ impl AgentRuntime {
                         break;
                     }
                 };
-                match provider.chat(&current_messages, &tools).await {
-                    Ok(r) => {
+
+                // 使用流式调用
+                match provider.chat_stream(&current_messages, &tools).await {
+                    Ok(mut stream_rx) => {
                         if attempt > 0 {
                             info!(
                                 attempt,
-                                iteration, pool_idx, "LLM call succeeded after retry"
+                                iteration, pool_idx, "LLM stream call succeeded after retry"
                             );
                         }
                         self.provider_pool.report(pool_idx, CallResult::Success);
-                        response_opt = Some(r);
+
+                        // 处理流式响应
+                        let mut accumulated_content = String::new();
+                        let mut accumulated_reasoning = String::new();
+                        let mut tool_call_accumulators: HashMap<String, ToolCallAccumulator> = HashMap::new();
+
+                        // 流接收超时：5分钟，防止恶意或 buggy provider 无限挂起
+                        const STREAM_TIMEOUT_SECS: u64 = 300;
+
+                        loop {
+                            let recv_result = tokio::time::timeout(
+                                std::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
+                                stream_rx.recv()
+                            ).await;
+
+                            match recv_result {
+                                Ok(Some(chunk)) => {
+                                    match chunk {
+                                        StreamChunk::TextDelta { delta } => {
+                                            accumulated_content.push_str(&delta);
+                                            // 发送 token 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "token",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "delta": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ReasoningDelta { delta } => {
+                                            accumulated_reasoning.push_str(&delta);
+                                            // 发送 thinking 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "thinking",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "content": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ToolCallStart { index: _, id, name } => {
+                                            let acc = tool_call_accumulators.entry(id.clone()).or_default();
+                                            acc.id = id.clone();
+                                            acc.name = name.clone();
+                                            // 发送 tool_call_start 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "tool_call_start",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "call_id": id,
+                                                    "tool": name,
+                                                    "params": {},
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ToolCallDelta { index: _, id, delta } => {
+                                            if let Some(acc) = tool_call_accumulators.get_mut(&id) {
+                                                acc.arguments.push_str(&delta);
+                                            }
+                                        }
+                                        StreamChunk::Done { response } => {
+                                            // 始终优先使用累积的值，响应值仅作为后备
+                                            // content 和 reasoning_content 来自流式累积
+                                            // tool_calls 来自累积器（如果有），否则用响应值
+                                            // finish_reason 和 usage 始终来自响应
+
+                                            // 构建最终的 tool_calls：优先使用累积的
+                                            let final_tool_calls = if !tool_call_accumulators.is_empty() {
+                                                tool_call_accumulators
+                                                    .drain()
+                                                    .map(|(_, acc)| acc.to_tool_call_request())
+                                                    .collect()
+                                            } else {
+                                                response.tool_calls.clone()
+                                            };
+
+                                            // 优先使用累积的 content，否则用响应值
+                                            let final_content = if !accumulated_content.is_empty() {
+                                                Some(accumulated_content.clone())
+                                            } else {
+                                                response.content.clone()
+                                            };
+
+                                            // 优先使用累积的 reasoning，否则用响应值
+                                            let final_reasoning = if !accumulated_reasoning.is_empty() {
+                                                Some(accumulated_reasoning.clone())
+                                            } else {
+                                                response.reasoning_content.clone()
+                                            };
+
+                                            response_opt = Some(LLMResponse {
+                                                content: final_content,
+                                                reasoning_content: final_reasoning,
+                                                tool_calls: final_tool_calls,
+                                                finish_reason: response.finish_reason.clone(),
+                                                usage: response.usage.clone(),
+                                            });
+
+                                            // 发送 message_done 事件表示消息完成
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "message_done",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                            break;
+                                        }
+                                        StreamChunk::Error { message } => {
+                                            warn!(error = %message, "Stream error");
+                                            last_error = Some(blockcell_core::Error::Provider(message));
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    // 流正常结束（channel 关闭）
+                                    break;
+                                }
+                                Err(_) => {
+                                    // 流接收超时
+                                    warn!("Stream receive timeout after {} seconds", STREAM_TIMEOUT_SECS);
+                                    last_error = Some(blockcell_core::Error::Provider(
+                                        format!("Stream timeout after {} seconds", STREAM_TIMEOUT_SECS)
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+
+                        // 将累积的工具调用转换为完整请求
+                        if response_opt.is_none() && !tool_call_accumulators.is_empty() {
+                            let final_tool_calls: Vec<ToolCallRequest> = tool_call_accumulators
+                                .into_iter()
+                                .map(|(_, acc)| acc.to_tool_call_request())
+                                .collect();
+
+                            response_opt = Some(LLMResponse {
+                                content: if accumulated_content.is_empty() {
+                                    None
+                                } else {
+                                    Some(accumulated_content)
+                                },
+                                reasoning_content: if accumulated_reasoning.is_empty() {
+                                    None
+                                } else {
+                                    Some(accumulated_reasoning)
+                                },
+                                tool_calls: final_tool_calls,
+                                finish_reason: "stop".to_string(),
+                                usage: serde_json::Value::Null,
+                            });
+                        }
+
                         break;
                     }
                     Err(e) => {
                         let err_str = format!("{}", e);
-                        warn!(error = %err_str, attempt, max_retries, iteration, pool_idx, "LLM call failed");
+                        warn!(error = %err_str, attempt, max_retries, iteration, pool_idx, "LLM stream call failed");
                         self.provider_pool
                             .report(pool_idx, ProviderPool::classify_error(&err_str));
                         last_error = Some(e);
