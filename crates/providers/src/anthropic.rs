@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::client::build_http_client;
 use crate::Provider;
@@ -514,10 +514,11 @@ impl Provider for AnthropicProvider {
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut tool_calls: HashMap<String, ToolCallAccumulator> = HashMap::new();
+            // index -> tool_id 映射，用于正确路由 delta 事件
+            let mut tool_index_to_id: HashMap<usize, String> = HashMap::new();
             let mut accumulated_content = String::new();
             let mut finish_reason = "stop".to_string();
             let mut usage = Value::Null;
-            let mut current_tool_index: Option<usize> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
@@ -529,8 +530,8 @@ impl Provider for AnthropicProvider {
                             let line = buffer[..pos].trim().to_string();
                             buffer = buffer[pos + 1..].to_string();
 
-                            // 解析 event 类型
-                            if let Some(event_type) = line.strip_prefix("event: ") {
+                            // 解析 event 类型（SSE 规范要求，但我们通过 data 中的 type 字段判断事件类型）
+                            if let Some(_event_type) = line.strip_prefix("event: ") {
                                 // 继续读取下一行的 data
                                 continue;
                             }
@@ -558,26 +559,16 @@ impl Provider for AnthropicProvider {
                                                         }
                                                     }
                                                     "input_json_delta" => {
-                                                        // 工具调用参数增量
-                                                        if let (Some(partial), Some(idx)) =
-                                                            (&delta.partial_json, &current_tool_index)
-                                                        {
-                                                            // 找到对应的工具调用累积器
-                                                            let tool_id = tool_calls
-                                                                .iter()
-                                                                .find(|(_, acc)| {
-                                                                    acc.arguments.is_empty()
-                                                                        || acc.arguments.len() < partial.len() + 100
-                                                                })
-                                                                .map(|(k, _)| k.clone());
-
-                                                            if let Some(id) = tool_id {
-                                                                if let Some(acc) = tool_calls.get_mut(&id) {
+                                                        // 工具调用参数增量 - 使用 event.index 直接定位
+                                                        if let (Some(partial), Some(idx)) = (&delta.partial_json, event.index) {
+                                                            // 使用事件的 index 字段直接查找对应的工具
+                                                            if let Some(tool_id) = tool_index_to_id.get(&idx) {
+                                                                if let Some(acc) = tool_calls.get_mut(tool_id) {
                                                                     acc.arguments.push_str(partial);
                                                                     let _ = tx
                                                                         .send(StreamChunk::ToolCallDelta {
-                                                                            index: *idx,
-                                                                            id: id.clone(),
+                                                                            index: idx,
+                                                                            id: tool_id.clone(),
                                                                             delta: partial.clone(),
                                                                         })
                                                                         .await;
@@ -593,13 +584,11 @@ impl Provider for AnthropicProvider {
                                             if let Some(content_block) = &event.content_block {
                                                 match content_block.block_type.as_str() {
                                                     "tool_use" => {
-                                                        if let (Some(id), Some(name)) =
-                                                            (&content_block.id, &content_block.name)
+                                                        if let (Some(id), Some(name), Some(idx)) =
+                                                            (&content_block.id, &content_block.name, event.index)
                                                         {
-                                                            let idx = current_tool_index
-                                                                .map(|i| i + 1)
-                                                                .unwrap_or(0);
-                                                            current_tool_index = Some(idx);
+                                                            // 建立 index -> id 映射
+                                                            tool_index_to_id.insert(idx, id.clone());
 
                                                             let acc = tool_calls
                                                                 .entry(id.clone())
@@ -794,7 +783,9 @@ struct AnthropicStreamUsage {
 #[derive(Debug, Deserialize)]
 struct AnthropicStreamError {
     #[serde(rename = "type")]
+    #[allow(dead_code)] // 用于 serde 反序列化，API 返回但当前未使用
     error_type: String,
+    #[allow(dead_code)] // 用于 serde 反序列化，用于错误处理
     message: String,
 }
 

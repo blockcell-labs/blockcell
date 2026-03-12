@@ -2155,78 +2155,132 @@ impl AgentRuntime {
                         let mut accumulated_reasoning = String::new();
                         let mut tool_call_accumulators: HashMap<String, ToolCallAccumulator> = HashMap::new();
 
-                        while let Some(chunk) = stream_rx.recv().await {
-                            match chunk {
-                                StreamChunk::TextDelta { delta } => {
-                                    accumulated_content.push_str(&delta);
-                                    // 发送 token 事件
-                                    if let Some(ref event_tx) = self.event_tx {
-                                        let event = serde_json::json!({
-                                            "type": "token",
-                                            "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                                            "chat_id": msg.chat_id.clone(),
-                                            "delta": delta,
-                                        });
-                                        let _ = event_tx.send(event.to_string());
-                                    }
-                                }
-                                StreamChunk::ReasoningDelta { delta } => {
-                                    accumulated_reasoning.push_str(&delta);
-                                    // 发送 thinking 事件
-                                    if let Some(ref event_tx) = self.event_tx {
-                                        let event = serde_json::json!({
-                                            "type": "thinking",
-                                            "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                                            "chat_id": msg.chat_id.clone(),
-                                            "content": delta,
-                                        });
-                                        let _ = event_tx.send(event.to_string());
-                                    }
-                                }
-                                StreamChunk::ToolCallStart { index: _, id, name } => {
-                                    let acc = tool_call_accumulators.entry(id.clone()).or_default();
-                                    acc.id = id.clone();
-                                    acc.name = name.clone();
-                                    // 发送 tool_call_start 事件
-                                    if let Some(ref event_tx) = self.event_tx {
-                                        let event = serde_json::json!({
-                                            "type": "tool_call_start",
-                                            "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                                            "chat_id": msg.chat_id.clone(),
-                                            "call_id": id,
-                                            "tool": name,
-                                            "params": {},
-                                        });
-                                        let _ = event_tx.send(event.to_string());
-                                    }
-                                }
-                                StreamChunk::ToolCallDelta { index: _, id, delta } => {
-                                    if let Some(acc) = tool_call_accumulators.get_mut(&id) {
-                                        acc.arguments.push_str(&delta);
-                                    }
-                                }
-                                StreamChunk::Done { response } => {
-                                    // 使用累积的值更新 response
-                                    if !accumulated_content.is_empty() {
-                                        response_opt = Some(LLMResponse {
-                                            content: Some(accumulated_content.clone()),
-                                            reasoning_content: if accumulated_reasoning.is_empty() {
-                                                None
+                        // 流接收超时：5分钟，防止恶意或 buggy provider 无限挂起
+                        const STREAM_TIMEOUT_SECS: u64 = 300;
+
+                        loop {
+                            let recv_result = tokio::time::timeout(
+                                std::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
+                                stream_rx.recv()
+                            ).await;
+
+                            match recv_result {
+                                Ok(Some(chunk)) => {
+                                    match chunk {
+                                        StreamChunk::TextDelta { delta } => {
+                                            accumulated_content.push_str(&delta);
+                                            // 发送 token 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "token",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "delta": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ReasoningDelta { delta } => {
+                                            accumulated_reasoning.push_str(&delta);
+                                            // 发送 thinking 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "thinking",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "content": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ToolCallStart { index: _, id, name } => {
+                                            let acc = tool_call_accumulators.entry(id.clone()).or_default();
+                                            acc.id = id.clone();
+                                            acc.name = name.clone();
+                                            // 发送 tool_call_start 事件
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "tool_call_start",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "call_id": id,
+                                                    "tool": name,
+                                                    "params": {},
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ToolCallDelta { index: _, id, delta } => {
+                                            if let Some(acc) = tool_call_accumulators.get_mut(&id) {
+                                                acc.arguments.push_str(&delta);
+                                            }
+                                        }
+                                        StreamChunk::Done { response } => {
+                                            // 始终优先使用累积的值，响应值仅作为后备
+                                            // content 和 reasoning_content 来自流式累积
+                                            // tool_calls 来自累积器（如果有），否则用响应值
+                                            // finish_reason 和 usage 始终来自响应
+
+                                            // 构建最终的 tool_calls：优先使用累积的
+                                            let final_tool_calls = if !tool_call_accumulators.is_empty() {
+                                                tool_call_accumulators
+                                                    .drain()
+                                                    .map(|(_, acc)| acc.to_tool_call_request())
+                                                    .collect()
                                             } else {
+                                                response.tool_calls.clone()
+                                            };
+
+                                            // 优先使用累积的 content，否则用响应值
+                                            let final_content = if !accumulated_content.is_empty() {
+                                                Some(accumulated_content.clone())
+                                            } else {
+                                                response.content.clone()
+                                            };
+
+                                            // 优先使用累积的 reasoning，否则用响应值
+                                            let final_reasoning = if !accumulated_reasoning.is_empty() {
                                                 Some(accumulated_reasoning.clone())
-                                            },
-                                            tool_calls: response.tool_calls.clone(),
-                                            finish_reason: response.finish_reason.clone(),
-                                            usage: response.usage.clone(),
-                                        });
-                                    } else {
-                                        response_opt = Some(response);
+                                            } else {
+                                                response.reasoning_content.clone()
+                                            };
+
+                                            response_opt = Some(LLMResponse {
+                                                content: final_content,
+                                                reasoning_content: final_reasoning,
+                                                tool_calls: final_tool_calls,
+                                                finish_reason: response.finish_reason.clone(),
+                                                usage: response.usage.clone(),
+                                            });
+
+                                            // 发送 message_done 事件表示消息完成
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "message_done",
+                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                            break;
+                                        }
+                                        StreamChunk::Error { message } => {
+                                            warn!(error = %message, "Stream error");
+                                            last_error = Some(blockcell_core::Error::Provider(message));
+                                            break;
+                                        }
                                     }
+                                }
+                                Ok(None) => {
+                                    // 流正常结束（channel 关闭）
                                     break;
                                 }
-                                StreamChunk::Error { message } => {
-                                    warn!(error = %message, "Stream error");
-                                    last_error = Some(blockcell_core::Error::Provider(message));
+                                Err(_) => {
+                                    // 流接收超时
+                                    warn!("Stream receive timeout after {} seconds", STREAM_TIMEOUT_SECS);
+                                    last_error = Some(blockcell_core::Error::Provider(
+                                        format!("Stream timeout after {} seconds", STREAM_TIMEOUT_SECS)
+                                    ));
                                     break;
                                 }
                             }
