@@ -314,32 +314,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case 'token': {
-        const lastMsg = state.messages[state.messages.length - 1];
-        if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
-          state.updateLastAssistantMessage((m) => ({
-            ...m,
-            content: m.content + (event.delta || ''),
-          }));
-        } else {
-          state.addMessage({
-            id: nextMsgId(),
-            role: 'assistant',
-            content: event.delta || '',
-            timestamp: Date.now(),
-            streaming: true,
-          });
-        }
+        // 直接使用 set() 并在回调中获取最新状态，确保流式追加正确
+        set((s) => {
+          const lastMsg = s.messages[s.messages.length - 1];
+          if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
+            const msgs = [...s.messages];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === 'assistant') {
+                msgs[i] = { ...msgs[i], content: msgs[i].content + (event.delta || '') };
+                break;
+              }
+            }
+            return { messages: msgs };
+          } else {
+            return {
+              messages: [...s.messages, {
+                id: nextMsgId(),
+                role: 'assistant',
+                content: event.delta || '',
+                timestamp: Date.now(),
+                streaming: true,
+              }],
+            };
+          }
+        });
         break;
       }
 
       case 'thinking': {
-        const lastMsg = state.messages[state.messages.length - 1];
-        if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
-          state.updateLastAssistantMessage((m) => ({
-            ...m,
-            reasoning: (m.reasoning || '') + (event.content || ''),
-          }));
-        }
+        // 直接使用 set() 并在回调中获取最新状态，确保流式追加正确
+        set((s) => {
+          const lastMsg = s.messages[s.messages.length - 1];
+          if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
+            const msgs = [...s.messages];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === 'assistant') {
+                msgs[i] = { ...msgs[i], reasoning: (msgs[i].reasoning || '') + (event.content || '') };
+                break;
+              }
+            }
+            return { messages: msgs };
+          }
+          return {}; // 无变化
+        });
         break;
       }
 
