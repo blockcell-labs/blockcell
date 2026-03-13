@@ -384,6 +384,13 @@ fn known_account_ids(cfg: &Config, channel: &str) -> Vec<String> {
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
+        "qq" => cfg
+            .channels
+            .qq
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
         _ => Vec::new(),
     };
     ids.sort();

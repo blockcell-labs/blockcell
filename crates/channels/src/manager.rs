@@ -583,6 +583,7 @@ impl ChannelManager {
             "dingtalk",
             "wecom",
             "lark",
+            "qq",
         ];
 
         channels
