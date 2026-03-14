@@ -227,6 +227,25 @@ impl ChannelManager {
                     cfg.channels.lark.allow_from = acc.allow_from.clone();
                 }
             }
+            "qq" => {
+                if let Some(acc) = Self::pick_account(
+                    "qq",
+                    &cfg.channels.qq.accounts,
+                    req_account,
+                    cfg.channels.qq.default_account_id.as_deref(),
+                )? {
+                    if !acc.enabled {
+                        return Err(Error::Channel(
+                            "Selected qq account is disabled".to_string(),
+                        ));
+                    }
+                    cfg.channels.qq.enabled = acc.enabled;
+                    cfg.channels.qq.app_id = acc.app_id.clone();
+                    cfg.channels.qq.app_secret = acc.app_secret.clone();
+                    cfg.channels.qq.environment = acc.environment.clone();
+                    cfg.channels.qq.allow_from = acc.allow_from.clone();
+                }
+            }
             _ => {}
         }
         Ok(cfg)
@@ -481,6 +500,28 @@ impl ChannelManager {
                     }
                 }
             }
+            "qq" => {
+                #[cfg(feature = "qq")]
+                {
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::qq::send_media_message(
+                                &send_config,
+                                &msg.chat_id,
+                                file_path,
+                            )
+                            .await
+                            {
+                                error!(error = %e, file = %file_path, "QQ: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::qq::send_message(&send_config, &msg.chat_id, &msg.content)
+                            .await?;
+                    }
+                }
+            }
             "cli" | "cron" | "ws" => {
                 // Internal channels — handled directly, not through external channel dispatch
             }
@@ -501,6 +542,7 @@ impl ChannelManager {
             "dingtalk" => "app_key not set",
             "wecom" => "corp_id not set",
             "lark" => "app_id not set",
+            "qq" => "app_id not set",
             _ => "not configured",
         }
     }
@@ -512,7 +554,11 @@ impl ChannelManager {
 
         let listeners = crate::account::listener_labels(&self.config, channel);
         if !listeners.is_empty() {
-            let noun = if listeners.len() == 1 { "listener" } else { "listeners" };
+            let noun = if listeners.len() == 1 {
+                "listener"
+            } else {
+                "listeners"
+            };
             return (
                 true,
                 format!(
@@ -541,6 +587,7 @@ impl ChannelManager {
             "dingtalk",
             "wecom",
             "lark",
+            "qq",
         ];
 
         channels
@@ -648,7 +695,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_get_status_uses_multi_account_listener_labels() {
         let mut config = Config::default();
@@ -671,7 +717,14 @@ mod tests {
             .find(|(name, _, _)| name == "telegram")
             .expect("telegram status should exist");
 
-        assert!(telegram.1, "telegram should be active when account listener exists");
-        assert!(telegram.2.contains("telegram:main"), "unexpected detail: {}", telegram.2);
+        assert!(
+            telegram.1,
+            "telegram should be active when account listener exists"
+        );
+        assert!(
+            telegram.2.contains("telegram:main"),
+            "unexpected detail: {}",
+            telegram.2
+        );
     }
 }

@@ -22,6 +22,8 @@ cbc = { version = "0.1", features = ["alloc"] }
 sha2 = "0.10"
 base64 = "0.22"
 md5 = "0.7"
+hex = "0.4"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 
 [features]
 default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark"]
@@ -33,3 +35,4 @@ discord = []
 dingtalk = []
 wecom = []
 lark = []
+qq = []

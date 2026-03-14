@@ -353,7 +353,21 @@ pub async fn run() -> anyhow::Result<()> {
             "✗ not configured".to_string()
         }
     );
-
+    println!(
+        "  qq:        {}",
+        if config.channels.qq.enabled && channel_configured(&config, "qq") {
+            format!(
+                "✓ enabled (app_id: {}){}",
+                config.channels.qq.app_id,
+                owner_suffix("qq", config.channels.qq.enabled)
+            )
+        } else if channel_configured(&config, "qq") {
+            "configured (disabled)".to_string()
+        } else {
+            "✗ not configured".to_string()
+        }
+    );
+    
     Ok(())
 }
 

@@ -1,8 +1,8 @@
 use super::*;
 use blockcell_core::config::{parse_json5_value, write_json5_pretty};
 
-const SUPPORTED_OWNER_CHANNELS: [&str; 8] = [
-    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark",
+const SUPPORTED_OWNER_CHANNELS: [&str; 9] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
 ];
 
 fn load_config_or_state(state: &GatewayState) -> Config {
@@ -202,6 +202,25 @@ pub(super) async fn handle_channels_list(State(state): State<GatewayState>) -> i
                 {"key": "encryptKey", "label": "Encrypt Key (Event encryption key)", "secret": true, "value": cfg.lark.encrypt_key.clone()},
                 {"key": "verificationToken", "label": "Verification Token (Event verification)", "secret": true, "value": cfg.lark.verification_token.clone()}
             ]
+        },
+        {
+            "id": "qq",
+            "name": "QQ频道",
+            "icon": "qq",
+            "doc": "docs/channels/zh/09_qq.md",
+            "configured": cfg.qq.enabled && blockcell_channels::account::channel_configured(&loaded_config, "qq"),
+            "enabled": cfg.qq.enabled,
+            "ownerAgent": owners.get("qq").cloned().unwrap_or_default(),
+            "accountOwners": loaded_config.channel_account_owners.get("qq").cloned().unwrap_or_default(),
+            "defaultAccountId": cfg.qq.default_account_id.clone().unwrap_or_default(),
+            "accounts": cfg.qq.accounts.keys().cloned().collect::<Vec<_>>(),
+            "listeners": blockcell_channels::account::listener_labels(&loaded_config, "qq"),
+            "listenerCount": blockcell_channels::account::listener_labels(&loaded_config, "qq").len(),
+            "fields": [
+                {"key": "appId", "label": "App ID", "secret": false, "value": cfg.qq.app_id.clone()},
+                {"key": "appSecret", "label": "App Secret", "secret": true, "value": cfg.qq.app_secret.clone()},
+                {"key": "environment", "label": "Environment (production/sandbox)", "secret": false, "value": cfg.qq.environment.clone()}
+            ]
         }
     ]);
     Json(serde_json::json!({ "channels": channels }))
@@ -361,6 +380,13 @@ fn known_account_ids(cfg: &Config, channel: &str) -> Vec<String> {
         "lark" => cfg
             .channels
             .lark
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "qq" => cfg
+            .channels
+            .qq
             .accounts
             .keys()
             .cloned()

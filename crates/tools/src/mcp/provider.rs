@@ -106,8 +106,11 @@ impl McpToolProvider {
         mcp_tools
             .into_iter()
             .map(|t| -> Arc<dyn Tool> {
-                let wrapper: Arc<dyn Tool> =
-                    Arc::new(McpToolWrapper::new(&self.server_name, t, self.client.clone()));
+                let wrapper: Arc<dyn Tool> = Arc::new(McpToolWrapper::new(
+                    &self.server_name,
+                    t,
+                    self.client.clone(),
+                ));
                 wrapper
             })
             .collect()

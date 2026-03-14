@@ -389,7 +389,13 @@ impl Tool for CronTool {
             Paths::new()
         };
         tokio::task::spawn_blocking(move || {
-            execute_cron_action_with_paths(&paths, &action, &params, &origin_channel, &origin_chat_id)
+            execute_cron_action_with_paths(
+                &paths,
+                &action,
+                &params,
+                &origin_channel,
+                &origin_chat_id,
+            )
         })
         .await
         .map_err(|e| Error::Tool(format!("Cron task failed: {}", e)))?

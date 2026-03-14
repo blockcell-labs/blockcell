@@ -347,6 +347,17 @@ pub(super) fn print_startup_banner(
                 "not enabled".into()
             },
         },
+        ChannelInfo {
+            id: "qq",
+            name: "QQ",
+            enabled: ch.qq.enabled,
+            configured: blockcell_channels::account::channel_configured(config, "qq"),
+            detail: if !ch.qq.app_id.is_empty() {
+                format!("app_id: {}  env: {}", ch.qq.app_id, if ch.qq.environment.is_empty() { "production" } else { &ch.qq.environment })
+            } else {
+                "no app_id configured".into()
+            },
+        },
     ];
 
     let mut enabled_routes: Vec<ChannelRouteLine> = Vec::new();
@@ -421,6 +432,13 @@ pub(super) fn print_startup_banner(
                             .get(account)
                             .map(|acc| format!("bridge: {}", acc.bridge_url))
                             .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("qq", Some(account)) => config
+                            .channels
+                            .qq
+                            .accounts
+                            .get(account)
+                            .map(|acc| format!("app_id: {}  env: {}", acc.app_id, if acc.environment.is_empty() { "production" } else { &acc.environment }))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
                         _ => ch_info.detail.clone(),
                     };
                     let suffix = match ch_info.id {
@@ -454,6 +472,10 @@ pub(super) fn print_startup_banner(
                         ),
                         "whatsapp" => default_marker(
                             config.channels.whatsapp.default_account_id.as_ref(),
+                            account_id,
+                        ),
+                        "qq" => default_marker(
+                            config.channels.qq.default_account_id.as_ref(),
                             account_id,
                         ),
                         _ => "",

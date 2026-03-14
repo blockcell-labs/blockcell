@@ -5,95 +5,99 @@ use serde_json::{json, Value};
 
 use crate::{Tool, ToolContext, ToolSchema};
 
- fn parse_string_map(input: &str) -> Option<serde_json::Map<String, Value>> {
-     let trimmed = input.trim();
-     if trimmed.is_empty() {
-         return Some(serde_json::Map::new());
-     }
+fn parse_string_map(input: &str) -> Option<serde_json::Map<String, Value>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Some(serde_json::Map::new());
+    }
 
-     if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
-         return Some(map);
-     }
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
+        return Some(map);
+    }
 
-     let normalized = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-         trimmed.to_string()
-     } else {
-         format!("{{{}}}", trimmed)
-     };
+    let normalized = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        trimmed.to_string()
+    } else {
+        format!("{{{}}}", trimmed)
+    };
 
-     let mut map = serde_json::Map::new();
-     for pair in normalized.split(',') {
-         let pair = pair.trim().trim_start_matches('{').trim_end_matches('}').trim();
-         if pair.is_empty() {
-             continue;
-         }
+    let mut map = serde_json::Map::new();
+    for pair in normalized.split(',') {
+        let pair = pair
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
+        if pair.is_empty() {
+            continue;
+        }
 
-         let (raw_key, raw_value) = pair.split_once("=>")?;
-         let key = strip_wrapping_quotes(raw_key.trim());
-         let value = parse_scalar_value(raw_value.trim());
-         map.insert(key, value);
-     }
+        let (raw_key, raw_value) = pair.split_once("=>")?;
+        let key = strip_wrapping_quotes(raw_key.trim());
+        let value = parse_scalar_value(raw_value.trim());
+        map.insert(key, value);
+    }
 
-     Some(map)
- }
+    Some(map)
+}
 
- fn parse_json_like_value(value: &Value) -> Option<Value> {
-     match value {
-         Value::String(s) => {
-             let trimmed = s.trim();
-             if trimmed.is_empty() {
-                 return None;
-             }
+fn parse_json_like_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
 
-             if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                 return Some(parsed);
-             }
+            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                return Some(parsed);
+            }
 
-             parse_string_map(trimmed).map(Value::Object)
-         }
-         other => Some(other.clone()),
-     }
- }
+            parse_string_map(trimmed).map(Value::Object)
+        }
+        other => Some(other.clone()),
+    }
+}
 
- fn strip_wrapping_quotes(input: &str) -> String {
-     let trimmed = input.trim();
-     if trimmed.len() >= 2 {
-         let bytes = trimmed.as_bytes();
-         let first = bytes[0];
-         let last = bytes[trimmed.len() - 1];
-         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-             return trimmed[1..trimmed.len() - 1].to_string();
-         }
-     }
-     trimmed.to_string()
- }
+fn strip_wrapping_quotes(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[trimmed.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
 
- fn parse_scalar_value(input: &str) -> Value {
-     let trimmed = input.trim();
-     let unquoted = strip_wrapping_quotes(trimmed);
+fn parse_scalar_value(input: &str) -> Value {
+    let trimmed = input.trim();
+    let unquoted = strip_wrapping_quotes(trimmed);
 
-     if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-         return parsed;
-     }
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        return parsed;
+    }
 
-     if unquoted.eq_ignore_ascii_case("true") {
-         return Value::Bool(true);
-     }
-     if unquoted.eq_ignore_ascii_case("false") {
-         return Value::Bool(false);
-     }
-     if unquoted.eq_ignore_ascii_case("null") {
-         return Value::Null;
-     }
-     if let Ok(parsed) = unquoted.parse::<i64>() {
-         return json!(parsed);
-     }
-     if let Ok(parsed) = unquoted.parse::<f64>() {
-         return json!(parsed);
-     }
+    if unquoted.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if unquoted.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if unquoted.eq_ignore_ascii_case("null") {
+        return Value::Null;
+    }
+    if let Ok(parsed) = unquoted.parse::<i64>() {
+        return json!(parsed);
+    }
+    if let Ok(parsed) = unquoted.parse::<f64>() {
+        return json!(parsed);
+    }
 
-     Value::String(unquoted)
- }
+    Value::String(unquoted)
+}
 
 pub struct HttpRequestTool;
 
@@ -259,7 +263,7 @@ impl Tool for HttpRequestTool {
         // Custom headers
         if let Some(headers) = params.get("headers").and_then(parse_json_like_value) {
             if let Some(headers) = headers.as_object() {
-            for (key, value) in headers {
+                for (key, value) in headers {
                     let val_str = match value {
                         Value::String(s) => s.clone(),
                         _ => value.to_string(),
@@ -519,9 +523,12 @@ mod tests {
 
     #[test]
     fn test_parse_string_map_json_string() {
-        let parsed = parse_string_map(r#"{"Content-Type":"application/json","X-Test":"1"}"#)
-            .unwrap();
-        assert_eq!(parsed.get("Content-Type").and_then(|v| v.as_str()), Some("application/json"));
+        let parsed =
+            parse_string_map(r#"{"Content-Type":"application/json","X-Test":"1"}"#).unwrap();
+        assert_eq!(
+            parsed.get("Content-Type").and_then(|v| v.as_str()),
+            Some("application/json")
+        );
         assert_eq!(parsed.get("X-Test").and_then(|v| v.as_str()), Some("1"));
     }
 
@@ -543,7 +550,8 @@ mod tests {
 
     #[test]
     fn test_parse_json_like_value_arrow_object() {
-        let parsed = parse_json_like_value(&json!(r#""code"=>"w001","pageSize"=>30,"page"=>1"#)).unwrap();
+        let parsed =
+            parse_json_like_value(&json!(r#""code"=>"w001","pageSize"=>30,"page"=>1"#)).unwrap();
         assert!(parsed.is_object());
         assert_eq!(parsed["code"], "w001");
         assert_eq!(parsed["pageSize"], 30);
@@ -552,7 +560,8 @@ mod tests {
 
     #[test]
     fn test_parse_json_like_value_query_params_string() {
-        let parsed = parse_json_like_value(&json!(r#"page=>1,pageSize=>30,keyword=>kimi"#)).unwrap();
+        let parsed =
+            parse_json_like_value(&json!(r#"page=>1,pageSize=>30,keyword=>kimi"#)).unwrap();
         assert!(parsed.is_object());
         assert_eq!(parsed["page"], 1);
         assert_eq!(parsed["pageSize"], 30);

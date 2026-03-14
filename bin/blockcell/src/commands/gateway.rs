@@ -1,3 +1,4 @@
+use anyhow::Context;
 use blockcell_agent::{
     AgentRuntime, CapabilityRegistryAdapter, ConfirmRequest, CoreEvolutionAdapter,
     MemoryStoreAdapter, MessageBus, ProviderLLMBridge, SkillScriptKind, TaskManager,
@@ -24,14 +25,13 @@ use blockcell_scheduler::{
 };
 use blockcell_skills::{new_registry_handle, CoreEvolution};
 use blockcell_skills::{EvolutionService, EvolutionServiceConfig};
-use blockcell_storage::{MemoryStore};
+use blockcell_storage::MemoryStore;
 use blockcell_tools::mcp::manager::McpManager;
 use blockcell_tools::{
     build_tool_registry_for_agent_config, build_tool_registry_with_all_mcp,
     CapabilityRegistryHandle, CoreEvolutionHandle, EventEmitterHandle, MemoryStoreHandle,
     ToolRegistry,
 };
-use anyhow::Context;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -271,8 +271,8 @@ fn active_model_and_provider(config: &Config) -> (String, Option<String>, &'stat
     )
 }
 
-const EXTERNAL_CHANNELS: [&str; 8] = [
-    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark",
+const EXTERNAL_CHANNELS: [&str; 9] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
 ];
 
 fn known_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
@@ -791,9 +791,12 @@ fn parse_env_assignment(line: &str) -> Option<(String, String)> {
 }
 
 fn ensure_and_load_gateway_env(paths: &Paths) -> anyhow::Result<()> {
-    paths
-        .ensure_dirs()
-        .with_context(|| format!("failed to create blockcell dirs at {}", paths.base.display()))?;
+    paths.ensure_dirs().with_context(|| {
+        format!(
+            "failed to create blockcell dirs at {}",
+            paths.base.display()
+        )
+    })?;
 
     let env_path = paths.env_file();
     if !env_path.exists() {
@@ -1357,6 +1360,20 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         ));
     }
 
+    #[cfg(feature = "qq")]
+    for listener in blockcell_channels::account::qq_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        info!(listener = %listener_name, "Starting QQ listener");
+        let qq = Arc::new(blockcell_channels::qq::QQChannel::new(listener.config, inbound_tx.clone()));
+        let shutdown_rx = shutdown_tx.subscribe();
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                qq.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
+
     // ── Build HTTP/WebSocket server ──
     // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above
     // somehow produced None or empty (e.g. env var was whitespace-only).
@@ -1562,6 +1579,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
             "/webhook/wecom",
             get(handle_wecom_webhook).post(handle_wecom_webhook),
         )
+        .route("/webhook/qq", post(handle_qq_webhook))
         .with_state(gateway_state);
 
     let bind_addr = format!("{}:{}", host, port);

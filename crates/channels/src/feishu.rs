@@ -1161,7 +1161,6 @@ async fn do_send_message(client: &Client, token: &str, chat_id: &str, text: &str
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,11 +1168,27 @@ mod tests {
     #[test]
     fn test_lookup_cached_token_is_scoped_by_app_id() {
         let mut cache = std::collections::HashMap::new();
-        store_cached_token(&mut cache, "app-a", "token-a", chrono::Utc::now().timestamp() + 7200);
-        store_cached_token(&mut cache, "app-b", "token-b", chrono::Utc::now().timestamp() + 7200);
+        store_cached_token(
+            &mut cache,
+            "app-a",
+            "token-a",
+            chrono::Utc::now().timestamp() + 7200,
+        );
+        store_cached_token(
+            &mut cache,
+            "app-b",
+            "token-b",
+            chrono::Utc::now().timestamp() + 7200,
+        );
 
-        assert_eq!(lookup_cached_token(&cache, "app-a").as_deref(), Some("token-a"));
-        assert_eq!(lookup_cached_token(&cache, "app-b").as_deref(), Some("token-b"));
+        assert_eq!(
+            lookup_cached_token(&cache, "app-a").as_deref(),
+            Some("token-a")
+        );
+        assert_eq!(
+            lookup_cached_token(&cache, "app-b").as_deref(),
+            Some("token-b")
+        );
         assert_eq!(lookup_cached_token(&cache, "missing"), None);
     }
 }

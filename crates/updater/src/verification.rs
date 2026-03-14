@@ -261,10 +261,7 @@ impl HealthChecker {
 
         // 对于其他 Unix 系统（如 Android Termux），尝试使用 ldd
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let (cmd, args) = (
-            "ldd",
-            vec![self.binary_path.to_str().unwrap_or("")]
-        );
+        let (cmd, args) = ("ldd", vec![self.binary_path.to_str().unwrap_or("")]);
 
         let result = tokio::process::Command::new(cmd).args(&args).output().await;
 

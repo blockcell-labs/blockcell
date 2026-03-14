@@ -21,6 +21,17 @@ function looksLikeBackgroundDeliveryMessage(content?: string) {
     || content.includes('新闻');
 }
 
+function containsToolTraceContent(content?: string) {
+  const trimmed = (content || '').trim();
+  if (!trimmed) return false;
+
+  const lower = trimmed.toLowerCase();
+  return lower.includes('<tool_call')
+    || lower.includes('[tool_call]')
+    || lower.includes('[/tool_call]')
+    || lower.includes('[called:');
+}
+
 function isCronBackgroundDelivery(event: WsEvent) {
   return event.background_delivery === true && event.delivery_kind === 'cron';
 }
@@ -278,14 +289,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case 'message_done': {
         // Check if there's a streaming assistant message to finalize
         const lastMsg = state.messages[state.messages.length - 1];
-        if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
+        const hasExplicitContent = Object.prototype.hasOwnProperty.call(event, 'content');
+        const finalContent = hasExplicitContent ? (event.content ?? '') : undefined;
+        const shouldDropStreamingToolTrace =
+          lastMsg?.role === 'assistant'
+          && lastMsg.streaming
+          && containsToolTraceContent(lastMsg.content)
+          && (!finalContent || !finalContent.trim())
+          && !(event.media && event.media.length > 0);
+        const highlight =
+          state.pendingFocusSessionId === state.currentSessionId
+          && !!state.pendingFocusText
+          && (event.content || '').includes(state.pendingFocusText);
+        if (shouldDropStreamingToolTrace) {
+          set((s) => ({ messages: s.messages.slice(0, -1) }));
+        } else if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
           state.updateLastAssistantMessage((m) => ({
             ...m,
-            content: event.content || m.content,
+            content: finalContent ?? m.content,
             streaming: false,
             media: event.media && event.media.length > 0
               ? [...new Set([...(m.media || []), ...event.media])]
               : m.media,
+          }));
+        } else if (
+          lastMsg?.role === 'assistant'
+          && !lastMsg.streaming
+          && (lastMsg.content || '') === (event.content || '')
+        ) {
+          state.updateLastAssistantMessage((m) => ({
+            ...m,
+            media: event.media && event.media.length > 0
+              ? [...new Set([...(m.media || []), ...event.media])]
+              : m.media,
+            highlight: m.highlight || highlight,
           }));
         } else {
           // New complete message
@@ -296,10 +333,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             timestamp: Date.now(),
             streaming: false,
             media: event.media && event.media.length > 0 ? event.media : undefined,
-            highlight:
-              state.pendingFocusSessionId === state.currentSessionId
-              && !!state.pendingFocusText
-              && (event.content || '').includes(state.pendingFocusText),
+            highlight,
           });
         }
         if (

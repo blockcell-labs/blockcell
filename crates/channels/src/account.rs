@@ -2,6 +2,8 @@ use blockcell_core::config::{
     DingTalkAccountConfig, DiscordAccountConfig, FeishuAccountConfig, LarkAccountConfig,
     SlackAccountConfig, TelegramAccountConfig, WeComAccountConfig, WhatsAppAccountConfig,
 };
+#[cfg(feature = "qq")]
+use blockcell_core::config::QQAccountConfig;
 use blockcell_core::Config;
 use std::collections::HashMap;
 
@@ -120,6 +122,16 @@ pub(crate) fn lark_account_id(config: &Config) -> Option<String> {
     )
 }
 
+#[cfg(feature = "qq")]
+pub(crate) fn qq_account_id(config: &Config) -> Option<String> {
+    let qq = &config.channels.qq;
+    resolve_account_id(
+        &qq.accounts,
+        |account| account.enabled,
+        |account| !qq.app_id.is_empty() && account.app_id == qq.app_id,
+    )
+}
+
 
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
@@ -184,7 +196,8 @@ pub fn telegram_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.telegram.token = account.token.clone();
             scoped.channels.telegram.allow_from = account.allow_from.clone();
             scoped.channels.telegram.proxy = account.proxy.clone();
-            scoped.channels.telegram.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.telegram.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.telegram.default_account_id = Some(account_id.to_string());
         },
     )
@@ -204,7 +217,8 @@ pub fn slack_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.slack.channels = account.channels.clone();
             scoped.channels.slack.allow_from = account.allow_from.clone();
             scoped.channels.slack.poll_interval_secs = account.poll_interval_secs;
-            scoped.channels.slack.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.slack.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.slack.default_account_id = Some(account_id.to_string());
         },
     )
@@ -222,7 +236,8 @@ pub fn discord_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.discord.bot_token = account.bot_token.clone();
             scoped.channels.discord.channels = account.channels.clone();
             scoped.channels.discord.allow_from = account.allow_from.clone();
-            scoped.channels.discord.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.discord.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.discord.default_account_id = Some(account_id.to_string());
         },
     )
@@ -241,7 +256,8 @@ pub fn dingtalk_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.dingtalk.app_secret = account.app_secret.clone();
             scoped.channels.dingtalk.robot_code = account.robot_code.clone();
             scoped.channels.dingtalk.allow_from = account.allow_from.clone();
-            scoped.channels.dingtalk.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.dingtalk.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.dingtalk.default_account_id = Some(account_id.to_string());
         },
     )
@@ -254,13 +270,11 @@ pub fn wecom_listener_configs(config: &Config) -> Vec<ListenerConfig> {
         &config.channels.wecom.accounts,
         |account| {
             account.enabled
-                && (
-                    !account.corp_id.is_empty()
-                        || (account.mode == "long_connection"
-                            || account.mode == "long-connection"
-                            || account.mode == "stream")
-                            && !account.bot_id.is_empty()
-                )
+                && (!account.corp_id.is_empty()
+                    || (account.mode == "long_connection"
+                        || account.mode == "long-connection"
+                        || account.mode == "stream")
+                        && !account.bot_id.is_empty())
         },
         |cfg| {
             let mode = cfg.channels.wecom.mode.as_str();
@@ -282,7 +296,8 @@ pub fn wecom_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.wecom.poll_interval_secs = account.poll_interval_secs;
             scoped.channels.wecom.ws_url = account.ws_url.clone();
             scoped.channels.wecom.ping_interval_secs = account.ping_interval_secs;
-            scoped.channels.wecom.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.wecom.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.wecom.default_account_id = Some(account_id.to_string());
         },
     )
@@ -302,7 +317,8 @@ pub fn feishu_scoped_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.feishu.encrypt_key = account.encrypt_key.clone();
             scoped.channels.feishu.verification_token = account.verification_token.clone();
             scoped.channels.feishu.allow_from = account.allow_from.clone();
-            scoped.channels.feishu.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.feishu.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.feishu.default_account_id = Some(account_id.to_string());
         },
     )
@@ -322,8 +338,30 @@ pub fn lark_scoped_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.lark.encrypt_key = account.encrypt_key.clone();
             scoped.channels.lark.verification_token = account.verification_token.clone();
             scoped.channels.lark.allow_from = account.allow_from.clone();
-            scoped.channels.lark.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.lark.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.lark.default_account_id = Some(account_id.to_string());
+        },
+    )
+}
+
+#[cfg(feature = "qq")]
+pub fn qq_listener_configs(config: &Config) -> Vec<ListenerConfig> {
+    scoped_listener_configs(
+        "qq",
+        config,
+        &config.channels.qq.accounts,
+        |account| account.enabled && !account.app_id.is_empty(),
+        |cfg| !cfg.channels.qq.app_id.is_empty(),
+        |scoped, account_id, account: &QQAccountConfig| {
+            scoped.channels.qq.enabled = account.enabled;
+            scoped.channels.qq.app_id = account.app_id.clone();
+            scoped.channels.qq.app_secret = account.app_secret.clone();
+            scoped.channels.qq.environment = account.environment.clone();
+            scoped.channels.qq.mode = account.mode.clone();
+            scoped.channels.qq.allow_from = account.allow_from.clone();
+            scoped.channels.qq.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.qq.default_account_id = Some(account_id.to_string());
         },
     )
 }
@@ -382,6 +420,12 @@ pub fn channel_configured(config: &Config, channel: &str) -> bool {
                     account.enabled && !account.app_id.is_empty()
                 })
         }
+        "qq" => {
+            !config.channels.qq.app_id.is_empty()
+                || has_enabled_account(&config.channels.qq.accounts, |account| {
+                    account.enabled && !account.app_id.is_empty()
+                })
+        }
         _ => false,
     }
 }
@@ -389,6 +433,16 @@ pub fn channel_configured(config: &Config, channel: &str) -> bool {
 pub fn listener_labels(config: &Config, channel: &str) -> Vec<String> {
     if !config.is_external_channel_enabled(channel) || !channel_configured(config, channel) {
         return Vec::new();
+    }
+
+    #[cfg(feature = "qq")]
+    if channel == "qq" {
+        let mut labels: Vec<String> = qq_listener_configs(config)
+            .into_iter()
+            .map(|listener| listener.label)
+            .collect();
+        labels.sort();
+        return labels;
     }
 
     let mut labels = match channel {
@@ -400,6 +454,7 @@ pub fn listener_labels(config: &Config, channel: &str) -> Vec<String> {
         "dingtalk" => dingtalk_listener_configs(config),
         "wecom" => wecom_listener_configs(config),
         "lark" => lark_scoped_configs(config),
+        "qq" => qq_listener_configs(config),
         _ => Vec::new(),
     }
     .into_iter()
@@ -421,7 +476,8 @@ pub fn whatsapp_listener_configs(config: &Config) -> Vec<ListenerConfig> {
             scoped.channels.whatsapp.enabled = account.enabled;
             scoped.channels.whatsapp.bridge_url = account.bridge_url.clone();
             scoped.channels.whatsapp.allow_from = account.allow_from.clone();
-            scoped.channels.whatsapp.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.whatsapp.accounts =
+                HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.whatsapp.default_account_id = Some(account_id.to_string());
         },
     )
@@ -434,7 +490,6 @@ mod tests {
         DingTalkAccountConfig, DiscordAccountConfig, FeishuAccountConfig, LarkAccountConfig,
         SlackAccountConfig, TelegramAccountConfig, WeComAccountConfig, WhatsAppAccountConfig,
     };
-
 
     #[test]
     fn test_telegram_listener_configs_expand_enabled_accounts() {
@@ -465,9 +520,22 @@ mod tests {
         assert_eq!(listeners[0].label, "telegram:main");
         assert_eq!(listeners[0].account_id.as_deref(), Some("main"));
         assert_eq!(listeners[0].config.channels.telegram.token, "tg-main");
-        assert_eq!(listeners[0].config.channels.telegram.default_account_id.as_deref(), Some("main"));
+        assert_eq!(
+            listeners[0]
+                .config
+                .channels
+                .telegram
+                .default_account_id
+                .as_deref(),
+            Some("main")
+        );
         assert_eq!(listeners[0].config.channels.telegram.accounts.len(), 1);
-        assert!(listeners[0].config.channels.telegram.accounts.contains_key("main"));
+        assert!(listeners[0]
+            .config
+            .channels
+            .telegram
+            .accounts
+            .contains_key("main"));
     }
 
     #[test]
@@ -564,7 +632,15 @@ mod tests {
         assert_eq!(listeners[0].label, "feishu:office");
         assert_eq!(listeners[0].account_id.as_deref(), Some("office"));
         assert_eq!(listeners[0].config.channels.feishu.app_id, "cli_office");
-        assert_eq!(listeners[0].config.channels.feishu.default_account_id.as_deref(), Some("office"));
+        assert_eq!(
+            listeners[0]
+                .config
+                .channels
+                .feishu
+                .default_account_id
+                .as_deref(),
+            Some("office")
+        );
         assert_eq!(listeners[0].config.channels.feishu.accounts.len(), 1);
     }
 
@@ -597,8 +673,19 @@ mod tests {
         assert_eq!(listeners[0].account_id.as_deref(), Some("ops"));
         assert_eq!(listeners[0].config.channels.wecom.corp_id, "corp-ops");
         assert_eq!(listeners[0].config.channels.wecom.agent_id, 7);
-        assert_eq!(listeners[0].config.channels.wecom.callback_token, "token-ops");
-        assert_eq!(listeners[0].config.channels.wecom.default_account_id.as_deref(), Some("ops"));
+        assert_eq!(
+            listeners[0].config.channels.wecom.callback_token,
+            "token-ops"
+        );
+        assert_eq!(
+            listeners[0]
+                .config
+                .channels
+                .wecom
+                .default_account_id
+                .as_deref(),
+            Some("ops")
+        );
         assert_eq!(listeners[0].config.channels.wecom.accounts.len(), 1);
     }
 
@@ -626,7 +713,10 @@ mod tests {
         );
 
         let listeners = listener_labels(&config, "telegram");
-        assert_eq!(listeners, vec!["telegram:backup".to_string(), "telegram:main".to_string()]);
+        assert_eq!(
+            listeners,
+            vec!["telegram:backup".to_string(), "telegram:main".to_string()]
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use blockcell_core::types::ChatMessage;
 use blockcell_core::{session_file_stem, session_id_from_file_stem, Paths, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use tracing::debug;
@@ -61,6 +62,19 @@ impl SessionStore {
         Ok(messages)
     }
 
+    pub fn load_metadata(&self, session_key: &str) -> Result<Value> {
+        let path = self.paths.session_file(session_key);
+
+        if !path.exists() {
+            return Ok(Value::Object(serde_json::Map::new()));
+        }
+
+        Ok(self
+            .read_metadata_line(&path)
+            .map(|(_, metadata)| metadata)
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new())))
+    }
+
     pub fn save(&self, session_key: &str, messages: &[ChatMessage]) -> Result<()> {
         let path = self.paths.session_file(session_key);
 
@@ -72,39 +86,56 @@ impl SessionStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         // 保留原始 created_at：若文件已存在则从第一行读取，否则使用当前时间
+        let (created_at, metadata) = if path.exists() {
+            self.read_metadata_line(&path)
+                .unwrap_or_else(|| (now.clone(), Value::Object(serde_json::Map::new())))
+        } else {
+            (now.clone(), Value::Object(serde_json::Map::new()))
+        };
+
+        self.write_session_file(&path, &created_at, &now, messages, &metadata)
+    }
+
+    pub fn save_with_metadata(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+        metadata: &Value,
+    ) -> Result<()> {
+        let path = self.paths.session_file(session_key);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
         let created_at = if path.exists() {
             self.read_created_at(&path).unwrap_or_else(|| now.clone())
         } else {
             now.clone()
         };
 
-        let mut file = File::create(&path)?;
-
-        // Write metadata
-        let metadata = SessionLine::Metadata {
-            created_at,
-            updated_at: now,
-            metadata: serde_json::Value::Object(serde_json::Map::new()),
-        };
-        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
-
-        // Write messages
-        for msg in messages {
-            writeln!(file, "{}", serde_json::to_string(msg)?)?;
-        }
-
-        Ok(())
+        self.write_session_file(&path, &created_at, &now, messages, metadata)
     }
 
     /// 从 session 文件第一行读取 created_at 字段。
     fn read_created_at(&self, path: &std::path::Path) -> Option<String> {
+        self.read_metadata_line(path)
+            .map(|(created_at, _)| created_at)
+    }
+
+    fn read_metadata_line(&self, path: &std::path::Path) -> Option<(String, Value)> {
         let file = File::open(path).ok()?;
         let mut reader = BufReader::new(file);
         let mut first_line = String::new();
         reader.read_line(&mut first_line).ok()?;
         let line: SessionLine = serde_json::from_str(first_line.trim()).ok()?;
         match line {
-            SessionLine::Metadata { created_at, .. } => Some(created_at),
+            SessionLine::Metadata {
+                created_at,
+                metadata,
+                ..
+            } => Some((created_at, metadata)),
             _ => None,
         }
     }
@@ -143,6 +174,30 @@ impl SessionStore {
         // Append message
         let mut file = OpenOptions::new().append(true).open(&path)?;
         writeln!(file, "{}", serde_json::to_string(message)?)?;
+
+        Ok(())
+    }
+
+    fn write_session_file(
+        &self,
+        path: &std::path::Path,
+        created_at: &str,
+        updated_at: &str,
+        messages: &[ChatMessage],
+        metadata: &Value,
+    ) -> Result<()> {
+        let mut file = File::create(path)?;
+
+        let metadata_line = SessionLine::Metadata {
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+            metadata: metadata.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&metadata_line)?)?;
+
+        for msg in messages {
+            writeln!(file, "{}", serde_json::to_string(msg)?)?;
+        }
 
         Ok(())
     }
@@ -195,5 +250,59 @@ impl SessionStore {
         );
 
         Some(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn test_store() -> (SessionStore, TempDir) {
+        let dir = TempDir::new().expect("temp dir");
+        let paths = Paths::with_base(dir.path().to_path_buf());
+        (SessionStore::new(paths), dir)
+    }
+
+    #[test]
+    fn test_save_preserves_existing_session_metadata() {
+        let (store, _dir) = test_store();
+        let session_key = "ws:chat-1";
+        let metadata = json!({
+            "continuation_context": {
+                "filesystem": {
+                    "current_dir": "/Users/apple/.blockcell",
+                    "entries": [
+                        {
+                            "index": 1,
+                            "name": ".env",
+                            "path": "/Users/apple/.blockcell/.env",
+                            "type": "file"
+                        }
+                    ]
+                }
+            }
+        });
+
+        store
+            .save_with_metadata(
+                session_key,
+                &[ChatMessage::user("查看上一级目录有哪些文件")],
+                &metadata,
+            )
+            .expect("save with metadata");
+
+        store
+            .save(session_key, &[ChatMessage::user("查看 .env 的内容")])
+            .expect("save messages while preserving metadata");
+
+        let loaded = store
+            .load_metadata(session_key)
+            .expect("load metadata after save");
+        assert_eq!(
+            loaded["continuation_context"]["filesystem"]["entries"][0]["path"],
+            "/Users/apple/.blockcell/.env"
+        );
     }
 }

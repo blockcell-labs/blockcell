@@ -76,7 +76,10 @@ pub async fn list(show_all: bool, agent_id: &str) -> anyhow::Result<()> {
         );
     }
 
-    println!("\nTotal: {} job(s)", jobs.iter().filter(|j| show_all || j.enabled).count());
+    println!(
+        "\nTotal: {} job(s)",
+        jobs.iter().filter(|j| show_all || j.enabled).count()
+    );
     Ok(())
 }
 

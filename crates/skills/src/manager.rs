@@ -34,6 +34,106 @@ pub struct SkillMeta {
     /// Fallback strategy when the skill fails.
     #[serde(default)]
     pub fallback: Option<SkillFallback>,
+    /// Structured execution configuration: script entry point and typed actions.
+    #[serde(default)]
+    pub execution: Option<SkillExecution>,
+}
+
+/// Structured execution configuration for a skill (Python/Rhai with explicit typed actions).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillExecution {
+    /// Script kind: "python", "rhai", or "markdown".
+    #[serde(default)]
+    pub kind: String,
+    /// Entry point filename, e.g. "SKILL.py".
+    #[serde(default)]
+    pub entry: String,
+    /// Invocation shape used by runtime, e.g. `argv`, `context`, or `prompt`.
+    #[serde(default)]
+    pub dispatch_kind: String,
+    /// Result shaping mode, e.g. `llm`, `direct`, or `none`.
+    #[serde(default)]
+    pub summary_mode: String,
+    /// List of callable actions exposed by this skill.
+    #[serde(default)]
+    pub actions: Vec<SkillAction>,
+}
+
+impl SkillExecution {
+    pub fn normalized_kind(&self) -> &str {
+        let kind = self.kind.trim();
+        if kind.is_empty() {
+            return "markdown";
+        }
+        kind
+    }
+
+    pub fn effective_dispatch_kind(&self) -> &str {
+        let dispatch_kind = self.dispatch_kind.trim();
+        if !dispatch_kind.is_empty() {
+            return dispatch_kind;
+        }
+
+        match self.normalized_kind() {
+            "python" => "argv",
+            "rhai" => "context",
+            "markdown" => "prompt",
+            _ => "prompt",
+        }
+    }
+
+    pub fn effective_summary_mode(&self) -> &str {
+        let summary_mode = self.summary_mode.trim();
+        if !summary_mode.is_empty() {
+            return summary_mode;
+        }
+
+        match self.normalized_kind() {
+            "markdown" => "direct",
+            "python" | "rhai" => "llm",
+            _ => "llm",
+        }
+    }
+}
+
+/// A single callable action within a structured skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillAction {
+    /// Action identifier, e.g. "search", "detail".
+    pub name: String,
+    /// Human-readable description shown to the LLM dispatcher.
+    #[serde(default)]
+    pub description: String,
+    /// Optional trigger phrases that hint at this specific action.
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    /// Named arguments accepted by this action.
+    #[serde(default)]
+    pub arguments: HashMap<String, SkillArgument>,
+    /// Command-line argv template. Use `{arg_name}` placeholders, e.g. `["search", "{keyword}"]`.
+    #[serde(default)]
+    pub argv: Vec<String>,
+}
+
+/// Specification for a single argument of a skill action.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillArgument {
+    /// Argument type: "string", "integer", "number", "boolean".
+    #[serde(rename = "type", default = "default_arg_type")]
+    pub kind: String,
+    /// Whether this argument must be provided.
+    #[serde(default)]
+    pub required: bool,
+    /// Description shown to the LLM when constructing arguments.
+    #[serde(default)]
+    pub description: String,
+    /// Allowed values (enum constraint).
+    #[serde(default)]
+    pub enum_values: Vec<String>,
+}
+
+fn default_arg_type() -> String {
+    "string".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,6 +169,14 @@ impl SkillMeta {
             self.capabilities.clone()
         }
     }
+
+    /// Returns true if this skill has structured execution actions defined.
+    pub fn is_structured_script(&self) -> bool {
+        self.execution
+            .as_ref()
+            .map(|e| !e.actions.is_empty())
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +187,8 @@ pub struct Skill {
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub current_version: Option<String>,
+    /// SKILL.md content cached at load time — avoids disk I/O on every skill match.
+    pub cached_md: Option<String>,
 }
 
 impl Skill {
@@ -92,8 +202,12 @@ impl Skill {
         self.path.join("SKILL.md").exists()
     }
 
-    /// Load the SKILL.md content.
+    /// Return the SKILL.md content, using the in-memory cache populated at load time.
     pub fn load_md(&self) -> Option<String> {
+        if self.cached_md.is_some() {
+            return self.cached_md.clone();
+        }
+        // Fallback: read from disk (e.g. if skill was constructed outside SkillManager)
         let md_path = self.path.join("SKILL.md");
         std::fs::read_to_string(md_path).ok()
     }
@@ -301,6 +415,7 @@ impl SkillManager {
             None
         };
 
+        let cached_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).ok();
         Ok(Some(Skill {
             name: if meta.name.is_empty() {
                 name
@@ -312,6 +427,7 @@ impl SkillManager {
             available,
             unavailable_reason: reason,
             current_version,
+            cached_md,
         }))
     }
 
@@ -407,14 +523,16 @@ impl SkillManager {
     /// Find a skill whose trigger phrases match the user input.
     /// Disabled skills are skipped during candidate selection.
     /// Returns the first matching skill.
-    pub fn match_skill(&self, user_input: &str, disabled_skills: &HashSet<String>) -> Option<&Skill> {
+    pub fn match_skill(
+        &self,
+        user_input: &str,
+        disabled_skills: &HashSet<String>,
+    ) -> Option<&Skill> {
         let input_lower = user_input.to_lowercase();
         self.skills
             .values()
             .filter(|s| {
-                s.available
-                    && !s.meta.triggers.is_empty()
-                    && !disabled_skills.contains(&s.name)
+                s.available && !s.meta.triggers.is_empty() && !disabled_skills.contains(&s.name)
             })
             .find(|s| {
                 s.meta
@@ -422,6 +540,28 @@ impl SkillManager {
                     .iter()
                     .any(|trigger| input_lower.contains(&trigger.to_lowercase()))
             })
+    }
+
+    /// Return ALL skills whose trigger phrases match the user input.
+    /// Used for multi-skill disambiguation when more than one skill matches.
+    pub fn match_all_skills<'a>(
+        &'a self,
+        user_input: &str,
+        disabled_skills: &HashSet<String>,
+    ) -> Vec<&'a Skill> {
+        let input_lower = user_input.to_lowercase();
+        self.skills
+            .values()
+            .filter(|s| {
+                s.available
+                    && !s.meta.triggers.is_empty()
+                    && !disabled_skills.contains(&s.name)
+                    && s.meta
+                        .triggers
+                        .iter()
+                        .any(|trigger| input_lower.contains(&trigger.to_lowercase()))
+            })
+            .collect()
     }
 
     /// List all available skills.
@@ -532,7 +672,6 @@ impl Default for SkillManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +732,7 @@ capabilities:
                     available: true,
                     unavailable_reason: None,
                     current_version: None,
+                    cached_md: None,
                 },
             ),
             (
@@ -608,6 +748,7 @@ capabilities:
                     available: true,
                     unavailable_reason: None,
                     current_version: None,
+                    cached_md: None,
                 },
             ),
         ]);
@@ -615,6 +756,68 @@ capabilities:
         let disabled_skills = HashSet::from(["disabled_skill".to_string()]);
         let matched = manager.match_skill("please deploy the release", &disabled_skills);
 
-        assert_eq!(matched.map(|skill| skill.name.as_str()), Some("active_skill"));
+        assert_eq!(
+            matched.map(|skill| skill.name.as_str()),
+            Some("active_skill")
+        );
+    }
+
+    #[test]
+    fn test_skill_execution_parses_dispatch_kind_and_summary_mode() {
+        let meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: tavily
+execution:
+  kind: python
+  entry: SKILL.py
+  dispatch_kind: argv
+  summary_mode: llm
+"#,
+        )
+        .expect("meta should parse");
+
+        let execution = meta.execution.expect("execution should exist");
+        assert_eq!(execution.kind, "python");
+        assert_eq!(execution.dispatch_kind, "argv");
+        assert_eq!(execution.summary_mode, "llm");
+    }
+
+    #[test]
+    fn test_skill_execution_defaults_dispatch_kind_by_runtime_kind() {
+        let python_meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: py_demo
+execution:
+  kind: python
+"#,
+        )
+        .expect("python meta should parse");
+        let rhai_meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: rhai_demo
+execution:
+  kind: rhai
+"#,
+        )
+        .expect("rhai meta should parse");
+        let markdown_meta: SkillMeta = serde_yaml::from_str(
+            r#"
+name: md_demo
+execution:
+  kind: markdown
+"#,
+        )
+        .expect("markdown meta should parse");
+
+        let python_execution = python_meta.execution.expect("python execution");
+        let rhai_execution = rhai_meta.execution.expect("rhai execution");
+        let markdown_execution = markdown_meta.execution.expect("markdown execution");
+
+        assert_eq!(python_execution.effective_dispatch_kind(), "argv");
+        assert_eq!(rhai_execution.effective_dispatch_kind(), "context");
+        assert_eq!(markdown_execution.effective_dispatch_kind(), "prompt");
+        assert_eq!(python_execution.effective_summary_mode(), "llm");
+        assert_eq!(rhai_execution.effective_summary_mode(), "llm");
+        assert_eq!(markdown_execution.effective_summary_mode(), "direct");
     }
 }

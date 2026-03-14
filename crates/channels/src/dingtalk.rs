@@ -180,7 +180,11 @@ impl DingTalkChannel {
         let Some(key) = event_id
             .filter(|s| !s.is_empty())
             .map(|s| format!("event:{}", s))
-            .or_else(|| msg_id.filter(|s| !s.is_empty()).map(|s| format!("msg:{}", s)))
+            .or_else(|| {
+                msg_id
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("msg:{}", s))
+            })
         else {
             return false;
         };
@@ -360,8 +364,12 @@ impl DingTalkChannel {
                                             .as_ref()
                                             .and_then(|h| h.event_id.as_deref())
                                             .map(|s| s.to_string());
-                                        if let Err(e) =
-                                            self.handle_callback_message(&parsed_data, stream_event_id.as_deref()).await
+                                        if let Err(e) = self
+                                            .handle_callback_message(
+                                                &parsed_data,
+                                                stream_event_id.as_deref(),
+                                            )
+                                            .await
                                         {
                                             error!(error = %e, "Failed to handle DingTalk callback");
                                         }
@@ -395,7 +403,11 @@ impl DingTalkChannel {
         Err(Error::Channel("DingTalk stream ended".to_string()))
     }
 
-    async fn handle_callback_message(&self, data: &serde_json::Value, event_id: Option<&str>) -> Result<()> {
+    async fn handle_callback_message(
+        &self,
+        data: &serde_json::Value,
+        event_id: Option<&str>,
+    ) -> Result<()> {
         // DingTalk callback message format
         let msg_type = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
 

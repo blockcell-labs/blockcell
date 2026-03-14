@@ -108,10 +108,21 @@ pub struct McpRootConfig {
 
 impl McpRootConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("Cannot read MCP config file {}: {}", path.display(), e)))?;
-        serde_json::from_str(&content)
-            .map_err(|e| Error::Config(format!("Parse error in MCP config file {}:{} — {}", path.display(), e.line(), e)))
+        let content = fs::read_to_string(path).map_err(|e| {
+            Error::Config(format!(
+                "Cannot read MCP config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        serde_json::from_str(&content).map_err(|e| {
+            Error::Config(format!(
+                "Parse error in MCP config file {}:{} — {}",
+                path.display(),
+                e.line(),
+                e
+            ))
+        })
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
@@ -202,8 +213,13 @@ impl McpResolvedConfig {
                     continue;
                 }
 
-                let content = fs::read_to_string(&path)
-                    .map_err(|e| Error::Config(format!("Cannot read MCP server file {}: {}", path.display(), e)))?;
+                let content = fs::read_to_string(&path).map_err(|e| {
+                    Error::Config(format!(
+                        "Cannot read MCP server file {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
                 let file_cfg: McpFileServerConfig = serde_json::from_str(&content)
                     .map_err(|e| Error::Config(format!("Parse error in MCP server file {}:{} — {}\n  Hint: each file must have a \"command\" field (e.g. \"command\": \"uvx\")", path.display(), e.line(), e)))?;
                 let (name, def) = file_cfg.into_parts()?;

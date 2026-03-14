@@ -1072,7 +1072,10 @@ mod tests {
         };
 
         let resolved = resolve_lark_plain_webhook_config(&config, &body);
-        assert_eq!(resolved.channels.lark.default_account_id.as_deref(), Some("intl"));
+        assert_eq!(
+            resolved.channels.lark.default_account_id.as_deref(),
+            Some("intl")
+        );
         assert_eq!(resolved.channels.lark.verification_token, "verify-intl");
     }
 

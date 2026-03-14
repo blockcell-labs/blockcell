@@ -33,14 +33,14 @@ enum LongConnOutbound {
 
 /// Registry of active long connection outbound senders keyed by bot_id.
 /// `send_message` uses this to route replies through the WebSocket instead of REST.
-static LONGCONN_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, mpsc::Sender<LongConnOutbound>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static LONGCONN_REGISTRY: std::sync::LazyLock<
+    Mutex<HashMap<String, mpsc::Sender<LongConnOutbound>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Maps chat_id -> latest req_id from aibot_msg_callback.
 /// aibot_respond_msg must echo back the original req_id so WeCom routes the reply correctly.
 static CHAT_REQID_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
 
 /// Shared REST access_token cache for WeCom corp APIs.
 static WECOM_TOKEN_CACHE: std::sync::LazyLock<tokio::sync::Mutex<CachedToken>> =
@@ -516,10 +516,9 @@ impl WeComChannel {
             }),
         };
         write
-            .send(WsMessage::Text(
-                serde_json::to_string(&req)
-                    .map_err(|e| Error::Channel(format!("WeCom subscribe serialize failed: {}", e)))?,
-            ))
+            .send(WsMessage::Text(serde_json::to_string(&req).map_err(
+                |e| Error::Channel(format!("WeCom subscribe serialize failed: {}", e)),
+            )?))
             .await
             .map_err(|e| Error::Channel(format!("WeCom subscribe send failed: {}", e)))?;
         Ok(())
@@ -545,16 +544,22 @@ impl WeComChannel {
                 info!("WeCom long connection subscribed successfully");
             }
             "aibot_msg_callback" => {
-                let headers: LongConnHeaders =
-                    serde_json::from_value(envelope.headers.clone()).unwrap_or(LongConnHeaders {
-                        req_id: None,
-                    });
+                let headers: LongConnHeaders = serde_json::from_value(envelope.headers.clone())
+                    .unwrap_or(LongConnHeaders { req_id: None });
                 // Store effective_chat_id -> req_id using the same logic as
                 // build_inbound_from_long_connection so the registry key always matches.
                 {
-                    let chatid = envelope.body.get("chatid").and_then(|v| v.as_str()).unwrap_or("");
-                    let from_user = envelope.body
-                        .get("from").and_then(|v| v.get("userid")).and_then(|v| v.as_str()).unwrap_or("");
+                    let chatid = envelope
+                        .body
+                        .get("chatid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let from_user = envelope
+                        .body
+                        .get("from")
+                        .and_then(|v| v.get("userid"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let effective_chat_id = if chatid.is_empty() { from_user } else { chatid };
                     if !effective_chat_id.is_empty() {
                         if let Some(req_id) = headers.req_id.as_deref() {
@@ -563,7 +568,10 @@ impl WeComChannel {
                         }
                     }
                 }
-                if let Some(inbound) = self.build_inbound_from_long_connection(&envelope.body).await? {
+                if let Some(inbound) = self
+                    .build_inbound_from_long_connection(&envelope.body)
+                    .await?
+                {
                     self.inbound_tx
                         .send(inbound)
                         .await
@@ -575,30 +583,35 @@ impl WeComChannel {
                         "errcode": 0,
                         "errmsg": "ok"
                     });
-                    write.send(WsMessage::Text(ack.to_string())).await.map_err(|e| {
-                        Error::Channel(format!("WeCom long connection ack failed: {}", e))
-                    })?;
+                    write
+                        .send(WsMessage::Text(ack.to_string()))
+                        .await
+                        .map_err(|e| {
+                            Error::Channel(format!("WeCom long connection ack failed: {}", e))
+                        })?;
                 }
             }
             "aibot_event_callback" => {
                 debug!(payload = %text, "WeCom long connection event callback received");
-                let headers: LongConnHeaders =
-                    serde_json::from_value(envelope.headers.clone()).unwrap_or(LongConnHeaders {
-                        req_id: None,
-                    });
+                let headers: LongConnHeaders = serde_json::from_value(envelope.headers.clone())
+                    .unwrap_or(LongConnHeaders { req_id: None });
                 if let Some(req_id) = headers.req_id {
                     let ack = serde_json::json!({
                         "headers": { "req_id": req_id },
                         "errcode": 0,
                         "errmsg": "ok"
                     });
-                    write.send(WsMessage::Text(ack.to_string())).await.map_err(|e| {
-                        Error::Channel(format!("WeCom long connection event ack failed: {}", e))
-                    })?;
+                    write
+                        .send(WsMessage::Text(ack.to_string()))
+                        .await
+                        .map_err(|e| {
+                            Error::Channel(format!("WeCom long connection event ack failed: {}", e))
+                        })?;
                 }
             }
             "ping" => {
-                write.send(WsMessage::Text("{\"cmd\":\"pong\"}".to_string()))
+                write
+                    .send(WsMessage::Text("{\"cmd\":\"pong\"}".to_string()))
                     .await
                     .map_err(|e| Error::Channel(format!("WeCom pong send failed: {}", e)))?;
             }
@@ -673,7 +686,9 @@ impl WeComChannel {
                     .await
                     {
                         Ok(path) => media.push(path),
-                        Err(e) => warn!(error = %e, "WeCom long connection: failed to download image"),
+                        Err(e) => {
+                            warn!(error = %e, "WeCom long connection: failed to download image")
+                        }
                     }
                 }
                 (
@@ -704,10 +719,14 @@ impl WeComChannel {
                     .await
                     {
                         Ok(path) => media.push(path),
-                        Err(e) => warn!(error = %e, "WeCom long connection: failed to download voice"),
+                        Err(e) => {
+                            warn!(error = %e, "WeCom long connection: failed to download voice")
+                        }
                     }
                 }
-                let content = if let Some(recognition) = voice.recognition.filter(|s| !s.trim().is_empty()) {
+                let content = if let Some(recognition) =
+                    voice.recognition.filter(|s| !s.trim().is_empty())
+                {
                     format!("用户发来一条语音，企业微信转写文本：{}", recognition.trim())
                 } else {
                     "用户发来了一条语音消息，请先用 audio_transcribe 工具转写，然后根据转写内容回复用户。".to_string()
@@ -728,7 +747,9 @@ impl WeComChannel {
                     .await
                     {
                         Ok(path) => media.push(path),
-                        Err(e) => warn!(error = %e, "WeCom long connection: failed to download file"),
+                        Err(e) => {
+                            warn!(error = %e, "WeCom long connection: failed to download file")
+                        }
                     }
                 }
                 let desc = match file.filename.as_deref() {
@@ -736,7 +757,8 @@ impl WeComChannel {
                         "用户发来了文件「{}」，请问您需要我做什么？（例如：读取内容、分析数据等）",
                         name
                     ),
-                    _ => "用户发来了一个文件，请问您需要我做什么？（例如：读取内容、分析数据等）".to_string(),
+                    _ => "用户发来了一个文件，请问您需要我做什么？（例如：读取内容、分析数据等）"
+                        .to_string(),
                 };
                 (desc, media, true)
             }
@@ -1131,7 +1153,10 @@ fn resolve_wecom_webhook_config(
         .unwrap_or("");
 
     let signed_payload = if method == "GET" {
-        query.get("echostr").map(|s| percent_decode(s)).unwrap_or_default()
+        query
+            .get("echostr")
+            .map(|s| percent_decode(s))
+            .unwrap_or_default()
     } else {
         extract_xml_tag(body, "Encrypt").unwrap_or_default()
     };
@@ -1396,7 +1421,8 @@ pub async fn process_webhook(
             let media_id = extract_xml_tag(&decrypted_body, "MediaId").unwrap_or_default();
             info!(media_id = %media_id, "WeCom webhook: received video");
             let paths = if !media_id.is_empty() {
-                match download_wecom_media(&resolved_config, &media_id, "video", Some("mp4")).await {
+                match download_wecom_media(&resolved_config, &media_id, "video", Some("mp4")).await
+                {
                     Ok(p) => vec![p],
                     Err(e) => {
                         warn!(error = %e.to_string(), "WeCom: failed to download video");
@@ -1419,7 +1445,9 @@ pub async fn process_webhook(
             let ext = file_name.rsplit('.').next().map(|s| s.to_string());
             info!(media_id = %media_id, file_name = %file_name, "WeCom webhook: received file");
             let paths = if !media_id.is_empty() {
-                match download_wecom_media(&resolved_config, &media_id, "file", ext.as_deref()).await {
+                match download_wecom_media(&resolved_config, &media_id, "file", ext.as_deref())
+                    .await
+                {
                     Ok(p) => vec![p],
                     Err(e) => {
                         warn!(error = %e.to_string(), "WeCom: failed to download file");
@@ -1887,7 +1915,12 @@ pub async fn send_media_message(
     // Long connection (AI bot) mode does not support sending any media files.
     let mode = config.channels.wecom.mode.trim().to_lowercase();
     if mode == "long_connection" || mode == "long-connection" || mode == "stream" {
-        return send_message(config, chat_id, "企业微信长连接机器人暂不支持发送图片或文件，请使用文字回复。").await;
+        return send_message(
+            config,
+            chat_id,
+            "企业微信长连接机器人暂不支持发送图片或文件，请使用文字回复。",
+        )
+        .await;
     }
 
     crate::rate_limit::wecom_limiter().acquire().await;
@@ -2133,7 +2166,10 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
         if let Some(tx) = registry.get(&bot_id) {
             let chunks = split_message(text, WECOM_MSG_LIMIT);
             for chunk in chunks {
-                let msg = LongConnOutbound::Text { chat_id: chat_id.to_string(), content: chunk };
+                let msg = LongConnOutbound::Text {
+                    chat_id: chat_id.to_string(),
+                    content: chunk,
+                };
                 if let Err(e) = tx.try_send(msg) {
                     warn!(error = %e, bot_id = %bot_id, "WeCom longconn: failed to queue outbound message");
                 }
@@ -2418,7 +2454,10 @@ mod tests {
         let body = format!("<xml><Encrypt>{}</Encrypt></xml>", encrypt);
 
         let resolved = resolve_wecom_webhook_config(&config, "POST", &query, &body);
-        assert_eq!(resolved.channels.wecom.default_account_id.as_deref(), Some("ops"));
+        assert_eq!(
+            resolved.channels.wecom.default_account_id.as_deref(),
+            Some("ops")
+        );
         assert_eq!(resolved.channels.wecom.callback_token, "token-b");
     }
 
@@ -2464,7 +2503,12 @@ mod tests {
             },
         );
 
-        let resolved = resolve_wecom_webhook_config(&config, "POST", &std::collections::HashMap::new(), "<xml></xml>");
+        let resolved = resolve_wecom_webhook_config(
+            &config,
+            "POST",
+            &std::collections::HashMap::new(),
+            "<xml></xml>",
+        );
         assert_eq!(resolved.channels.wecom.corp_id, "legacy-corp");
         assert_eq!(resolved.channels.wecom.default_account_id, None);
     }

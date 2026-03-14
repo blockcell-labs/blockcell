@@ -905,6 +905,52 @@ pub struct LarkConfig {
     pub default_account_id: Option<String>,
 }
 
+/// QQ Official Bot channel configuration.
+/// Uses Tencent's official QQ Bot API with OAuth2 authentication
+/// and a Discord-like WebSocket gateway protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QQConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// QQ Bot App ID
+    #[serde(default)]
+    pub app_id: String,
+    /// QQ Bot App Secret
+    #[serde(default)]
+    pub app_secret: String,
+    /// API environment: production or sandbox
+    #[serde(default)]
+    pub environment: String,
+    /// Connection mode: "websocket" (default, no public IP needed) or "webhook" (requires public URL)
+    #[serde(default)]
+    pub mode: String,
+    /// Allowlist of user IDs. Empty = allow all.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    #[serde(default)]
+    pub accounts: HashMap<String, QQAccountConfig>,
+    #[serde(default)]
+    pub default_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QQAccountConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub environment: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+}
+
 /// 企业微信 (WeCom / WeChat Work) channel configuration.
 /// Supports both callback mode (webhook) and polling mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1010,6 +1056,8 @@ pub struct ChannelsConfig {
     pub wecom: WeComConfig,
     #[serde(default)]
     pub lark: LarkConfig,
+    #[serde(default)]
+    pub qq: QQConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1624,6 +1672,7 @@ impl Config {
             "dingtalk" => self.channels.dingtalk.enabled,
             "wecom" => self.channels.wecom.enabled,
             "lark" => self.channels.lark.enabled,
+            "qq" => self.channels.qq.enabled,
             _ => false,
         }
     }

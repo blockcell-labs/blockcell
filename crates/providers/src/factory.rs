@@ -2,8 +2,8 @@ use blockcell_core::config::ToolCallMode;
 use blockcell_core::Config;
 
 use crate::{
-    AnthropicProvider, GeminiProvider, OllamaProvider, OpenAIProvider,
-    OpenAIResponsesProvider, Provider,
+    AnthropicProvider, GeminiProvider, OllamaProvider, OpenAIProvider, OpenAIResponsesProvider,
+    Provider,
 };
 
 /// 默认的 OpenAI 兼容 provider 的 api_base

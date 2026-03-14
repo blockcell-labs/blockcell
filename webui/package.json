@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 3210",
+    "test": "tsc -p tsconfig.test.json --noEmit && esbuild src/lib/store.test.ts --bundle --platform=node --format=esm --outfile=.test-dist/store.test.js && node --test .test-dist/store.test.js",
     "build": "tsc -b && vite build",
     "preview": "vite preview --port 3210"
   },

@@ -106,21 +106,25 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                 })
                                 .unwrap_or_default();
 
-                            let requested_agent_id = parsed.get("agent_id").and_then(|v| v.as_str());
+                            let requested_agent_id =
+                                parsed.get("agent_id").and_then(|v| v.as_str());
                             let resolved_agent_id = match requested_agent_id {
-                                Some(requested) => match resolve_requested_agent_id(&state.config, Some(requested)) {
-                                    Ok(agent_id) => agent_id,
-                                    Err(err) => {
-                                        let _ = ws_broadcast.send(
-                                            serde_json::to_string(&WsEvent::Error {
-                                                chat_id: client_chat_id.clone(),
-                                                message: err,
-                                            })
-                                            .unwrap_or_default(),
-                                        );
-                                        continue;
+                                Some(requested) => {
+                                    match resolve_requested_agent_id(&state.config, Some(requested))
+                                    {
+                                        Ok(agent_id) => agent_id,
+                                        Err(err) => {
+                                            let _ = ws_broadcast.send(
+                                                serde_json::to_string(&WsEvent::Error {
+                                                    chat_id: client_chat_id.clone(),
+                                                    message: err,
+                                                })
+                                                .unwrap_or_default(),
+                                            );
+                                            continue;
+                                        }
                                     }
-                                },
+                                }
                                 None => "default".to_string(),
                             };
 
@@ -199,19 +203,22 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                             };
 
                             let inbound = match parsed.get("agent_id").and_then(|v| v.as_str()) {
-                                Some(requested) => match resolve_requested_agent_id(&state.config, Some(requested)) {
-                                    Ok(agent_id) => with_route_agent_id(inbound, &agent_id),
-                                    Err(err) => {
-                                        let _ = ws_broadcast.send(
-                                            serde_json::to_string(&WsEvent::Error {
-                                                chat_id: chat_id.clone(),
-                                                message: err,
-                                            })
-                                            .unwrap_or_default(),
-                                        );
-                                        continue;
+                                Some(requested) => {
+                                    match resolve_requested_agent_id(&state.config, Some(requested))
+                                    {
+                                        Ok(agent_id) => with_route_agent_id(inbound, &agent_id),
+                                        Err(err) => {
+                                            let _ = ws_broadcast.send(
+                                                serde_json::to_string(&WsEvent::Error {
+                                                    chat_id: chat_id.clone(),
+                                                    message: err,
+                                                })
+                                                .unwrap_or_default(),
+                                            );
+                                            continue;
+                                        }
                                     }
-                                },
+                                }
                                 None => inbound,
                             };
 

@@ -9,18 +9,6 @@ pub(super) fn assign_session_id(chat_id: &str, agent_id: &str) -> String {
         return format!("{}:{}", agent_id, chrono::Utc::now().timestamp_millis());
     }
 
-    if let Some(rest) = trimmed.strip_prefix(&format!("{}:", agent_id)) {
-        if rest.chars().all(|c| c.is_ascii_digit()) && rest.len() >= 10 {
-            return format!("{}:{}", agent_id, chrono::Utc::now().timestamp_millis());
-        }
-    }
-
-    if let Some(rest) = trimmed.strip_prefix(&format!("{}_", agent_id)) {
-        if rest.chars().all(|c| c.is_ascii_digit()) && rest.len() >= 10 {
-            return format!("{}:{}", agent_id, chrono::Utc::now().timestamp_millis());
-        }
-    }
-
     trimmed.to_string()
 }
 
@@ -217,7 +205,8 @@ pub(super) async fn handle_tasks(
             }
         },
     );
-    let tasks_json = serde_json::to_value(&filtered_tasks).unwrap_or(serde_json::Value::Array(vec![]));
+    let tasks_json =
+        serde_json::to_value(&filtered_tasks).unwrap_or(serde_json::Value::Array(vec![]));
 
     Json(TasksResponse {
         queued,
@@ -227,4 +216,26 @@ pub(super) async fn handle_tasks(
         tasks: tasks_json,
     })
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assign_session_id;
+
+    #[test]
+    fn assign_session_id_generates_new_id_when_missing() {
+        let session_id = assign_session_id("", "default");
+
+        assert!(session_id.starts_with("default:"));
+        let suffix = session_id.trim_start_matches("default:");
+        assert!(suffix.chars().all(|c| c.is_ascii_digit()));
+        assert!(suffix.len() >= 10);
+    }
+
+    #[test]
+    fn assign_session_id_preserves_existing_ws_session_id() {
+        let session_id = assign_session_id("default:1773470425266", "default");
+
+        assert_eq!(session_id, "default:1773470425266");
+    }
 }

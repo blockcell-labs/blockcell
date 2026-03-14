@@ -1,8 +1,11 @@
 use blockcell_core::path_policy::{PathOp, PathPolicy, PolicyAction};
 use blockcell_core::system_event::{EventPriority, EventScope, SessionSummary, SystemEvent};
-use blockcell_core::types::{ChatMessage, LLMResponse, StreamChunk, ToolCallAccumulator, ToolCallRequest};
+use blockcell_core::types::{
+    ChatMessage, LLMResponse, StreamChunk, ToolCallAccumulator, ToolCallRequest,
+};
 use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths, Result};
 use blockcell_providers::{CallResult, Provider, ProviderPool};
+use blockcell_skills::manager::SkillExecution;
 use blockcell_storage::{AuditLogger, SessionStore};
 use blockcell_tools::{
     CapabilityRegistryHandle, CoreEvolutionHandle, EventEmitterHandle, MemoryStoreHandle,
@@ -327,11 +330,275 @@ fn compact_json_value(value: &serde_json::Value, depth: usize) -> serde_json::Va
     }
 }
 
+fn merge_json_value(target: &mut serde_json::Value, update: serde_json::Value) {
+    match (target, update) {
+        (serde_json::Value::Object(target_obj), serde_json::Value::Object(update_obj)) => {
+            for (key, value) in update_obj {
+                if let Some(existing) = target_obj.get_mut(&key) {
+                    merge_json_value(existing, value);
+                } else {
+                    target_obj.insert(key, value);
+                }
+            }
+        }
+        (slot, value) => {
+            *slot = value;
+        }
+    }
+}
+
+fn merge_continuation_context_metadata(
+    metadata: &mut serde_json::Value,
+    update: serde_json::Value,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let metadata_obj = metadata.as_object_mut().expect("metadata object");
+    let entry = metadata_obj
+        .entry("continuation_context".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    merge_json_value(entry, update);
+}
+
+fn extract_continuation_context_update(
+    tool_name: &str,
+    result_json: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut update = serde_json::Value::Object(serde_json::Map::new());
+
+    if let Some(tool_context) = result_json.get("continuation_context").cloned() {
+        merge_json_value(&mut update, tool_context);
+    }
+
+    match tool_name {
+        "list_dir" => {
+            let Some(dir_path) = result_json.get("path").and_then(|v| v.as_str()) else {
+                return match update.as_object() {
+                    Some(obj) if obj.is_empty() => None,
+                    _ => Some(update),
+                };
+            };
+
+            let entries = result_json
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let items = entries
+                .into_iter()
+                .take(40)
+                .enumerate()
+                .filter_map(|(idx, entry)| {
+                    let name = entry.get("name").and_then(|v| v.as_str())?;
+                    let item_type = entry
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other");
+                    let path = PathBuf::from(dir_path)
+                        .join(name)
+                        .to_string_lossy()
+                        .to_string();
+                    Some(serde_json::json!({
+                        "index": idx + 1,
+                        "name": name,
+                        "path": path,
+                        "type": item_type
+                    }))
+                })
+                .collect::<Vec<_>>();
+
+            merge_json_value(
+                &mut update,
+                serde_json::json!({
+                    "filesystem": {
+                        "current_dir": dir_path,
+                        "entries": items
+                    }
+                }),
+            );
+        }
+        "read_file" => {
+            if let Some(path) = result_json.get("path").and_then(|v| v.as_str()) {
+                let name = Path::new(path)
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or(path);
+                merge_json_value(
+                    &mut update,
+                    serde_json::json!({
+                        "filesystem": {
+                            "last_read_file": {
+                                "name": name,
+                                "path": path,
+                                "type": "file"
+                            },
+                            "selected_entry": {
+                                "name": name,
+                                "path": path,
+                                "type": "file"
+                            }
+                        }
+                    }),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    match update.as_object() {
+        Some(obj) if obj.is_empty() => None,
+        _ => Some(update),
+    }
+}
+
+fn merge_continuation_context_from_tool_result(
+    session_metadata: &mut serde_json::Value,
+    tool_name: &str,
+    tool_result: &str,
+) {
+    let Ok(result_json) = serde_json::from_str::<serde_json::Value>(tool_result) else {
+        return;
+    };
+
+    if let Some(context_update) = extract_continuation_context_update(tool_name, &result_json) {
+        merge_continuation_context_metadata(session_metadata, context_update);
+    }
+}
+
+fn merge_continuation_context_value(
+    session_metadata: &mut serde_json::Value,
+    continuation_context: Option<serde_json::Value>,
+) {
+    if let Some(context_update) = continuation_context {
+        merge_continuation_context_metadata(session_metadata, context_update);
+    }
+}
+
+fn build_recent_execution_trace_entry(
+    kind: &str,
+    name: &str,
+    action: Option<&str>,
+    summary: &str,
+    context_ref: Option<&str>,
+    timestamp_ms: i64,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "turn_id".to_string(),
+        serde_json::json!(format!("t_{}", timestamp_ms)),
+    );
+    obj.insert("kind".to_string(), serde_json::json!(kind));
+    obj.insert("name".to_string(), serde_json::json!(name));
+    obj.insert(
+        "summary".to_string(),
+        serde_json::json!(truncate_str(summary.trim(), 160)),
+    );
+    obj.insert("timestamp_ms".to_string(), serde_json::json!(timestamp_ms));
+    if let Some(action) = action.map(str::trim).filter(|value| !value.is_empty()) {
+        obj.insert("action".to_string(), serde_json::json!(action));
+    }
+    if let Some(context_ref) = context_ref.map(str::trim).filter(|value| !value.is_empty()) {
+        obj.insert("context_ref".to_string(), serde_json::json!(context_ref));
+    }
+    serde_json::Value::Object(obj)
+}
+
+fn append_recent_execution_trace(
+    session_metadata: &mut serde_json::Value,
+    entry: serde_json::Value,
+) {
+    if !session_metadata.is_object() {
+        *session_metadata = serde_json::Value::Object(serde_json::Map::new());
+    }
+
+    let metadata_obj = session_metadata
+        .as_object_mut()
+        .expect("session metadata object");
+    let trace = metadata_obj
+        .entry("recent_execution_trace".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+    if !trace.is_array() {
+        *trace = serde_json::Value::Array(Vec::new());
+    }
+
+    let trace_array = trace.as_array_mut().expect("trace array");
+    trace_array.push(entry);
+    if trace_array.len() > 3 {
+        let remove_count = trace_array.len() - 3;
+        trace_array.drain(0..remove_count);
+    }
+}
+
+fn build_continuation_context_inventory(continuation_context: &serde_json::Value) -> Vec<String> {
+    let Some(context_obj) = continuation_context.as_object() else {
+        return Vec::new();
+    };
+
+    let mut hints = Vec::new();
+    for (root_key, root_value) in context_obj {
+        match root_value {
+            serde_json::Value::Object(root_obj) => {
+                for (child_key, child_value) in root_obj {
+                    match child_value {
+                        serde_json::Value::Array(items) => {
+                            hints.push(format!("{}.{}({})", root_key, child_key, items.len()));
+                        }
+                        serde_json::Value::Object(_) => {
+                            hints.push(format!("{}.{}", root_key, child_key));
+                        }
+                        _ => {
+                            hints.push(format!("{}.{}", root_key, child_key));
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                hints.push(format!("{}({})", root_key, items.len()));
+            }
+            _ => hints.push(root_key.clone()),
+        }
+    }
+
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+fn context_root_keys(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+fn primary_context_ref(value: &serde_json::Value) -> Option<String> {
+    let mut keys = context_root_keys(value);
+    keys.sort();
+    keys.into_iter().next()
+}
+
+fn summarize_trace_text(text: &str) -> String {
+    truncate_str(text.trim(), 160)
+}
+
+fn summarize_trace_result(raw: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        let compact = compact_json_value(&value, 0);
+        if let Ok(json) = serde_json::to_string(&compact) {
+            return summarize_trace_text(&json);
+        }
+    }
+    summarize_trace_text(raw)
+}
+
 /// Prepare skill result for presentation.
 struct SkillResultPresentation {
     direct_text: Option<String>,
     llm_payload: Option<String>,
     fallback_text: String,
+    continuation_context: Option<serde_json::Value>,
 }
 
 fn prepare_skill_result_for_presentation(
@@ -351,6 +618,7 @@ fn prepare_skill_result_for_presentation(
                 direct_text: None,
                 llm_payload: Some(truncate_str(output, 4000)),
                 fallback_text: raw_fallback,
+                continuation_context: None,
             };
         }
     };
@@ -360,19 +628,17 @@ fn prepare_skill_result_for_presentation(
             direct_text: None,
             llm_payload: Some(truncate_str(output, 4000)),
             fallback_text: raw_fallback,
+            continuation_context: None,
         };
     };
 
-    if let Some(display_text) = obj.get("display_text").and_then(|v| v.as_str()) {
-        let text = display_text.trim();
-        if !text.is_empty() {
-            return SkillResultPresentation {
-                direct_text: Some(text.to_string()),
-                llm_payload: None,
-                fallback_text: text.to_string(),
-            };
-        }
-    }
+    let direct_text = obj
+        .get("display_text")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let continuation_context = obj.get("continuation_context").cloned();
 
     let instruction = obj
         .get("instruction")
@@ -389,7 +655,7 @@ fn prepare_skill_result_for_presentation(
     } else {
         let mut compact = serde_json::Map::new();
         for (key, value) in obj {
-            if key == "raw_data" {
+            if key == "raw_data" || key == "continuation_context" {
                 continue;
             }
             compact.insert(key.clone(), compact_json_value(value, 0));
@@ -400,7 +666,9 @@ fn prepare_skill_result_for_presentation(
     let llm_payload =
         serde_json::to_string_pretty(&llm_source).unwrap_or_else(|_| truncate_str(output, 4000));
 
-    let fallback_text = if let Some(summary) = obj.get("summary_data") {
+    let fallback_text = if let Some(text) = direct_text.as_ref() {
+        text.clone()
+    } else if let Some(summary) = obj.get("summary_data") {
         let compact = serde_json::to_string_pretty(&compact_json_value(summary, 0))
             .unwrap_or_else(|_| "{}".to_string());
         format!(
@@ -413,9 +681,10 @@ fn prepare_skill_result_for_presentation(
     };
 
     SkillResultPresentation {
-        direct_text: None,
+        direct_text,
         llm_payload: Some(truncate_str(&llm_payload, 16000)),
         fallback_text,
+        continuation_context,
     }
 }
 
@@ -630,6 +899,86 @@ impl SkillScriptKind {
             SkillScriptKind::Markdown => "markdown",
         }
     }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+struct SkillDecision {
+    use_skill: bool,
+    skill: Option<String>,
+    method: Option<String>,
+    arguments: serde_json::Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct SkillInvocation {
+    skill_name: String,
+    runtime_kind: SkillScriptKind,
+    dispatch_kind: String,
+    method: Option<String>,
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct InteractionDecision {
+    active_skill: Option<ActiveSkillContext>,
+    active_skill_route: Option<SkillExecutionRoute>,
+    chat_intents: Vec<IntentCategory>,
+    mode: InteractionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillExecutionRoute {
+    PromptOnly,
+    Structured,
+    LegacyScript,
+}
+
+fn decide_skill_execution_route(
+    execution: Option<&SkillExecution>,
+    script_kind: Option<SkillScriptKind>,
+) -> Option<SkillExecutionRoute> {
+    if let Some(execution) = execution {
+        if !execution.actions.is_empty() {
+            return Some(SkillExecutionRoute::Structured);
+        }
+
+        return match execution.normalized_kind() {
+            "markdown" => Some(SkillExecutionRoute::PromptOnly),
+            "python" | "rhai" => Some(SkillExecutionRoute::LegacyScript),
+            _ => match script_kind {
+                Some(SkillScriptKind::Markdown) => Some(SkillExecutionRoute::PromptOnly),
+                Some(SkillScriptKind::Python) | Some(SkillScriptKind::Rhai) => {
+                    Some(SkillExecutionRoute::LegacyScript)
+                }
+                None => None,
+            },
+        };
+    }
+
+    match script_kind {
+        Some(SkillScriptKind::Markdown) => Some(SkillExecutionRoute::PromptOnly),
+        Some(SkillScriptKind::Python) | Some(SkillScriptKind::Rhai) => {
+            Some(SkillExecutionRoute::LegacyScript)
+        }
+        None => None,
+    }
+}
+
+fn determine_interaction_mode(
+    has_active_skill: bool,
+    chat_intents: &[IntentCategory],
+) -> InteractionMode {
+    if has_active_skill {
+        return InteractionMode::Skill;
+    }
+
+    if chat_intents.len() == 1 && matches!(chat_intents[0], IntentCategory::Chat) {
+        return InteractionMode::Chat;
+    }
+
+    InteractionMode::General
 }
 
 fn user_wants_send_image(text: &str) -> bool {
@@ -1648,6 +1997,393 @@ impl AgentRuntime {
         messages.extend(tail);
     }
 
+    async fn chat_with_provider(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<LLMResponse> {
+        if let Some((pidx, provider)) = self.provider_pool.acquire() {
+            let result = provider.chat(messages, tools).await;
+            match &result {
+                Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
+                Err(e) => self
+                    .provider_pool
+                    .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+            }
+            result
+        } else {
+            Err(blockcell_core::Error::Config(
+                "ProviderPool: no healthy providers".to_string(),
+            ))
+        }
+    }
+
+    async fn run_prompt_skill_loop(
+        &mut self,
+        msg: &InboundMessage,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        tool_names: &[String],
+        session_metadata: &mut serde_json::Value,
+    ) -> Result<String> {
+        let allowed_tool_names = tool_names.iter().cloned().collect::<HashSet<_>>();
+        let max_iterations = self
+            .config
+            .agents
+            .defaults
+            .max_tool_iterations
+            .min(4)
+            .max(1);
+        let mut current_messages = messages;
+        let mut final_response = String::new();
+
+        for iteration in 0..max_iterations {
+            let response = self.chat_with_provider(&current_messages, &tools).await?;
+
+            if response.tool_calls.is_empty() {
+                final_response = response.content.unwrap_or_default();
+                break;
+            }
+
+            current_messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: serde_json::Value::String(response.content.unwrap_or_default()),
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: Some(response.tool_calls.clone()),
+                tool_call_id: None,
+                name: None,
+            });
+
+            for tool_call in response.tool_calls {
+                let tool_result =
+                    if crate::prompt_skill_executor::PromptSkillExecutor::is_tool_allowed(
+                        &tool_call.name,
+                        &allowed_tool_names,
+                    ) {
+                        self.execute_tool_call(&tool_call, msg).await
+                    } else {
+                        serde_json::json!({
+                            "error": format!(
+                                "Tool '{}' is not available inside prompt skill scope.",
+                                tool_call.name
+                            ),
+                            "tool": tool_call.name,
+                            "hint": "Use only the tools declared by the active skill."
+                        })
+                        .to_string()
+                    };
+
+                merge_continuation_context_from_tool_result(
+                    session_metadata,
+                    &tool_call.name,
+                    &tool_result,
+                );
+                let context_ref = serde_json::from_str::<serde_json::Value>(&tool_result)
+                    .ok()
+                    .and_then(|rv| extract_continuation_context_update(&tool_call.name, &rv))
+                    .and_then(|update| primary_context_ref(&update));
+                append_recent_execution_trace(
+                    session_metadata,
+                    build_recent_execution_trace_entry(
+                        "tool",
+                        &tool_call.name,
+                        None,
+                        &summarize_trace_result(&tool_result),
+                        context_ref.as_deref(),
+                        chrono::Utc::now().timestamp_millis(),
+                    ),
+                );
+
+                let mut tool_message = ChatMessage::tool_result(&tool_call.id, &tool_result);
+                tool_message.name = Some(tool_call.name.clone());
+                current_messages.push(tool_message);
+            }
+
+            if iteration == max_iterations - 1 {
+                let mut final_messages = current_messages.clone();
+                final_messages.push(ChatMessage::user(
+                    "请基于以上技能上下文和工具结果，直接给出最终答案。不要再调用任何工具。",
+                ));
+                final_response = self
+                    .chat_with_provider(&final_messages, &[])
+                    .await?
+                    .content
+                    .unwrap_or_default();
+                break;
+            }
+        }
+
+        let final_response = strip_fake_tool_calls(final_response.trim());
+        Ok(final_response.trim().to_string())
+    }
+
+    fn resolve_skill_execution_route_for_active_skill(
+        &self,
+        active_skill: Option<&ActiveSkillContext>,
+    ) -> Option<SkillExecutionRoute> {
+        let skill_ctx = active_skill?;
+        self.context_builder
+            .skill_manager()
+            .and_then(|sm| sm.get(&skill_ctx.name))
+            .and_then(|skill| {
+                let script_kind = skill
+                    .meta
+                    .execution
+                    .as_ref()
+                    .and_then(|execution| match execution.normalized_kind() {
+                        "python" => Some(SkillScriptKind::Python),
+                        "rhai" => Some(SkillScriptKind::Rhai),
+                        "markdown" => Some(SkillScriptKind::Markdown),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        infer_skill_script_kind(&self.paths, &skill_ctx.name)
+                            .map(|kind| kind.as_runtime_kind())
+                    });
+                decide_skill_execution_route(skill.meta.execution.as_ref(), script_kind)
+            })
+    }
+
+    fn load_recent_execution_trace(
+        &self,
+        session_metadata: &serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        session_metadata
+            .get("recent_execution_trace")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn recent_skill_names(&self, recent_trace: &[serde_json::Value]) -> Vec<String> {
+        let mut names = recent_trace
+            .iter()
+            .filter_map(|entry| {
+                let kind = entry.get("kind").and_then(|value| value.as_str())?;
+                if !kind.contains("skill") {
+                    return None;
+                }
+                entry
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn related_recent_trace_for_skill(
+        &self,
+        session_metadata: &serde_json::Value,
+        skill_name: &str,
+    ) -> Vec<serde_json::Value> {
+        self.load_recent_execution_trace(session_metadata)
+            .into_iter()
+            .filter(|entry| {
+                entry.get("name").and_then(|value| value.as_str()) == Some(skill_name)
+                    || entry.get("context_ref").and_then(|value| value.as_str()) == Some(skill_name)
+            })
+            .collect()
+    }
+
+    async fn arbitrate_route_choice(
+        &mut self,
+        msg: &InboundMessage,
+        skill_candidates: &[String],
+        chat_intents: &[IntentCategory],
+        session_metadata: &serde_json::Value,
+    ) -> Option<crate::skill_decision::RouteChoice> {
+        let recent_trace = self.load_recent_execution_trace(session_metadata);
+        let continuation_hints = session_metadata
+            .get("continuation_context")
+            .map(build_continuation_context_inventory)
+            .unwrap_or_default();
+
+        if recent_trace.is_empty() && continuation_hints.is_empty() {
+            return None;
+        }
+
+        let available_tools: HashSet<String> =
+            self.tool_registry.tool_names().into_iter().collect();
+        let tool_candidates = resolve_profile_tool_names(
+            &self.config,
+            self.agent_id.as_deref(),
+            chat_intents,
+            &available_tools,
+        );
+
+        let prompt = crate::skill_decision::SkillDecisionEngine::build_routing_decision_prompt(
+            &msg.content,
+            &recent_trace,
+            skill_candidates,
+            &tool_candidates,
+            &continuation_hints,
+        );
+        let messages = vec![ChatMessage::user(&prompt)];
+        let response = self.chat_with_provider(&messages, &[]).await.ok()?;
+        let content = response.content.unwrap_or_default();
+        let cleaned = extract_json_from_text(&content);
+        let payload: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+        let recent_skill_names = self.recent_skill_names(&recent_trace);
+
+        crate::skill_decision::SkillDecisionEngine::normalize_route_choice(
+            &payload,
+            skill_candidates,
+            &recent_skill_names,
+        )
+    }
+
+    async fn decide_interaction(
+        &mut self,
+        msg: &InboundMessage,
+        disabled_skills: &HashSet<String>,
+        classifier: &crate::intent::IntentClassifier,
+        session_metadata: &serde_json::Value,
+    ) -> InteractionDecision {
+        let explicit_name = detect_explicit_skill_name(&msg.content);
+        let forced_skill_name: &str = if !explicit_name.is_empty() {
+            &explicit_name
+        } else {
+            msg.metadata
+                .get("forced_skill_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        };
+
+        let skill_candidates: Vec<(String, String)> = self
+            .context_builder
+            .skill_manager()
+            .map(|sm| {
+                sm.match_all_skills(&msg.content, disabled_skills)
+                    .into_iter()
+                    .map(|s| (s.name.clone(), s.meta.description.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let chat_intents = classifier.classify(&msg.content);
+        let skill_candidate_names = skill_candidates
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+
+        let mut active_skill = None;
+        let mut mode_override = None;
+
+        if !forced_skill_name.is_empty() {
+            active_skill = self
+                .context_builder
+                .resolve_active_skill_by_name(forced_skill_name, disabled_skills);
+        } else if let Some(route_choice) = self
+            .arbitrate_route_choice(msg, &skill_candidate_names, &chat_intents, session_metadata)
+            .await
+        {
+            match route_choice.kind {
+                crate::skill_decision::RouteChoiceKind::ContinueRecentSkill
+                | crate::skill_decision::RouteChoiceKind::UseCurrentSkill => {
+                    if let Some(skill_name) = route_choice.skill_name.as_deref() {
+                        active_skill = self
+                            .context_builder
+                            .resolve_active_skill_by_name(skill_name, disabled_skills);
+                        if active_skill.is_some() {
+                            mode_override = Some(InteractionMode::Skill);
+                        }
+                    }
+                }
+                crate::skill_decision::RouteChoiceKind::UseTools => {
+                    mode_override = Some(InteractionMode::General);
+                }
+                crate::skill_decision::RouteChoiceKind::Chat => {
+                    mode_override = Some(InteractionMode::Chat);
+                }
+            }
+        }
+
+        if active_skill.is_none() && mode_override.is_none() {
+            active_skill = match skill_candidates.len() {
+                0 => None,
+                1 => self
+                    .context_builder
+                    .resolve_active_skill_by_name(&skill_candidates[0].0, disabled_skills),
+                _ => {
+                    let selected = self
+                        .llm_disambiguate_skill(&msg.content, &skill_candidates)
+                        .await;
+                    self.context_builder
+                        .resolve_active_skill_by_name(&selected, disabled_skills)
+                }
+            };
+        }
+
+        let mode = mode_override
+            .unwrap_or_else(|| determine_interaction_mode(active_skill.is_some(), &chat_intents));
+        let active_skill_route =
+            self.resolve_skill_execution_route_for_active_skill(active_skill.as_ref());
+
+        info!(
+            mode = ?mode,
+            active_skill = active_skill.as_ref().map(|s| s.name.as_str()),
+            active_skill_route = ?active_skill_route,
+            "Interaction mode resolved"
+        );
+
+        InteractionDecision {
+            active_skill,
+            active_skill_route,
+            chat_intents,
+            mode,
+        }
+    }
+
+    async fn execute_decided_skill_route(
+        &mut self,
+        decision: &InteractionDecision,
+        msg: &InboundMessage,
+        persist_session_key: &str,
+    ) -> Option<Result<String>> {
+        if !matches!(decision.mode, InteractionMode::Skill) {
+            return None;
+        }
+
+        let skill_ctx = decision.active_skill.as_ref()?;
+        match decision.active_skill_route {
+            Some(SkillExecutionRoute::PromptOnly) => {
+                info!(
+                    skill = %skill_ctx.name,
+                    "Prompt-only skill matched — entering scoped prompt executor"
+                );
+                Some(
+                    self.dispatch_prompt_skill_for_user(&skill_ctx.name, msg, persist_session_key)
+                        .await,
+                )
+            }
+            Some(SkillExecutionRoute::Structured) => {
+                info!(
+                    skill = %skill_ctx.name,
+                    "Structured script skill matched — entering controlled dispatch path"
+                );
+                Some(
+                    self.dispatch_structured_skill_for_user(
+                        &skill_ctx.name,
+                        msg,
+                        persist_session_key,
+                    )
+                    .await,
+                )
+            }
+            Some(SkillExecutionRoute::LegacyScript) => {
+                info!(
+                    skill = %skill_ctx.name,
+                    "Legacy script skill matched — using compatibility LLM path"
+                );
+                None
+            }
+            None => None,
+        }
+    }
+
     pub async fn process_message(&mut self, msg: InboundMessage) -> Result<String> {
         let session_key = msg.session_key();
         let cron_deliver_target = if msg.channel == "cron"
@@ -1727,10 +2463,7 @@ impl AgentRuntime {
         }
 
         // ── skill script fast path: execute SKILL.rhai / SKILL.py directly without LLM ──
-        let metadata_skill_name = msg
-            .metadata
-            .get("skill_name")
-            .and_then(|v| v.as_str());
+        let metadata_skill_name = msg.metadata.get("skill_name").and_then(|v| v.as_str());
         let scripted_kind = resolve_skill_script_kind_from_metadata(
             &msg.metadata,
             Some(&self.paths),
@@ -1754,9 +2487,16 @@ impl AgentRuntime {
                 .execute_skill_script(&skill_name, &msg, script_kind)
                 .await;
 
+            let mut result_presentation: Option<SkillResultPresentation> = None;
             let final_response = match result {
                 Ok(output) => {
                     let presentation = prepare_skill_result_for_presentation(&skill_name, &output);
+                    result_presentation = Some(SkillResultPresentation {
+                        direct_text: presentation.direct_text.clone(),
+                        llm_payload: presentation.llm_payload.clone(),
+                        fallback_text: presentation.fallback_text.clone(),
+                        continuation_context: presentation.continuation_context.clone(),
+                    });
                     if let Some(direct_text) = presentation.direct_text {
                         info!(
                             skill = %skill_name,
@@ -1789,12 +2529,17 @@ impl AgentRuntime {
                                 "你是一个定时任务结果整理助手。技能脚本已经执行完成。\
                                 请优先依据输入中的技能说明、instruction 和 summary_data 整理结果。\
                                 如果已经是轻量结构化摘要，就直接整理成清晰友好的最终回复。\
-                                不要再调用任何工具，不要编造未提供的信息。"
+                                不要再调用任何工具，不要编造未提供的信息。",
                             ),
-                            ChatMessage::user(&format!(
-                                "[定时任务·{}] 技能脚本执行完成。以下是该技能的 SKILL.md 指导：\n\n{}\n\n以下是脚本产出的待整理数据：\n\n{}",
-                                skill_name, skill_markdown, summarize_input
-                            )),
+                            ChatMessage::user(
+                                &crate::skill_summary::SkillSummaryFormatter::build_prompt(
+                                    &msg.content,
+                                    &skill_name,
+                                    None,
+                                    &skill_markdown,
+                                    &summarize_input,
+                                ),
+                            ),
                         ];
 
                         let llm_result = if let Some((pidx, provider)) =
@@ -1859,10 +2604,26 @@ impl AgentRuntime {
                 session_key.clone()
             };
 
-            let skill_history_message = ChatMessage::assistant(&final_response);
-            let _ = self
+            let mut history = self
                 .session_store
-                .append(&persist_session_key, &skill_history_message);
+                .load(&persist_session_key)
+                .unwrap_or_default();
+            let mut session_metadata = self
+                .session_store
+                .load_metadata(&persist_session_key)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(presentation) = result_presentation {
+                merge_continuation_context_value(
+                    &mut session_metadata,
+                    presentation.continuation_context,
+                );
+            }
+            history.push(ChatMessage::assistant(&final_response));
+            let _ = self.session_store.save_with_metadata(
+                &persist_session_key,
+                &history,
+                &session_metadata,
+            );
 
             if let Some((channel, to)) = deliver_target {
                 if channel == "ws" {
@@ -1984,6 +2745,7 @@ impl AgentRuntime {
 
         // Load session history
         let mut history = self.session_store.load(&session_key)?;
+        let mut session_metadata = self.session_store.load_metadata(&persist_session_key)?;
 
         // Auto-set session display name from first user message
         if history.is_empty() {
@@ -2011,48 +2773,29 @@ impl AgentRuntime {
         let disabled_tools = load_disabled_toggles(&self.paths, "tools");
         let disabled_skills = load_disabled_toggles(&self.paths, "skills");
 
-        let forced_skill_name = msg
-            .metadata
-            .get("forced_skill_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let active_skill = self
-            .context_builder
-            .resolve_active_skill_by_name(forced_skill_name, &disabled_skills)
-            .or_else(|| {
-                self.context_builder
-                    .resolve_active_skill(&msg.content, &disabled_skills)
-            });
-        let chat_intents = classifier.classify(&msg.content);
-        let is_chat = active_skill.is_none()
-            && chat_intents.len() == 1
-            && matches!(chat_intents[0], crate::intent::IntentCategory::Chat);
-        let mode = if active_skill.is_some() {
-            InteractionMode::Skill
-        } else if is_chat {
-            InteractionMode::Chat
-        } else {
-            InteractionMode::General
-        };
-        info!(
-            mode = ?mode,
-            active_skill = active_skill.as_ref().map(|s| s.name.as_str()),
-            "Interaction mode resolved"
-        );
+        let decision = self
+            .decide_interaction(&msg, &disabled_skills, &classifier, &session_metadata)
+            .await;
+        if let Some(result) = self
+            .execute_decided_skill_route(&decision, &msg, &persist_session_key)
+            .await
+        {
+            return result;
+        }
 
         let available_tools: HashSet<String> =
             self.tool_registry.tool_names().into_iter().collect();
         let routed_agent_id = self.agent_id.as_deref();
         let mut tool_names = resolve_effective_tool_names(
             &self.config,
-            mode,
+            decision.mode,
             routed_agent_id,
-            active_skill.as_ref(),
-            &chat_intents,
+            decision.active_skill.as_ref(),
+            &decision.chat_intents,
             &available_tools,
         );
 
-        if tool_names.is_empty() && !matches!(mode, InteractionMode::Chat) {
+        if tool_names.is_empty() && !matches!(decision.mode, InteractionMode::Chat) {
             tool_names = global_core_tool_names();
             tool_names.retain(|name| available_tools.contains(name));
         }
@@ -2082,8 +2825,9 @@ impl AgentRuntime {
         tool_names.dedup();
 
         // Collect tool-specific prompt rules from the registry for actually loaded tools.
-        let mode_names: Vec<String> = match mode {
-            InteractionMode::Skill => active_skill
+        let mode_names: Vec<String> = match decision.mode {
+            InteractionMode::Skill => decision
+                .active_skill
                 .as_ref()
                 .map(|skill| vec![format!("Skill:{}", skill.name)])
                 .unwrap_or_else(|| vec!["Skill".to_string()]),
@@ -2115,14 +2859,15 @@ impl AgentRuntime {
             &history,
             &msg.content,
             &msg.media,
-            mode,
-            active_skill.as_ref(),
+            decision.mode,
+            decision.active_skill.as_ref(),
             &disabled_skills,
             &disabled_tools,
             &msg.channel,
             pending_intent,
             &tool_names,
             &tool_prompt_rules,
+            session_metadata.get("continuation_context"),
         );
 
         // Now add user message to history for session persistence
@@ -2151,8 +2896,8 @@ impl AgentRuntime {
             schemas
         };
         info!(
-            mode = ?mode,
-            active_skill = active_skill.as_ref().map(|s| s.name.as_str()),
+            mode = ?decision.mode,
+            active_skill = decision.active_skill.as_ref().map(|s| s.name.as_str()),
             tool_count = tools.len(),
             disabled_tools = disabled_tools.len(),
             disabled_skills = disabled_skills.len(),
@@ -2217,7 +2962,8 @@ impl AgentRuntime {
                         // 处理流式响应
                         let mut accumulated_content = String::new();
                         let mut accumulated_reasoning = String::new();
-                        let mut tool_call_accumulators: HashMap<String, ToolCallAccumulator> = HashMap::new();
+                        let mut tool_call_accumulators: HashMap<String, ToolCallAccumulator> =
+                            HashMap::new();
 
                         // 流接收超时：5分钟，防止恶意或 buggy provider 无限挂起
                         const STREAM_TIMEOUT_SECS: u64 = 300;
@@ -2225,8 +2971,9 @@ impl AgentRuntime {
                         loop {
                             let recv_result = tokio::time::timeout(
                                 std::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
-                                stream_rx.recv()
-                            ).await;
+                                stream_rx.recv(),
+                            )
+                            .await;
 
                             match recv_result {
                                 Ok(Some(chunk)) => {
@@ -2258,7 +3005,9 @@ impl AgentRuntime {
                                             }
                                         }
                                         StreamChunk::ToolCallStart { index: _, id, name } => {
-                                            let acc = tool_call_accumulators.entry(id.clone()).or_default();
+                                            let acc = tool_call_accumulators
+                                                .entry(id.clone())
+                                                .or_default();
                                             acc.id = id.clone();
                                             acc.name = name.clone();
                                             // 发送 tool_call_start 事件
@@ -2274,7 +3023,11 @@ impl AgentRuntime {
                                                 let _ = event_tx.send(event.to_string());
                                             }
                                         }
-                                        StreamChunk::ToolCallDelta { index: _, id, delta } => {
+                                        StreamChunk::ToolCallDelta {
+                                            index: _,
+                                            id,
+                                            delta,
+                                        } => {
                                             if let Some(acc) = tool_call_accumulators.get_mut(&id) {
                                                 acc.arguments.push_str(&delta);
                                             }
@@ -2286,14 +3039,15 @@ impl AgentRuntime {
                                             // finish_reason 和 usage 始终来自响应
 
                                             // 构建最终的 tool_calls：优先使用累积的
-                                            let final_tool_calls = if !tool_call_accumulators.is_empty() {
-                                                tool_call_accumulators
-                                                    .drain()
-                                                    .map(|(_, acc)| acc.to_tool_call_request())
-                                                    .collect()
-                                            } else {
-                                                response.tool_calls.clone()
-                                            };
+                                            let final_tool_calls =
+                                                if !tool_call_accumulators.is_empty() {
+                                                    tool_call_accumulators
+                                                        .drain()
+                                                        .map(|(_, acc)| acc.to_tool_call_request())
+                                                        .collect()
+                                                } else {
+                                                    response.tool_calls.clone()
+                                                };
 
                                             // 优先使用累积的 content，否则用响应值
                                             let final_content = if !accumulated_content.is_empty() {
@@ -2303,11 +3057,12 @@ impl AgentRuntime {
                                             };
 
                                             // 优先使用累积的 reasoning，否则用响应值
-                                            let final_reasoning = if !accumulated_reasoning.is_empty() {
-                                                Some(accumulated_reasoning.clone())
-                                            } else {
-                                                response.reasoning_content.clone()
-                                            };
+                                            let final_reasoning =
+                                                if !accumulated_reasoning.is_empty() {
+                                                    Some(accumulated_reasoning.clone())
+                                                } else {
+                                                    response.reasoning_content.clone()
+                                                };
 
                                             response_opt = Some(LLMResponse {
                                                 content: final_content,
@@ -2323,7 +3078,8 @@ impl AgentRuntime {
                                         }
                                         StreamChunk::Error { message } => {
                                             warn!(error = %message, "Stream error");
-                                            last_error = Some(blockcell_core::Error::Provider(message));
+                                            last_error =
+                                                Some(blockcell_core::Error::Provider(message));
                                             break;
                                         }
                                     }
@@ -2334,10 +3090,14 @@ impl AgentRuntime {
                                 }
                                 Err(_) => {
                                     // 流接收超时
-                                    warn!("Stream receive timeout after {} seconds", STREAM_TIMEOUT_SECS);
-                                    last_error = Some(blockcell_core::Error::Provider(
-                                        format!("Stream timeout after {} seconds", STREAM_TIMEOUT_SECS)
-                                    ));
+                                    warn!(
+                                        "Stream receive timeout after {} seconds",
+                                        STREAM_TIMEOUT_SECS
+                                    );
+                                    last_error = Some(blockcell_core::Error::Provider(format!(
+                                        "Stream timeout after {} seconds",
+                                        STREAM_TIMEOUT_SECS
+                                    )));
                                     break;
                                 }
                             }
@@ -2464,6 +3224,38 @@ impl AgentRuntime {
                     // with media; collecting here would cause a duplicate send.
                     if tool_call.name != "message" {
                         if let Ok(ref rv) = serde_json::from_str::<serde_json::Value>(&result) {
+                            if let Some(context_update) =
+                                extract_continuation_context_update(&tool_call.name, rv)
+                            {
+                                let context_ref = primary_context_ref(&context_update);
+                                merge_continuation_context_metadata(
+                                    &mut session_metadata,
+                                    context_update,
+                                );
+                                append_recent_execution_trace(
+                                    &mut session_metadata,
+                                    build_recent_execution_trace_entry(
+                                        "tool",
+                                        &tool_call.name,
+                                        None,
+                                        &summarize_trace_result(&result),
+                                        context_ref.as_deref(),
+                                        chrono::Utc::now().timestamp_millis(),
+                                    ),
+                                );
+                            } else {
+                                append_recent_execution_trace(
+                                    &mut session_metadata,
+                                    build_recent_execution_trace_entry(
+                                        "tool",
+                                        &tool_call.name,
+                                        None,
+                                        &summarize_trace_result(&result),
+                                        None,
+                                        chrono::Utc::now().timestamp_millis(),
+                                    ),
+                                );
+                            }
                             let media_exts = [
                                 "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "mp3", "wav",
                                 "m4a", "mp4", "webm", "mov",
@@ -2495,6 +3287,18 @@ impl AgentRuntime {
                                 }
                             }
                         }
+                    } else {
+                        append_recent_execution_trace(
+                            &mut session_metadata,
+                            build_recent_execution_trace_entry(
+                                "tool",
+                                &tool_call.name,
+                                None,
+                                &summarize_trace_result(&result),
+                                None,
+                                chrono::Utc::now().timestamp_millis(),
+                            ),
+                        );
                     }
 
                     // Detect thin web_search results (only titles/URLs, no actual content).
@@ -2733,7 +3537,8 @@ impl AgentRuntime {
         let final_response = strip_fake_tool_calls(&final_response);
 
         // Save session
-        self.session_store.save(&persist_session_key, &history)?;
+        self.session_store
+            .save_with_metadata(&persist_session_key, &history, &session_metadata)?;
 
         // L2 incremental session summary (P2-1):
         // When history is long enough, build an extractive summary and store it.
@@ -2757,7 +3562,8 @@ impl AgentRuntime {
                 .unwrap_or(false)
         {
             if let Some(tx) = &self.outbound_tx {
-                let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+                let mut outbound =
+                    OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
                 outbound.account_id = msg.account_id.clone();
                 outbound.media = collected_media.clone();
                 outbound.metadata = extract_reply_metadata(&msg);
@@ -3479,65 +4285,175 @@ impl AgentRuntime {
         skill_name: &str,
         msg: &InboundMessage,
     ) -> Result<String> {
-        let md_path = self.resolve_skill_script_path(skill_name, "SKILL.md")?;
-        self.run_markdown_script(&md_path, skill_name, msg).await
+        let _ = self.resolve_skill_script_path(skill_name, "SKILL.md")?;
+        let history = self.session_store.load(&msg.session_key())?;
+        let final_response = self
+            .run_prompt_skill_for_user(skill_name, msg, &history)
+            .await?;
+        Ok(serde_json::json!({ "display_text": final_response }).to_string())
     }
 
-    /// Helper: run a SKILL.md-only skill by routing the message back through the
-    /// normal LLM pipeline, but forcing skill matching via the skill's first trigger.
-    async fn run_markdown_script(
+    async fn run_prompt_skill_for_session(
         &mut self,
-        md_path: &std::path::Path,
         skill_name: &str,
         msg: &InboundMessage,
-    ) -> Result<String> {
-        let skill = self
+        history: &[ChatMessage],
+        session_key: &str,
+    ) -> Result<(String, serde_json::Value)> {
+        let disabled_skills = load_disabled_toggles(&self.paths, "skills");
+        let disabled_tools = load_disabled_toggles(&self.paths, "tools");
+        let active_skill = self
             .context_builder
-            .skill_manager()
-            .and_then(|sm| sm.get(skill_name))
+            .resolve_active_skill_by_name(skill_name, &disabled_skills)
             .ok_or_else(|| {
                 blockcell_core::Error::Skill(format!("Skill '{}' not found", skill_name))
             })?;
 
-        if !md_path.exists() {
+        if !active_skill.inject_prompt_md {
             return Err(blockcell_core::Error::Skill(format!(
-                "SKILL.md not found for skill '{}'",
+                "Skill '{}' is not a prompt-only markdown skill",
                 skill_name
             )));
         }
 
-        let trigger = skill
-            .meta
-            .triggers
-            .first()
-            .cloned()
-            .unwrap_or_else(|| skill_name.to_string());
-
-        let mut routed_msg = msg.clone();
-        routed_msg.content = if msg.content.trim().is_empty() {
-            trigger
-        } else {
-            format!("{}\n{}", trigger, msg.content)
-        };
-
-        let metadata = if routed_msg.metadata.is_object() {
-            routed_msg.metadata.as_object_mut()
-        } else {
-            routed_msg.metadata = serde_json::json!({});
-            routed_msg.metadata.as_object_mut()
-        };
-        if let Some(obj) = metadata {
-            obj.remove("skill_script");
-            obj.remove("skill_script_kind");
-            obj.remove("skill_markdown");
-            obj.insert(
-                "forced_skill_name".to_string(),
-                serde_json::json!(skill_name),
+        let available_tools = self
+            .tool_registry
+            .tool_names()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let tool_names =
+            crate::prompt_skill_executor::PromptSkillExecutor::resolve_allowed_tool_names(
+                &active_skill.tools,
+                &available_tools,
             );
+
+        let mode_names = vec![format!("Skill:{}", active_skill.name)];
+        let prompt_ctx = blockcell_tools::PromptContext {
+            channel: &msg.channel,
+            intents: &mode_names,
+        };
+        let tool_name_refs = tool_names
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>();
+        let tool_prompt_rules = self
+            .tool_registry
+            .get_prompt_rules(&tool_name_refs, &prompt_ctx);
+        let pending_intent = msg
+            .metadata
+            .get("media_pending_intent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut session_metadata = self.session_store.load_metadata(session_key)?;
+        let messages = self.context_builder.build_messages_for_mode_with_channel(
+            history,
+            &msg.content,
+            &msg.media,
+            InteractionMode::Skill,
+            Some(&active_skill),
+            &disabled_skills,
+            &disabled_tools,
+            &msg.channel,
+            pending_intent,
+            &tool_names,
+            &tool_prompt_rules,
+            session_metadata.get("continuation_context"),
+        );
+
+        let mut tools = if tool_names.is_empty() {
+            Vec::new()
+        } else {
+            self.tool_registry.get_tiered_schemas(
+                &tool_name_refs,
+                blockcell_tools::registry::global_core_tool_names(),
+            )
+        };
+        if !disabled_tools.is_empty() {
+            tools.retain(|schema| {
+                let name = schema
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                !disabled_tools.contains(name)
+            });
         }
 
-        info!(skill = %skill_name, "SKILL.md execution routed through normal LLM skill flow");
-        Box::pin(self.process_message(routed_msg)).await
+        let final_response = self
+            .run_prompt_skill_loop(msg, messages, tools, &tool_names, &mut session_metadata)
+            .await?;
+
+        Ok((final_response, session_metadata))
+    }
+
+    async fn run_prompt_skill_for_user(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+        history: &[ChatMessage],
+    ) -> Result<String> {
+        let (final_response, _) = self
+            .run_prompt_skill_for_session(skill_name, msg, history, &msg.session_key())
+            .await?;
+        Ok(final_response)
+    }
+
+    async fn dispatch_prompt_skill_for_user(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+        persist_session_key: &str,
+    ) -> Result<String> {
+        let history = self.session_store.load(persist_session_key)?;
+        let (final_response, session_metadata) = self
+            .run_prompt_skill_for_session(skill_name, msg, &history, persist_session_key)
+            .await?;
+
+        let mut updated_history = history;
+        let mut session_metadata = session_metadata;
+        append_recent_execution_trace(
+            &mut session_metadata,
+            build_recent_execution_trace_entry(
+                "prompt_skill",
+                skill_name,
+                None,
+                &summarize_trace_text(&final_response),
+                None,
+                chrono::Utc::now().timestamp_millis(),
+            ),
+        );
+        updated_history.push(ChatMessage::user(&msg.content));
+        updated_history.push(ChatMessage::assistant(&final_response));
+        self.session_store.save_with_metadata(
+            persist_session_key,
+            &updated_history,
+            &session_metadata,
+        )?;
+
+        if msg.channel == "ws" {
+            if let Some(ref event_tx) = self.event_tx {
+                let event = serde_json::json!({
+                    "type": "message_done",
+                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                    "chat_id": msg.chat_id,
+                    "task_id": "",
+                    "content": final_response,
+                    "tool_calls": 0,
+                    "duration_ms": 0,
+                    "media": [],
+                });
+                let _ = event_tx.send(event.to_string());
+            }
+        }
+
+        if let Some(tx) = &self.outbound_tx {
+            let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+            outbound.account_id = msg.account_id.clone();
+            outbound.metadata = extract_reply_metadata(msg);
+            let _ = tx.send(outbound).await;
+        }
+
+        Ok(final_response)
     }
 
     /// Helper: run a single .rhai script file with tool execution support.
@@ -3546,6 +4462,17 @@ impl AgentRuntime {
         rhai_path: &std::path::Path,
         skill_name: &str,
         msg: &InboundMessage,
+    ) -> Result<String> {
+        self.run_rhai_script_with_context(rhai_path, skill_name, msg, None)
+            .await
+    }
+
+    async fn run_rhai_script_with_context(
+        &self,
+        rhai_path: &std::path::Path,
+        skill_name: &str,
+        msg: &InboundMessage,
+        extra_ctx: Option<serde_json::Value>,
     ) -> Result<String> {
         use blockcell_skills::dispatcher::SkillDispatcher;
         use std::collections::HashMap;
@@ -3665,19 +4592,28 @@ impl AgentRuntime {
         context_vars.insert("skill_name".to_string(), serde_json::json!(skill_name));
         context_vars.insert("trigger".to_string(), serde_json::json!("cron"));
 
+        let invocation = extra_ctx
+            .as_ref()
+            .and_then(|ctx| ctx.get("invocation"))
+            .cloned();
+
         // Build a `ctx` map so SKILL.rhai scripts can use `ctx.user_input`, `ctx.channel`, etc.
-        context_vars.insert(
-            "ctx".to_string(),
-            serde_json::json!({
-                "user_input": msg.content,
-                "skill_name": skill_name,
-                "trigger": "cron",
-                "channel": msg.channel,
-                "chat_id": msg.chat_id,
-                "message": msg.content,
-                "metadata": msg.metadata,
-            }),
-        );
+        let mut ctx_json = serde_json::json!({
+            "user_input": msg.content,
+            "skill_name": skill_name,
+            "trigger": "cron",
+            "channel": msg.channel,
+            "chat_id": msg.chat_id,
+            "message": msg.content,
+            "metadata": msg.metadata,
+        });
+        if let Some(invocation_value) = invocation.clone() {
+            context_vars.insert("invocation".to_string(), invocation_value.clone());
+            if let Some(ctx_obj) = ctx_json.as_object_mut() {
+                ctx_obj.insert("invocation".to_string(), invocation_value);
+            }
+        }
+        context_vars.insert("ctx".to_string(), ctx_json);
 
         // Execute the Rhai script in a blocking task
         let dispatcher = SkillDispatcher::new();
@@ -3825,6 +4761,415 @@ impl AgentRuntime {
             "SKILL.py cron execution succeeded"
         );
         Ok(output_text)
+    }
+
+    /// Helper: run a SKILL.py script with explicit command-line arguments (structured dispatch).
+    async fn run_python_script_with_argv(
+        &self,
+        py_path: &std::path::Path,
+        skill_name: &str,
+        argv: &[String],
+    ) -> Result<String> {
+        use std::process::Stdio;
+
+        let python_bin = if which::which("python3").is_ok() {
+            "python3"
+        } else if which::which("python").is_ok() {
+            "python"
+        } else {
+            return Err(blockcell_core::Error::Skill(
+                "Python runtime not found (python3/python)".to_string(),
+            ));
+        };
+
+        let timeout_secs = self.config.tools.exec.timeout.clamp(1, 600) as u64;
+        let mut cmd = tokio::process::Command::new(python_bin);
+        cmd.arg(py_path);
+        for arg in argv {
+            cmd.arg(arg);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(parent) = py_path.parent() {
+            cmd.current_dir(parent);
+        }
+
+        let child = cmd.spawn().map_err(|e| {
+            blockcell_core::Error::Skill(format!(
+                "Failed to spawn {} for {}: {}",
+                python_bin,
+                py_path.display(),
+                e
+            ))
+        })?;
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            blockcell_core::Error::Skill(format!(
+                "SKILL.py execution timed out after {}s",
+                timeout_secs
+            ))
+        })?
+        .map_err(|e| blockcell_core::Error::Skill(format!("SKILL.py execution failed: {}", e)))?;
+
+        let max_output_chars = 10_000;
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stdout.len() > max_output_chars {
+            stdout = format!(
+                "{}\n... (output truncated)",
+                truncate_str(&stdout, max_output_chars)
+            );
+        }
+        if stderr.len() > max_output_chars {
+            stderr = format!(
+                "{}\n... (stderr truncated)",
+                truncate_str(&stderr, max_output_chars)
+            );
+        }
+
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated".to_string());
+            // Python scripts often print error messages to stdout then sys.exit(1);
+            // prefer stderr, fall back to stdout so the caller sees the actual message.
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                String::new()
+            };
+            let err = if detail.is_empty() {
+                format!("SKILL.py exited with status {}", code)
+            } else {
+                format!("SKILL.py exited with status {}: {}", code, detail)
+            };
+            warn!(skill = %skill_name, argv = ?argv, exit_code = %code, detail = %detail, "SKILL.py structured execution failed");
+            return Err(blockcell_core::Error::Skill(err));
+        }
+
+        let output_text = if stdout.trim().is_empty() {
+            "Python skill executed successfully (no output)".to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+
+        info!(
+            skill = %skill_name,
+            argv = ?argv,
+            "SKILL.py structured execution succeeded"
+        );
+        Ok(output_text)
+    }
+
+    /// Structured skill dispatch for user-initiated messages.
+    ///
+    /// For skills with `execution.actions` defined in meta.yaml, the runtime:
+    /// 1. Uses LLM to select the appropriate action and construct typed arguments
+    /// 2. Validates arguments against the action schema
+    /// 3. Builds command-line argv by substituting `{placeholder}` tokens
+    /// 4. Executes SKILL.py directly with the structured argv
+    /// 5. Uses LLM to present the script result to the user
+    async fn dispatch_structured_skill_for_user(
+        &mut self,
+        skill_name: &str,
+        msg: &InboundMessage,
+        persist_session_key: &str,
+    ) -> Result<String> {
+        // 1. Collect skill metadata and actions
+        let (skill_md, execution) = {
+            let sm = self.context_builder.skill_manager().ok_or_else(|| {
+                blockcell_core::Error::Skill("SkillManager not available".to_string())
+            })?;
+            let skill = sm.get(skill_name).ok_or_else(|| {
+                blockcell_core::Error::Skill(format!("Skill '{}' not found", skill_name))
+            })?;
+            let md = skill.load_md().unwrap_or_default();
+            let execution = skill.meta.execution.as_ref().cloned().unwrap_or_default();
+            (md, execution)
+        };
+
+        let actions = execution.actions.clone();
+        let history = self.session_store.load(persist_session_key)?;
+        let mut session_metadata = self.session_store.load_metadata(persist_session_key)?;
+
+        if actions.is_empty() {
+            return Err(blockcell_core::Error::Skill(format!(
+                "Skill '{}' has no structured actions",
+                skill_name
+            )));
+        }
+
+        let skill_continuation_context = session_metadata
+            .get("continuation_context")
+            .and_then(|value| value.get(skill_name));
+        let related_recent_trace =
+            self.related_recent_trace_for_skill(&session_metadata, skill_name);
+
+        // 3. LLM call: select method + construct arguments (stateless, no tools)
+        let method_prompt =
+            crate::skill_decision::SkillDecisionEngine::build_method_decision_prompt(
+                &msg.content,
+                skill_name,
+                &execution,
+                skill_continuation_context,
+                &related_recent_trace,
+            );
+        let method_messages = vec![ChatMessage::user(&method_prompt)];
+
+        let dispatch_result = if let Some((pidx, provider)) = self.provider_pool.acquire() {
+            let r = provider.chat(&method_messages, &[]).await;
+            match &r {
+                Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
+                Err(e) => self
+                    .provider_pool
+                    .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+            }
+            r
+        } else {
+            return Err(blockcell_core::Error::Config(
+                "ProviderPool: no healthy providers".to_string(),
+            ));
+        }?;
+
+        let dispatch_text = dispatch_result.content.unwrap_or_default();
+
+        // 4. Parse JSON from LLM output (handles ```json ... ``` wrapping)
+        let dispatch_json: serde_json::Value = {
+            let cleaned = extract_json_from_text(&dispatch_text);
+            serde_json::from_str(&cleaned).map_err(|e| {
+                blockcell_core::Error::Skill(format!(
+                    "LLM method selection returned invalid JSON ({}): {}",
+                    e,
+                    truncate_str(&dispatch_text, 200)
+                ))
+            })?
+        };
+
+        let dispatch_plan =
+            crate::structured_skill_executor::StructuredSkillExecutor::build_dispatch_plan(
+                skill_name,
+                &execution,
+                &dispatch_json,
+            )?;
+        let method_name = dispatch_plan.method_name.clone();
+        let argv = dispatch_plan.argv.clone();
+        let runtime_kind = execution.normalized_kind().to_string();
+
+        info!(
+            skill = %skill_name,
+            method = %method_name,
+            argv = ?argv,
+            runtime_kind = %runtime_kind,
+            "Structured skill dispatch: executing structured script"
+        );
+
+        let script_result = match runtime_kind.as_str() {
+            "python" => {
+                let py_path = self.resolve_skill_script_path(skill_name, "SKILL.py")?;
+                self.run_python_script_with_argv(&py_path, skill_name, &argv)
+                    .await
+            }
+            "rhai" => {
+                let rhai_path = self.resolve_skill_script_path(skill_name, "SKILL.rhai")?;
+                let rhai_context =
+                    crate::structured_skill_executor::StructuredSkillExecutor::build_rhai_context(
+                        &dispatch_plan,
+                    );
+                self.run_rhai_script_with_context(&rhai_path, skill_name, msg, Some(rhai_context))
+                    .await
+            }
+            other => Err(blockcell_core::Error::Skill(format!(
+                "Structured skill '{}' has unsupported runtime kind '{}'",
+                skill_name, other
+            ))),
+        };
+
+        // 9. Summarize script output with LLM
+        let final_response = match script_result {
+            Ok(output) => {
+                let presentation = prepare_skill_result_for_presentation(skill_name, &output);
+                merge_continuation_context_value(
+                    &mut session_metadata,
+                    presentation.continuation_context,
+                );
+                let summarize_messages = vec![
+                    ChatMessage::system(
+                        "你是技能结果整理助手。脚本已执行完成，请将结果整理为友好的回复。\
+                        优先依据技能说明组织输出。不要调用任何工具，不要编造未提供的信息。",
+                    ),
+                    ChatMessage::user(&build_structured_skill_summary_prompt(
+                        &msg.content,
+                        skill_name,
+                        &method_name,
+                        &skill_md,
+                        presentation.llm_payload.as_deref().unwrap_or(&output),
+                    )),
+                ];
+                if let Some((pidx, provider)) = self.provider_pool.acquire() {
+                    let r = provider.chat(&summarize_messages, &[]).await;
+                    match &r {
+                        Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
+                        Err(e) => self
+                            .provider_pool
+                            .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+                    }
+                    match r {
+                        Ok(resp) => resp.content.unwrap_or(output),
+                        Err(e) => {
+                            warn!(
+                                skill = %skill_name,
+                                error = %e,
+                                "Summarization LLM call failed, returning raw output"
+                            );
+                            presentation.fallback_text.clone()
+                        }
+                    }
+                } else {
+                    presentation.fallback_text.clone()
+                }
+            }
+            Err(e) => {
+                warn!(
+                    skill = %skill_name,
+                    method = %method_name,
+                    error = %e,
+                    "Structured skill execution failed"
+                );
+                self.context_builder
+                    .skill_manager()
+                    .and_then(|sm| sm.get(skill_name))
+                    .and_then(|s| s.meta.fallback.as_ref())
+                    .and_then(|fb| fb.message.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| format!("[{}] 执行失败: {}", skill_name, e))
+            }
+        };
+
+        // 10. Persist user message + assistant response to session history
+        let mut updated_history = history;
+        let trace_context_ref = session_metadata
+            .get("continuation_context")
+            .and_then(|value| value.get(skill_name))
+            .map(|_| skill_name.to_string());
+        append_recent_execution_trace(
+            &mut session_metadata,
+            build_recent_execution_trace_entry(
+                "structured_skill",
+                skill_name,
+                Some(&method_name),
+                &summarize_trace_text(&final_response),
+                trace_context_ref.as_deref(),
+                chrono::Utc::now().timestamp_millis(),
+            ),
+        );
+        updated_history.push(ChatMessage::user(&msg.content));
+        updated_history.push(ChatMessage::assistant(&final_response));
+        let _ = self.session_store.save_with_metadata(
+            persist_session_key,
+            &updated_history,
+            &session_metadata,
+        );
+
+        // 11. Deliver response via outbound channel
+        if let Some(tx) = &self.outbound_tx {
+            let mut outbound = OutboundMessage::new(&msg.channel, &msg.chat_id, &final_response);
+            outbound.account_id = msg.account_id.clone();
+            let _ = tx.send(outbound).await;
+        }
+
+        // 12. Emit WebSocket message_done event for streaming clients
+        if msg.channel == "ws" {
+            if let Some(ref event_tx) = self.event_tx {
+                let event = serde_json::json!({
+                    "type": "message_done",
+                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                    "chat_id": msg.chat_id,
+                    "task_id": "",
+                    "content": final_response,
+                    "tool_calls": 0,
+                    "duration_ms": 0,
+                    "media": [],
+                });
+                let _ = event_tx.send(event.to_string());
+            }
+        }
+
+        Ok(final_response)
+    }
+
+    /// Stateless LLM call to pick the best skill from multiple trigger-matched candidates.
+    /// No chat history is passed — only skill names, descriptions, and the user query.
+    async fn llm_disambiguate_skill(
+        &mut self,
+        user_input: &str,
+        candidates: &[(String, String)],
+    ) -> String {
+        if candidates.is_empty() {
+            return String::new();
+        }
+        if candidates.len() == 1 {
+            return candidates[0].0.clone();
+        }
+
+        let skills_desc = candidates
+            .iter()
+            .map(|(name, desc)| format!("- {}: {}", name, desc))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            "根据用户请求，从以下技能中选择最合适的一个。\n\n\
+            可用技能：\n{}\n\n\
+            用户请求：{}\n\n\
+            请直接输出技能名称，不要有任何额外说明。",
+            skills_desc, user_input
+        );
+
+        let messages = vec![ChatMessage::user(&prompt)];
+
+        if let Some((pidx, provider)) = self.provider_pool.acquire() {
+            let r = provider.chat(&messages, &[]).await;
+            match &r {
+                Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
+                Err(e) => self
+                    .provider_pool
+                    .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+            }
+            if let Ok(resp) = r {
+                let selected = resp.content.unwrap_or_default();
+                let selected = selected.trim();
+                if let Some(normalized) =
+                    crate::skill_decision::SkillDecisionEngine::normalize_selected_skill_name(
+                        selected, candidates,
+                    )
+                {
+                    info!(
+                        selected = %normalized,
+                        candidates = candidates.len(),
+                        "LLM disambiguated skill"
+                    );
+                    return normalized;
+                }
+            }
+        }
+
+        // Fallback: first candidate
+        warn!(
+            candidates = candidates.len(),
+            "Skill disambiguation failed, falling back to first candidate"
+        );
+        candidates[0].0.clone()
     }
 
     pub async fn run_loop(
@@ -4114,6 +5459,90 @@ impl AgentRuntime {
         .await;
         info!("AgentRuntime stopped");
     }
+}
+
+/// Detect explicit skill invocation patterns in user input and return the skill name.
+/// Recognised patterns: "用技能 X", "使用技能 X", "调用技能 X", "call skill X", "run skill X".
+fn detect_explicit_skill_name(text: &str) -> String {
+    let cn_patterns = ["用技能 ", "使用技能 ", "调用技能 ", "执行技能 "];
+    let en_patterns = ["call skill ", "run skill ", "use skill ", "using skill "];
+
+    for pat in &cn_patterns {
+        if let Some(pos) = text.find(pat) {
+            let rest = &text[pos + pat.len()..];
+            let name = extract_skill_token(rest.trim_start());
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+
+    let lower = text.to_lowercase();
+    for pat in &en_patterns {
+        if let Some(pos) = lower.find(pat) {
+            let rest = &text[pos + pat.len()..];
+            let name = extract_skill_token(rest.trim_start());
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+
+    String::new()
+}
+
+/// Extract a skill-name token: alphanumerics, hyphens, underscores, dots, @.
+fn extract_skill_token(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+        .collect()
+}
+
+/// Extract the first JSON object from potentially markdown-wrapped LLM output.
+/// Handles ```json ... ```, ``` ... ```, and bare `{ ... }` patterns.
+fn extract_json_from_text(text: &str) -> String {
+    // Try ```json ... ``` blocks first
+    if let Some(start) = text.find("```json") {
+        let after = &text[start + 7..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    // Try ``` ... ``` blocks containing an object
+    if let Some(start) = text.find("```") {
+        let after = &text[start + 3..];
+        if let Some(end) = after.find("```") {
+            let candidate = after[..end].trim();
+            if candidate.starts_with('{') {
+                return candidate.to_string();
+            }
+        }
+    }
+    // Fall back to first { ... } span
+    if let Some(start) = text.find('{') {
+        if let Some(end) = text.rfind('}') {
+            if end >= start {
+                return text[start..=end].to_string();
+            }
+        }
+    }
+    text.trim().to_string()
+}
+
+fn build_structured_skill_summary_prompt(
+    user_question: &str,
+    skill_name: &str,
+    method_name: &str,
+    skill_md: &str,
+    script_output: &str,
+) -> String {
+    crate::skill_summary::SkillSummaryFormatter::build_prompt(
+        user_question,
+        skill_name,
+        Some(method_name),
+        skill_md,
+        script_output,
+    )
 }
 
 /// Free async function that runs a user message in the background.
@@ -4541,6 +5970,7 @@ mod tests {
         let skill = ActiveSkillContext {
             name: "stock_analysis".to_string(),
             prompt_md: String::new(),
+            inject_prompt_md: true,
             tools: vec!["finance_api".to_string()],
             fallback_message: None,
         };
@@ -4610,6 +6040,532 @@ mod tests {
         };
 
         assert!(ctx.event_emitter.is_some());
+    }
+
+    #[test]
+    fn test_skill_decision_engine_builds_structured_schema_without_skill_md() {
+        use crate::skill_decision::SkillDecisionEngine;
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution};
+
+        let execution = SkillExecution {
+            kind: "python".to_string(),
+            entry: "SKILL.py".to_string(),
+            dispatch_kind: "argv".to_string(),
+            summary_mode: "llm".to_string(),
+            actions: vec![SkillAction {
+                name: "search".to_string(),
+                description: "搜索笔记".to_string(),
+                triggers: vec!["搜小红书".to_string()],
+                arguments: HashMap::from([(
+                    "keyword".to_string(),
+                    SkillArgument {
+                        kind: "string".to_string(),
+                        required: true,
+                        description: "搜索关键词".to_string(),
+                        enum_values: Vec::new(),
+                    },
+                )]),
+                argv: vec!["search".to_string(), "{keyword}".to_string()],
+            }],
+        };
+
+        let schema = SkillDecisionEngine::build_structured_skill_schema("xiaohongshu", &execution);
+
+        assert_eq!(schema["skill"], "xiaohongshu");
+        assert_eq!(schema["runtime_kind"], "python");
+        assert_eq!(schema["dispatch_kind"], "argv");
+        assert_eq!(schema["summary_mode"], "llm");
+        assert!(schema["actions"].is_array());
+        assert_eq!(schema["actions"][0]["name"], "search");
+        assert!(schema.to_string().contains("keyword"));
+        assert!(!schema.to_string().contains("SKILL.md"));
+    }
+
+    #[test]
+    fn test_skill_decision_engine_normalizes_selected_skill_name() {
+        use crate::skill_decision::SkillDecisionEngine;
+
+        let candidates = vec![
+            ("xiaohongshu".to_string(), "小红书相关能力".to_string()),
+            ("weather".to_string(), "天气查询".to_string()),
+        ];
+
+        let exact = SkillDecisionEngine::normalize_selected_skill_name("xiaohongshu", &candidates);
+        let partial = SkillDecisionEngine::normalize_selected_skill_name(
+            "最合适的是 xiaohongshu。",
+            &candidates,
+        );
+        let missing = SkillDecisionEngine::normalize_selected_skill_name("finance", &candidates);
+
+        assert_eq!(exact.as_deref(), Some("xiaohongshu"));
+        assert_eq!(partial.as_deref(), Some("xiaohongshu"));
+        assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn test_skill_decision_engine_builds_method_prompt_without_skill_md() {
+        use crate::skill_decision::{RouteChoiceKind, SkillDecisionEngine};
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution};
+
+        let execution = SkillExecution {
+            kind: "python".to_string(),
+            entry: "SKILL.py".to_string(),
+            dispatch_kind: String::new(),
+            summary_mode: String::new(),
+            actions: vec![SkillAction {
+                name: "search".to_string(),
+                description: "搜索网页".to_string(),
+                triggers: vec!["搜索网页".to_string()],
+                arguments: HashMap::from([(
+                    "query".to_string(),
+                    SkillArgument {
+                        kind: "string".to_string(),
+                        required: true,
+                        description: "搜索词".to_string(),
+                        enum_values: Vec::new(),
+                    },
+                )]),
+                argv: vec!["--query".to_string(), "{query}".to_string()],
+            }],
+        };
+
+        let prompt = SkillDecisionEngine::build_method_decision_prompt(
+            "搜索 openclaw 最新信息",
+            "tavily",
+            &execution,
+            None,
+            &[],
+        );
+
+        assert!(prompt.contains("tavily"));
+        assert!(prompt.contains("openclaw"));
+        assert!(prompt.contains("\"runtime_kind\":\"python\""));
+        assert!(prompt.contains("\"dispatch_kind\":\"argv\""));
+        assert!(!prompt.contains("SKILL.md"));
+        assert!(!prompt.contains("技能说明"));
+
+        let route_prompt = SkillDecisionEngine::build_routing_decision_prompt(
+            "查看第4条",
+            &[serde_json::json!({
+                "kind": "structured_skill",
+                "name": "xiaohongshu",
+                "action": "feeds",
+                "summary": "Fetched 20 notes.",
+                "context_ref": "xiaohongshu",
+                "timestamp_ms": 1
+            })],
+            &["xiaohongshu".to_string()],
+            &["browse".to_string(), "read_file".to_string()],
+            &["xiaohongshu.feed_results(20)".to_string()],
+        );
+
+        assert!(route_prompt.contains("查看第4条"));
+        assert!(route_prompt.contains("xiaohongshu"));
+        assert!(route_prompt.contains("browse"));
+        assert!(route_prompt.contains("feed_results(20)"));
+
+        let route = SkillDecisionEngine::normalize_route_choice(
+            &serde_json::json!({
+                "route": "continue_recent_skill",
+                "skill_name": "xiaohongshu"
+            }),
+            &["xiaohongshu".to_string()],
+            &["xiaohongshu".to_string()],
+        )
+        .expect("route should normalize");
+        assert_eq!(route.kind, RouteChoiceKind::ContinueRecentSkill);
+        assert_eq!(route.skill_name.as_deref(), Some("xiaohongshu"));
+
+        let invalid = SkillDecisionEngine::normalize_route_choice(
+            &serde_json::json!({"route": "unknown"}),
+            &["xiaohongshu".to_string()],
+            &["xiaohongshu".to_string()],
+        );
+        assert!(invalid.is_none());
+    }
+
+    #[test]
+    fn test_skill_decision_engine_builds_method_prompt_with_continuation_context() {
+        use crate::skill_decision::SkillDecisionEngine;
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution};
+
+        let execution = SkillExecution {
+            kind: "python".to_string(),
+            entry: "SKILL.py".to_string(),
+            dispatch_kind: "argv".to_string(),
+            summary_mode: "llm".to_string(),
+            actions: vec![SkillAction {
+                name: "detail".to_string(),
+                description: "查看详情".to_string(),
+                triggers: vec!["看详情".to_string()],
+                arguments: HashMap::from([
+                    (
+                        "feed_id".to_string(),
+                        SkillArgument {
+                            kind: "string".to_string(),
+                            required: true,
+                            description: "内部 feed id".to_string(),
+                            enum_values: Vec::new(),
+                        },
+                    ),
+                    (
+                        "xsec_token".to_string(),
+                        SkillArgument {
+                            kind: "string".to_string(),
+                            required: true,
+                            description: "内部 token".to_string(),
+                            enum_values: Vec::new(),
+                        },
+                    ),
+                ]),
+                argv: vec![
+                    "detail".to_string(),
+                    "{feed_id}".to_string(),
+                    "{xsec_token}".to_string(),
+                ],
+            }],
+        };
+
+        let prompt = SkillDecisionEngine::build_method_decision_prompt(
+            "查看第4条",
+            "xiaohongshu",
+            &execution,
+            Some(&serde_json::json!({
+                "feed_results": [
+                    {
+                        "index": 4,
+                        "title": "第四条",
+                        "feed_id": "feed-4",
+                        "xsec_token": "token-4"
+                    }
+                ]
+            })),
+            &[serde_json::json!({
+                "kind": "structured_skill",
+                "name": "xiaohongshu",
+                "action": "feeds",
+                "summary": "Fetched 20 notes."
+            })],
+        );
+
+        assert!(prompt.contains("查看第4条"));
+        assert!(prompt.contains("feed_results"));
+        assert!(prompt.contains("token-4"));
+        assert!(prompt.contains("\"method\""));
+    }
+
+    #[test]
+    fn test_build_structured_skill_summary_prompt_includes_skill_md_brief() {
+        let prompt = build_structured_skill_summary_prompt(
+            "帮我搜一下小红书露营装备",
+            "xiaohongshu",
+            "search",
+            "请优先提炼结果，不要冗长输出。",
+            "找到 3 条高互动笔记",
+        );
+
+        assert!(prompt.contains("帮我搜一下小红书露营装备"));
+        assert!(prompt.contains("xiaohongshu"));
+        assert!(prompt.contains("search"));
+        assert!(prompt.contains("请优先提炼结果"));
+        assert!(prompt.contains("找到 3 条高互动笔记"));
+    }
+
+    #[test]
+    fn test_structured_skill_executor_rejects_missing_required_argument() {
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution};
+
+        let execution = SkillExecution {
+            kind: "python".to_string(),
+            entry: "SKILL.py".to_string(),
+            dispatch_kind: "argv".to_string(),
+            summary_mode: "llm".to_string(),
+            actions: vec![SkillAction {
+                name: "search".to_string(),
+                description: "搜索网页".to_string(),
+                triggers: vec![],
+                arguments: HashMap::from([(
+                    "query".to_string(),
+                    SkillArgument {
+                        kind: "string".to_string(),
+                        required: true,
+                        description: "搜索词".to_string(),
+                        enum_values: Vec::new(),
+                    },
+                )]),
+                argv: vec!["--query".to_string(), "{query}".to_string()],
+            }],
+        };
+
+        let err = crate::structured_skill_executor::StructuredSkillExecutor::build_dispatch_plan(
+            "tavily",
+            &execution,
+            &serde_json::json!({
+                "method": "search",
+                "arguments": {}
+            }),
+        )
+        .expect_err("missing required argument should fail");
+
+        assert!(format!("{}", err).contains("Required argument 'query' missing"));
+    }
+
+    #[test]
+    fn test_structured_skill_executor_builds_python_argv_from_arguments() {
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution};
+
+        let execution = SkillExecution {
+            kind: "python".to_string(),
+            entry: "SKILL.py".to_string(),
+            dispatch_kind: "argv".to_string(),
+            summary_mode: "llm".to_string(),
+            actions: vec![SkillAction {
+                name: "search".to_string(),
+                description: "搜索网页".to_string(),
+                triggers: vec![],
+                arguments: HashMap::from([(
+                    "query".to_string(),
+                    SkillArgument {
+                        kind: "string".to_string(),
+                        required: true,
+                        description: "搜索词".to_string(),
+                        enum_values: Vec::new(),
+                    },
+                )]),
+                argv: vec![
+                    "--query".to_string(),
+                    "{query}".to_string(),
+                    "--format".to_string(),
+                    "md".to_string(),
+                ],
+            }],
+        };
+
+        let plan = crate::structured_skill_executor::StructuredSkillExecutor::build_dispatch_plan(
+            "tavily",
+            &execution,
+            &serde_json::json!({
+                "method": "search",
+                "arguments": {
+                    "query": "openclaw"
+                }
+            }),
+        )
+        .expect("dispatch plan should build");
+
+        assert_eq!(plan.method_name, "search");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "--query".to_string(),
+                "openclaw".to_string(),
+                "--format".to_string(),
+                "md".to_string()
+            ]
+        );
+        assert_eq!(
+            plan.arguments.get("query").and_then(|v| v.as_str()),
+            Some("openclaw")
+        );
+    }
+
+    #[test]
+    fn test_markdown_skill_executor_limits_tools_to_skill_scope() {
+        let available: HashSet<String> = ["web_search", "read_file", "spawn", "memory_query"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let tool_names =
+            crate::prompt_skill_executor::PromptSkillExecutor::resolve_allowed_tool_names(
+                &[
+                    "web_search".to_string(),
+                    "spawn".to_string(),
+                    "unknown_tool".to_string(),
+                ],
+                &available,
+            );
+
+        assert_eq!(tool_names, vec!["web_search".to_string()]);
+    }
+
+    #[test]
+    fn test_markdown_skill_executor_does_not_fallback_to_global_tools() {
+        let available: HashSet<String> = ["web_search", "read_file", "memory_query"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let tool_names =
+            crate::prompt_skill_executor::PromptSkillExecutor::resolve_allowed_tool_names(
+                &[],
+                &available,
+            );
+
+        assert!(tool_names.is_empty());
+    }
+
+    #[test]
+    fn test_process_message_routes_prompt_skill_to_prompt_executor() {
+        use blockcell_skills::manager::{SkillExecution, SkillMeta};
+
+        let prompt_meta = SkillMeta {
+            name: "deep_analysis".to_string(),
+            execution: Some(SkillExecution {
+                kind: "markdown".to_string(),
+                entry: "SKILL.md".to_string(),
+                dispatch_kind: String::new(),
+                summary_mode: String::new(),
+                actions: Vec::new(),
+            }),
+            ..SkillMeta::default()
+        };
+
+        let route = decide_skill_execution_route(
+            prompt_meta.execution.as_ref(),
+            Some(SkillScriptKind::Markdown),
+        );
+
+        assert_eq!(route, Some(SkillExecutionRoute::PromptOnly));
+    }
+
+    #[test]
+    fn test_process_message_routes_structured_python_skill_to_executor() {
+        use blockcell_skills::manager::{SkillAction, SkillArgument, SkillExecution, SkillMeta};
+
+        let structured_meta = SkillMeta {
+            name: "tavily".to_string(),
+            execution: Some(SkillExecution {
+                kind: "python".to_string(),
+                entry: "SKILL.py".to_string(),
+                dispatch_kind: String::new(),
+                summary_mode: String::new(),
+                actions: vec![SkillAction {
+                    name: "search".to_string(),
+                    description: String::new(),
+                    triggers: Vec::new(),
+                    arguments: HashMap::from([(
+                        "query".to_string(),
+                        SkillArgument {
+                            kind: "string".to_string(),
+                            required: true,
+                            description: String::new(),
+                            enum_values: Vec::new(),
+                        },
+                    )]),
+                    argv: vec!["--query".to_string(), "{query}".to_string()],
+                }],
+            }),
+            ..SkillMeta::default()
+        };
+
+        let route = decide_skill_execution_route(
+            structured_meta.execution.as_ref(),
+            Some(SkillScriptKind::Python),
+        );
+
+        assert_eq!(route, Some(SkillExecutionRoute::Structured));
+    }
+
+    #[test]
+    fn test_legacy_script_skill_still_uses_compat_path() {
+        use blockcell_skills::manager::{SkillExecution, SkillMeta};
+
+        let legacy_meta = SkillMeta {
+            name: "weather".to_string(),
+            execution: Some(SkillExecution {
+                kind: "rhai".to_string(),
+                entry: "SKILL.rhai".to_string(),
+                dispatch_kind: String::new(),
+                summary_mode: String::new(),
+                actions: Vec::new(),
+            }),
+            ..SkillMeta::default()
+        };
+
+        let route = decide_skill_execution_route(
+            legacy_meta.execution.as_ref(),
+            Some(SkillScriptKind::Rhai),
+        );
+
+        assert_eq!(route, Some(SkillExecutionRoute::LegacyScript));
+    }
+
+    #[test]
+    fn test_determine_interaction_mode_prefers_skill() {
+        let mode = determine_interaction_mode(true, &[IntentCategory::Chat]);
+        assert_eq!(mode, InteractionMode::Skill);
+    }
+
+    #[test]
+    fn test_determine_interaction_mode_uses_chat_for_single_chat_intent() {
+        let mode = determine_interaction_mode(false, &[IntentCategory::Chat]);
+        assert_eq!(mode, InteractionMode::Chat);
+    }
+
+    #[test]
+    fn test_determine_interaction_mode_falls_back_to_general_without_skill() {
+        let mode = determine_interaction_mode(false, &[IntentCategory::Unknown]);
+        assert_eq!(mode, InteractionMode::General);
+    }
+
+    #[test]
+    fn test_skill_summary_formatter_uses_brief_md_and_result() {
+        let prompt = crate::skill_summary::SkillSummaryFormatter::build_prompt(
+            "帮我搜一下 AI 新闻",
+            "ai_news",
+            Some("search"),
+            "请优先提炼要点，不要重复脚本原文。",
+            "找到 5 条相关新闻",
+        );
+
+        assert!(prompt.contains("帮我搜一下 AI 新闻"));
+        assert!(prompt.contains("ai_news"));
+        assert!(prompt.contains("search"));
+        assert!(prompt.contains("请优先提炼要点"));
+        assert!(prompt.contains("找到 5 条相关新闻"));
+    }
+
+    #[test]
+    fn test_prompt_and_script_skills_share_summary_formatter() {
+        let prompt_skill_prompt = crate::skill_summary::SkillSummaryFormatter::build_prompt(
+            "帮我深度分析 BTC",
+            "deep_analysis",
+            None,
+            "请按结构化方式输出。",
+            "这是最终分析结果。",
+        );
+        let script_skill_prompt = crate::skill_summary::SkillSummaryFormatter::build_prompt(
+            "北京天气",
+            "weather",
+            Some("forecast"),
+            "优先给出天气摘要。",
+            "今天晴，最高 18 度。",
+        );
+
+        assert!(prompt_skill_prompt.contains("技能说明摘要"));
+        assert!(script_skill_prompt.contains("技能说明摘要"));
+        assert!(prompt_skill_prompt.contains("执行结果"));
+        assert!(script_skill_prompt.contains("执行结果"));
+    }
+
+    #[test]
+    fn test_structured_skill_executor_builds_rhai_invocation_context() {
+        let dispatch_plan = crate::structured_skill_executor::StructuredDispatchPlan {
+            method_name: "search".to_string(),
+            arguments: serde_json::Map::from_iter([(
+                "query".to_string(),
+                serde_json::json!("blockcell"),
+            )]),
+            argv: Vec::new(),
+        };
+
+        let context = crate::structured_skill_executor::StructuredSkillExecutor::build_rhai_context(
+            &dispatch_plan,
+        );
+
+        assert_eq!(context["invocation"]["method"], "search");
+        assert_eq!(context["invocation"]["arguments"]["query"], "blockcell");
     }
 
     fn test_runtime() -> AgentRuntime {
@@ -4729,7 +6685,10 @@ mod tests {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
-        let result = runtime.process_message(msg).await.expect("process cron message");
+        let result = runtime
+            .process_message(msg)
+            .await
+            .expect("process cron message");
         assert!(!result.is_empty());
 
         let payload = event_rx.recv().await.expect("receive ws event");
@@ -4762,7 +6721,10 @@ mod tests {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
 
-        let result = runtime.process_message(msg).await.expect("process cron message");
+        let result = runtime
+            .process_message(msg)
+            .await
+            .expect("process cron message");
         assert!(!result.is_empty());
 
         let ws_session_key = blockcell_core::build_session_key("ws", "webui-chat-2");
@@ -4779,7 +6741,10 @@ mod tests {
         }));
 
         let cron_path = runtime.paths.session_file(&cron_session_key);
-        assert!(!cron_path.exists(), "cron job session file should not be created");
+        assert!(
+            !cron_path.exists(),
+            "cron job session file should not be created"
+        );
     }
 
     #[tokio::test]
@@ -4874,6 +6839,208 @@ mod tests {
 
         assert!(tool_names.is_empty());
     }
+
+    #[test]
+    fn test_extract_continuation_context_from_list_dir_result() {
+        let result = serde_json::json!({
+            "path": "/Users/apple/.blockcell",
+            "entries": [
+                { "name": ".DS_Store", "type": "file" },
+                { "name": ".env", "type": "file" },
+                { "name": "workspace", "type": "directory" }
+            ]
+        });
+
+        let context = extract_continuation_context_update("list_dir", &result)
+            .expect("list_dir should produce continuation context");
+
+        assert_eq!(
+            context["filesystem"]["current_dir"],
+            "/Users/apple/.blockcell"
+        );
+        assert_eq!(context["filesystem"]["entries"][1]["name"], ".env");
+        assert_eq!(
+            context["filesystem"]["entries"][1]["path"],
+            "/Users/apple/.blockcell/.env"
+        );
+        assert_eq!(context["filesystem"]["entries"][1]["index"], 2);
+    }
+
+    #[test]
+    fn test_merge_continuation_context_from_tool_result_updates_existing_session_metadata() {
+        let mut metadata = serde_json::json!({
+            "continuation_context": {
+                "filesystem": {
+                    "current_dir": "/Users/apple/.blockcell",
+                    "entries": [
+                        {
+                            "index": 1,
+                            "name": ".env",
+                            "path": "/Users/apple/.blockcell/.env",
+                            "type": "file"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let tool_result = serde_json::json!({
+            "path": "/Users/apple/.blockcell/.env",
+            "content": "VITE_API_BASE=http://localhost:18790"
+        })
+        .to_string();
+
+        merge_continuation_context_from_tool_result(&mut metadata, "read_file", &tool_result);
+
+        assert_eq!(
+            metadata["continuation_context"]["filesystem"]["last_read_file"]["path"],
+            "/Users/apple/.blockcell/.env"
+        );
+        assert_eq!(
+            metadata["continuation_context"]["filesystem"]["selected_entry"]["name"],
+            ".env"
+        );
+        assert_eq!(
+            metadata["continuation_context"]["filesystem"]["entries"][0]["path"],
+            "/Users/apple/.blockcell/.env"
+        );
+    }
+
+    #[test]
+    fn test_append_recent_execution_trace_keeps_latest_three_entries() {
+        let mut metadata = serde_json::json!({});
+
+        append_recent_execution_trace(
+            &mut metadata,
+            build_recent_execution_trace_entry(
+                "structured_skill",
+                "xiaohongshu",
+                Some("feeds"),
+                "first",
+                Some("xiaohongshu"),
+                1,
+            ),
+        );
+        append_recent_execution_trace(
+            &mut metadata,
+            build_recent_execution_trace_entry(
+                "tool",
+                "list_dir",
+                None,
+                "second",
+                Some("filesystem"),
+                2,
+            ),
+        );
+        append_recent_execution_trace(
+            &mut metadata,
+            build_recent_execution_trace_entry(
+                "structured_skill",
+                "weather",
+                Some("forecast"),
+                "third",
+                Some("weather"),
+                3,
+            ),
+        );
+        append_recent_execution_trace(
+            &mut metadata,
+            build_recent_execution_trace_entry(
+                "tool",
+                "read_file",
+                None,
+                "fourth",
+                Some("filesystem"),
+                4,
+            ),
+        );
+
+        let trace = metadata["recent_execution_trace"]
+            .as_array()
+            .expect("trace array");
+        assert_eq!(trace.len(), 3);
+        assert_eq!(trace[0]["name"], "list_dir");
+        assert_eq!(trace[1]["name"], "weather");
+        assert_eq!(trace[2]["name"], "read_file");
+    }
+
+    #[test]
+    fn test_build_continuation_context_inventory_summarizes_roots() {
+        let hints = build_continuation_context_inventory(&serde_json::json!({
+            "filesystem": {
+                "entries": [
+                    {"name": ".env"},
+                    {"name": "config.json5"}
+                ],
+                "current_dir": "/Users/apple/.blockcell"
+            },
+            "xiaohongshu": {
+                "feed_results": [
+                    {"index": 1},
+                    {"index": 2},
+                    {"index": 3}
+                ],
+                "selected_note": {
+                    "feed_id": "feed-1"
+                }
+            }
+        }));
+
+        assert!(hints.contains(&"filesystem.entries(2)".to_string()));
+        assert!(hints.contains(&"filesystem.current_dir".to_string()));
+        assert!(hints.contains(&"xiaohongshu.feed_results(3)".to_string()));
+        assert!(hints.contains(&"xiaohongshu.selected_note".to_string()));
+    }
+
+    #[test]
+    fn test_prepare_skill_result_for_presentation_separates_continuation_context() {
+        let output = serde_json::json!({
+            "success": true,
+            "action": "search",
+            "display_text": "找到 1 条相关笔记。",
+            "data": {
+                "items": [
+                    {
+                        "index": 1,
+                        "title": "上海咖啡推荐"
+                    }
+                ]
+            },
+            "continuation_context": {
+                "xiaohongshu": {
+                    "search_results": [
+                        {
+                            "index": 1,
+                            "title": "上海咖啡推荐",
+                            "feed_id": "feed-1",
+                            "xsec_token": "token-1"
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+
+        let presentation = prepare_skill_result_for_presentation("xiaohongshu", &output);
+
+        assert_eq!(
+            presentation.direct_text.as_deref(),
+            Some("找到 1 条相关笔记。")
+        );
+        assert_eq!(
+            presentation.continuation_context.as_ref().unwrap()["xiaohongshu"]["search_results"][0]
+                ["feed_id"],
+            "feed-1"
+        );
+        let llm_payload = presentation
+            .llm_payload
+            .as_ref()
+            .expect("structured payload should still provide LLM summary input");
+        assert!(llm_payload.contains("上海咖啡推荐"));
+        assert!(!llm_payload.contains("feed-1"));
+        assert!(!llm_payload.contains("xsec_token"));
+    }
+
     #[test]
     fn test_is_sensitive_filename_matches_json5_config() {
         assert!(is_sensitive_filename("config.json5"));

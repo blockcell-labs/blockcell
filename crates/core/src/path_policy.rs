@@ -424,7 +424,10 @@ mod tests {
         assert_eq!(policy.evaluate(&target, PathOp::Read), PolicyAction::Allow);
         assert_eq!(policy.evaluate(&target, PathOp::Write), PolicyAction::Allow);
         // exec not covered by this rule → default (confirm)
-        assert_eq!(policy.evaluate(&target, PathOp::Exec), PolicyAction::Confirm);
+        assert_eq!(
+            policy.evaluate(&target, PathOp::Exec),
+            PolicyAction::Confirm
+        );
     }
 
     #[test]
@@ -463,10 +466,16 @@ mod tests {
         );
         let dev_file = home().join("dev").join("code.rs");
         // ~/dev is more specific than ~ → allow wins
-        assert_eq!(policy.evaluate(&dev_file, PathOp::Write), PolicyAction::Allow);
+        assert_eq!(
+            policy.evaluate(&dev_file, PathOp::Write),
+            PolicyAction::Allow
+        );
         // ~/Documents is only covered by deny-home
         let doc_file = home().join("Documents").join("notes.txt");
-        assert_eq!(policy.evaluate(&doc_file, PathOp::Write), PolicyAction::Deny);
+        assert_eq!(
+            policy.evaluate(&doc_file, PathOp::Write),
+            PolicyAction::Deny
+        );
     }
 
     #[test]

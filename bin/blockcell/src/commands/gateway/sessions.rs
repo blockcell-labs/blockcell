@@ -1,5 +1,8 @@
 use super::*;
-use blockcell_core::{resolve_session_key_from_id, session_file_stem, session_id_from_file_stem, session_title_from_id};
+use blockcell_core::{
+    resolve_session_key_from_id, session_file_stem, session_id_from_file_stem,
+    session_title_from_id,
+};
 use blockcell_storage::SessionStore;
 // ---------------------------------------------------------------------------
 // P0: Session management endpoints
@@ -162,7 +165,8 @@ pub(super) async fn handle_session_get(
     };
     let agent_paths = state.paths.for_agent(&agent_id);
     let session_stems = session_file_stems(&agent_paths.sessions_dir());
-    let session_key = resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
+    let session_key =
+        resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
     let session_store = SessionStore::new(agent_paths);
     let loaded_messages: blockcell_core::Result<Vec<blockcell_core::types::ChatMessage>> =
         session_store.load(&session_key);
@@ -218,7 +222,8 @@ pub(super) async fn handle_session_delete(
     };
     let agent_paths = state.paths.for_agent(&agent_id);
     let session_stems = session_file_stems(&agent_paths.sessions_dir());
-    let session_key = resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
+    let session_key =
+        resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
     let path = agent_paths.session_file(&session_key);
     let session_id_clone = session_id.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -255,7 +260,8 @@ pub(super) async fn handle_session_rename(
     };
     let agent_paths = state.paths.for_agent(&agent_id);
     let session_stems = session_file_stems(&agent_paths.sessions_dir());
-    let session_key = resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
+    let session_key =
+        resolve_session_key_from_id(&session_id, session_stems.iter().map(|s| s.as_str()));
     let file_stem = session_file_stem(&session_key);
     let normalized_id = session_file_stem(&session_id);
     let meta_path = agent_paths.sessions_dir().join("_meta.json");
@@ -271,14 +277,8 @@ pub(super) async fn handle_session_rename(
             serde_json::Map::new()
         };
 
-        meta.insert(
-            file_stem,
-            serde_json::json!({ "name": name.clone() }),
-        );
-        meta.insert(
-            normalized_id,
-            serde_json::json!({ "name": name.clone() }),
-        );
+        meta.insert(file_stem, serde_json::json!({ "name": name.clone() }));
+        meta.insert(normalized_id, serde_json::json!({ "name": name.clone() }));
 
         match std::fs::write(
             &meta_path,

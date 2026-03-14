@@ -96,3 +96,50 @@ pub(super) async fn handle_wecom_webhook(
 ) -> impl IntoResponse {
     (axum::http::StatusCode::OK, "success")
 }
+
+// ---------------------------------------------------------------------------
+// QQ webhook handler (public, no auth)
+// ---------------------------------------------------------------------------
+
+/// POST /webhook/qq — receives events from QQ Official Bot via HTTP callback.
+/// This endpoint must be publicly accessible. Configure the URL in the QQ Bot Developer Console
+/// under "Development" → "Event Settings" → "Callback URL": https://your-domain/webhook/qq
+#[cfg(feature = "qq")]
+pub(super) async fn handle_qq_webhook(
+    State(state): State<GatewayState>,
+    body: String,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if !state.config.channels.qq.enabled {
+        return (StatusCode::OK, axum::Json(serde_json::json!({"retcode": 0}))).into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "QQ webhook invalid JSON");
+            return (StatusCode::OK, axum::Json(serde_json::json!({"retcode": 0}))).into_response();
+        }
+    };
+
+    let qq_channel = blockcell_channels::qq::QQChannel::new(state.config.clone(), state.inbound_tx.clone());
+
+    match qq_channel.handle_webhook_payload(&payload).await {
+        Ok(resp_json) => {
+            (StatusCode::OK, axum::Json(resp_json)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "QQ webhook processing error");
+            (StatusCode::OK, axum::Json(serde_json::json!({"retcode": 1}))).into_response()
+        }
+    }
+}
+
+#[cfg(not(feature = "qq"))]
+pub(super) async fn handle_qq_webhook(
+    State(_state): State<GatewayState>,
+    _body: String,
+) -> impl IntoResponse {
+    axum::Json(serde_json::json!({"retcode": 0}))
+}

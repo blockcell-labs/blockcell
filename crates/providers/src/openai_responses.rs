@@ -274,8 +274,9 @@ impl OpenAIResponsesProvider {
             max_output_tokens: self.max_tokens,
         };
 
-        let request_body = serde_json::to_string(&request)
-            .map_err(|e| Error::Provider(format!("Failed to serialize responses request: {}", e)))?;
+        let request_body = serde_json::to_string(&request).map_err(|e| {
+            Error::Provider(format!("Failed to serialize responses request: {}", e))
+        })?;
 
         info!(
             url = %url,
@@ -284,7 +285,10 @@ impl OpenAIResponsesProvider {
             tools_count = tools.len(),
             "Calling OpenAI Responses API"
         );
-        debug!(body_len = request_body.len(), "Responses request body prepared");
+        debug!(
+            body_len = request_body.len(),
+            "Responses request body prepared"
+        );
 
         let response = self
             .client
@@ -328,7 +332,10 @@ impl OpenAIResponsesProvider {
         let mut tool_calls = Vec::new();
 
         for item in output {
-            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            let item_type = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             match item_type {
                 "message" => {
                     if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
@@ -545,7 +552,10 @@ mod tests {
 
     #[test]
     fn test_content_to_input_parts_plain_text_fallback() {
-        let parts = OpenAIResponsesProvider::content_to_input_parts("user", &Value::String("hello".to_string()));
+        let parts = OpenAIResponsesProvider::content_to_input_parts(
+            "user",
+            &Value::String("hello".to_string()),
+        );
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["type"], "input_text");
         assert_eq!(parts[0]["text"], "hello");

@@ -31,13 +31,21 @@ pub trait Provider: Send + Sync {
             // 发送文本内容
             if let Some(content) = &response.content {
                 if !content.is_empty() {
-                    let _ = tx.send(StreamChunk::TextDelta { delta: content.clone() }).await;
+                    let _ = tx
+                        .send(StreamChunk::TextDelta {
+                            delta: content.clone(),
+                        })
+                        .await;
                 }
             }
             // 发送推理内容
             if let Some(reasoning) = &response.reasoning_content {
                 if !reasoning.is_empty() {
-                    let _ = tx.send(StreamChunk::ReasoningDelta { delta: reasoning.clone() }).await;
+                    let _ = tx
+                        .send(StreamChunk::ReasoningDelta {
+                            delta: reasoning.clone(),
+                        })
+                        .await;
                 }
             }
             // 发送完成事件

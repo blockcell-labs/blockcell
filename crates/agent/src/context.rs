@@ -17,6 +17,7 @@ pub enum InteractionMode {
 pub struct ActiveSkillContext {
     pub name: String,
     pub prompt_md: String,
+    pub inject_prompt_md: bool,
     pub tools: Vec<String>,
     pub fallback_message: Option<String>,
 }
@@ -196,6 +197,7 @@ impl ContextBuilder {
             "",
             &[],
             &[],
+            None,
         )
     }
 
@@ -210,9 +212,16 @@ impl ContextBuilder {
         let manager = self.skill_manager.as_ref()?;
         let skill = manager.match_skill(user_input, disabled_skills)?;
         let prompt_md = skill.load_md()?;
+        let inject_prompt_md = skill
+            .meta
+            .execution
+            .as_ref()
+            .map(|execution| execution.normalized_kind() == "markdown")
+            .unwrap_or(true);
         Some(ActiveSkillContext {
             name: skill.name.clone(),
             prompt_md,
+            inject_prompt_md,
             tools: skill.meta.effective_tools(),
             fallback_message: skill
                 .meta
@@ -239,9 +248,16 @@ impl ContextBuilder {
             return None;
         }
         let prompt_md = skill.load_md()?;
+        let inject_prompt_md = skill
+            .meta
+            .execution
+            .as_ref()
+            .map(|execution| execution.normalized_kind() == "markdown")
+            .unwrap_or(true);
         Some(ActiveSkillContext {
             name: skill.name.clone(),
             prompt_md,
+            inject_prompt_md,
             tools: skill.meta.effective_tools(),
             fallback_message: skill
                 .meta
@@ -266,6 +282,7 @@ impl ContextBuilder {
         user_query: &str,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
+        continuation_context: Option<&serde_json::Value>,
     ) -> String {
         let mut prompt = String::new();
         let is_chat = matches!(mode, InteractionMode::Chat);
@@ -332,6 +349,15 @@ impl ContextBuilder {
             "Workspace: {}\n\n",
             self.paths.workspace().display()
         ));
+
+        if let Some(context_json) =
+            Self::serialize_continuation_context_for_prompt(continuation_context)
+        {
+            prompt.push_str("## Continuation Context\n");
+            prompt.push_str("Use this structured context from recent tool results to resolve follow-up references like file names, titles, or ordinal mentions such as `第2个` before deciding whether to call tools again.\n");
+            prompt.push_str(&context_json);
+            prompt.push_str("\n\n");
+        }
 
         if is_skill_mode || is_general {
             if let Some(ref store) = self.memory_store {
@@ -405,9 +431,13 @@ impl ContextBuilder {
 
         if let Some(skill) = active_skill {
             prompt.push_str(&format!("## Active Skill: {}\n", skill.name));
-            prompt.push_str("The user's input matches this installed skill. Follow the skill's instructions below. Prefer the skill's scoped tools and avoid unrelated tools.\n\n");
-            prompt.push_str(&skill.prompt_md);
-            prompt.push_str("\n\n");
+            if skill.inject_prompt_md {
+                prompt.push_str("The user's input matches this installed skill. Follow the skill's instructions below. Prefer the skill's scoped tools and avoid unrelated tools.\n\n");
+                prompt.push_str(&skill.prompt_md);
+                prompt.push_str("\n\n");
+            } else {
+                prompt.push_str("The user's input matches this installed skill. Use the skill's scoped tools and avoid unrelated tools.\n\n");
+            }
             if let Some(fallback_message) = &skill.fallback_message {
                 prompt.push_str("## Skill Fallback\n");
                 prompt.push_str(fallback_message);
@@ -437,6 +467,7 @@ impl ContextBuilder {
         pending_intent: bool,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
+        continuation_context: Option<&serde_json::Value>,
     ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         let is_im_channel = matches!(
@@ -460,22 +491,36 @@ impl ContextBuilder {
             user_content,
             available_tool_names,
             tool_prompt_rules,
+            continuation_context,
         );
         let system_tokens = estimate_tokens(&system_prompt);
         messages.push(ChatMessage::system(&system_prompt));
 
+        let followup_hint =
+            Self::build_followup_resolution_hint(user_content, continuation_context);
+
         let user_msg = if media.is_empty() {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            ChatMessage::user(&trimmed)
+            let enriched = if let Some(hint) = &followup_hint {
+                format!("{}\n\n[Follow-up Reference]\n{}", trimmed, hint)
+            } else {
+                trimmed
+            };
+            ChatMessage::user(&enriched)
         } else {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
+            let enriched = if let Some(hint) = &followup_hint {
+                format!("{}\n\n[Follow-up Reference]\n{}", trimmed, hint)
+            } else {
+                trimmed
+            };
             let all_paths: Vec<&str> = media
                 .iter()
                 .filter(|p| !p.is_empty())
                 .map(|p| p.as_str())
                 .collect();
             let text_with_paths = if all_paths.is_empty() {
-                trimmed
+                enriched
             } else {
                 let paths_str = all_paths
                     .iter()
@@ -484,7 +529,7 @@ impl ContextBuilder {
                     .join("\n");
                 format!(
                     "{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}",
-                    trimmed, paths_str
+                    enriched, paths_str
                 )
             };
             if pending_intent {
@@ -520,6 +565,80 @@ impl ContextBuilder {
 
         messages.push(user_msg);
         messages
+    }
+
+    fn serialize_continuation_context_for_prompt(
+        continuation_context: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        let context = continuation_context?;
+        let obj = context.as_object()?;
+        if obj.is_empty() {
+            return None;
+        }
+
+        let json = serde_json::to_string_pretty(context).ok()?;
+        Some(Self::trim_text_head_tail(&json, 1600))
+    }
+
+    fn build_followup_resolution_hint(
+        user_content: &str,
+        continuation_context: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        let context = continuation_context?;
+        let filesystem = context.get("filesystem")?;
+        let entries = filesystem.get("entries")?.as_array()?;
+
+        if let Some(target_index) = Self::extract_ordinal_reference(user_content) {
+            if let Some(item) = entries.iter().find(|entry| {
+                entry.get("index").and_then(|v| v.as_u64()) == Some(target_index as u64)
+            }) {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("item");
+                let path = item.get("path").and_then(|v| v.as_str())?;
+                return Some(format!(
+                    "The user's ordinal reference matches item #{}: `{}` -> `{}`. Use this exact path directly for filesystem tools.",
+                    target_index, name, path
+                ));
+            }
+        }
+
+        for item in entries {
+            let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if name.is_empty() || !user_content.contains(name) {
+                continue;
+            }
+            let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            return Some(format!(
+                "In the previous filesystem result, `{}` resolves to `{}`. Use this exact path directly for filesystem tools instead of searching again.",
+                name, path
+            ));
+        }
+
+        None
+    }
+
+    fn extract_ordinal_reference(user_content: &str) -> Option<usize> {
+        let chars: Vec<char> = user_content.chars().collect();
+        for (idx, ch) in chars.iter().enumerate() {
+            if *ch != '第' {
+                continue;
+            }
+            let mut digits = String::new();
+            for next in chars.iter().skip(idx + 1) {
+                if next.is_ascii_digit() {
+                    digits.push(*next);
+                } else {
+                    break;
+                }
+            }
+            if !digits.is_empty() {
+                return digits.parse::<usize>().ok();
+            }
+        }
+        None
     }
 
     fn build_multimodal_message(&self, text: &str, media: &[String]) -> ChatMessage {
@@ -846,5 +965,122 @@ impl ContextBuilder {
 
     fn load_file_if_exists<P: AsRef<Path>>(&self, path: P) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_resolve_active_skill_by_name_disables_prompt_injection_for_structured_skill() {
+        let base =
+            std::env::temp_dir().join(format!("blockcell-context-test-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_base(base);
+        let skill_dir = paths.skills_dir().join("structured_demo");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join("meta.yaml"),
+            r#"
+name: structured_demo
+description: structured demo
+triggers:
+  - structured demo
+execution:
+  kind: python
+  entry: SKILL.py
+  dispatch_kind: argv
+  summary_mode: llm
+"#,
+        )
+        .expect("write meta");
+        fs::write(skill_dir.join("SKILL.md"), "structured skill manual").expect("write skill md");
+
+        let builder = ContextBuilder::new(paths, Config::default());
+
+        let ctx = builder
+            .resolve_active_skill_by_name("structured_demo", &HashSet::new())
+            .expect("active skill should resolve");
+
+        assert!(!ctx.inject_prompt_md);
+    }
+
+    #[test]
+    fn test_build_system_prompt_skips_skill_md_when_prompt_injection_disabled() {
+        let builder = ContextBuilder::new(
+            Paths::with_base(
+                std::env::temp_dir()
+                    .join(format!("blockcell-context-test-{}", uuid::Uuid::new_v4())),
+            ),
+            Config::default(),
+        );
+        let active_skill = ActiveSkillContext {
+            name: "structured_demo".to_string(),
+            prompt_md: "DO NOT INCLUDE".to_string(),
+            inject_prompt_md: false,
+            tools: vec!["finance_api".to_string()],
+            fallback_message: Some("fallback".to_string()),
+        };
+
+        let prompt = builder.build_system_prompt_for_mode_with_channel(
+            InteractionMode::Skill,
+            Some(&active_skill),
+            &HashSet::new(),
+            &HashSet::new(),
+            "cli",
+            "",
+            &[],
+            &[],
+            None,
+        );
+
+        assert!(prompt.contains("## Active Skill: structured_demo"));
+        assert!(!prompt.contains("DO NOT INCLUDE"));
+        assert!(prompt.contains("fallback"));
+    }
+
+    #[test]
+    fn test_build_messages_includes_followup_resolution_hint_from_continuation_context() {
+        let builder = ContextBuilder::new(
+            Paths::with_base(
+                std::env::temp_dir()
+                    .join(format!("blockcell-context-test-{}", uuid::Uuid::new_v4())),
+            ),
+            Config::default(),
+        );
+        let continuation_context = serde_json::json!({
+            "filesystem": {
+                "current_dir": "/Users/apple/.blockcell",
+                "entries": [
+                    {
+                        "index": 1,
+                        "name": ".env",
+                        "path": "/Users/apple/.blockcell/.env",
+                        "type": "file"
+                    }
+                ]
+            }
+        });
+
+        let messages = builder.build_messages_for_mode_with_channel(
+            &[],
+            "查看 .env 的内容",
+            &[],
+            InteractionMode::General,
+            None,
+            &HashSet::new(),
+            &HashSet::new(),
+            "ws",
+            false,
+            &["read_file".to_string()],
+            &[],
+            Some(&continuation_context),
+        );
+
+        let last = messages.last().expect("user message");
+        let content = last.content.as_str().expect("string user content");
+        assert!(content.contains("查看 .env 的内容"));
+        assert!(content.contains("/Users/apple/.blockcell/.env"));
     }
 }

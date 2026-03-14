@@ -7,8 +7,8 @@ use blockcell_tools::build_tool_registry_with_all_mcp;
 use blockcell_tools::mcp::manager::McpManager;
 use std::process::Command;
 
-const EXTERNAL_CHANNELS: [&str; 8] = [
-    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark",
+const EXTERNAL_CHANNELS: [&str; 9] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
 ];
 
 fn known_account_ids(config: &Config, channel: &str) -> Vec<String> {
@@ -65,6 +65,13 @@ fn known_account_ids(config: &Config, channel: &str) -> Vec<String> {
         "lark" => config
             .channels
             .lark
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "qq" => config
+            .channels
+            .qq
             .accounts
             .keys()
             .cloned()
@@ -136,6 +143,14 @@ fn enabled_account_ids(config: &Config, channel: &str) -> Vec<String> {
         "lark" => config
             .channels
             .lark
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
+        "qq" => config
+            .channels
+            .qq
             .accounts
             .iter()
             .filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty())

@@ -307,6 +307,34 @@ fn configure_channel(config: &mut Config, channel: &str) -> anyhow::Result<()> {
             }
             config.channels.lark.enabled = true;
         }
+        "qq" => {
+            let app_id =
+                prompt_optional_with_existing("QQ app_id", &config.channels.qq.app_id)?;
+            let app_secret =
+                prompt_optional_with_existing("QQ app_secret", &config.channels.qq.app_secret)?;
+            if !app_id.is_empty() {
+                config.channels.qq.app_id = app_id;
+            }
+            if !app_secret.is_empty() {
+                config.channels.qq.app_secret = app_secret;
+            }
+            if config.channels.qq.app_id.trim().is_empty()
+                || config.channels.qq.app_secret.trim().is_empty()
+            {
+                bail!("QQ app_id and app_secret are required.");
+            }
+            let environment = prompt_optional_with_existing(
+                "QQ environment (production/sandbox)",
+                &config.channels.qq.environment,
+            )?;
+            if !environment.is_empty() {
+                config.channels.qq.environment = environment;
+            }
+            if config.channels.qq.environment.trim().is_empty() {
+                config.channels.qq.environment = "production".to_string();
+            }
+            config.channels.qq.enabled = true;
+        }
         _ => bail!("Unsupported channel '{}'", channel),
     }
 
@@ -388,6 +416,7 @@ fn prompt_channel() -> anyhow::Result<String> {
         "wecom",
         "dingtalk",
         "lark",
+        "qq",
     ];
     let idx = prompt_select("Configure one channel (optional)", &options, 0)?;
     let mapped = match idx {
@@ -396,6 +425,7 @@ fn prompt_channel() -> anyhow::Result<String> {
         3 => "wecom",
         4 => "dingtalk",
         5 => "lark",
+        6 => "qq",
         _ => "skip",
     };
     Ok(mapped.to_string())
@@ -441,6 +471,7 @@ fn normalize_channel(input: &str) -> Option<&'static str> {
         "wecom" | "wechatwork" => Some("wecom"),
         "dingtalk" => Some("dingtalk"),
         "lark" => Some("lark"),
+        "qq" => Some("qq"),
         "none" | "skip" => Some("skip"),
         _ => None,
     }
@@ -554,6 +585,7 @@ mod tests {
     fn test_normalize_channel_aliases() {
         assert_eq!(normalize_channel("wechatwork"), Some("wecom"));
         assert_eq!(normalize_channel("dingtalk"), Some("dingtalk"));
+        assert_eq!(normalize_channel("qq"), Some("qq"));
         assert_eq!(normalize_channel("skip"), Some("skip"));
         assert_eq!(normalize_channel("unknown"), None);
     }

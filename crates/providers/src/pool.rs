@@ -86,26 +86,27 @@ impl ProviderPool {
         let defaults = &config.agents.defaults;
 
         // 收集 ModelEntry 列表（兼容旧配置）
-        let entries_cfg: Vec<(String, String, u32, u32, ToolCallMode)> = if !defaults.model_pool.is_empty() {
-            defaults
-                .model_pool
-                .iter()
-                .map(|e| {
-                    (
-                        e.model.clone(),
-                        e.provider.clone(),
-                        e.weight,
-                        e.priority,
-                        e.tool_call_mode,
-                    )
-                })
-                .collect()
-        } else {
-            // 旧配置：单条目
-            let model = defaults.model.clone();
-            let provider_name = defaults.provider.clone().unwrap_or_default();
-            vec![(model, provider_name, 1, 1, ToolCallMode::Native)]
-        };
+        let entries_cfg: Vec<(String, String, u32, u32, ToolCallMode)> =
+            if !defaults.model_pool.is_empty() {
+                defaults
+                    .model_pool
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.model.clone(),
+                            e.provider.clone(),
+                            e.weight,
+                            e.priority,
+                            e.tool_call_mode,
+                        )
+                    })
+                    .collect()
+            } else {
+                // 旧配置：单条目
+                let model = defaults.model.clone();
+                let provider_name = defaults.provider.clone().unwrap_or_default();
+                vec![(model, provider_name, 1, 1, ToolCallMode::Native)]
+            };
 
         if entries_cfg.is_empty() {
             return Err(anyhow::anyhow!(

@@ -246,7 +246,9 @@ impl SkillDispatcher {
         // Register type-check helpers so scripts can call val.is_map(), val.is_string(), etc.
         engine.register_fn("is_map", |val: Dynamic| -> bool { val.is::<Map>() });
         engine.register_fn("is_string", |val: Dynamic| -> bool { val.is::<String>() });
-        engine.register_fn("is_array", |val: Dynamic| -> bool { val.is::<rhai::Array>() });
+        engine.register_fn("is_array", |val: Dynamic| -> bool {
+            val.is::<rhai::Array>()
+        });
 
         // Register is_error(result) — check if a tool result is an error
         engine.register_fn("is_error", |val: Map| -> bool { val.contains_key("error") });
@@ -784,5 +786,44 @@ mod tests {
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].tool_name, "camera_list");
         assert_eq!(result.tool_calls[1].tool_name, "camera_capture");
+    }
+
+    #[test]
+    fn test_invocation_context_available_inside_ctx() {
+        let dispatcher = SkillDispatcher::new();
+        let mut ctx = HashMap::new();
+        ctx.insert(
+            "ctx".to_string(),
+            serde_json::json!({
+                "invocation": {
+                    "method": "search",
+                    "arguments": {
+                        "query": "blockcell"
+                    }
+                }
+            }),
+        );
+
+        let result = dispatcher
+            .execute_sync(
+                r#"
+            let invocation = get_field(ctx, "invocation");
+            let method = get_field(invocation, "method");
+            let args = get_field(invocation, "arguments");
+            let query = get_field(args, "query");
+            set_output(#{
+                method: method,
+                query: query
+            });
+            "#,
+                "",
+                ctx,
+                |_name, _params| Ok(serde_json::json!({})),
+            )
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.output["method"], "search");
+        assert_eq!(result.output["query"], "blockcell");
     }
 }

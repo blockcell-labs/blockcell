@@ -43,7 +43,7 @@ urlencoding = { workspace = true }
 rhai = { workspace = true }
 
 [features]
-default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark"]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq"]
 telegram = ["blockcell-channels/telegram"]
 whatsapp = ["blockcell-channels/whatsapp"]
 feishu = ["blockcell-channels/feishu"]
@@ -52,3 +52,4 @@ discord = ["blockcell-channels/discord"]
 dingtalk = ["blockcell-channels/dingtalk"]
 wecom = ["blockcell-channels/wecom"]
 lark = ["blockcell-channels/lark"]
+qq = ["blockcell-channels/qq"]

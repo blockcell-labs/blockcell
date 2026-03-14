@@ -108,7 +108,10 @@ fn get_agent(ctx: &ToolContext, agent_id: &str) -> Result<Value> {
 
 fn summary(ctx: &ToolContext) -> Value {
     let resolved = ctx.config.resolved_agents();
-    let agent_ids = resolved.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>();
+    let agent_ids = resolved
+        .iter()
+        .map(|agent| agent.id.clone())
+        .collect::<Vec<_>>();
     let channel_map = channel_binding_map(&ctx.config);
     let channel_summary = channel_map
         .iter()

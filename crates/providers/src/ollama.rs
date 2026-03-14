@@ -507,9 +507,7 @@ impl Provider for OllamaProvider {
                                 if !chunk.message.content.is_empty() {
                                     let delta = chunk.message.content.clone();
                                     accumulated_content.push_str(&delta);
-                                    let _ = tx
-                                        .send(StreamChunk::TextDelta { delta })
-                                        .await;
+                                    let _ = tx.send(StreamChunk::TextDelta { delta }).await;
                                 }
 
                                 // 处理工具调用
