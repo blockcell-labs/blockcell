@@ -307,6 +307,7 @@ async fn action_generate(ctx: &ToolContext, params: &Value) -> Result<Value> {
 }
 
 /// Generate a matplotlib Python script.
+#[allow(clippy::too_many_arguments)]
 fn generate_matplotlib_script(
     chart_type: &str,
     data: &Value,

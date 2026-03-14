@@ -43,6 +43,7 @@ impl GeminiProvider {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_proxy(
         api_key: &str,
         api_base: Option<&str>,

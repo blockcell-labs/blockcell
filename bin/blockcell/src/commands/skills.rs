@@ -263,13 +263,11 @@ pub async fn set_enabled(name: &str, enable: bool) -> anyhow::Result<()> {
         } else {
             println!("  Skill '{}' is already enabled.", name);
         }
+    } else if !marker.exists() {
+        std::fs::write(&marker, "")?;
+        println!("⏸  Skill '{}' disabled.", name);
     } else {
-        if !marker.exists() {
-            std::fs::write(&marker, "")?;
-            println!("⏸  Skill '{}' disabled.", name);
-        } else {
-            println!("  Skill '{}' is already disabled.", name);
-        }
+        println!("  Skill '{}' is already disabled.", name);
     }
     Ok(())
 }

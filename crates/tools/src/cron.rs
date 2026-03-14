@@ -236,10 +236,7 @@ fn load_store(paths: &Paths) -> Result<JobStore> {
         return Ok(JobStore::default());
     }
     let content = std::fs::read_to_string(&path)?;
-    let store: JobStore = match serde_json::from_str(&content) {
-        Ok(store) => store,
-        Err(_) => JobStore::default(),
-    };
+    let store: JobStore = serde_json::from_str(&content).unwrap_or_default();
     Ok(store)
 }
 

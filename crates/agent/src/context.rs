@@ -271,6 +271,7 @@ impl ContextBuilder {
         self.skill_manager.as_ref()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_system_prompt_for_mode_with_channel(
         &self,
         mode: InteractionMode,
@@ -452,6 +453,7 @@ impl ContextBuilder {
         prompt
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_messages_for_mode_with_channel(
         &self,
         history: &[ChatMessage],
@@ -740,7 +742,7 @@ impl ContextBuilder {
                 recent_msgs.push(Self::trim_chat_message(msg));
             }
         }
-        let recent_tokens: usize = recent_msgs.iter().map(|m| estimate_message_tokens(m)).sum();
+        let recent_tokens: usize = recent_msgs.iter().map(estimate_message_tokens).sum();
 
         // If recent rounds alone exceed budget, just return them (trimmed harder)
         if recent_tokens >= token_budget {
@@ -864,9 +866,9 @@ impl ContextBuilder {
 
                         // Check that all expected tool responses follow
                         let mut found_ids = std::collections::HashSet::new();
-                        for j in (i + 1)..history.len() {
-                            if history[j].role == "tool" {
-                                if let Some(ref id) = history[j].tool_call_id {
+                        for msg in history.iter().skip(i + 1) {
+                            if msg.role == "tool" {
+                                if let Some(ref id) = msg.tool_call_id {
                                     found_ids.insert(id.as_str());
                                 }
                             } else {

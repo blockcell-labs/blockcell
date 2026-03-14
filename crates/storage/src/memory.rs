@@ -27,12 +27,16 @@ impl MemoryScope {
             MemoryScope::LongTerm => "long_term",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for MemoryScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "short_term" => Some(MemoryScope::ShortTerm),
-            "long_term" => Some(MemoryScope::LongTerm),
-            _ => None,
+            "short_term" => Ok(MemoryScope::ShortTerm),
+            "long_term" => Ok(MemoryScope::LongTerm),
+            _ => Err(format!("Invalid memory scope: {}", s)),
         }
     }
 }
@@ -68,20 +72,24 @@ impl MemoryType {
             MemoryType::Note => "note",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for MemoryType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "fact" => Some(MemoryType::Fact),
-            "preference" => Some(MemoryType::Preference),
-            "project" => Some(MemoryType::Project),
-            "task" => Some(MemoryType::Task),
-            "glossary" => Some(MemoryType::Glossary),
-            "contact" => Some(MemoryType::Contact),
-            "snippet" => Some(MemoryType::Snippet),
-            "policy" => Some(MemoryType::Policy),
-            "summary" => Some(MemoryType::Summary),
-            "note" => Some(MemoryType::Note),
-            _ => None,
+            "fact" => Ok(MemoryType::Fact),
+            "preference" => Ok(MemoryType::Preference),
+            "project" => Ok(MemoryType::Project),
+            "task" => Ok(MemoryType::Task),
+            "glossary" => Ok(MemoryType::Glossary),
+            "contact" => Ok(MemoryType::Contact),
+            "snippet" => Ok(MemoryType::Snippet),
+            "policy" => Ok(MemoryType::Policy),
+            "summary" => Ok(MemoryType::Summary),
+            "note" => Ok(MemoryType::Note),
+            _ => Err(format!("Invalid memory type: {}", s)),
         }
     }
 }

@@ -1793,10 +1793,10 @@ or\n\
                     continue;
                 }
                 // Remove __pycache__ and other cache dirs
-                if name_str == "__pycache__" || name_str.starts_with('.') {
-                    if std::fs::remove_dir_all(&path).is_ok() {
-                        removed += 1;
-                    }
+                if (name_str == "__pycache__" || name_str.starts_with('.'))
+                    && std::fs::remove_dir_all(&path).is_ok()
+                {
+                    removed += 1;
                 }
             } else {
                 if keep_files.contains(&name_str.as_ref()) {
@@ -1810,10 +1810,8 @@ or\n\
                         || name_str.ends_with(".orig")
                         || name_str.starts_with('.')
                         || name_str.ends_with('~');
-                if should_remove {
-                    if std::fs::remove_file(&path).is_ok() {
-                        removed += 1;
-                    }
+                if should_remove && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
                 }
             }
         }

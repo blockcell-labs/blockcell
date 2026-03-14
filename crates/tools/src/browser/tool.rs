@@ -195,7 +195,7 @@ impl Tool for BrowseTool {
         let headed = params["headed"].as_bool().unwrap_or(false);
         let engine = params["browser"]
             .as_str()
-            .map(BrowserEngine::from_str)
+            .and_then(|s| s.parse::<BrowserEngine>().ok())
             .unwrap_or(BrowserEngine::Chrome);
 
         let workspace = ctx.workspace.clone();
@@ -579,14 +579,13 @@ async fn action_screenshot(
     let workspace_path = media_dir.join(format!("screenshot_{}.png", ts));
 
     let user_path = params["output_path"].as_str().map(|p| {
-        let pb = if p.starts_with("~/") {
+        if p.starts_with("~/") {
             dirs::home_dir()
                 .map(|h| h.join(&p[2..]))
                 .unwrap_or_else(|| std::path::PathBuf::from(p))
         } else {
             std::path::PathBuf::from(p)
-        };
-        pb
+        }
     });
 
     // Decode base64 and write
@@ -1500,13 +1499,13 @@ mod tests {
 
     #[test]
     fn test_browser_engine_from_str() {
-        assert_eq!(BrowserEngine::from_str("chrome"), BrowserEngine::Chrome);
-        assert_eq!(BrowserEngine::from_str("Chrome"), BrowserEngine::Chrome);
-        assert_eq!(BrowserEngine::from_str("firefox"), BrowserEngine::Firefox);
-        assert_eq!(BrowserEngine::from_str("ff"), BrowserEngine::Firefox);
-        assert_eq!(BrowserEngine::from_str("edge"), BrowserEngine::Edge);
-        assert_eq!(BrowserEngine::from_str("msedge"), BrowserEngine::Edge);
-        assert_eq!(BrowserEngine::from_str("unknown"), BrowserEngine::Chrome); // default
+        assert_eq!("chrome".parse::<BrowserEngine>().unwrap(), BrowserEngine::Chrome);
+        assert_eq!("Chrome".parse::<BrowserEngine>().unwrap(), BrowserEngine::Chrome);
+        assert_eq!("firefox".parse::<BrowserEngine>().unwrap(), BrowserEngine::Firefox);
+        assert_eq!("ff".parse::<BrowserEngine>().unwrap(), BrowserEngine::Firefox);
+        assert_eq!("edge".parse::<BrowserEngine>().unwrap(), BrowserEngine::Edge);
+        assert_eq!("msedge".parse::<BrowserEngine>().unwrap(), BrowserEngine::Edge);
+        assert_eq!("unknown".parse::<BrowserEngine>().unwrap(), BrowserEngine::Chrome); // default
     }
 
     #[test]

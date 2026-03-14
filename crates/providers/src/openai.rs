@@ -119,6 +119,7 @@ impl OpenAIProvider {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_proxy(
         api_key: &str,
         api_base: Option<&str>,
@@ -210,8 +211,9 @@ impl OpenAIProvider {
 
     /// Parse text-based tool call blocks from the response content.
     /// Handles multiple formats:
-    /// - `<tool_call>{"name":"...","arguments":{...}}</tool_call>`
+    /// - `{"name":"...","arguments":{...}}`
     /// - `[TOOL_CALL]{tool => "...", args => {...}}[/TOOL_CALL]`
+    ///
     /// Returns (remaining_text, parsed_tool_calls).
     fn parse_function_parameter_tool_block(
         block: &str,
@@ -617,9 +619,9 @@ impl OpenAIProvider {
             if let Some(pos) = text.find(pat.as_str()) {
                 let after = text[pos + pat.len()..].trim();
                 // Quoted value
-                if after.starts_with('"') {
-                    if let Some(end_quote) = after[1..].find('"') {
-                        return Some(after[1..1 + end_quote].to_string());
+                if let Some(after) = after.strip_prefix('"') {
+                    if let Some(end_quote) = after.find('"') {
+                        return Some(after[..end_quote].to_string());
                     }
                 }
                 // Unquoted value — take until comma or whitespace
@@ -1185,8 +1187,8 @@ impl Provider for OpenAIProvider {
                                 if data == "[DONE]" {
                                     // 构建最终响应
                                     let final_tool_calls: Vec<ToolCallRequest> = tool_calls
-                                        .into_iter()
-                                        .map(|(_, acc)| acc.to_tool_call_request())
+                                        .into_values()
+                                        .map(|acc| acc.to_tool_call_request())
                                         .collect();
 
                                     let response = finalize_stream_response(
@@ -1287,8 +1289,8 @@ impl Provider for OpenAIProvider {
 
             // 如果流结束但没有收到 [DONE]，也发送完成事件
             let final_tool_calls: Vec<ToolCallRequest> = tool_calls
-                .into_iter()
-                .map(|(_, acc)| acc.to_tool_call_request())
+                .into_values()
+                .map(|acc| acc.to_tool_call_request())
                 .collect();
 
             let response = finalize_stream_response(

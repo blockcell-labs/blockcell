@@ -47,7 +47,7 @@ fn extract_host(url: &str) -> Option<String> {
     } else {
         url
     };
-    let host = without_scheme.split('/').next()?.split('@').last()?;
+    let host = without_scheme.split('/').next()?.split('@').next_back()?;
     // 去掉端口
     let host = if host.starts_with('[') {
         // IPv6

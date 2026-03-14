@@ -20,6 +20,7 @@ impl MessageBus {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn split(
         self,
     ) -> (

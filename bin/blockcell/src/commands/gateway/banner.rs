@@ -27,6 +27,7 @@ pub(super) fn rand_u32() -> u32 {
     h.finish() as u32
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn print_startup_banner(
     config: &Config,
     host: &str,

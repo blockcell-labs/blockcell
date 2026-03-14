@@ -239,7 +239,7 @@ pub(super) async fn handle_channel_update(
     Json(req): Json<ChannelUpdateRequest>,
 ) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    let result: anyhow::Result<serde_json::Value> = (|| async {
+    let result: anyhow::Result<serde_json::Value> = async {
         let mut root = load_config_value_or_state(&state)?;
 
         let channels = root
@@ -317,7 +317,7 @@ pub(super) async fn handle_channel_update(
 
         write_json5_pretty(&config_path, &root)?;
         Ok(serde_json::json!({ "status": "ok", "channel": ch_key }))
-    })()
+    }
     .await;
 
     match result {
@@ -498,13 +498,13 @@ pub(super) async fn handle_channel_owner_put(
     Json(req): Json<ChannelOwnerUpdateRequest>,
 ) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    let result: anyhow::Result<serde_json::Value> = (|| async {
+    let result: anyhow::Result<serde_json::Value> = async {
         let mut cfg = load_config_or_state(&state);
 
         let payload = set_owner_binding(&mut cfg, &channel, None, &req.agent)?;
         cfg.save(&config_path)?;
         Ok(payload)
-    })()
+    }
     .await;
 
     match result {
@@ -520,13 +520,13 @@ pub(super) async fn handle_channel_account_owner_put(
     Json(req): Json<ChannelOwnerUpdateRequest>,
 ) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    let result: anyhow::Result<serde_json::Value> = (|| async {
+    let result: anyhow::Result<serde_json::Value> = async {
         let mut cfg = load_config_or_state(&state);
 
         let payload = set_owner_binding(&mut cfg, &channel, Some(&account_id), &req.agent)?;
         cfg.save(&config_path)?;
         Ok(payload)
-    })()
+    }
     .await;
 
     match result {
@@ -541,12 +541,12 @@ pub(super) async fn handle_channel_owner_delete(
     AxumPath(channel): AxumPath<String>,
 ) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    let result: anyhow::Result<serde_json::Value> = (|| async {
+    let result: anyhow::Result<serde_json::Value> = async {
         let mut cfg = load_config_or_state(&state);
         let payload = clear_owner_binding(&mut cfg, &channel, None)?;
         cfg.save(&config_path)?;
         Ok(payload)
-    })()
+    }
     .await;
 
     match result {
@@ -561,12 +561,12 @@ pub(super) async fn handle_channel_account_owner_delete(
     AxumPath((channel, account_id)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
     let config_path = state.paths.config_file();
-    let result: anyhow::Result<serde_json::Value> = (|| async {
+    let result: anyhow::Result<serde_json::Value> = async {
         let mut cfg = load_config_or_state(&state);
         let payload = clear_owner_binding(&mut cfg, &channel, Some(&account_id))?;
         cfg.save(&config_path)?;
         Ok(payload)
-    })()
+    }
     .await;
 
     match result {

@@ -19,15 +19,19 @@ pub enum BrowserEngine {
     Firefox,
 }
 
-impl BrowserEngine {
-    pub fn from_str(s: &str) -> Self {
+impl std::str::FromStr for BrowserEngine {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "firefox" | "ff" => Self::Firefox,
-            "edge" | "msedge" => Self::Edge,
-            _ => Self::Chrome,
+            "firefox" | "ff" => Ok(Self::Firefox),
+            "edge" | "msedge" => Ok(Self::Edge),
+            _ => Ok(Self::Chrome),
         }
     }
+}
 
+impl BrowserEngine {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Chrome => "chrome",

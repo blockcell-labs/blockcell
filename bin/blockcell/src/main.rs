@@ -269,6 +269,7 @@ enum ToolsCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum McpCommands {
     /// List MCP servers
@@ -568,9 +569,10 @@ enum CronCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Default)]
 enum UpgradeCommands {
     /// Check for available updates
+    #[default]
     Check,
     /// Download available update
     Download,
@@ -584,12 +586,6 @@ enum UpgradeCommands {
     },
     /// Show upgrade status
     Status,
-}
-
-impl Default for UpgradeCommands {
-    fn default() -> Self {
-        UpgradeCommands::Check
-    }
 }
 
 #[derive(Subcommand)]
@@ -864,10 +860,10 @@ async fn main() -> anyhow::Result<()> {
             }
             ToolsCommands::Toggle {
                 tool_name,
-                enable,
+                enable: _,
                 disable,
             } => {
-                let enabled = if disable { false } else { enable || true };
+                let enabled = !disable;
                 commands::tools_cmd::toggle(&tool_name, enabled).await?;
             }
         },

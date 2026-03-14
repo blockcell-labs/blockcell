@@ -53,6 +53,7 @@ impl OpenAIResponsesProvider {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_proxy(
         api_key: &str,
         api_base: Option<&str>,
@@ -131,19 +132,11 @@ impl OpenAIResponsesProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
 
-        if url.starts_with("data:") {
-            Some(json!({
-                "type": "input_image",
-                "image_url": url,
-                "detail": detail,
-            }))
-        } else {
-            Some(json!({
-                "type": "input_image",
-                "image_url": url,
-                "detail": detail,
-            }))
-        }
+        Some(json!({
+            "type": "input_image",
+            "image_url": url,
+            "detail": detail,
+        }))
     }
 
     fn content_to_input_parts(role: &str, content: &Value) -> Vec<Value> {

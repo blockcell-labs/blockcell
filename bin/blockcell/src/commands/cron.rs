@@ -26,8 +26,8 @@ pub async fn list(show_all: bool, agent_id: &str) -> anyhow::Result<()> {
         println!("Agent: {}", agent_id);
     }
     println!(
-        "{:<8} {:<22} {:<8} {:<18} {}",
-        "ID", "Name", "Enabled", "Next Run", "Schedule"
+        "{:<8} {:<22} {:<8} {:<18} Schedule",
+        "ID", "Name", "Enabled", "Next Run"
     );
     println!("{}", "-".repeat(80));
 

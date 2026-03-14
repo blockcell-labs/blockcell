@@ -181,7 +181,7 @@ impl CronService {
             .collect();
 
         match matching.len() {
-            0 => return Ok(None),
+            0 => Ok(None),
             1 => {
                 let job = &mut jobs[matching[0]];
                 job.enabled = enabled;

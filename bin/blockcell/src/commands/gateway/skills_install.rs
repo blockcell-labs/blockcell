@@ -268,11 +268,9 @@ fn sanitize_skill_name(raw: &str) -> Result<String, String> {
         let c = ch.to_ascii_lowercase();
         if c.is_ascii_alphanumeric() {
             out.push(c);
-        } else if matches!(c, ' ' | '-' | '.' | '_') {
-            if !out.ends_with('_') {
+        } else if matches!(c, ' ' | '-' | '.' | '_') && !out.ends_with('_') {
                 out.push('_');
             }
-        }
     }
     let out = out.trim_matches('_').to_string();
     if out.is_empty() {
@@ -690,7 +688,7 @@ pub(super) async fn handle_skill_install_external(
         let root_prefix = url
             .split("/tree/")
             .nth(1)
-            .and_then(|s| s.splitn(2, '/').nth(1))
+            .and_then(|s| s.split_once('/').map(|x| x.1))
             .unwrap_or("")
             .trim_matches('/')
             .to_string();

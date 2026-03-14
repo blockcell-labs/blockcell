@@ -946,6 +946,7 @@ fn dingtalk_mime_for_ext(ext: &str) -> &'static str {
 /// Send a text message to a DingTalk conversation or user.
 /// - If `chat_id` starts with `"cid:"` or is a known group chatid format, uses `chat/send`.
 /// - Otherwise treats `chat_id` as a user ID and uses the new API v1.0 robot message.
+///
 /// Long messages are split to respect the 4096-char limit.
 pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<()> {
     crate::rate_limit::dingtalk_limiter().acquire().await;

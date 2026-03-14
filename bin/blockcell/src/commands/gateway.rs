@@ -605,6 +605,7 @@ fn open_agent_memory_store(paths: &Paths) -> Option<MemoryStoreHandle> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_agent_runtime(
     config: &Config,
     paths: &Paths,

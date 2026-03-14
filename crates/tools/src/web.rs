@@ -489,7 +489,7 @@ async fn fetch_via_cdp(url: &str, max_chars: usize, workspace: &std::path::Path)
 
     let current_url = eval
         .get("result")
-        .and_then(|_| None::<String>)
+        .and(None::<String>)
         .unwrap_or_else(|| url.to_string());
 
     let markdown = crate::html_to_md::html_to_markdown(&html);

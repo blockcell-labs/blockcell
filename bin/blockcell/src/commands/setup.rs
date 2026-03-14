@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context};
-use blockcell_core::config::{ModelEntry, ProviderConfig, ToolCallMode};
+use blockcell_core::config::{ModelEntry, ToolCallMode};
 use blockcell_core::{Config, Paths};
 use std::io::{self, Write};
 
@@ -120,7 +120,7 @@ fn configure_provider(
     let entry = config
         .providers
         .entry(provider.to_string())
-        .or_insert_with(ProviderConfig::default);
+        .or_default();
 
     if entry.api_base.is_none() {
         entry.api_base = default_api_base_for_provider(provider).map(|s| s.to_string());

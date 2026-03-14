@@ -19,9 +19,7 @@ fn agent_owner_bindings(config: &Config, agent_id: &str) -> Vec<String> {
             .channel_account_owners
             .iter()
             .flat_map(|(channel, bindings)| {
-                bindings.iter().filter_map(move |(account_id, owner)| {
-                    (owner.trim() == agent_id).then(|| format!("{}:{}", channel, account_id))
-                })
+                bindings.iter().filter(|(_, owner)| owner.trim() == agent_id).map(move |(account_id, _)| format!("{}:{}", channel, account_id))
             }),
     );
 

@@ -13,6 +13,15 @@ use tracing::{debug, error, info, warn};
 
 use crate::{Tool, ToolContext, ToolSchema};
 
+/// Type alias for WebSocket write half
+type WsWriteHalf = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    WsMessage,
+>;
+
+/// Type alias for shared WebSocket write handle
+type WsWriteHandle = Arc<Mutex<Option<WsWriteHalf>>>;
+
 /// Global stream manager — holds all active subscriptions.
 static STREAM_MANAGER: Lazy<Arc<Mutex<StreamManager>>> =
     Lazy::new(|| Arc::new(Mutex::new(StreamManager::new())));
@@ -720,18 +729,7 @@ async fn run_websocket_stream(
         }
 
         // Store write half for send action
-        let write_handle: Arc<
-            Mutex<
-                Option<
-                    futures::stream::SplitSink<
-                        tokio_tungstenite::WebSocketStream<
-                            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                        >,
-                        WsMessage,
-                    >,
-                >,
-            >,
-        > = Arc::new(Mutex::new(Some(write)));
+        let write_handle: WsWriteHandle = Arc::new(Mutex::new(Some(write)));
 
         {
             let mut ws_writers = WS_WRITERS.lock().await;
@@ -805,27 +803,8 @@ async fn run_websocket_stream(
 }
 
 /// Global WebSocket write handles for the send action.
-static WS_WRITERS: Lazy<
-    Arc<
-        Mutex<
-            HashMap<
-                String,
-                Arc<
-                    Mutex<
-                        Option<
-                            futures::stream::SplitSink<
-                                tokio_tungstenite::WebSocketStream<
-                                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                                >,
-                                WsMessage,
-                            >,
-                        >,
-                    >,
-                >,
-            >,
-        >,
-    >,
-> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static WS_WRITERS: Lazy<Arc<Mutex<HashMap<String, WsWriteHandle>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 async fn run_sse_stream(
     stream_id: String,

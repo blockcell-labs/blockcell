@@ -168,6 +168,7 @@ impl TaskManager {
     }
 
     /// Register a new task and return its ID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_task(
         &self,
         task_id: &str,

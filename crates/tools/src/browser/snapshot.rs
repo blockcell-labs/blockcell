@@ -206,7 +206,7 @@ fn get_ax_value(node: &Value, field: &str) -> String {
 /// Assign ref IDs to interactive elements in the tree.
 /// Returns the updated ref counter and a map of ref_id -> node metadata.
 pub fn assign_refs(
-    nodes: &mut Vec<AXNode>,
+    nodes: &mut [AXNode],
     start_counter: u32,
     interactive_only: bool,
 ) -> (u32, HashMap<String, Value>) {
