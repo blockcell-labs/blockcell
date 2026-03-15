@@ -633,7 +633,7 @@ impl ContextBuilder {
         Self::fallback_latest_round(&rounds)
     }
 
-    fn split_history_into_rounds<'a>(history: &'a [ChatMessage]) -> Vec<Vec<&'a ChatMessage>> {
+    fn split_history_into_rounds(history: &[ChatMessage]) -> Vec<Vec<&ChatMessage>> {
         let mut rounds: Vec<Vec<&ChatMessage>> = Vec::new();
         let mut current_round: Vec<&ChatMessage> = Vec::new();
 

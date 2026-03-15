@@ -476,9 +476,9 @@ fn resolve_cron_deliver_target(msg: &InboundMessage) -> Option<(String, String)>
     Some((channel.to_string(), to.to_string()))
 }
 
-fn split_history_into_rounds_for_planning<'a>(
-    history: &'a [ChatMessage],
-) -> Vec<Vec<&'a ChatMessage>> {
+fn split_history_into_rounds_for_planning(
+    history: &[ChatMessage],
+) -> Vec<Vec<&ChatMessage>> {
     let mut rounds = Vec::new();
     let mut current = Vec::new();
 
@@ -4049,7 +4049,6 @@ impl AgentRuntime {
             .await?;
 
         let mut updated_history = history;
-        let session_metadata = session_metadata;
         let allowed_tools = self
             .context_builder
             .skill_manager()
