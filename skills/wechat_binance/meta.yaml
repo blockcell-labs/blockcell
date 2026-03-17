@@ -1,0 +1,17 @@
+name: wechat_binance
+description: "抓取币安市值排名前10的代币信息并通过微信发送"
+requires:
+  bins: ["python3", "osascript"]
+  env: []
+permissions: []
+always: false
+triggers:
+  - "币安市值"
+  - "binance top 10"
+  - "发送币安行情top10给"
+  - "wechat binance"
+capabilities: []
+output_format: "markdown"
+fallback:
+  strategy: "error"
+  message: "抓取或发送失败，请检查网络和微信状态"
