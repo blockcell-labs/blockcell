@@ -621,6 +621,13 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.saveProxy': 'Save Proxy Config',
     'settings.proxyPriority': 'Provider-specific proxy → Global proxy → Direct',
     'settings.proxyOff': 'Global proxy disabled, all providers connect directly',
+    // Command Picker
+    'commandPicker.searchPlaceholder': 'Search tools and skills...',
+    'commandPicker.select': 'to select',
+    'commandPicker.noResults': 'No matching tools or skills',
+    'commandPicker.count': '{n} commands',
+    'commandPicker.navigate': 'navigate',
+    'commandPicker.insert': 'insert',
   },
   zh: {
     // Sidebar
@@ -1224,6 +1231,13 @@ const translations: Record<Locale, Record<string, string>> = {
     'settings.saveProxy': '保存代理配置',
     'settings.proxyPriority': '供应商专用代理 > 本页全局代理 > 直连',
     'settings.proxyOff': '全局代理未启用，各供应商直连',
+    // Command Picker
+    'commandPicker.searchPlaceholder': '搜索工具和技能...',
+    'commandPicker.select': '选择',
+    'commandPicker.noResults': '没有匹配的工具或技能',
+    'commandPicker.count': '{n} 个命令',
+    'commandPicker.navigate': '导航',
+    'commandPicker.insert': '插入',
   },
 };
 

@@ -27,6 +27,13 @@ use blockcell_tools::{
     build_tool_registry_for_agent_config, CapabilityRegistryHandle, CoreEvolutionHandle,
     MemoryStoreHandle,
 };
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    style::Print,
+    terminal::{self, Clear, ClearType},
+};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{info, warn};
@@ -697,8 +704,6 @@ pub async fn run(
         let session_clone = session.clone();
         let stdin_task_manager = task_manager.clone();
         let stdin_handle = tokio::task::spawn_blocking(move || {
-            use std::io::{BufRead, Write};
-            let stdin = std::io::stdin();
             let mut stdout = std::io::stdout();
             // Create a small tokio runtime for blocking task manager queries
             let local_rt = tokio::runtime::Builder::new_current_thread()
@@ -707,20 +712,20 @@ pub async fn run(
                 .expect("Failed to create local runtime for stdin");
 
             loop {
-                print!("> ");
-                let _ = stdout.flush();
+                // Note: prompt is printed inside read_line_with_command_picker
+                // to avoid double printing after raw mode is enabled
 
-                let mut raw_input = String::new();
-                match stdin.lock().read_line(&mut raw_input) {
-                    Ok(0) => break, // EOF (Ctrl+D)
-                    Ok(_) => {}
-                    Err(_) => continue, // Non-UTF-8 or other read error — skip and re-prompt
-                }
+                // Read input character by character to detect "/" immediately
+                let input = read_line_with_command_picker(
+                    &stdin_paths,
+                    &mut stdout,
+                    &session_clone,
+                    &stdin_tx,
+                );
 
-                // After reading a line, check if a confirmation request arrived
-                // (it may have arrived while we were blocked on read_line)
+                // Check if a confirmation request arrived
                 if let Ok(response_tx) = confirm_answer_rx.try_recv() {
-                    let answer = raw_input.trim().to_lowercase();
+                    let answer = input.trim().to_lowercase();
                     let allowed = answer == "y" || answer == "yes";
                     if allowed {
                         eprintln!("✅ Access granted");
@@ -732,7 +737,7 @@ pub async fn run(
                     continue;
                 }
 
-                let input = raw_input.trim().to_string();
+                let input = input.trim().to_string();
                 if input.is_empty() {
                     continue;
                 }
@@ -754,6 +759,7 @@ pub async fn run(
                     println!("  /clear-skills       Clear all skill evolution records");
                     println!("  /forget-skill <n>   Delete records for a specific skill");
                     println!("  /quit  /exit        Exit interactive mode");
+                    println!("  /<name>             Quick invoke a tool or skill");
                     println!();
                     continue;
                 }
@@ -934,6 +940,458 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Read a line of input with real-time command picker support.
+/// When user types "/", immediately show command suggestions below the input line.
+/// Supports backspace to delete and escape to cancel picker.
+fn read_line_with_command_picker(
+    paths: &Paths,
+    stdout: &mut std::io::Stdout,
+    _session: &str,
+    _stdin_tx: &mpsc::Sender<InboundMessage>,
+) -> String {
+    let mut input = String::new();
+    let all_items = collect_command_items(paths);
+    let mut selected_index: usize = 0;
+    let mut showing_picker = false;
+    let mut visible_count: usize = 0;
+    let mut visible_limit: usize = 16; // Initial items to show
+    let mut prev_visible_limit: usize = 0; // Track previous limit for proper clearing
+    let mut command_start_pos: Option<usize> = None; // Position of '/' for command
+    const LOAD_MORE_COUNT: usize = 10; // Items to load when scrolling to end
+
+    // Enable raw mode for character-by-character input
+    // This disables line buffering and echo on both Unix and Windows
+    // If raw mode fails, we fall back to standard input mode
+    if let Err(e) = terminal::enable_raw_mode() {
+        // Raw mode failed - use fallback with std::io::stdin
+        // This means we won't have command picker, but basic input will work
+        eprintln!("Warning: Failed to enable raw mode: {}. Using fallback input.", e);
+        let _ = terminal::disable_raw_mode(); // Ensure clean state
+        use std::io::{self, BufRead};
+        let stdin = io::stdin();
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).is_ok() {
+            return line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+        }
+        return String::new();
+    }
+
+    // Initial prompt - use crossterm commands for proper terminal control
+    let _ = execute!(
+        stdout,
+        Print("\r"),
+        Clear(ClearType::CurrentLine),
+        Print("> ")
+    );
+
+    loop {
+        match event::read() {
+            Ok(Event::Key(key)) => {
+                // On Windows, we receive both Press and Release events.
+                // Only process Press events to avoid double input.
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Char(c) => {
+                        if c == 'c' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                            // Ctrl+C - exit
+                            let _ = terminal::disable_raw_mode();
+                            println!();
+                            std::process::exit(0);
+                        }
+
+                        // Add character to input
+                        input.push(c);
+
+                        // Check if we should show suggestions - detect '/' anywhere
+                        if let Some((pos, query)) = extract_command_query(&input) {
+                            if !showing_picker {
+                                showing_picker = true;
+                            }
+                            command_start_pos = Some(pos);
+                            // Always reset selection when typing new characters
+                            selected_index = 0;
+                            visible_limit = 16;
+                            // Render suggestions with the query part
+                            visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                            prev_visible_limit = visible_limit;
+                        } else if showing_picker {
+                            clear_suggestions(prev_visible_limit, &input, stdout);
+                            prev_visible_limit = 0;
+                            showing_picker = false;
+                            visible_count = 0;
+                            command_start_pos = None;
+                        } else {
+                            // Render input line only
+                            let _ = execute!(
+                                stdout,
+                                Print("\r"),
+                                Clear(ClearType::CurrentLine),
+                                Print(format!("> {}", input))
+                            );
+                        }
+
+                        // Flush to ensure output is immediately visible
+                        use std::io::Write;
+                        let _ = stdout.flush();
+                    }
+                    KeyCode::Enter => {
+                        // If showing picker, select current item
+                        if showing_picker && visible_count > 0 {
+                            let query = extract_command_query(&input).map(|(_, q)| q).unwrap_or("");
+                            let filtered = filter_items(&all_items, query);
+
+                            if let Some(item) = filtered.get(selected_index) {
+                                // Clear suggestions first
+                                clear_suggestions(prev_visible_limit, &input, stdout);
+                                prev_visible_limit = 0;
+                                // Replace command part with selected item
+                                if let Some(pos) = command_start_pos {
+                                    input = format!("{} /{} ", &input[..pos], item.name);
+                                } else {
+                                    input = format!("/{} ", item.name);
+                                }
+                                render_input_line(&input, stdout);
+                                showing_picker = false;
+                                visible_count = 0;
+                                command_start_pos = None;
+                                continue;
+                            }
+                        }
+
+                        // Submit the input
+                        if showing_picker {
+                            clear_suggestions(prev_visible_limit, &input, stdout);
+                        }
+                        let _ = terminal::disable_raw_mode();
+                        println!();
+                        return input;
+                    }
+                    KeyCode::Tab => {
+                        // Select current item in picker
+                        if showing_picker && visible_count > 0 {
+                            let query = extract_command_query(&input).map(|(_, q)| q).unwrap_or("");
+                            let filtered = filter_items(&all_items, query);
+
+                            if let Some(item) = filtered.get(selected_index) {
+                                // Clear suggestions first
+                                clear_suggestions(prev_visible_limit, &input, stdout);
+                                prev_visible_limit = 0;
+                                // Replace command part with selected item
+                                if let Some(pos) = command_start_pos {
+                                    input = format!("{} /{} ", &input[..pos], item.name);
+                                } else {
+                                    input = format!("/{} ", item.name);
+                                }
+                                render_input_line(&input, stdout);
+                                showing_picker = false;
+                                visible_count = 0;
+                                command_start_pos = None;
+                            }
+                        }
+                    }
+                    KeyCode::Up => {
+                        if showing_picker && visible_count > 0 && selected_index > 0 {
+                            selected_index -= 1;
+                            let query = extract_command_query(&input).map(|(_, q)| q).unwrap_or("");
+                            visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                            prev_visible_limit = visible_limit;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if showing_picker && visible_count > 0 {
+                            // visible_limit is how many we're showing, visible_count is total available
+                            let displayed_count = visible_limit.min(visible_count);
+                            let last_displayed_idx = displayed_count.saturating_sub(1);
+                            let last_total_idx = visible_count.saturating_sub(1);
+
+                            let query = extract_command_query(&input).map(|(_, q)| q).unwrap_or("");
+
+                            // Check if we're at the last displayed item and there are more items to load
+                            if selected_index == last_displayed_idx && selected_index < last_total_idx {
+                                // Load more items
+                                visible_limit += LOAD_MORE_COUNT;
+                                selected_index += 1;
+                                visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                                prev_visible_limit = visible_limit;
+                            } else if selected_index < last_displayed_idx {
+                                // Normal navigation within displayed items
+                                selected_index += 1;
+                                visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                                prev_visible_limit = visible_limit;
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if !input.is_empty() {
+                            // Remove last character
+                            input.pop();
+
+                            // Re-show suggestions if still in command mode
+                            if let Some((_, query)) = extract_command_query(&input) {
+                                // Show picker again
+                                showing_picker = true;
+                                selected_index = 0;
+                                visible_limit = 16; // Reset on new search
+                                visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                                prev_visible_limit = visible_limit;
+                            } else {
+                                // Clear suggestions if was showing
+                                if showing_picker && visible_count > 0 {
+                                    clear_suggestions(prev_visible_limit, &input, stdout);
+                                    prev_visible_limit = 0;
+                                }
+                                showing_picker = false;
+                                visible_count = 0;
+                                command_start_pos = None;
+                                render_input_line(&input, stdout);
+                            }
+
+                            // Flush to ensure output is immediately visible
+                            use std::io::Write;
+                            let _ = stdout.flush();
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if showing_picker {
+                            clear_suggestions(prev_visible_limit, &input, stdout);
+                            prev_visible_limit = 0;
+                            showing_picker = false;
+                            visible_count = 0;
+                            command_start_pos = None;
+                            render_input_line(&input, stdout);
+                            use std::io::Write;
+                            let _ = stdout.flush();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Resize(_, _)) => {
+                // Terminal resize - re-render if showing picker
+                if showing_picker {
+                    let query = extract_command_query(&input).map(|(_, q)| q).unwrap_or("");
+                    visible_count = render_suggestions(&all_items, query, &input, selected_index, visible_limit, prev_visible_limit, stdout);
+                    prev_visible_limit = visible_limit;
+                } else {
+                    render_input_line(&input, stdout);
+                }
+            }
+            Ok(_) => {
+                // Ignore other events
+            }
+            Err(_) => {
+                let _ = terminal::disable_raw_mode();
+                return input;
+            }
+        }
+    }
+}
+
+/// Render the input line using crossterm commands
+/// Uses \r to overwrite any potential terminal echo (Windows raw mode issue)
+fn render_input_line(input: &str, stdout: &mut std::io::Stdout) {
+    use std::io::Write;
+    let _ = execute!(
+        stdout,
+        Print("\r"),
+        Clear(ClearType::CurrentLine),
+        Print(format!("> {}", input))
+    );
+    // Flush to ensure the output is immediately visible
+    let _ = stdout.flush();
+}
+
+/// Extract command query from input - finds the last '/' and returns the text after it
+/// Only triggers if '/' is at the start or preceded by a space
+/// Returns (position of '/', query string) if found and no space after '/'
+fn extract_command_query(input: &str) -> Option<(usize, &str)> {
+    // Find the last '/' in input
+    if let Some(slash_pos) = input.rfind('/') {
+        // Check if '/' is at the start or preceded by a space
+        let is_at_start = slash_pos == 0;
+        // Check if the part before '/' ends with a space (or is empty for start)
+        let before_slash = &input[..slash_pos];
+        let is_after_space = before_slash.ends_with(' ');
+
+        if !is_at_start && !is_after_space {
+            return None;
+        }
+
+        let after_slash = &input[slash_pos + 1..];
+        // Check if there's no space in the command part (means still typing command)
+        if !after_slash.contains(' ') {
+            Some((slash_pos, after_slash))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Filter items based on query - returns all matching items sorted by relevance
+fn filter_items<'a>(items: &'a [CommandItem], query: &str) -> Vec<&'a CommandItem> {
+    if query.is_empty() {
+        items.iter().collect()
+    } else {
+        let q = query.to_lowercase();
+        // Score each item: name starts with query = 3, name contains query = 2, description contains query = 1
+        let mut scored: Vec<(usize, &CommandItem)> = items
+            .iter()
+            .filter_map(|item| {
+                let name_lower = item.name.to_lowercase();
+                let desc_lower = item.description.to_lowercase();
+                let score = if name_lower.starts_with(&q) {
+                    3
+                } else if name_lower.contains(&q) {
+                    2
+                } else if desc_lower.contains(&q) {
+                    1
+                } else {
+                    0
+                };
+                if score > 0 {
+                    Some((score, item))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by score first (higher is better), then by name
+        scored.sort_by(|a, b| {
+            if b.0 != a.0 {
+                b.0.cmp(&a.0)
+            } else {
+                a.1.name.cmp(&b.1.name)
+            }
+        });
+
+        scored.into_iter().map(|(_, item)| item).collect()
+    }
+}
+
+/// Render suggestions below the input line
+/// Returns the total number of filtered items (not just displayed)
+fn render_suggestions(
+    all_items: &[CommandItem],
+    query: &str,
+    input: &str,
+    selected: usize,
+    visible_limit: usize,
+    prev_lines_to_clear: usize,
+    stdout: &mut std::io::Stdout,
+) -> usize {
+    let filtered = filter_items(all_items, query);
+    let total_count = filtered.len();
+    let display_count = filtered.len().min(visible_limit);
+    let has_more = total_count > visible_limit;
+
+    // First, clear all previously displayed lines plus potential new lines
+    // Use the maximum of prev_lines_to_clear and current visible_limit
+    let lines_to_clear = prev_lines_to_clear.max(visible_limit) + 1; // +1 for "show more" line
+    let _ = execute!(stdout, cursor::SavePosition);
+    for _ in 0..lines_to_clear {
+        let _ = execute!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine));
+    }
+    let _ = execute!(stdout, cursor::RestorePosition);
+
+    if display_count == 0 {
+        // Just render input line if no suggestions
+        let _ = execute!(
+            stdout,
+            Print("\r"),
+            Clear(ClearType::CurrentLine),
+            Print(format!("> {}", input))
+        );
+        return 0;
+    }
+
+    // Calculate max name width for alignment
+    let max_name_width = filtered
+        .iter()
+        .take(display_count)
+        .map(|item| item.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    // Now print the suggestions - move down one line at a time
+    for (i, item) in filtered.iter().take(display_count).enumerate() {
+        let is_selected = i == selected;
+        let icon = if item.kind == "tool" { "🔧" } else { "✨" };
+        let kind_label = if item.kind == "tool" { "tool" } else { "skill" };
+        let desc: String = item.description.chars().take(25).collect();
+
+        // Pad name to align descriptions
+        let name_width = item.name.chars().count();
+        let padding = " ".repeat(max_name_width.saturating_sub(name_width));
+
+        // Move to next line, clear it, print content
+        let _ = execute!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine));
+
+        if is_selected {
+            // Selected item with reverse video and bold
+            let _ = execute!(stdout, Print(format!("\x1b[7m\x1b[1m {} {}{} \x1b[0m\x1b[90m[{}]\x1b[0m \x1b[2m{}\x1b[0m", icon, item.name, padding, kind_label, desc)));
+        } else {
+            let _ = execute!(stdout, Print(format!("   {} {}{}  \x1b[90m[{}]\x1b[0m \x1b[2m{}\x1b[0m", icon, item.name, padding, kind_label, desc)));
+        }
+    }
+
+    // Show "show more" indicator if there are more items
+    let mut extra_lines = 0;
+    if has_more {
+        let remaining = total_count - visible_limit;
+        let _ = execute!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine));
+        let _ = execute!(stdout, Print(format!("\x1b[90m   ↓ show more ({} remaining)\x1b[0m", remaining)));
+        extra_lines = 1;
+    }
+
+    // Move cursor back up to input line
+    for _ in 0..(display_count + extra_lines) {
+        let _ = execute!(stdout, cursor::MoveUp(1));
+    }
+
+    // Render input line
+    let _ = execute!(
+        stdout,
+        Print("\r"),
+        Clear(ClearType::CurrentLine),
+        Print(format!("> {}", input))
+    );
+
+    // Flush to ensure output is immediately visible
+    use std::io::Write;
+    let _ = stdout.flush();
+
+    total_count
+}
+
+/// Clear the suggestion list
+fn clear_suggestions(visible_limit: usize, input: &str, stdout: &mut std::io::Stdout) {
+    // Save position, clear all suggestion lines (+1 for potential "show more" line), restore position
+    let lines_to_clear = visible_limit + 1;
+    let _ = execute!(stdout, cursor::SavePosition);
+    for _ in 0..lines_to_clear {
+        let _ = execute!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine));
+    }
+    let _ = execute!(stdout, cursor::RestorePosition);
+
+    // Render input line
+    let _ = execute!(
+        stdout,
+        Print("\r"),
+        Clear(ClearType::CurrentLine),
+        Print(format!("> {}", input))
+    );
+
+    // Flush to ensure output is immediately visible
+    use std::io::Write;
+    let _ = stdout.flush();
 }
 
 /// Scan a directory for skill subdirectories and collect (name, description) pairs.
@@ -1393,6 +1851,55 @@ fn print_tools_status(paths: &Paths) {
     println!();
     println!("  💡 /skills view skills | capability_evolve tool to learn new tools");
     println!();
+}
+
+/// A command item for the interactive picker
+#[derive(Clone)]
+struct CommandItem {
+    name: String,
+    description: String,
+    kind: String, // "tool" or "skill"
+}
+
+/// Collect all available tools and skills as command items
+fn collect_command_items(paths: &Paths) -> Vec<CommandItem> {
+    let mut items = Vec::new();
+
+    // Collect built-in tools
+    for (_category, tools) in BUILTIN_TOOLS {
+        for (name, desc) in *tools {
+            items.push(CommandItem {
+                name: name.to_string(),
+                description: desc.to_string(),
+                kind: "tool".to_string(),
+            });
+        }
+    }
+
+    // Collect skills from workspace
+    let skills = scan_skill_dirs(&paths.skills_dir());
+    for (name, desc) in skills {
+        items.push(CommandItem {
+            name,
+            description: if desc.is_empty() {
+                "Skill".to_string()
+            } else {
+                desc
+            },
+            kind: "skill".to_string(),
+        });
+    }
+
+    // Sort by kind (tools first) then by name
+    items.sort_by(|a, b| {
+        if a.kind != b.kind {
+            a.kind.cmp(&b.kind) // tools before skills
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+
+    items
 }
 
 /// Format a Unix timestamp to a human-readable string.

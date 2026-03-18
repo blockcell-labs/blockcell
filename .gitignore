@@ -4,3 +4,92 @@
 /.worktrees/
 CLAUDE.md
 .claude/
+
+# ========================================
+# Android 项目忽略规则
+# ========================================
+
+# Gradle 文件
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio
+android-app/.idea/
+android-app/*.iml
+android-app/app/*.iml
+android-app/captures/
+android-app/externalNativeBuild/
+android-app/.cxx/
+
+# Android 编译产物
+android-app/app/src/main/assets/binaries/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# 本地配置
+android-app/keystore.properties
+android-app/app/keystore.properties
+*.jks
+*.keystore
+
+# NDK 编译输出 (由 CI/CD 生成)
+21/
+22/
+23/
+24/
+
+# ========================================
+# WebUI 忽略规则
+# ========================================
+
+# 依赖目录
+webui/node_modules/
+
+# 构建产物 (保留 dist 用于静态文件服务)
+# webui/dist/
+
+# 本地环境配置
+webui/.env
+webui/.env.local
+webui/.env.*.local
+
+# 日志
+webui/npm-debug.log*
+webui/yarn-debug.log*
+webui/yarn-error.log*
+
+# 编辑器
+webui/.vscode/
+webui/.idea/
+
+
+# ========================================
+# 通用忽略规则
+# ========================================
+
+# 操作系统
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 编辑器/IDE
+*.swp
+*.swo
+*~
+.idea/
+*.sublime-*
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+*.bak

@@ -41,6 +41,7 @@ reqwest = { workspace = true }
 zip = { workspace = true }
 urlencoding = { workspace = true }
 rhai = { workspace = true }
+crossterm = "0.28"
 
 [features]
 default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq"]

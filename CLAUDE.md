@@ -10,7 +10,7 @@ BlockCell 是一个用 Rust 构建的自进化 AI 多智能体框架。它不只
 ### 核心概念
 
 | 概念 | 说明 |
-|------|------|
+| ------ | ------ |
 | **Agent** | 智能体运行时，负责接收消息、调用 LLM、执行工具、管理状态 |
 | **Tool** | 原子能力单元，如 `read_file`、`web_fetch`、`send_message` |
 | **Skill** | 组合多个工具的技能，支持 Markdown 定义 + Rhai/Python 脚本 |
@@ -34,7 +34,15 @@ blockcell/
 │   ├── providers/          # LLM 提供商客户端
 │   ├── storage/            # SQLite 存储 (会话/记忆/审计)
 │   └── updater/            # 自动更新机制
-├── webui/                  # Web 前端 (Vue.js)
+├── webui/                  # Web 前端 (React + TypeScript + Vite)
+│   ├── src/
+│   │   ├── components/     # React 组件
+│   │   │   └── chat/       # 聊天相关组件 (消息列表、输入框、命令选择器)
+│   │   ├── lib/            # 工具函数、i18n、API 客户端
+│   │   ├── App.tsx         # 主应用组件
+│   │   └── main.tsx        # 入口文件
+│   ├── dist/               # 构建产物 (嵌入到 binary)
+│   └── package.json
 ├── skills/                 # 用户技能目录
 └── docs/                   # 文档
 ```
@@ -173,7 +181,45 @@ cargo test -p blockcell-agent
 cargo test test_intent_mcp_validation
 ```
 
+## WebUI 开发
+
+### 前端技术栈
+
+| 类别 | 技术 |
+| ---- | ---- |
+| 框架 | React 18 + TypeScript |
+| 构建 | Vite |
+| 样式 | Tailwind CSS |
+| 组件 | shadcn/ui |
+| 状态 | React Hooks |
+
+### 前端命令
+
+```bash
+cd webui
+
+# 安装依赖
+npm install
+
+# 开发模式
+npm run dev
+
+# 构建
+npm run build
+
+# 类型检查
+npm run type-check
+```
+
+### 前后端交互
+
+- Gateway 模式下，WebUI 静态文件嵌入到 binary 中
+- 通过 WebSocket `/ws` 端点进行实时通信
+- API 端点: `/api/*`
+
 ## 技术栈详情
+
+### 后端 (Rust)
 
 | 类别     | 技术                                              |
 | -------- | ------------------------------------------------- |
@@ -184,6 +230,16 @@ cargo test test_intent_mcp_validation
 | LLM      | OpenAI-compatible API                             |
 | 通讯     | WebSocket, Telegram Bot API, Slack Socket Mode    |
 | 加密     | ed25519-dalek, sha2                               |
+
+### 前端 (WebUI)
+
+| 类别     | 技术                                              |
+| -------- | ------------------------------------------------- |
+| 框架     | React 18, TypeScript                              |
+| 构建     | Vite                                              |
+| 样式     | Tailwind CSS                                      |
+| 组件库   | shadcn/ui                                         |
+| 国际化   | 自定义 i18n                                       |
 
 ## 相关文档
 
@@ -200,6 +256,8 @@ cargo test test_intent_mcp_validation
 | `crates/agent/src/lib.rs`         | Agent 核心逻辑         |
 | `crates/tools/src/`               | 工具实现               |
 | `crates/skills/src/engine.rs`     | 技能引擎               |
+| `webui/src/components/chat/`      | 聊天 UI 组件           |
+| `webui/src/App.tsx`               | WebUI 主组件           |
 | `~/.blockcell/config.json5`       | 用户配置               |
 
 ---

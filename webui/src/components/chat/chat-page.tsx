@@ -8,6 +8,7 @@ import { wsManager } from '@/lib/ws';
 import { getSession, uploadFile } from '@/lib/api';
 import { MessageBubble } from './message-bubble';
 import { BlockcellLogo } from '../blockcell-logo';
+import { CommandPicker, CommandItem } from './command-picker';
 import { useT } from '@/lib/i18n';
 import { isMediaPath } from './media-attachment';
 import type { UiMessage } from '@/lib/store';
@@ -33,9 +34,12 @@ export function ChatPage() {
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [showCommandPicker, setShowCommandPicker] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
   const hasMessages = messages.length > 0;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const selectedAgentRef = useRef(selectedAgentId);
   const currentSessionRef = useRef(currentSessionId);
@@ -250,9 +254,81 @@ export function ChatPage() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    // Handle command picker navigation
+    if (showCommandPicker) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Tab' || e.key === 'Enter') {
+        // Let CommandPicker handle these
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowCommandPicker(false);
+        setCommandQuery('');
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    }
+  }
+
+  function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const value = e.target.value;
+    setInput(value);
+
+    // Detect "/" at start of line or after space
+    const cursorPos = e.target.selectionStart;
+    const textBeforeCursor = value.slice(0, cursorPos);
+    const lastNewline = textBeforeCursor.lastIndexOf('\n');
+    const textAfterLastNewline = textBeforeCursor.slice(lastNewline + 1);
+
+    // Find the last '/' in the current line
+    const lastSlash = textAfterLastNewline.lastIndexOf('/');
+    if (lastSlash !== -1) {
+      // Check if '/' is at start or after a space
+      const isAtStart = lastSlash === 0;
+      const isAfterSpace = lastSlash > 0 && textAfterLastNewline[lastSlash - 1] === ' ';
+
+      if (isAtStart || isAfterSpace) {
+        const afterSlash = textAfterLastNewline.slice(lastSlash + 1);
+        // Check if there's no space after '/' (still typing command)
+        if (!afterSlash.includes(' ')) {
+          setShowCommandPicker(true);
+          setCommandQuery(afterSlash);
+          return;
+        }
+      }
+    }
+
+    setShowCommandPicker(false);
+    setCommandQuery('');
+  }
+
+  function handleCommandSelect(item: CommandItem) {
+    // Insert the command name at cursor position
+    const cursorPos = inputRef.current?.selectionStart || 0;
+    const textBeforeCursor = input.slice(0, cursorPos);
+    const textAfterCursor = input.slice(cursorPos);
+
+    // Find the start of the "/" command (use lastIndexOf to find the last '/')
+    const lastNewline = textBeforeCursor.lastIndexOf('\n');
+    const slashPos = textBeforeCursor.lastIndexOf('/');
+
+    if (slashPos !== -1 && slashPos > lastNewline) {
+      // Replace from "/" to cursor with the command name
+      const newText = input.slice(0, slashPos) + '/' + item.name + ' ' + textAfterCursor;
+      setInput(newText);
+      setShowCommandPicker(false);
+      setCommandQuery('');
+
+      // Focus input and move cursor after the inserted command
+      setTimeout(() => {
+        inputRef.current?.focus();
+        const newCursorPos = slashPos + 1 + item.name.length + 1;
+        inputRef.current?.setSelectionRange(newCursorPos, newCursorPos);
+      }, 0);
     }
   }
 
@@ -328,7 +404,19 @@ export function ChatPage() {
             </div>
           )}
 
-          <div className="flex items-end gap-2 bg-card border border-border rounded-xl p-2">
+          <div ref={inputContainerRef} className="flex items-end gap-2 bg-card border border-border rounded-xl p-2 relative">
+            {/* Command Picker */}
+            <CommandPicker
+              open={showCommandPicker}
+              query={commandQuery}
+              onSelect={handleCommandSelect}
+              onClose={() => {
+                setShowCommandPicker(false);
+                setCommandQuery('');
+              }}
+              containerRef={inputContainerRef}
+            />
+
             {/* Hidden file input */}
             <input
               ref={fileInputRef}
@@ -352,7 +440,7 @@ export function ChatPage() {
             <textarea
               ref={inputRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               placeholder={t('chat.inputPlaceholder')}
               className="flex-1 bg-transparent resize-none outline-none text-sm min-h-[40px] max-h-[200px] px-2"
