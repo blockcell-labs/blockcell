@@ -23,6 +23,8 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_maintenance;
 pub mod message;
+#[cfg(feature = "napcat")]
+pub mod napcat;
 pub mod network_monitor;
 pub mod ocr;
 pub mod office;
@@ -209,6 +211,9 @@ pub struct ToolContext {
     pub session_key: String,
     pub channel: String,
     pub account_id: Option<String>,
+    /// The user ID who triggered this tool call (sender of the message).
+    /// Used for permission checks in admin tools.
+    pub sender_id: Option<String>,
     pub chat_id: String,
     pub config: Config,
     pub permissions: PermissionSet,
@@ -251,6 +256,8 @@ impl<'a> PromptContext<'a> {
                 | "discord"
                 | "dingtalk"
                 | "whatsapp"
+                | "napcat"
+                | "qq"
         )
     }
 

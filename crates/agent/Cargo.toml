@@ -20,3 +20,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 which = { workspace = true }
 regex = { workspace = true }
+
+[features]
+default = ["napcat"]
+napcat = ["blockcell-tools/napcat"]

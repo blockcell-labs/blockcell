@@ -183,6 +183,15 @@ impl ToolRegistry {
         // Session response cache recall
         registry.register(Arc::new(SessionRecallTool));
 
+        // NapCatQQ tools (conditional)
+        #[cfg(feature = "napcat")]
+        {
+            crate::napcat::group::register_group_tools(&mut registry);
+            crate::napcat::user::register_user_tools(&mut registry);
+            crate::napcat::message::register_message_tools(&mut registry);
+            crate::napcat::extend::register_extend_tools(&mut registry);
+        }
+
         registry
     }
 

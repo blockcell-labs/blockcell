@@ -904,13 +904,45 @@ fn resolve_effective_tool_names(
             resolve_profile_tool_names(config, agent_id, intents, available_tools)
         }
     };
+
+    // DEBUG: Log profile tools containing napcat
+    {
+        let napcat_in_profile: Vec<&str> = profile_tools
+            .iter()
+            .filter(|t| t.starts_with("napcat_"))
+            .map(String::as_str)
+            .collect();
+        if !napcat_in_profile.is_empty() {
+            tracing::info!(
+                mode = ?mode,
+                intents = ?intents,
+                napcat_from_profile = ?napcat_in_profile,
+                "DEBUG: NapCatQQ tools from profile"
+            );
+        }
+    }
+
     tool_names.append(&mut profile_tools);
 
     if let Some(skill) = active_skill {
         tool_names.extend(skill.tools.iter().cloned());
     }
 
+    // Filter by available tools (registry)
     tool_names.retain(|name| available_tools.contains(name));
+
+    // Filter napcat tools by config enabled state
+    if !config.channels.napcat.enabled {
+        let napcat_count = tool_names.iter().filter(|n| n.starts_with("napcat_")).count();
+        if napcat_count > 0 {
+            tracing::info!(
+                napcat_tools_removed = napcat_count,
+                "DEBUG: Removing napcat tools because config.channels.napcat.enabled=false"
+            );
+        }
+        tool_names.retain(|name| !name.starts_with("napcat_"));
+    }
+
     tool_names.sort();
     tool_names.dedup();
     tool_names
@@ -1525,6 +1557,83 @@ impl AgentRuntime {
         })
     }
 
+    /// Build permissions for tool execution based on channel, sender, and chat context.
+    ///
+    /// This method grants appropriate permissions based on:
+    /// - Channel type (napcat, telegram, discord, etc.)
+    /// - User whitelist membership
+    /// - Admin status
+    fn build_tool_permissions(
+        &self,
+        channel: &str,
+        sender_id: Option<&str>,
+        chat_id: &str,
+    ) -> blockcell_core::types::PermissionSet {
+        use blockcell_core::types::PermissionSet;
+
+        let mut perms = PermissionSet::new();
+
+        // Grant channel-specific permissions
+        match channel {
+            "napcat" => {
+                // Use NapCat-specific permission builder
+                #[cfg(feature = "napcat")]
+                {
+                    perms = blockcell_tools::napcat::build_napcat_user_permissions(
+                        &self.config.channels.napcat,
+                        sender_id,
+                        chat_id,
+                    );
+                }
+                #[cfg(not(feature = "napcat"))]
+                {
+                    _ = (sender_id, chat_id); // Suppress unused variable warning
+                    perms = perms.with_permission("channel:napcat");
+                }
+            }
+            "telegram" => {
+                perms = perms.with_permission("channel:telegram");
+                // Grant basic tool access for telegram users
+                perms = perms.with_permission("telegram:tools");
+            }
+            "discord" => {
+                perms = perms.with_permission("channel:discord");
+                perms = perms.with_permission("discord:tools");
+            }
+            "slack" => {
+                perms = perms.with_permission("channel:slack");
+                perms = perms.with_permission("slack:tools");
+            }
+            "feishu" | "lark" => {
+                perms = perms.with_permission(&format!("channel:{}", channel));
+                perms = perms.with_permission("feishu:tools");
+            }
+            "wecom" => {
+                perms = perms.with_permission("channel:wecom");
+                perms = perms.with_permission("wecom:tools");
+            }
+            "dingtalk" => {
+                perms = perms.with_permission("channel:dingtalk");
+                perms = perms.with_permission("dingtalk:tools");
+            }
+            "whatsapp" => {
+                perms = perms.with_permission("channel:whatsapp");
+                perms = perms.with_permission("whatsapp:tools");
+            }
+            "cli" => {
+                // CLI mode gets full permissions
+                perms = perms.with_permission("channel:cli");
+                perms = perms.with_permission("cli:tools");
+            }
+            _ => {
+                // Unknown channel - grant basic access
+                perms = perms.with_permission(&format!("channel:{}", channel));
+            }
+        }
+
+        perms
+    }
+
     pub fn context_builder(&self) -> &ContextBuilder {
         &self.context_builder
     }
@@ -1917,16 +2026,9 @@ impl AgentRuntime {
         while i < split_point {
             let msg = &messages[i];
             if msg.role == "user" {
-                // Keep user messages but trim them
+                // Keep user messages intact - they contain task context that must not be lost
                 let text = match &msg.content {
-                    serde_json::Value::String(s) => {
-                        let chars: String = s.chars().take(150).collect();
-                        if s.chars().count() > 150 {
-                            format!("{}...", chars)
-                        } else {
-                            chars
-                        }
-                    }
+                    serde_json::Value::String(s) => s.clone(),
                     _ => "(media)".to_string(),
                 };
                 compressed_middle.push(ChatMessage::user(&text));
@@ -2886,6 +2988,23 @@ impl AgentRuntime {
 
         let available_tools: HashSet<String> =
             self.tool_registry.tool_names().into_iter().collect();
+
+        // DEBUG: Log napcat config and available tools
+        {
+            let napcat_enabled = self.config.channels.napcat.enabled;
+            let napcat_in_registry: Vec<&str> = available_tools
+                .iter()
+                .filter(|t| t.starts_with("napcat_"))
+                .map(String::as_str)
+                .collect();
+            info!(
+                napcat_enabled = napcat_enabled,
+                napcat_tools_in_registry = ?napcat_in_registry,
+                total_available_tools = available_tools.len(),
+                "DEBUG: NapCatQQ tool visibility check"
+            );
+        }
+
         let routed_agent_id = self.agent_id.as_deref();
         let mut tool_names = resolve_effective_tool_names(
             &self.config,
@@ -2895,6 +3014,22 @@ impl AgentRuntime {
             &decision.chat_intents,
             &available_tools,
         );
+
+        // DEBUG: Log resolved tools
+        {
+            let napcat_in_resolved: Vec<&str> = tool_names
+                .iter()
+                .filter(|t| t.starts_with("napcat_"))
+                .map(String::as_str)
+                .collect();
+            info!(
+                mode = ?decision.mode,
+                intents = ?decision.chat_intents,
+                napcat_tools_resolved = ?napcat_in_resolved,
+                total_resolved_tools = tool_names.len(),
+                "DEBUG: Resolved tools for LLM"
+            );
+        }
 
         if tool_names.is_empty() && !matches!(decision.mode, InteractionMode::Chat) {
             tool_names = global_core_tool_names();
@@ -2995,6 +3130,21 @@ impl AgentRuntime {
                 &tool_name_refs,
                 blockcell_tools::registry::global_core_tool_names(),
             );
+
+            // DEBUG: Log actual schemas sent to LLM
+            {
+                let napcat_schemas: Vec<&str> = schemas
+                    .iter()
+                    .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                    .filter(|n| n.starts_with("napcat_"))
+                    .collect();
+                info!(
+                    napcat_tools_in_schemas = ?napcat_schemas,
+                    total_schemas = schemas.len(),
+                    "DEBUG: Tool schemas sent to LLM"
+                );
+            }
+
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
                     let name = schema
@@ -3189,6 +3339,13 @@ impl AgentRuntime {
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
                 for tool_call in &response.tool_calls {
+                    // DEBUG: Log tool call
+                    info!(
+                        tool_name = %tool_call.name,
+                        tool_id = %tool_call.id,
+                        "DEBUG: LLM requested tool call"
+                    );
+
                     if tool_call.name == "web_search" || tool_call.name == "web_fetch" {
                         wants_forced_answer = true;
                     }
@@ -3210,6 +3367,20 @@ impl AgentRuntime {
                     } else {
                         scoped_tool_denied_result(&tool_call.name)
                     };
+
+                    // DEBUG: Log tool execution result
+                    // Use chars() to safely truncate at UTF-8 character boundaries
+                    let result_preview: String = if result.chars().count() > 200 {
+                        format!("{}... (truncated, {} chars total)", result.chars().take(200).collect::<String>(), result.chars().count())
+                    } else {
+                        result.clone()
+                    };
+                    info!(
+                        tool_name = %tool_call.name,
+                        result_preview = %result_preview,
+                        "DEBUG: Tool execution result"
+                    );
+
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
                     // Collect media paths from tool results for WebUI display.
@@ -3916,9 +4087,10 @@ impl AgentRuntime {
             session_key: msg.session_key(),
             channel: msg.channel.clone(),
             account_id: msg.account_id.clone(),
+            sender_id: Some(msg.sender_id.clone()),
             chat_id: msg.chat_id.clone(),
             config: self.config.clone(),
-            permissions: blockcell_core::types::PermissionSet::new(), // TODO: Load from skill meta
+            permissions: self.build_tool_permissions(&msg.channel, Some(&msg.sender_id), &msg.chat_id),
             task_manager: Some(tm_handle),
             memory_store: self.memory_store.clone(),
             outbound_tx: self.outbound_tx.clone(),
@@ -4309,6 +4481,7 @@ impl AgentRuntime {
                     session_key: session_key.clone(),
                     channel: channel.clone(),
                     account_id: None,
+                    sender_id: None, // Cron jobs have no sender
                     chat_id: chat_id.clone(),
                     config: config.clone(),
                     permissions: blockcell_core::types::PermissionSet::new(),
@@ -5628,6 +5801,7 @@ mod tests {
             session_key: "cli:test".to_string(),
             channel: "cli".to_string(),
             account_id: None,
+            sender_id: None,
             chat_id: "chat-1".to_string(),
             config: Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),
@@ -6728,6 +6902,82 @@ description: local demo
             resolve_profile_tool_names(&config, None, &[IntentCategory::Chat], &available);
 
         assert!(tool_names.is_empty());
+    }
+
+    #[test]
+    fn test_napcat_tools_hidden_when_disabled() {
+        // Config with napcat disabled (default)
+        let config: Config = serde_json::from_str(
+            r#"{
+                "channels": {
+                    "napcat": {
+                        "enabled": false
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let available: HashSet<String> = [
+            "read_file",
+            "napcat_get_group_list",
+            "napcat_get_login_info",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let tool_names = resolve_effective_tool_names(
+            &config,
+            InteractionMode::General,
+            None,
+            None,
+            &[IntentCategory::Communication],
+            &available,
+        );
+
+        // napcat tools should be filtered out
+        assert!(tool_names.contains(&"read_file".to_string()));
+        assert!(!tool_names.contains(&"napcat_get_group_list".to_string()));
+        assert!(!tool_names.contains(&"napcat_get_login_info".to_string()));
+    }
+
+    #[test]
+    fn test_napcat_tools_visible_when_enabled() {
+        // Config with napcat enabled
+        let config: Config = serde_json::from_str(
+            r#"{
+                "channels": {
+                    "napcat": {
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let available: HashSet<String> = [
+            "read_file",
+            "napcat_get_group_list",
+            "napcat_get_login_info",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let tool_names = resolve_effective_tool_names(
+            &config,
+            InteractionMode::General,
+            None,
+            None,
+            &[IntentCategory::Communication],
+            &available,
+        );
+
+        // napcat tools should be visible
+        assert!(tool_names.contains(&"read_file".to_string()));
+        assert!(tool_names.contains(&"napcat_get_group_list".to_string()));
+        assert!(tool_names.contains(&"napcat_get_login_info".to_string()));
     }
 
     #[test]

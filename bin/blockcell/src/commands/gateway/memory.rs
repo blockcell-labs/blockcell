@@ -26,6 +26,7 @@ async fn execute_memory_create_via_tool(
         session_key,
         channel: MEMORY_GATEWAY_CHANNEL.to_string(),
         account_id: None,
+        sender_id: None,
         chat_id,
         config: state.config.clone(),
         permissions: blockcell_core::types::PermissionSet::new(),

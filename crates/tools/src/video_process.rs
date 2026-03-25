@@ -854,6 +854,7 @@ mod tests {
             session_key: String::new(),
             channel: String::new(),
             account_id: None,
+            sender_id: None,
             chat_id: String::new(),
             config: blockcell_core::Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),

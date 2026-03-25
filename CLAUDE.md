@@ -2,6 +2,18 @@
 
 > BlockCell → BlueClaw: 自进化 AI 多智能体框架
 
+## 快速导航
+
+- [项目概述](#项目概述) - 核心概念与架构
+- [快速开始](#快速开始) - 安装、配置、运行
+- [开发规范](#开发规范) - 工作流、代码风格、最佳实践
+- [常用命令](#常用命令) - 开发、运行、发布命令
+- [WebUI 开发](#webui-开发) - 前端技术栈与开发指南
+- [调试技巧](#调试技巧) - 日志级别、调试命令
+- [Crate 详解](#crate-详解) - 各模块详细说明
+
+---
+
 ## 项目概述
 
 BlockCell 是一个用 Rust 构建的自进化 AI 多智能体框架。它不只是聊天机器人，而是能真正执行任务的 AI 智能体：
@@ -343,6 +355,177 @@ npm run type-check
    // 错误日志
    tracing::error!(error = %e, "Failed to process");
    ```
+
+---
+
+## 开发工作流
+
+### 功能开发流程
+
+```text
+1. 创建功能分支
+   git checkout -b feature/feat_xxx
+
+2. 编写代码 + 测试
+   cargo check && cargo test
+
+3. 提交代码
+   git commit -m "feat: 描述"
+
+4. 推送并创建 PR
+   git push -u origin feature/feat_xxx
+   gh pr create
+
+5. 代码审查通过后合并
+```
+
+### Bug 修复流程
+
+```text
+1. 创建修复分支
+   git checkout -b fix/bug_xxx
+
+2. 编写测试复现 Bug
+   cargo test test_bug_xxx
+
+3. 修复代码
+   cargo check && cargo test
+
+4. 提交并创建 PR
+   git commit -m "fix: 修复 xxx 问题"
+```
+
+### 发布流程
+
+```text
+1. 更新版本号 (Cargo.toml)
+2. 更新 CHANGELOG
+3. 运行完整测试
+   cargo test --all-features
+4. 构建 Release
+   cargo build -p blockcell --release
+5. 创建 Git Tag
+   git tag v0.x.x && git push --tags
+6. GitHub Actions 自动发布
+```
+
+---
+
+## 安全指南
+
+### API 密钥管理
+
+- ✅ 使用 `~/.blockcell/config.json5` 存储密钥
+- ✅ 使用环境变量覆盖敏感配置
+- ❌ 不要在代码中硬编码密钥
+- ❌ 不要将密钥提交到 Git
+
+### 数据安全
+
+| 数据类型 | 处理方式 |
+| -------- | -------- |
+| 用户消息 | SQLite 本地存储，不外传 |
+| API 密钥 | 配置文件加密存储 |
+| 会话日志 | 本地存储，可配置保留策略 |
+| 敏感信息 | 通过 `.gitignore` 排除 |
+
+### 权限控制
+
+```json
+// config.json5 中配置工具权限
+{
+  "agents": {
+    "defaults": {
+      "allowedTools": ["read_file", "web_fetch"],
+      "deniedTools": ["exec", "delete_file"]
+    }
+  }
+}
+```
+
+### 安全审计
+
+```bash
+# 检查依赖安全漏洞
+cargo audit
+
+# 检查代码安全问题
+cargo clippy -- -W clippy::security
+```
+
+---
+
+## MCP 集成
+
+### MCP 服务器配置
+
+在 `~/.blockcell/config.json5` 中配置 MCP 服务器：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "mcp-server-filesystem",
+      "args": ["/path/to/allowed/dir"]
+    },
+    "postgres": {
+      "command": "mcp-server-postgres",
+      "args": ["postgres://localhost/mydb"]
+    }
+  }
+}
+```
+
+### MCP 工具使用
+
+MCP 工具会自动注册到 Agent 工具列表中：
+
+```text
+Agent 启动 → 加载 MCP 配置 → 连接 MCP 服务器 → 注册工具
+```
+
+### 开发自定义 MCP 服务器
+
+1. 参考 [MCP 协议规范](https://modelcontextprotocol.io/)
+2. 实现工具定义和处理逻辑
+3. 在配置中添加服务器
+
+---
+
+## 故障排查
+
+### 常见问题
+
+| 问题 | 可能原因 | 解决方案 |
+| ---- | -------- | -------- |
+| 编译失败 | 依赖缺失 | `cargo build` 检查具体错误 |
+| 运行时崩溃 | 配置错误 | 检查 `~/.blockcell/config.json5` |
+| LLM 调用失败 | API 密钥无效 | 检查密钥和网络连接 |
+| WebUI 无法访问 | 端口占用 | 检查 3000 端口是否被占用 |
+| Channel 断连 | 网络问题 | 检查网络连接和代理设置 |
+
+### 日志调试
+
+```bash
+# 启用详细日志
+RUST_LOG=debug,blockcell_agent=trace cargo run -p blockcell -- gateway
+
+# 只看特定模块
+RUST_LOG=blockcell_channels::telegram=trace cargo run -p blockcell -- gateway
+
+# 输出到文件
+RUST_LOG=debug cargo run -p blockcell -- gateway 2>&1 | tee debug.log
+```
+
+### 性能问题
+
+```bash
+# 检查内存使用
+cargo run -p blockcell -- gateway &
+
+# 使用 flamegraph 分析
+cargo flamegraph --root -p blockcell -- gateway
+```
 
 ---
 
