@@ -29,6 +29,7 @@ const CHANNEL_ICONS: Record<string, React.ReactNode> = {
   wecom: <Building2 className="w-7 h-7" />,
   whatsapp: <Wifi className="w-7 h-7" />,
   lark: <Globe className="w-7 h-7" />,
+  napcat: <MessageCircle className="w-7 h-7" />,
 };
 
 const CHANNEL_COLORS: Record<string, string> = {
@@ -40,6 +41,7 @@ const CHANNEL_COLORS: Record<string, string> = {
   wecom: 'text-[hsl(var(--brand-green))]',
   whatsapp: 'text-[hsl(var(--brand-green))]',
   lark: 'text-sky-400',
+  napcat: 'text-green-400',
 };
 
 const GITHUB_BASE_ZH = 'https://github.com/blockcell-labs/blockcell/blob/main/docs/channels/zh/';
@@ -54,6 +56,7 @@ const DOC_FILES: Record<string, string> = {
   wecom:    '06_wecom.md',
   whatsapp: '07_whatsapp.md',
   lark:     '08_lark.md',
+  napcat:   '10_napcatqq.md',
 };
 
 function extractAgentIds(config: any): string[] {
@@ -91,6 +94,7 @@ function primaryCredentialKey(channelId: string): string | null {
     case 'discord': return 'botToken';
     case 'dingtalk': return 'appKey';
     case 'wecom': return 'corpId';
+    case 'napcat': return 'httpUrl';
     default: return null;
   }
 }
@@ -196,6 +200,15 @@ function getAccountFieldSpecs(channelId: string): AccountFieldSpec[] {
         { key: 'encodingAesKey', label: 'encodingAesKey', secret: true },
         { key: 'allowFrom', label: 'allowFrom', kind: 'list' },
         { key: 'pollIntervalSecs', label: 'pollIntervalSecs', kind: 'number' },
+      ];
+    case 'napcat':
+      return [
+        { key: 'mode', label: 'mode' },
+        { key: 'wsUrl', label: 'wsUrl' },
+        { key: 'httpUrl', label: 'httpUrl' },
+        { key: 'accessToken', label: 'accessToken', secret: true },
+        { key: 'serverHost', label: 'serverHost' },
+        { key: 'serverPort', label: 'serverPort', kind: 'number' },
       ];
     default:
       return [];

@@ -367,7 +367,22 @@ pub async fn run() -> anyhow::Result<()> {
             "✗ not configured".to_string()
         }
     );
-    
+    println!(
+        "  napcat:    {}",
+        if config.channels.napcat.enabled && channel_configured(&config, "napcat") {
+            format!(
+                "✓ enabled (mode: {}, ws: {}){}",
+                config.channels.napcat.mode,
+                if config.channels.napcat.ws_url.is_empty() { "n/a" } else { &config.channels.napcat.ws_url },
+                owner_suffix("napcat", config.channels.napcat.enabled)
+            )
+        } else if channel_configured(&config, "napcat") {
+            "configured (disabled)".to_string()
+        } else {
+            "✗ not configured".to_string()
+        }
+    );
+
     Ok(())
 }
 

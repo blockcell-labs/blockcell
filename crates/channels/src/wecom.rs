@@ -1890,7 +1890,7 @@ where
         .unwrap_or("file")
         .to_string();
     let total_size = file_bytes.len();
-    let total_chunks = (total_size + LONGCONN_CHUNK_SIZE - 1) / LONGCONN_CHUNK_SIZE;
+    let total_chunks = total_size.div_ceil(LONGCONN_CHUNK_SIZE);
     if total_chunks > 100 {
         return Err(Error::Channel(format!(
             "WeCom longconn upload: file too large ({} bytes, {} chunks > 100 max)",

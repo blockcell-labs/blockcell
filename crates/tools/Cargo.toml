@@ -3,9 +3,14 @@ name = "blockcell-tools"
 version = "0.1.4"
 edition = "2021"
 
+[features]
+default = []
+napcat = ["blockcell-channels/napcat"]
+
 [dependencies]
 blockcell-core = { path = "../core" }
 blockcell-storage = { path = "../storage" }
+blockcell-channels = { path = "../channels", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -246,6 +246,39 @@ impl ChannelManager {
                     cfg.channels.qq.allow_from = acc.allow_from.clone();
                 }
             }
+            "napcat" => {
+                if let Some(acc) = Self::pick_account(
+                    "napcat",
+                    &cfg.channels.napcat.accounts,
+                    req_account,
+                    cfg.channels.napcat.default_account_id.as_deref(),
+                )? {
+                    if !acc.enabled {
+                        return Err(Error::Channel(
+                            "Selected napcat account is disabled".to_string(),
+                        ));
+                    }
+                    cfg.channels.napcat.enabled = acc.enabled;
+                    if let Some(ref mode) = acc.mode {
+                        cfg.channels.napcat.mode = mode.clone();
+                    }
+                    if let Some(ref ws_url) = acc.ws_url {
+                        cfg.channels.napcat.ws_url = ws_url.clone();
+                    }
+                    if let Some(ref access_token) = acc.access_token {
+                        cfg.channels.napcat.access_token = access_token.clone();
+                    }
+                    if let Some(ref allow_from) = acc.allow_from {
+                        cfg.channels.napcat.allow_from = allow_from.clone();
+                    }
+                    if let Some(ref allow_groups) = acc.allow_groups {
+                        cfg.channels.napcat.allow_groups = allow_groups.clone();
+                    }
+                    if let Some(ref block_from) = acc.block_from {
+                        cfg.channels.napcat.block_from = block_from.clone();
+                    }
+                }
+            }
             "weixin" => {
                 if let Some(acc) = Self::pick_account(
                     "weixin",
@@ -540,6 +573,29 @@ impl ChannelManager {
                     }
                 }
             }
+            "napcat" => {
+                #[cfg(feature = "napcat")]
+                {
+                    if !msg.media.is_empty() {
+                        for file_path in &msg.media {
+                            if let Err(e) = crate::napcat::send_media_message(
+                                &send_config,
+                                &msg.chat_id,
+                                "",
+                                std::slice::from_ref(file_path),
+                            )
+                            .await
+                            {
+                                error!(error = %e, file = %file_path, "NapCatQQ: failed to send media");
+                            }
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        crate::napcat::send_message(&send_config, &msg.chat_id, &msg.content)
+                            .await?;
+                    }
+                }
+            }
             "weixin" => {
                 #[cfg(feature = "weixin")]
                 {
@@ -580,6 +636,7 @@ impl ChannelManager {
             "wecom" => "corp_id not set",
             "lark" => "app_id not set",
             "qq" => "app_id not set",
+            "napcat" => "ws_url not set",
             "weixin" => "token not set",
             _ => "not configured",
         }
@@ -626,6 +683,7 @@ impl ChannelManager {
             "wecom",
             "lark",
             "qq",
+            "napcat",
             "weixin",
         ];
 

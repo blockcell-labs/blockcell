@@ -15,6 +15,9 @@ futures = { workspace = true }
 chrono = { workspace = true }
 tokio-tungstenite = { workspace = true }
 url = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 dirs = "5.0"
 prost = "0.13"
 aes = "0.8"
@@ -26,7 +29,7 @@ hex = "0.4"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 
 [features]
-default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "weixin"]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "weixin", "napcat"]
 telegram = []
 whatsapp = []
 feishu = []
@@ -36,4 +39,5 @@ dingtalk = []
 wecom = []
 lark = []
 qq = []
+napcat = []
 weixin = []

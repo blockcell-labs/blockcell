@@ -264,6 +264,7 @@ mod tests {
             session_key: "cli:test".to_string(),
             channel: "cli".to_string(),
             account_id: None,
+            sender_id: None,
             chat_id: "chat-1".to_string(),
             config: Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),

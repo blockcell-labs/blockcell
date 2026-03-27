@@ -342,12 +342,21 @@ fn ensure_known_tool(
 ) -> Result<()> {
     if registered.contains(tool_name) || declared_mcp_tool(config, mcp, tool_name, registered) {
         Ok(())
+    } else if is_optional_feature_tool(tool_name) {
+        // Optional feature tools (e.g., napcat_*) may not be registered if the feature is disabled
+        Ok(())
     } else {
         Err(Error::Config(format!(
             "intentRouter.profiles.{} references unknown tool '{}'",
             profile_name, tool_name
         )))
     }
+}
+
+/// Check if a tool is from an optional feature that may not be enabled.
+/// These tools are allowed to be missing from the registry.
+fn is_optional_feature_tool(tool_name: &str) -> bool {
+    tool_name.starts_with("napcat_")
 }
 
 fn declared_mcp_tool(

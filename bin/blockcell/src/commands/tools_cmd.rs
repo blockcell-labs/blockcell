@@ -169,6 +169,7 @@ pub async fn test(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
         session_key: "cli:test".to_string(),
         channel: String::new(),
         account_id: None,
+        sender_id: None, // CLI tool execution has no sender
         chat_id: String::new(),
         permissions: blockcell_core::types::PermissionSet::new(),
         outbound_tx: None,

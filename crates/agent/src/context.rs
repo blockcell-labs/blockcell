@@ -446,6 +446,8 @@ impl ContextBuilder {
                 | "discord"
                 | "dingtalk"
                 | "whatsapp"
+                | "napcat"
+                | "qq"
         );
 
         let system_prompt = self.build_system_prompt_for_mode_with_channel(

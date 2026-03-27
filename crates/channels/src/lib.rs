@@ -29,6 +29,9 @@ pub mod lark;
 #[cfg(feature = "qq")]
 pub mod qq;
 
+#[cfg(feature = "napcat")]
+pub mod napcat;
+
 #[cfg(feature = "weixin")]
 pub mod weixin;
 
