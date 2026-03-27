@@ -38,10 +38,10 @@ pub(super) async fn handle_channels_status(State(state): State<GatewayState>) ->
 }
 
 // ---------------------------------------------------------------------------
-// Channels list — all 8 supported channels with config status
+// Channels list — all 10 supported channels with config status
 // ---------------------------------------------------------------------------
 
-/// GET /v1/channels — list all 8 supported channels with their configuration status
+/// GET /v1/channels — list all 10 supported channels with their configuration status
 pub(super) async fn handle_channels_list(State(state): State<GatewayState>) -> impl IntoResponse {
     // Read from disk each time so updates via PUT take effect immediately
     // without requiring a gateway restart.
@@ -241,6 +241,25 @@ pub(super) async fn handle_channels_list(State(state): State<GatewayState>) -> i
                 {"key": "wsUrl", "label": "WebSocket URL (client模式)", "secret": false, "value": cfg.napcat.ws_url.clone()},
                 {"key": "accessToken", "label": "Access Token", "secret": true, "value": cfg.napcat.access_token.clone()},
                 {"key": "serverPort", "label": "服务端口 (server模式)", "secret": false, "value": cfg.napcat.server_port.to_string()}
+            ]
+        }
+        ,
+        {
+            "id": "weixin",
+            "name": "微信",
+            "icon": "weixin",
+            "doc": "docs/23_weixin_integration.md",
+            "configured": cfg.weixin.enabled && blockcell_channels::account::channel_configured(&loaded_config, "weixin"),
+            "enabled": cfg.weixin.enabled,
+            "ownerAgent": owners.get("weixin").cloned().unwrap_or_default(),
+            "accountOwners": loaded_config.channel_account_owners.get("weixin").cloned().unwrap_or_default(),
+            "defaultAccountId": cfg.weixin.default_account_id.clone().unwrap_or_default(),
+            "accounts": cfg.weixin.accounts.keys().cloned().collect::<Vec<_>>(),
+            "listeners": blockcell_channels::account::listener_labels(&loaded_config, "weixin"),
+            "listenerCount": blockcell_channels::account::listener_labels(&loaded_config, "weixin").len(),
+            "fields": [
+                {"key": "token", "label": "Token", "secret": true, "value": cfg.weixin.token.clone()},
+                {"key": "proxy", "label": "Proxy (可选)", "secret": false, "value": cfg.weixin.proxy.clone().unwrap_or_default()}
             ]
         }
     ]);

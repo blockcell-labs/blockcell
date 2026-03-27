@@ -1018,12 +1018,21 @@ impl OpenAIProvider {
             info!(body_len = raw_body.len(), preview = %&trimmed[..end], "LLM raw response");
         }
 
-        let chat_response: ChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            let end = truncate_at_char_boundary(&raw_body, 500);
+        let trimmed_body = raw_body.trim();
+        if trimmed_body.is_empty() {
+            return Err(Error::Provider(format!(
+                "LLM returned an empty response body (status {}, len {})",
+                status,
+                raw_body.len()
+            )));
+        }
+
+        let chat_response: ChatResponse = serde_json::from_str(trimmed_body).map_err(|e| {
+            let end = truncate_at_char_boundary(trimmed_body, 500);
             Error::Provider(format!(
                 "Failed to parse response: {}. Body: {}",
                 e,
-                &raw_body[..end]
+                &trimmed_body[..end]
             ))
         })?;
 

@@ -384,6 +384,17 @@ pub(super) fn print_startup_banner(
                     }
                 };
                 format!("mode: {}  conn: {}", mode, conn_display)
+            }
+        },
+        ChannelInfo {
+            id: "weixin",
+            name: "Weixin",
+            enabled: ch.weixin.enabled,
+            configured: blockcell_channels::account::channel_configured(config, "weixin"),
+            detail: if !ch.weixin.token.is_empty() {
+                format!("allow_from: {:?}", ch.weixin.allow_from)
+            } else {
+                "no token configured".into()
             },
         },
     ];
@@ -499,6 +510,13 @@ pub(super) fn print_startup_banner(
                                 format!("mode: {}  conn: {}", mode, conn_display)
                             })
                             .unwrap_or_else(|| ch_info.detail.clone()),
+                        ("weixin", Some(account)) => config
+                            .channels
+                            .weixin
+                            .accounts
+                            .get(account)
+                            .map(|acc| format!("allow_from: {:?}", acc.allow_from))
+                            .unwrap_or_else(|| ch_info.detail.clone()),
                         _ => ch_info.detail.clone(),
                     };
                     let suffix = match ch_info.id {
@@ -540,6 +558,10 @@ pub(super) fn print_startup_banner(
                         ),
                         "napcat" => default_marker(
                             config.channels.napcat.default_account_id.as_ref(),
+                            account_id,
+                        ),                            
+                        "weixin" => default_marker(
+                            config.channels.weixin.default_account_id.as_ref(),
                             account_id,
                         ),
                         _ => "",

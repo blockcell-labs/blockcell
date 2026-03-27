@@ -4889,7 +4889,7 @@ async fn run_message_task(
         runtime.set_confirm(tx);
     }
     runtime.set_task_manager(task_manager.clone());
-    runtime.set_agent_id(agent_id);
+    runtime.set_agent_id(agent_id.clone());
     runtime.set_event_emitter(event_emitter);
     if let Some(store) = memory_store {
         runtime.set_memory_store(store);
@@ -4900,9 +4900,11 @@ async fn run_message_task(
     if let Some(core_evo) = core_evolution {
         runtime.set_core_evolution(core_evo);
     }
-    if let Some(tx) = event_tx {
+    if let Some(tx) = event_tx.clone() {
         runtime.set_event_tx(tx);
     }
+
+    let error_chat_id = msg.chat_id.clone();
 
     match runtime.process_message(msg).await {
         Ok(response) => {
@@ -4914,6 +4916,18 @@ async fn run_message_task(
         Err(e) => {
             let err_msg = format!("{}", e);
             error!(task_id = %task_id, error = %e, "Message task failed");
+            if let Some(ref event_tx) = event_tx {
+                let _ = event_tx.send(
+                    serde_json::json!({
+                        "type": "error",
+                        "agent_id": agent_id.clone().unwrap_or_else(|| "default".to_string()),
+                        "chat_id": error_chat_id,
+                        "task_id": task_id.clone(),
+                        "message": err_msg,
+                    })
+                    .to_string(),
+                );
+            }
             // Keep failed tasks briefly for visibility, then let tick cleanup handle them
             task_manager.set_failed(&task_id, &err_msg).await;
         }
