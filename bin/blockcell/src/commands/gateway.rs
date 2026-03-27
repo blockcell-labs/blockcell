@@ -17,6 +17,8 @@ use blockcell_channels::telegram::TelegramChannel;
 use blockcell_channels::wecom::WeComChannel;
 #[cfg(feature = "whatsapp")]
 use blockcell_channels::whatsapp::WhatsAppChannel;
+#[cfg(feature = "napcat")]
+use blockcell_channels::napcat::NapCatChannel;
 use blockcell_channels::ChannelManager;
 use blockcell_core::{Config, InboundMessage, OutboundMessage, Paths};
 use blockcell_scheduler::{
@@ -272,9 +274,9 @@ fn active_model_and_provider(config: &Config) -> (String, Option<String>, &'stat
     )
 }
 
-const EXTERNAL_CHANNELS: [&str; 10] = [
+const EXTERNAL_CHANNELS: [&str; 11] = [
     "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
-    "weixin",
+    "napcat", "weixin",
 ];
 
 fn known_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
@@ -338,6 +340,20 @@ fn known_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
         "weixin" => config
             .channels
             .weixin
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "qq" => config
+            .channels
+            .qq
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "napcat" => config
+            .channels
+            .napcat
             .accounts
             .keys()
             .cloned()
@@ -420,6 +436,29 @@ fn enabled_channel_account_ids(config: &Config, channel: &str) -> Vec<String> {
             .accounts
             .iter()
             .filter(|(_, account)| account.enabled && !account.token.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "qq" => config
+            .channels
+            .qq
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.enabled && !account.app_id.trim().is_empty())
+            .map(|(account_id, _)| account_id.clone())
+            .collect::<Vec<_>>(),
+        "napcat" => config
+            .channels
+            .napcat
+            .accounts
+            .iter()
+            .filter(|(_, account)| {
+                account.enabled
+                    && account
+                        .ws_url
+                        .as_ref()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+            })
             .map(|(account_id, _)| account_id.clone())
             .collect::<Vec<_>>(),
         _ => Vec::new(),
@@ -1393,14 +1432,27 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         ));
     }
 
+    #[cfg(feature = "napcat")]
+    for listener in blockcell_channels::account::napcat_listener_configs(&config) {
+        let listener_name = listener.label.clone();
+        info!(listener = %listener_name, "Starting NapCatQQ listener");
+        let napcat = Arc::new(NapCatChannel::new(listener.config, inbound_tx.clone()));
+        let shutdown_rx = shutdown_tx.subscribe();
+        channel_handles.push((
+            listener_name,
+            tokio::spawn(async move {
+                napcat.run_loop(shutdown_rx).await;
+            }),
+        ));
+    }
+
     #[cfg(feature = "weixin")]
     for listener in blockcell_channels::account::weixin_listener_configs(&config) {
         let listener_name = listener.label.clone();
         info!(listener = %listener_name, "Starting Weixin listener");
-        let weixin = Arc::new(blockcell_channels::weixin::WeixinChannel::new(
-            listener.config,
-            inbound_tx.clone(),
-        ));
+        let weixin = Arc::new(
+            blockcell_channels::weixin::WeixinChannel::new(listener.config, inbound_tx.clone()),
+        );
         let shutdown_rx = shutdown_tx.subscribe();
         channel_handles.push((
             listener_name,

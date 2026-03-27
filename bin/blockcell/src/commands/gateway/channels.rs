@@ -1,8 +1,8 @@
 use super::*;
 use blockcell_core::config::{parse_json5_value, write_json5_pretty};
 
-const SUPPORTED_OWNER_CHANNELS: [&str; 10] = [
-    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
+const SUPPORTED_OWNER_CHANNELS: [&str; 11] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq", "napcat",
     "weixin",
 ];
 
@@ -222,6 +222,26 @@ pub(super) async fn handle_channels_list(State(state): State<GatewayState>) -> i
                 {"key": "appSecret", "label": "App Secret", "secret": true, "value": cfg.qq.app_secret.clone()},
                 {"key": "environment", "label": "Environment (production/sandbox)", "secret": false, "value": cfg.qq.environment.clone()}
             ]
+        },
+        {
+            "id": "napcat",
+            "name": "NapCatQQ",
+            "icon": "napcat",
+            "doc": "docs/channels/zh/10_napcat.md",
+            "configured": cfg.napcat.enabled && blockcell_channels::account::channel_configured(&loaded_config, "napcat"),
+            "enabled": cfg.napcat.enabled,
+            "ownerAgent": owners.get("napcat").cloned().unwrap_or_default(),
+            "accountOwners": loaded_config.channel_account_owners.get("napcat").cloned().unwrap_or_default(),
+            "defaultAccountId": cfg.napcat.default_account_id.clone().unwrap_or_default(),
+            "accounts": cfg.napcat.accounts.keys().cloned().collect::<Vec<_>>(),
+            "listeners": blockcell_channels::account::listener_labels(&loaded_config, "napcat"),
+            "listenerCount": blockcell_channels::account::listener_labels(&loaded_config, "napcat").len(),
+            "fields": [
+                {"key": "mode", "label": "连接模式 (client/server)", "secret": false, "value": cfg.napcat.mode.clone()},
+                {"key": "wsUrl", "label": "WebSocket URL (client模式)", "secret": false, "value": cfg.napcat.ws_url.clone()},
+                {"key": "accessToken", "label": "Access Token", "secret": true, "value": cfg.napcat.access_token.clone()},
+                {"key": "serverPort", "label": "服务端口 (server模式)", "secret": false, "value": cfg.napcat.server_port.to_string()}
+            ]
         }
         ,
         {
@@ -407,6 +427,13 @@ fn known_account_ids(cfg: &Config, channel: &str) -> Vec<String> {
         "qq" => cfg
             .channels
             .qq
+            .accounts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "napcat" => cfg
+            .channels
+            .napcat
             .accounts
             .keys()
             .cloned()

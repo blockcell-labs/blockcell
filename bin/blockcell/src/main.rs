@@ -54,7 +54,7 @@ enum Commands {
         /// Model name override
         #[arg(long)]
         model: Option<String>,
-        /// Optional channel to configure (telegram/feishu/wecom/dingtalk/lark/qq/none)
+        /// Optional channel to configure (telegram/feishu/wecom/dingtalk/lark/qq/napcat/none)
         #[arg(long)]
         channel: Option<String>,
         /// Skip provider config validation after saving config

@@ -45,7 +45,7 @@ crossterm = "0.28"
 qrcode = "0.14"
 
 [features]
-default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq", "weixin"]
+default = ["telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq", "weixin", "napcat"]
 telegram = ["blockcell-channels/telegram"]
 whatsapp = ["blockcell-channels/whatsapp"]
 feishu = ["blockcell-channels/feishu"]
@@ -55,4 +55,5 @@ dingtalk = ["blockcell-channels/dingtalk"]
 wecom = ["blockcell-channels/wecom"]
 lark = ["blockcell-channels/lark"]
 qq = ["blockcell-channels/qq"]
+napcat = ["blockcell-channels/napcat", "blockcell-tools/napcat"]
 weixin = ["blockcell-channels/weixin"]

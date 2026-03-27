@@ -335,6 +335,90 @@ fn configure_channel(config: &mut Config, channel: &str) -> anyhow::Result<()> {
             }
             config.channels.qq.enabled = true;
         }
+        "napcat" => {
+            let mode_options = [
+                "ws-client (BlockCell connects to NapCatQQ WebSocket server)",
+                "ws-server (NapCatQQ connects to BlockCell WebSocket server)",
+            ];
+            let mode_idx = prompt_select("Connection mode", &mode_options, 0)?;
+            let mode = match mode_idx {
+                0 => "ws-client",
+                1 => "ws-server",
+                _ => "ws-client",
+            }.to_string();
+
+            // WebSocket URL (only for ws-client mode)
+            let ws_url = if mode == "ws-client" {
+                prompt_line_with_default("WebSocket URL", "ws://127.0.0.1:3001")?
+            } else {
+                String::new()
+            };
+
+            // Server configuration for ws-server mode
+            let (server_host, server_port, server_path) = if mode == "ws-server" {
+                let host = prompt_line_with_default("WebSocket server host", "0.0.0.0")?;
+                // NapCatQQ client 默认连接 ws://localhost:13005
+                let port_str = prompt_line_with_default("WebSocket server port", "13005")?;
+                let port = port_str.parse::<u16>().unwrap_or(13005);
+                // NapCatQQ client 默认连接根路径 /
+                let path = prompt_line_with_default("WebSocket server path", "/")?;
+                (host, port, path)
+            } else {
+                (String::new(), 0, String::new())
+            };
+
+            let access_token = prompt_line("Access token (optional, press Enter to skip)")?;
+
+            // Group response mode
+            let mode_options = [
+                "all - 响应所有群聊消息",
+                "at_only - 仅响应@我的群聊消息",
+                "none - 不响应任何群聊消息",
+            ];
+            let mode_idx = prompt_select("群聊响应模式", &mode_options, 0)?;
+            let group_response_mode = match mode_idx {
+                0 => "all",
+                1 => "at_only",
+                2 => "none",
+                _ => "all",
+            }
+            .to_string();
+
+            config.channels.napcat.enabled = true;
+            config.channels.napcat.mode = mode;
+            config.channels.napcat.ws_url = ws_url;
+            config.channels.napcat.server_host = server_host;
+            config.channels.napcat.server_port = server_port;
+            config.channels.napcat.server_path = server_path;
+            config.channels.napcat.access_token = access_token;
+            config.channels.napcat.group_response_mode = group_response_mode;
+
+            // 媒体自动下载配置
+            let auto_download_options = [
+                "是 - 自动下载图片、语音、视频、文件等媒体",
+                "否 - 不自动下载媒体",
+            ];
+            let auto_idx = prompt_select("是否自动下载媒体文件", &auto_download_options, 0)?;
+            config.channels.napcat.auto_download_media = auto_idx == 0;
+
+            if config.channels.napcat.auto_download_media {
+                let max_size_str = prompt_line_with_default(
+                    "最大自动下载大小 (字节)",
+                    "10485760",
+                )?;
+                if let Ok(max_size) = max_size_str.parse::<u64>() {
+                    config.channels.napcat.max_auto_download_size = max_size;
+                }
+
+                let download_dir = prompt_line_with_default(
+                    "媒体下载目录 (相对于 workspace)",
+                    "downloads",
+                )?;
+                if !download_dir.trim().is_empty() {
+                    config.channels.napcat.media_download_dir = download_dir;
+                }
+            }
+        }
         _ => bail!("Unsupported channel '{}'", channel),
     }
 
@@ -417,6 +501,7 @@ fn prompt_channel() -> anyhow::Result<String> {
         "dingtalk",
         "lark",
         "qq",
+        "napcat",
     ];
     let idx = prompt_select("Configure one channel (optional)", &options, 0)?;
     let mapped = match idx {
@@ -426,6 +511,7 @@ fn prompt_channel() -> anyhow::Result<String> {
         4 => "dingtalk",
         5 => "lark",
         6 => "qq",
+        7 => "napcat",
         _ => "skip",
     };
     Ok(mapped.to_string())
@@ -472,6 +558,7 @@ fn normalize_channel(input: &str) -> Option<&'static str> {
         "dingtalk" => Some("dingtalk"),
         "lark" => Some("lark"),
         "qq" => Some("qq"),
+        "napcat" | "napcatqq" => Some("napcat"),
         "none" | "skip" => Some("skip"),
         _ => None,
     }
@@ -586,6 +673,8 @@ mod tests {
         assert_eq!(normalize_channel("wechatwork"), Some("wecom"));
         assert_eq!(normalize_channel("dingtalk"), Some("dingtalk"));
         assert_eq!(normalize_channel("qq"), Some("qq"));
+        assert_eq!(normalize_channel("napcat"), Some("napcat"));
+        assert_eq!(normalize_channel("napcatqq"), Some("napcat"));
         assert_eq!(normalize_channel("skip"), Some("skip"));
         assert_eq!(normalize_channel("unknown"), None);
     }

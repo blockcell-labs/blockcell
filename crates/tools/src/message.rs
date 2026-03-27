@@ -48,7 +48,8 @@ impl Tool for MessageTool {
         let mut rules = String::new();
         if ctx.is_im_channel() {
             rules.push_str("- **当前渠道为 IM 聊天（不渲染 Markdown）**: 不要在回复文字中使用 markdown 图片语法（如 `![](path)`），IM 端不会渲染。若需展示图片内容，用文字描述即可。\n");
-            rules.push_str("- **发送图片/文件给用户（⚠️ 必须调用 message 工具，否则文件不会发出）**: 当用户要求发回图片/文件时，**必须**调用 `message` 工具，参数示例：`{\"media\": [\"/root/.blockcell/workspace/media/xxx.jpg\"], \"content\": \"这是你要的图片\"}`。**绝对禁止**在不调用工具的情况下直接回复\"发送成功\"——那是幻觉，图片根本没有发出去。\n");
+            rules.push_str("- **发送图片/文件给用户**: 当用户要求发回图片/文件时，调用 `message` 工具发送。\n");
+            rules.push_str("- **⚠️ 已下载的用户媒体不要发回**: 消息中标注的\"已下载的媒体文件\"（包括图片、语音、视频、文件）是用户发给你的，已自动下载到本地。**这些媒体不要发送回原聊天**——用户已经有了！你可以读取、处理这些文件，但不要用 message 工具发送回去。只有当用户明确要求\"转发给别人\"或\"发送到其他群\"时才发送。\n");
         } else {
             rules.push_str("- **Media display**: The WebUI can render images and play audio inline. To show an image or audio file, include the full file path in your response text (e.g. `/root/.blockcell/workspace/photo.jpg`). The frontend will auto-detect media paths and render them. You can also use markdown image syntax: `![description](file_path)`. NEVER say you cannot display images — you CAN.\n");
             rules.push_str("- **发送图片/文件给用户（通过聊天渠道）**: 调用 `message` 工具，参数 `media=[\"<本地文件路径>\"]`。仅在回复文字中写 markdown 图片语法无法真正发送文件，必须用工具调用。\n");

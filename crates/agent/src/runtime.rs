@@ -904,13 +904,21 @@ fn resolve_effective_tool_names(
             resolve_profile_tool_names(config, agent_id, intents, available_tools)
         }
     };
+
     tool_names.append(&mut profile_tools);
 
     if let Some(skill) = active_skill {
         tool_names.extend(skill.tools.iter().cloned());
     }
 
+    // Filter by available tools (registry)
     tool_names.retain(|name| available_tools.contains(name));
+
+    // Filter napcat tools by config enabled state
+    if !config.channels.napcat.enabled {
+        tool_names.retain(|name| !name.starts_with("napcat_"));
+    }
+
     tool_names.sort();
     tool_names.dedup();
     tool_names
@@ -1525,6 +1533,83 @@ impl AgentRuntime {
         })
     }
 
+    /// Build permissions for tool execution based on channel, sender, and chat context.
+    ///
+    /// This method grants appropriate permissions based on:
+    /// - Channel type (napcat, telegram, discord, etc.)
+    /// - User whitelist membership
+    /// - Admin status
+    fn build_tool_permissions(
+        &self,
+        channel: &str,
+        sender_id: Option<&str>,
+        chat_id: &str,
+    ) -> blockcell_core::types::PermissionSet {
+        use blockcell_core::types::PermissionSet;
+
+        let mut perms = PermissionSet::new();
+
+        // Grant channel-specific permissions
+        match channel {
+            "napcat" => {
+                // Use NapCat-specific permission builder
+                #[cfg(feature = "napcat")]
+                {
+                    perms = blockcell_tools::napcat::build_napcat_user_permissions(
+                        &self.config.channels.napcat,
+                        sender_id,
+                        chat_id,
+                    );
+                }
+                #[cfg(not(feature = "napcat"))]
+                {
+                    _ = (sender_id, chat_id); // Suppress unused variable warning
+                    perms = perms.with_permission("channel:napcat");
+                }
+            }
+            "telegram" => {
+                perms = perms.with_permission("channel:telegram");
+                // Grant basic tool access for telegram users
+                perms = perms.with_permission("telegram:tools");
+            }
+            "discord" => {
+                perms = perms.with_permission("channel:discord");
+                perms = perms.with_permission("discord:tools");
+            }
+            "slack" => {
+                perms = perms.with_permission("channel:slack");
+                perms = perms.with_permission("slack:tools");
+            }
+            "feishu" | "lark" => {
+                perms = perms.with_permission(&format!("channel:{}", channel));
+                perms = perms.with_permission("feishu:tools");
+            }
+            "wecom" => {
+                perms = perms.with_permission("channel:wecom");
+                perms = perms.with_permission("wecom:tools");
+            }
+            "dingtalk" => {
+                perms = perms.with_permission("channel:dingtalk");
+                perms = perms.with_permission("dingtalk:tools");
+            }
+            "whatsapp" => {
+                perms = perms.with_permission("channel:whatsapp");
+                perms = perms.with_permission("whatsapp:tools");
+            }
+            "cli" => {
+                // CLI mode gets full permissions
+                perms = perms.with_permission("channel:cli");
+                perms = perms.with_permission("cli:tools");
+            }
+            _ => {
+                // Unknown channel - grant basic access
+                perms = perms.with_permission(&format!("channel:{}", channel));
+            }
+        }
+
+        perms
+    }
+
     pub fn context_builder(&self) -> &ContextBuilder {
         &self.context_builder
     }
@@ -1917,16 +2002,9 @@ impl AgentRuntime {
         while i < split_point {
             let msg = &messages[i];
             if msg.role == "user" {
-                // Keep user messages but trim them
+                // Keep user messages intact - they contain task context that must not be lost
                 let text = match &msg.content {
-                    serde_json::Value::String(s) => {
-                        let chars: String = s.chars().take(150).collect();
-                        if s.chars().count() > 150 {
-                            format!("{}...", chars)
-                        } else {
-                            chars
-                        }
-                    }
+                    serde_json::Value::String(s) => s.clone(),
                     _ => "(media)".to_string(),
                 };
                 compressed_middle.push(ChatMessage::user(&text));
@@ -2087,16 +2165,22 @@ impl AgentRuntime {
             .defaults
             .max_tool_iterations
             .clamp(1, 30);
+        let tools_max_iterations = self
+            .config
+            .agents
+            .defaults
+            .max_tool_iterations_by_tool
+            .clone();
+        let mut tool_call_counts: HashMap<String, u32> = HashMap::new();
+        let mut over_iteration: bool = false;
         let mut current_messages = messages;
-        let mut final_response = String::new();
         let mut trace_messages = Vec::new();
 
-        for iteration in 0..max_iterations {
+        let final_response = loop {
             let response = self.chat_with_provider(&current_messages, &tools).await?;
 
             if response.tool_calls.is_empty() {
-                final_response = response.content.unwrap_or_default();
-                break;
+                break response.content.unwrap_or_default();
             }
 
             let assistant_tool_call = ChatMessage {
@@ -2116,8 +2200,28 @@ impl AgentRuntime {
                         &tool_call.name,
                         &allowed_tool_names,
                     ) {
-                        self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
-                            .await
+                        let max_iterations = tools_max_iterations
+                            .get(&tool_call.name)
+                            .copied()
+                            .unwrap_or(max_iterations);
+                        let count = tool_call_counts.entry(tool_call.name.clone()).or_insert(0);
+
+                        *count += 1;
+                        if *count > max_iterations {
+                            over_iteration = true;
+                            serde_json::json!({
+                                "error": format!(
+                                    "Tool '{}' execeeded max call limit ({}).",
+                                    tool_call.name, max_iterations
+                                ),
+                                "tool": tool_call.name,
+                                "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
+                            })
+                            .to_string()
+                        } else {
+                            self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
+                                .await
+                        }
                     } else {
                         serde_json::json!({
                             "error": format!(
@@ -2135,19 +2239,19 @@ impl AgentRuntime {
                 trace_messages.push(tool_message);
             }
 
-            if iteration == max_iterations - 1 {
+            if over_iteration {
                 let mut final_messages = current_messages.clone();
                 final_messages.push(ChatMessage::user(
                     "请基于以上技能上下文和工具结果，直接给出最终答案。不要再调用任何工具。",
                 ));
-                final_response = self
+                let final_response = self
                     .chat_with_provider(&final_messages, &[])
                     .await?
                     .content
                     .unwrap_or_default();
-                break;
+                break final_response;
             }
-        }
+        };
 
         let final_response = strip_fake_tool_calls(final_response.trim());
         Ok(PromptSkillLoopOutput {
@@ -2469,7 +2573,7 @@ impl AgentRuntime {
         current_messages: &[ChatMessage],
         tools: &[serde_json::Value],
         msg: &InboundMessage,
-        iteration: u32,
+        iteration: &HashMap<String, u32>,
         saw_rate_limit_this_turn: &mut bool,
     ) -> std::result::Result<LLMResponse, blockcell_core::Error> {
         let max_retries = self.config.agents.defaults.llm_max_retries;
@@ -2481,7 +2585,10 @@ impl AgentRuntime {
                 let delay_ms = base_delay_ms * (1u64 << (attempt - 1).min(4));
                 warn!(
                     attempt,
-                    max_retries, delay_ms, iteration, "Retrying LLM call after transient error"
+                    max_retries,
+                    delay_ms,
+                    ?iteration,
+                    "Retrying LLM call after transient error"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
@@ -2500,7 +2607,9 @@ impl AgentRuntime {
                     if attempt > 0 {
                         info!(
                             attempt,
-                            iteration, pool_idx, "LLM stream call succeeded after retry"
+                            ?iteration,
+                            pool_idx,
+                            "LLM stream call succeeded after retry"
                         );
                     }
                     let mut accumulated_content = String::new();
@@ -2675,7 +2784,7 @@ impl AgentRuntime {
                 }
                 Err(e) => {
                     let err_str = format!("{}", e);
-                    warn!(error = %err_str, attempt, max_retries, iteration, pool_idx, "LLM stream call failed");
+                    warn!(error = %err_str, attempt, max_retries, ?iteration, pool_idx, "LLM stream call failed");
                     let call_result = ProviderPool::classify_error(&err_str);
                     if matches!(&call_result, CallResult::RateLimit) {
                         *saw_rate_limit_this_turn = true;
@@ -2886,6 +2995,7 @@ impl AgentRuntime {
 
         let available_tools: HashSet<String> =
             self.tool_registry.tool_names().into_iter().collect();
+
         let routed_agent_id = self.agent_id.as_deref();
         let mut tool_names = resolve_effective_tool_names(
             &self.config,
@@ -2995,6 +3105,7 @@ impl AgentRuntime {
                 &tool_name_refs,
                 blockcell_tools::registry::global_core_tool_names(),
             );
+
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
                     let name = schema
@@ -3021,6 +3132,14 @@ impl AgentRuntime {
 
         // Main loop with max iterations
         let max_iterations = self.config.agents.defaults.max_tool_iterations;
+        let tools_max_iterations = self
+            .config
+            .agents
+            .defaults
+            .max_tool_iterations_by_tool
+            .clone();
+        let mut tool_call_counts: HashMap<String, u32> = HashMap::new();
+        let mut over_iteration: bool = false;
         let mut current_messages = messages;
         let mut final_response = String::new();
         let mut message_tool_sent_media = false;
@@ -3035,10 +3154,10 @@ impl AgentRuntime {
         // Only dynamic supplement (below) mutates the `tools` vec — no redundant reload.
         let mut _schema_cache_dirty = false;
 
-        for iteration in 0..max_iterations {
-            debug!(iteration, "LLM call iteration");
+        loop {
+            debug!(iteration = ?tool_call_counts, "LLM call iteration");
             debug!(
-                iteration,
+                iteration = ?tool_call_counts,
                 current_messages_len = current_messages.len(),
                 tool_schema_count = tools.len(),
                 "LLM loop state"
@@ -3047,7 +3166,7 @@ impl AgentRuntime {
             if should_throttle_next_tool_round {
                 let delay = tool_round_throttle_delay(saw_rate_limit_this_turn);
                 info!(
-                    iteration,
+                    iteration = ?tool_call_counts,
                     delay_ms = delay.as_millis() as u64,
                     saw_rate_limit_this_turn,
                     "Throttling next LLM call after tool round"
@@ -3063,7 +3182,7 @@ impl AgentRuntime {
                     &current_messages,
                     &tools,
                     &msg,
-                    iteration,
+                    &tool_call_counts,
                     &mut saw_rate_limit_this_turn,
                 )
                 .await;
@@ -3073,7 +3192,7 @@ impl AgentRuntime {
                 Ok(r) => r,
                 Err(e) => {
                     let max_retries = self.config.agents.defaults.llm_max_retries;
-                    warn!(error = %e, iteration, retries = max_retries, "LLM call failed after all retries");
+                    warn!(error = %e, iteration = ?tool_call_counts, retries = max_retries, "LLM call failed after all retries");
                     final_response = llm_exhausted_error(max_retries, &e);
                     if let Some(evo_service) = self.context_builder.evolution_service() {
                         let _ = evo_service
@@ -3206,10 +3325,31 @@ impl AgentRuntime {
                     }
                     let tool_timer = ScopedTimer::new();
                     let result = if tool_names.iter().any(|allowed| allowed == &tool_call.name) {
-                        self.execute_tool_call(tool_call, &msg, None).await
+                        let max_iterations = tools_max_iterations
+                            .get(&tool_call.name)
+                            .copied()
+                            .unwrap_or(max_iterations);
+                        let count = tool_call_counts.entry(tool_call.name.clone()).or_insert(0);
+
+                        *count += 1;
+                        if *count > max_iterations {
+                            over_iteration = true;
+                            serde_json::json!({
+                                "error": format!(
+                                    "Tool '{}' execeeded max call limit ({}).",
+                                    tool_call.name, max_iterations
+                                ),
+                                "tool": tool_call.name,
+                                "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
+                            })
+                            .to_string()
+                        } else {
+                            self.execute_tool_call(tool_call, &msg, None).await
+                        }
                     } else {
                         scoped_tool_denied_result(&tool_call.name)
                     };
+
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
                     // Collect media paths from tool results for WebUI display.
@@ -3386,7 +3526,7 @@ impl AgentRuntime {
                     history.push(tool_msg);
                 }
 
-                if wants_forced_answer && iteration + 1 < max_iterations {
+                if wants_forced_answer && !over_iteration {
                     if !web_search_thin_results.is_empty() {
                         // Thin results: guide LLM to fetch actual page content instead of giving up
                         let urls_hint = web_search_thin_results
@@ -3437,7 +3577,7 @@ impl AgentRuntime {
                     );
                 }
 
-                if iteration + 1 < max_iterations && !short_circuit_after_tools {
+                if !over_iteration && !short_circuit_after_tools {
                     should_throttle_next_tool_round = true;
                 }
 
@@ -3446,10 +3586,12 @@ impl AgentRuntime {
                     break;
                 }
 
-                if iteration == max_iterations - 1 {
+                if over_iteration {
                     warn!(
-                        iteration,
-                        max_iterations, "Reached max iterations; forcing a final no-tools answer"
+                        iteration = ?tool_call_counts,
+                        max_iterations,
+                        ?tools_max_iterations,
+                        "Reached max iterations; forcing a final no-tools answer"
                     );
                     let mut final_messages = current_messages.clone();
                     final_messages.push(ChatMessage::user(
@@ -3916,9 +4058,10 @@ impl AgentRuntime {
             session_key: msg.session_key(),
             channel: msg.channel.clone(),
             account_id: msg.account_id.clone(),
+            sender_id: Some(msg.sender_id.clone()),
             chat_id: msg.chat_id.clone(),
             config: self.config.clone(),
-            permissions: blockcell_core::types::PermissionSet::new(), // TODO: Load from skill meta
+            permissions: self.build_tool_permissions(&msg.channel, Some(&msg.sender_id), &msg.chat_id),
             task_manager: Some(tm_handle),
             memory_store: self.memory_store.clone(),
             outbound_tx: self.outbound_tx.clone(),
@@ -4309,6 +4452,7 @@ impl AgentRuntime {
                     session_key: session_key.clone(),
                     channel: channel.clone(),
                     account_id: None,
+                    sender_id: None, // Cron jobs have no sender
                     chat_id: chat_id.clone(),
                     config: config.clone(),
                     permissions: blockcell_core::types::PermissionSet::new(),
@@ -5642,6 +5786,7 @@ mod tests {
             session_key: "cli:test".to_string(),
             channel: "cli".to_string(),
             account_id: None,
+            sender_id: None,
             chat_id: "chat-1".to_string(),
             config: Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),
@@ -6742,6 +6887,82 @@ description: local demo
             resolve_profile_tool_names(&config, None, &[IntentCategory::Chat], &available);
 
         assert!(tool_names.is_empty());
+    }
+
+    #[test]
+    fn test_napcat_tools_hidden_when_disabled() {
+        // Config with napcat disabled (default)
+        let config: Config = serde_json::from_str(
+            r#"{
+                "channels": {
+                    "napcat": {
+                        "enabled": false
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let available: HashSet<String> = [
+            "read_file",
+            "napcat_get_group_list",
+            "napcat_get_login_info",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let tool_names = resolve_effective_tool_names(
+            &config,
+            InteractionMode::General,
+            None,
+            None,
+            &[IntentCategory::Communication],
+            &available,
+        );
+
+        // napcat tools should be filtered out
+        assert!(tool_names.contains(&"read_file".to_string()));
+        assert!(!tool_names.contains(&"napcat_get_group_list".to_string()));
+        assert!(!tool_names.contains(&"napcat_get_login_info".to_string()));
+    }
+
+    #[test]
+    fn test_napcat_tools_visible_when_enabled() {
+        // Config with napcat enabled
+        let config: Config = serde_json::from_str(
+            r#"{
+                "channels": {
+                    "napcat": {
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let available: HashSet<String> = [
+            "read_file",
+            "napcat_get_group_list",
+            "napcat_get_login_info",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let tool_names = resolve_effective_tool_names(
+            &config,
+            InteractionMode::General,
+            None,
+            None,
+            &[IntentCategory::Communication],
+            &available,
+        );
+
+        // napcat tools should be visible
+        assert!(tool_names.contains(&"read_file".to_string()));
+        assert!(tool_names.contains(&"napcat_get_group_list".to_string()));
+        assert!(tool_names.contains(&"napcat_get_login_info".to_string()));
     }
 
     #[test]

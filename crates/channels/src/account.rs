@@ -5,6 +5,8 @@ use blockcell_core::config::{
 };
 #[cfg(feature = "qq")]
 use blockcell_core::config::QQAccountConfig;
+#[cfg(feature = "napcat")]
+use blockcell_core::config::NapCatAccountConfig;
 use blockcell_core::Config;
 use std::collections::HashMap;
 
@@ -130,6 +132,16 @@ pub(crate) fn qq_account_id(config: &Config) -> Option<String> {
         &qq.accounts,
         |account| account.enabled,
         |account| !qq.app_id.is_empty() && account.app_id == qq.app_id,
+    )
+}
+
+#[cfg(feature = "napcat")]
+pub(crate) fn napcat_account_id(config: &Config) -> Option<String> {
+    let napcat = &config.channels.napcat;
+    resolve_account_id(
+        &napcat.accounts,
+        |account| account.enabled,
+        |account| !napcat.ws_url.is_empty() && account.ws_url.as_deref() == Some(&napcat.ws_url),
     )
 }
 
@@ -375,6 +387,66 @@ pub fn qq_listener_configs(config: &Config) -> Vec<ListenerConfig> {
     )
 }
 
+#[cfg(feature = "napcat")]
+pub fn napcat_listener_configs(config: &Config) -> Vec<ListenerConfig> {
+    // Helper to check if an account is properly configured for any mode
+    fn is_account_configured(account: &NapCatAccountConfig) -> bool {
+        if !account.enabled {
+            return false;
+        }
+        // Check based on mode or any configured field
+        account.ws_url.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+            || account.server_port.map(|p| p > 0).unwrap_or(false)
+    }
+
+    // Helper to check if base config is properly configured
+    fn is_base_configured(cfg: &Config) -> bool {
+        !cfg.channels.napcat.ws_url.is_empty()
+            || cfg.channels.napcat.server_port > 0
+    }
+
+    scoped_listener_configs(
+        "napcat",
+        config,
+        &config.channels.napcat.accounts,
+        is_account_configured,
+        is_base_configured,
+        |scoped, account_id, account: &NapCatAccountConfig| {
+            scoped.channels.napcat.enabled = account.enabled;
+            if let Some(ref mode) = account.mode {
+                scoped.channels.napcat.mode = mode.clone();
+            }
+            if let Some(ref ws_url) = account.ws_url {
+                scoped.channels.napcat.ws_url = ws_url.clone();
+            }
+            if let Some(ref access_token) = account.access_token {
+                scoped.channels.napcat.access_token = access_token.clone();
+            }
+            if let Some(ref allow_from) = account.allow_from {
+                scoped.channels.napcat.allow_from = allow_from.clone();
+            }
+            if let Some(ref allow_groups) = account.allow_groups {
+                scoped.channels.napcat.allow_groups = allow_groups.clone();
+            }
+            if let Some(ref block_from) = account.block_from {
+                scoped.channels.napcat.block_from = block_from.clone();
+            }
+            // Copy server config for ws-server mode
+            if let Some(ref server_host) = account.server_host {
+                scoped.channels.napcat.server_host = server_host.clone();
+            }
+            if let Some(server_port) = account.server_port {
+                scoped.channels.napcat.server_port = server_port;
+            }
+            if let Some(ref server_path) = account.server_path {
+                scoped.channels.napcat.server_path = server_path.clone();
+            }
+            scoped.channels.napcat.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
+            scoped.channels.napcat.default_account_id = Some(account_id.to_string());
+        },
+    )
+}
+
 fn has_enabled_account<T>(accounts: &HashMap<String, T>, is_enabled: impl Fn(&T) -> bool) -> bool {
     accounts.values().any(is_enabled)
 }
@@ -435,6 +507,22 @@ pub fn channel_configured(config: &Config, channel: &str) -> bool {
                     account.enabled && !account.app_id.is_empty()
                 })
         }
+        "napcat" => {
+            // Check if any mode is configured:
+            // - ws-client: ws_url is set
+            // - ws-server: server_port is set (non-zero)
+            let base_configured = !config.channels.napcat.ws_url.is_empty()
+                || config.channels.napcat.server_port > 0;
+            let account_configured = has_enabled_account(&config.channels.napcat.accounts, |account| {
+                if !account.enabled {
+                    return false;
+                }
+                // Check account-specific configuration based on mode
+                account.ws_url.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+                    || account.server_port.map(|p| p > 0).unwrap_or(false)
+            });
+            base_configured || account_configured
+        }
         "weixin" => {
             !config.channels.weixin.token.is_empty()
                 || has_enabled_account(&config.channels.weixin.accounts, |account| {
@@ -479,6 +567,16 @@ pub fn listener_labels(config: &Config, channel: &str) -> Vec<String> {
         return labels;
     }
 
+    #[cfg(feature = "napcat")]
+    if channel == "napcat" {
+        let mut labels: Vec<String> = napcat_listener_configs(config)
+            .into_iter()
+            .map(|listener| listener.label)
+            .collect();
+        labels.sort();
+        return labels;
+    }
+
     let mut labels = match channel {
         "telegram" => telegram_listener_configs(config),
         "whatsapp" => whatsapp_listener_configs(config),
@@ -488,7 +586,26 @@ pub fn listener_labels(config: &Config, channel: &str) -> Vec<String> {
         "dingtalk" => dingtalk_listener_configs(config),
         "wecom" => wecom_listener_configs(config),
         "lark" => lark_scoped_configs(config),
-        "qq" => qq_listener_configs(config),
+        "qq" => {
+            #[cfg(feature = "qq")]
+            {
+                qq_listener_configs(config)
+            }
+            #[cfg(not(feature = "qq"))]
+            {
+                Vec::new()
+            }
+        }
+        "napcat" => {
+            #[cfg(feature = "napcat")]
+            {
+                napcat_listener_configs(config)
+            }
+            #[cfg(not(feature = "napcat"))]
+            {
+                Vec::new()
+            }
+        }
         "weixin" => weixin_listener_configs(config),
         _ => Vec::new(),
     }

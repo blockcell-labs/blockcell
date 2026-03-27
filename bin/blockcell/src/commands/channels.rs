@@ -5,8 +5,8 @@ use qrcode::QrCode;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-const SUPPORTED_OWNER_CHANNELS: [&str; 10] = [
-    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
+const SUPPORTED_OWNER_CHANNELS: [&str; 11] = [
+    "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq", "napcat",
     "weixin",
 ];
 
@@ -21,6 +21,7 @@ fn known_account_ids(config: &Config, channel: &str) -> Vec<String> {
         "wecom" => config.channels.wecom.accounts.keys().cloned().collect::<Vec<_>>(),
         "lark" => config.channels.lark.accounts.keys().cloned().collect::<Vec<_>>(),
         "qq" => config.channels.qq.accounts.keys().cloned().collect::<Vec<_>>(),
+        "napcat" => config.channels.napcat.accounts.keys().cloned().collect::<Vec<_>>(),
         _ => Vec::new(),
     };
     ids.sort();
