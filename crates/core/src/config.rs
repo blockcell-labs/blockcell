@@ -127,6 +127,9 @@ pub struct AgentDefaults {
     pub temperature: f32,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    /// Per-tool max iterations. If a tool name is not present, use max_tool_iterations as default.
+    #[serde(default)]
+    pub max_tool_iterations_by_tool: HashMap<String, u32>,
     #[serde(default = "default_llm_max_retries")]
     pub llm_max_retries: u32,
     #[serde(default = "default_llm_retry_delay_ms")]
@@ -202,6 +205,7 @@ impl Default for AgentDefaults {
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             max_tool_iterations: default_max_tool_iterations(),
+            max_tool_iterations_by_tool: HashMap::new(),
             llm_max_retries: default_llm_max_retries(),
             llm_retry_delay_ms: default_llm_retry_delay_ms(),
             max_context_tokens: default_max_context_tokens(),
@@ -310,6 +314,8 @@ pub struct AgentProfileConfig {
     #[serde(default)]
     pub max_tool_iterations: Option<u32>,
     #[serde(default)]
+    pub max_tool_iterations_by_tool: HashMap<String, u32>,
+    #[serde(default)]
     pub llm_max_retries: Option<u32>,
     #[serde(default)]
     pub llm_retry_delay_ms: Option<u64>,
@@ -342,6 +348,7 @@ impl Default for AgentProfileConfig {
             max_tokens: None,
             temperature: None,
             max_tool_iterations: None,
+            max_tool_iterations_by_tool: HashMap::new(),
             llm_max_retries: None,
             llm_retry_delay_ms: None,
             max_context_tokens: None,
@@ -2137,6 +2144,9 @@ impl Config {
             }
             if let Some(max_tool_iterations) = agent.max_tool_iterations {
                 defaults.max_tool_iterations = max_tool_iterations;
+            }
+            if !agent.max_tool_iterations_by_tool.is_empty() {
+                defaults.max_tool_iterations_by_tool = agent.max_tool_iterations_by_tool.clone();
             }
             if let Some(llm_max_retries) = agent.llm_max_retries {
                 defaults.llm_max_retries = llm_max_retries;
