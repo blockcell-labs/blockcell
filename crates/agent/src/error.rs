@@ -145,6 +145,7 @@ pub(crate) fn classify_tool_failure(result: &str) -> ToolFailureKind {
         || lower.contains("temporary")
         || lower.contains("network")
         || lower.contains("dns")
+        || lower.contains("bad parameter")
     {
         return ToolFailureKind::Transient;
     }

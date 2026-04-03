@@ -228,7 +228,7 @@ impl Tool for EditFileTool {
         let count = content.matches(old_text).count();
         if count == 0 {
             return Err(Error::Tool(format!(
-                "old_text not found in file: {}",
+                "bad parameter: old_text in {} not exists, please read_file firstly and then call this with correct old_text",
                 path.display()
             )));
         }
