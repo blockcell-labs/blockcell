@@ -3191,6 +3191,7 @@ impl AgentRuntime {
                 finish_reason = %response.finish_reason,
                 "LLM response received"
             );
+            debug!(target: "chat::response", response = serde_json::to_string(&response).unwrap_or_default(), "Response detail");
 
             // Handle tool calls
             if !response.tool_calls.is_empty() {

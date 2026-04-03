@@ -990,6 +990,7 @@ impl OpenAIProvider {
         let request_body = serde_json::to_string(&request)
             .map_err(|e| Error::Provider(format!("Failed to serialize request: {}", e)))?;
         debug!(body_len = request_body.len(), "Request body prepared");
+        debug!(target: "chat::request", request_body, "Request detail");
 
         let response = self
             .client
@@ -1017,6 +1018,7 @@ impl OpenAIProvider {
             let end = truncate_at_char_boundary(trimmed, 500);
             info!(body_len = raw_body.len(), preview = %&trimmed[..end], "LLM raw response");
         }
+        debug!(target: "chat::response", response = raw_body, "LLM response");
 
         let trimmed_body = raw_body.trim();
         if trimmed_body.is_empty() {
@@ -1352,6 +1354,7 @@ impl Provider for OpenAIProvider {
         };
 
         info!(url = %url, model = %self.model, "Starting streaming LLM call");
+        debug!(target: "chat::request", request = serde_json::to_string(&request).unwrap_or_default(), "Request detail");
 
         let response = self
             .client

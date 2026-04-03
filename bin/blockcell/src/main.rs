@@ -769,10 +769,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Setup tracing
     let filter = if cli.verbose {
-        EnvFilter::new("debug")
+        EnvFilter::new("debug,chat::request=info,chat::response=info")
     } else {
         EnvFilter::new("info")
     };
+
+    // Support switch from env
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| filter);
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr))
