@@ -2037,13 +2037,14 @@ impl AgentRuntime {
     /// 并收集恢复信息（文件、技能、Session Memory）。
     ///
     /// ## 返回
-    /// - `Some(CompactResult)` - 压缩成功
-    /// - `None` - 压缩失败（LLM 错误等）
+    /// - `CompactResult` - 压缩结果（通过 `success` 字段判断是否成功）
+    ///   - 成功：`success: true`，包含摘要和恢复消息
+    ///   - 失败：`success: false`，`error` 字段包含错误信息
     async fn execute_layer4_compact(
         &self,
         messages: &[ChatMessage],
         _session_key: &str,
-    ) -> Option<crate::compact::CompactResult> {
+    ) -> crate::compact::CompactResult {
         use crate::compact::{CompactResult, generate_compact_summary};
         use crate::session_memory::get_session_memory_path;
 
@@ -2071,8 +2072,9 @@ impl AgentRuntime {
         let summary_message = match summary_result {
             Ok(summary) => summary.to_markdown(),
             Err(e) => {
+                let error_msg = format!("LLM compact summary generation failed: {}", e);
                 warn!(error = %e, "[layer4] Failed to generate compact summary");
-                return None;
+                return CompactResult::failed(&error_msg);
             }
         };
 
@@ -2108,14 +2110,14 @@ impl AgentRuntime {
             "[layer4] Compact completed successfully"
         );
 
-        Some(CompactResult {
+        CompactResult {
             summary_message,
             recovery_message,
             pre_compact_tokens,
             post_compact_tokens,
             success: true,
             error: None,
-        })
+        }
     }
 
     async fn chat_with_provider(
@@ -3214,10 +3216,11 @@ impl AgentRuntime {
                         "[layer4] Pre-loop compact check triggered"
                     );
 
-                    if let Some(compact_result) = self.execute_layer4_compact(
+                    let compact_result = self.execute_layer4_compact(
                         &current_messages,
                         &session_key,
-                    ).await {
+                    ).await;
+                    if compact_result.success {
                         current_messages.clear();
                         current_messages.push(ChatMessage::system(
                             &compact_result.to_compact_message()
@@ -3235,6 +3238,11 @@ impl AgentRuntime {
                             ms.file_tracker_mut().clear();
                             ms.skill_tracker_mut().clear();
                         }
+                    } else {
+                        warn!(
+                            error = ?compact_result.error,
+                            "[layer4] Pre-loop compact failed"
+                        );
                     }
                 }
             }
@@ -3683,10 +3691,11 @@ impl AgentRuntime {
                         );
 
                         // 执行 Layer 4 Compact
-                        if let Some(compact_result) = self.execute_layer4_compact(
+                        let compact_result = self.execute_layer4_compact(
                             &current_messages,
                             &session_key,
-                        ).await {
+                        ).await;
+                        if compact_result.success {
                             // 替换消息历史为压缩后的内容
                             current_messages.clear();
                             current_messages.push(ChatMessage::system(
@@ -3709,6 +3718,11 @@ impl AgentRuntime {
 
                             // 跳过后续处理
                             continue;
+                        } else {
+                            warn!(
+                                error = ?compact_result.error,
+                                "[layer4] Compact failed, continuing without compression"
+                            );
                         }
                     }
                 }
@@ -3947,10 +3961,11 @@ impl AgentRuntime {
                         "[post-sampling] Executing synchronous compact before response delivery"
                     );
 
-                    if let Some(compact_result) = self.execute_layer4_compact(
+                    let compact_result = self.execute_layer4_compact(
                         &history,
                         &session_key,
-                    ).await {
+                    ).await;
+                    if compact_result.success {
                         // 压缩成功，替换历史
                         history.clear();
                         history.push(ChatMessage::system(
@@ -3969,6 +3984,11 @@ impl AgentRuntime {
                             ms.file_tracker_mut().clear();
                             ms.skill_tracker_mut().clear();
                         }
+                    } else {
+                        warn!(
+                            error = ?compact_result.error,
+                            "[post-sampling] Compact failed, continuing without compression"
+                        );
                     }
                 }
                 crate::memory_system::PostSamplingAction::None => {}

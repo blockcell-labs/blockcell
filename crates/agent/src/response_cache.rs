@@ -586,6 +586,30 @@ fn sanitize_tool_use_id(tool_use_id: &str) -> String {
     }
 }
 
+/// 清理 session_key 防止路径遍历攻击
+///
+/// 清理策略：
+/// 1. 只保留字母、数字、连字符和下划线
+/// 2. 限制长度
+fn sanitize_session_key(session_key: &str) -> String {
+    let sanitized: String = session_key
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+
+    // 如果清理后为空，使用默认值
+    if sanitized.is_empty() {
+        return format!("session-{}", uuid::Uuid::new_v4().simple());
+    }
+
+    // 限制长度 (UUID 格式通常是 36 字符，允许稍长)
+    if sanitized.len() > 64 {
+        sanitized[..64].to_string()
+    } else {
+        sanitized
+    }
+}
+
 /// 构建内存 fallback 替换消息（当磁盘持久化失败时）
 ///
 /// 包含预览内容，告知用户磁盘持久化失败但数据已通过预览保留。
@@ -645,10 +669,29 @@ pub async fn persist_tool_result(
     // 清理 tool_use_id 防止路径注入
     let safe_tool_use_id = sanitize_tool_use_id(tool_use_id);
 
+    // 清理 session_key 防止路径遍历
+    let safe_session_key = sanitize_session_key(session_key);
+
     let dir = workspace_dir
         .join("sessions")
-        .join(session_key)
+        .join(&safe_session_key)
         .join(TOOL_RESULTS_SUBDIR);
+
+    // 验证目录路径仍在工作目录内（防止路径遍历攻击）
+    // 注意：由于 session_key 已被清理，这主要是防御性编程
+    let dir_canonical = match std::fs::canonicalize(&dir.parent().unwrap_or(&dir)) {
+        Ok(p) => p,
+        Err(_) => dir.clone(), // 目录不存在时使用原始路径
+    };
+    let workspace_canonical = match std::fs::canonicalize(workspace_dir) {
+        Ok(p) => p,
+        Err(_) => workspace_dir.to_path_buf(),
+    };
+    if !dir_canonical.starts_with(&workspace_canonical) {
+        return Err(PersistToolResultError {
+            error: "Path traversal detected: directory escapes workspace".to_string(),
+        });
+    }
 
     // 创建目录
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -661,6 +704,13 @@ pub async fn persist_tool_result(
     let is_json = content.trim_start().starts_with('[');
     let ext = if is_json { "json" } else { "txt" };
     let filepath = dir.join(format!("{}.{}", safe_tool_use_id, ext));
+
+    // 验证最终文件路径仍在预期目录内
+    if !filepath.starts_with(&dir) {
+        return Err(PersistToolResultError {
+            error: "Path traversal detected: file escapes target directory".to_string(),
+        });
+    }
 
     // 原子写入：使用 create_new 避免竞争
     let content_str = if is_json {
