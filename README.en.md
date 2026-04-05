@@ -14,6 +14,8 @@
 
 [Website](https://blockcell.dev) • [Documentation](https://blockcell.dev/docs) • [中文](README.md)
 
+**Latest release**: v0.1.5 • [Download Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.5) • [Changelog](CHANGELOG.en.md)
+
 </div>
 
 ---
