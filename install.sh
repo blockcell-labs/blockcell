@@ -157,13 +157,16 @@ install_from_release() {
   tar -xzf "$TMP_DIR/$asset" -C "$TMP_DIR"
 
   if [ ! -f "$TMP_DIR/$BIN_NAME" ]; then
-    if [ -f "$TMP_DIR/blockcell" ]; then
-      :
-    elif [ -f "$TMP_DIR/bin/$BIN_NAME" ]; then
-      cp "$TMP_DIR/bin/$BIN_NAME" "$TMP_DIR/$BIN_NAME"
-    elif [ -f "$TMP_DIR/blockcell/bin/$BIN_NAME" ]; then
-      cp "$TMP_DIR/blockcell/bin/$BIN_NAME" "$TMP_DIR/$BIN_NAME"
-    fi
+    for candidate in \
+      "$TMP_DIR"/*/"$BIN_NAME" \
+      "$TMP_DIR"/*/bin/"$BIN_NAME" \
+      "$TMP_DIR"/bin/"$BIN_NAME" \
+      "$TMP_DIR"/"$BIN_NAME"; do
+      if [ -f "$candidate" ]; then
+        cp "$candidate" "$TMP_DIR/$BIN_NAME"
+        break
+      fi
+    done
   fi
 
   if [ ! -f "$TMP_DIR/$BIN_NAME" ]; then

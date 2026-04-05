@@ -1,11 +1,10 @@
 # BlueClaw
+
 <div align="center">
 
 <img src="screenshot/logo-blueclaw.png" alt="BlueClaw Logo" width="320" />
 
-**BlockCell进化为BlueClaw - 蓝虾**
-
-<div align="center">
+**BlockCell evolves into BlueClaw — the blue claw**
 
 **A self-evolving AI agent framework built with Rust**
 
@@ -14,6 +13,8 @@
 [![GitHub stars](https://img.shields.io/github/stars/blockcell-labs/blockcell?style=social)](https://github.com/blockcell-labs/blockcell)
 
 [Website](https://blockcell.dev) • [Documentation](https://blockcell.dev/docs) • [中文](README.md)
+
+**Latest release**: v0.1.5 • [Download Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.5) • [Changelog](CHANGELOG.en.md)
 
 </div>
 
@@ -346,6 +347,8 @@ For full functionality, install these tools:
 
 ## 📚 Documentation
 
+- [Full series index](docs/en/00_index.md)
+- [What is blockcell?](docs/en/01_what_is_blockcell.md)
 - [Quick Start Guide (Single Agent)](QUICKSTART.md)
 - [Quick Start Guide (Multi-Agent)](QUICKSTART.multi-agent.md)
 - [Architecture Deep Dive](docs/en/12_architecture.md)
@@ -353,6 +356,8 @@ For full functionality, install these tools:
 - [Skill System](docs/en/04_skill_system.md)
 - [Memory System](docs/en/05_memory_system.md)
 - [Channel Configuration](docs/en/06_channels.md)
+- [Browser Automation](docs/en/07_browser_automation.md)
+- [Gateway Mode](docs/en/08_gateway_mode.md)
 - [Self-Evolution](docs/en/09_self_evolution.md)
 
 ---

@@ -31,6 +31,7 @@ jobs:
             arch: arm64
             binary: blockcell
             archive_ext: tar.gz
+            deployment_target: "11.0"
 
           # macOS Intel (x86_64) — cross-compiled from arm64 runner
           - os: macos-15
@@ -39,6 +40,7 @@ jobs:
             arch: amd64
             binary: blockcell
             archive_ext: tar.gz
+            deployment_target: "10.15"
 
           # Linux x86_64 (musl — fully static, no glibc dependency)
           - os: ubuntu-22.04
@@ -68,17 +70,13 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+          key: ${{ matrix.target }}
 
       # ── Platform-specific dependencies ───────────────────────────────────
       - name: Install Linux deps (Linux)
@@ -86,16 +84,20 @@ jobs:
         run: |
           sudo apt-get update -qq
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            sudo apt-get install -y ca-certificates musl-tools musl-dev pkg-config perl make gcc g++
+            sudo apt-get install -y ca-certificates musl-tools musl-dev pkg-config perl make gcc g++ protobuf-compiler
           else
-            sudo apt-get install -y ca-certificates pkg-config libssl-dev
+            sudo apt-get install -y ca-certificates pkg-config libssl-dev protobuf-compiler
           fi
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install openssl --no-progress -y
+          choco install openssl protoc --no-progress -y
           echo "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
@@ -104,6 +106,14 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-musl' && '-C target-feature=+crt-static' || '' }}
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          # thin LTO is much faster than fat LTO with negligible quality loss
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "4"
+          # Ensure C build scripts (lz4-sys, blake3, etc.) target the same macOS
+          # version as the Rust linker; avoids "built for newer macOS" linker errors
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target || '' }}
         run: |
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
             export OPENSSL_VENDORED=1

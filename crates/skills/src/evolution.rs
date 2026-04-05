@@ -1187,7 +1187,9 @@ impl SkillEvolution {
         let has_md = skill_dir.join("SKILL.md").exists();
         if skill_dir.join("SKILL.rhai").exists() {
             SkillLayout::RhaiOrchestration
-        } else if skill_dir.join("SKILL.py").exists() || Self::contains_local_script_asset(&skill_dir) {
+        } else if skill_dir.join("SKILL.py").exists()
+            || Self::contains_local_script_asset(&skill_dir)
+        {
             if has_md {
                 SkillLayout::Hybrid
             } else {
