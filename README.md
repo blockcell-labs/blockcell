@@ -4,7 +4,7 @@
 
 <img src="screenshot/logo-blueclaw.png" alt="BlueClaw Logo" width="320" />
 
-**BlockCell进化为BlueClaw - 蓝虾**
+**BlockCell 进化为 BlueClaw — 蓝虾**
 
 **用 Rust 构建的自进化 AI 多智能体框架**
 
@@ -345,13 +345,17 @@ blockcell gateway
 
 ## 📚 文档
 
+- [完整系列索引](docs/00_index.md)
+- [什么是 blockcell？](docs/01_what_is_blockcell.md)
 - [快速开始指南（单 agent）](QUICKSTART.zh-CN.md)
 - [多 agent 快速开始](QUICKSTART.multi-agent.zh-CN.md)
-- [架构深度解析](docs/01_what_is_blockcell.md)
+- [架构深度解析](docs/12_architecture.md)
 - [工具系统](docs/03_tools_system.md)
 - [技能系统](docs/04_skill_system.md)
 - [记忆系统](docs/05_memory_system.md)
 - [渠道配置](docs/06_channels.md)
+- [浏览器自动化](docs/07_browser_automation.md)
+- [Gateway 模式](docs/08_gateway_mode.md)
 - [自我进化](docs/09_self_evolution.md)
 
 ---

@@ -86,16 +86,20 @@ jobs:
         run: |
           sudo apt-get update -qq
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            sudo apt-get install -y ca-certificates musl-tools musl-dev pkg-config perl make gcc g++
+            sudo apt-get install -y ca-certificates musl-tools musl-dev pkg-config perl make gcc g++ protobuf-compiler
           else
-            sudo apt-get install -y ca-certificates pkg-config libssl-dev
+            sudo apt-get install -y ca-certificates pkg-config libssl-dev protobuf-compiler
           fi
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install openssl --no-progress -y
+          choco install openssl protoc --no-progress -y
           echo "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
