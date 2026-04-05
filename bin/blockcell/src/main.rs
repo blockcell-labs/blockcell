@@ -783,7 +783,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Support switch from env
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| filter);
+    let filter = EnvFilter::try_from_default_env().unwrap_or(filter);
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr))

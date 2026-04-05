@@ -75,7 +75,7 @@ impl<'a> HybridMemoryRetriever<'a> {
             })
             .collect();
 
-        results.sort_by(|left, right| compare_results(left, right));
+        results.sort_by(compare_results);
         results.truncate(params.top_k);
         Ok(results)
     }
