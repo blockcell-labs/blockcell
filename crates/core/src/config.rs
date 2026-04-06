@@ -2462,7 +2462,7 @@ mod tests {
         cfg.memory.vector.enabled = true;
         cfg.memory.vector.provider = "openai".to_string();
         cfg.memory.vector.model = "text-embedding-3-small".to_string();
-        cfg.memory.vector.uri = Some("./memory/vectors.lancedb".to_string());
+        cfg.memory.vector.uri = Some("./memory/vectors.rabitq".to_string());
 
         cfg.save(&path).expect("save config json5");
         let content = fs::read_to_string(&path).expect("read saved config");
@@ -2476,7 +2476,7 @@ mod tests {
         assert_eq!(loaded.memory.vector.model, "text-embedding-3-small");
         assert_eq!(
             loaded.memory.vector.uri.as_deref(),
-            Some("./memory/vectors.lancedb")
+            Some("./memory/vectors.rabitq")
         );
     }
 
@@ -2531,7 +2531,7 @@ mod tests {
       enabled: true,
       provider: "openai",
       model: "text-embedding-3-small",
-      uri: "./memory/lancedb",
+      uri: "./memory/rabitq",
       table: "memory_vectors"
     }
   }
@@ -2541,7 +2541,7 @@ mod tests {
         assert!(cfg.memory.vector.enabled);
         assert_eq!(cfg.memory.vector.provider, "openai");
         assert_eq!(cfg.memory.vector.model, "text-embedding-3-small");
-        assert_eq!(cfg.memory.vector.uri.as_deref(), Some("./memory/lancedb"));
+        assert_eq!(cfg.memory.vector.uri.as_deref(), Some("./memory/rabitq"));
         assert_eq!(cfg.memory.vector.table, "memory_vectors");
     }
 

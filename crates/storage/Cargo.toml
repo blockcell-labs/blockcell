@@ -15,9 +15,7 @@ uuid = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 futures = { workspace = true }
-lancedb = { workspace = true }
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
+rabitq_rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"

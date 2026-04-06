@@ -1,6 +1,6 @@
 pub mod audit;
 pub mod contacts;
-pub mod lancedb;
+pub mod rabitq_index;
 pub mod memory;
 pub mod memory_contract;
 pub mod memory_service;

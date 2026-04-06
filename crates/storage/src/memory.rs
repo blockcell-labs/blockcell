@@ -2423,8 +2423,8 @@ Language: Chinese
                 scope: "long_term".to_string(),
                 item_type: "fact".to_string(),
                 title: Some("favorite database".to_string()),
-                content: "The preferred vector store is LanceDB".to_string(),
-                summary: Some("Prefers LanceDB".to_string()),
+                content: "The preferred vector store is RabitQ".to_string(),
+                summary: Some("Prefers RabitQ".to_string()),
                 tags: vec!["vector".to_string(), "database".to_string()],
                 source: "user".to_string(),
                 channel: None,
@@ -2478,7 +2478,7 @@ Language: Chinese
                 scope: "long_term".to_string(),
                 item_type: "preference".to_string(),
                 title: Some("runtime".to_string()),
-                content: "Use SQLite for canonical storage and LanceDB for vectors".to_string(),
+                content: "Use SQLite for canonical storage and RabitQ for vectors".to_string(),
                 summary: None,
                 tags: vec!["storage".to_string()],
                 source: "user".to_string(),
@@ -2500,7 +2500,7 @@ Language: Chinese
             vec![
                 "Title: runtime\nSummary: Use SQLite for canonical storage\nTags: storage"
                     .to_string(),
-                "Title: runtime\nSummary: Use SQLite for canonical storage and LanceDB for vectors\nTags: storage"
+                "Title: runtime\nSummary: Use SQLite for canonical storage and RabitQ for vectors\nTags: storage"
                     .to_string()
             ]
         );
@@ -2957,7 +2957,7 @@ Language: Chinese
                 scope: "long_term".to_string(),
                 item_type: "fact".to_string(),
                 title: Some("semantic result".to_string()),
-                content: "LanceDB can recover semantically related memory".to_string(),
+                content: "RabitQ can recover semantically related memory".to_string(),
                 summary: Some("semantic retrieval works".to_string()),
                 tags: vec!["vector".to_string()],
                 source: "user".to_string(),

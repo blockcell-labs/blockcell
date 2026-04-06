@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use blockcell_core::{Config, Paths};
 use blockcell_providers::create_embedder;
-use blockcell_storage::lancedb::LanceDbIndex;
+use blockcell_storage::rabitq_index::RabitqIndex;
 use blockcell_storage::vector::VectorRuntime;
 use blockcell_storage::{MemoryStore, MemoryStoreOptions};
 use tracing::warn;
@@ -43,8 +43,8 @@ fn build_vector_runtime(
         table_name
     };
 
-    let index = LanceDbIndex::open_or_create(&uri, &table_name)
-        .map_err(|error| anyhow::anyhow!("Failed to initialize LanceDB index: {}", error))
+    let index = RabitqIndex::open_or_create(&uri, &table_name)
+        .map_err(|error| anyhow::anyhow!("Failed to initialize RabitQ index: {}", error))
         .with_context(|| format!("vector uri={}, table={}", uri, table_name))?;
 
     Ok(Some(Arc::new(VectorRuntime {
@@ -76,7 +76,7 @@ fn resolve_vector_uri(paths: &Paths, config: &Config) -> String {
 
     paths
         .memory_dir()
-        .join("vectors.lancedb")
+        .join("vectors.rabitq")
         .to_string_lossy()
         .to_string()
 }
@@ -92,7 +92,7 @@ mod tests {
 
         assert_eq!(
             resolve_vector_uri(&paths, &config),
-            "/tmp/blockcell-test/workspace/memory/vectors.lancedb"
+            "/tmp/blockcell-test/workspace/memory/vectors.rabitq"
         );
     }
 
@@ -100,11 +100,11 @@ mod tests {
     fn test_resolve_vector_uri_joins_relative_paths() {
         let paths = Paths::with_base(PathBuf::from("/tmp/blockcell-test"));
         let mut config = Config::default();
-        config.memory.vector.uri = Some("lancedb/index".to_string());
+        config.memory.vector.uri = Some("rabitq/index".to_string());
 
         assert_eq!(
             resolve_vector_uri(&paths, &config),
-            "/tmp/blockcell-test/workspace/memory/lancedb/index"
+            "/tmp/blockcell-test/workspace/memory/rabitq/index"
         );
     }
 }
