@@ -1,6 +1,15 @@
 //! # /clear 命令
 //!
 //! 清除当前会话历史。
+//!
+//! ## session_key 格式
+//!
+//! session_key 的格式为 `{channel}:{chat_id}`，例如：
+//! - CLI: `cli:default`
+//! - WebSocket: `ws:{session_id}`
+//! - Telegram: `telegram:{chat_id}`
+//!
+//! 这个格式与 `SessionStore::session_file()` 的路径计算保持一致。
 
 use crate::commands::slash_commands::*;
 use blockcell_storage::SessionStore;
@@ -21,6 +30,10 @@ impl SlashCommand for ClearCommand {
     async fn execute(&self, _args: &str, ctx: &CommandContext) -> CommandResult {
         let mut results: Vec<String> = Vec::new();
 
+        // session_key 格式: {channel}:{chat_id}
+        // 例如: cli:default, ws:abc123, telegram:123456789
+        let session_key = format!("{}:{}", ctx.source.channel, ctx.source.chat_id);
+
         // 1. 调用清除回调（如果存在）
         if let Some(ref callback) = ctx.session_clear_callback {
             if callback() {
@@ -33,12 +46,14 @@ impl SlashCommand for ClearCommand {
         }
 
         // 2. 清除会话历史文件 (SessionStore)
-        let session_key = format!("{}:{}", ctx.source.channel, ctx.source.chat_id);
         let session_store = SessionStore::new(ctx.paths.clone());
         match session_store.clear(&session_key) {
             Ok(true) => results.push("✅ 会话历史文件已删除".to_string()),
             Ok(false) => results.push("ℹ️ 无会话历史文件（可能从未对话过）".to_string()),
-            Err(e) => results.push(format!("⚠️ 会话历史文件删除失败: {}", e)),
+            Err(e) => results.push(format!(
+                "⚠️ 会话历史文件删除失败 (session: {}): {}",
+                session_key, e
+            )),
         }
 
         // 3. 清除 Session Memory 文件
@@ -52,7 +67,11 @@ impl SlashCommand for ClearCommand {
         if session_memory_path.exists() {
             match tokio::fs::remove_file(&session_memory_path).await {
                 Ok(_) => results.push("✅ Session Memory 文件已删除".to_string()),
-                Err(e) => results.push(format!("⚠️ Session Memory 删除失败: {}", e)),
+                Err(e) => results.push(format!(
+                    "⚠️ Session Memory 删除失败 (path: {}): {}",
+                    session_memory_path.display(),
+                    e
+                )),
             }
         }
 

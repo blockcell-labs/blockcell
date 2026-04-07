@@ -2,15 +2,14 @@
 //!
 //! 学习新技能。
 //!
-//! 注：此命令需要在 CLI/Gateway 层特殊处理，将消息转发给 AgentRuntime。
+//! 此命令返回 `ForwardToRuntime`，将转换后的消息转发给 AgentRuntime 处理。
 
 use crate::commands::slash_commands::*;
 
 /// /learn 命令 - 学习新技能
 ///
 /// 注意：此命令会调用 LLM，消耗 Token。
-/// 由于需要将消息转发给 AgentRuntime，此命令在处理器中仅做参数验证，
-/// 实际的消息转发逻辑在 CLI/Gateway 层实现。
+/// 返回 `ForwardToRuntime`，携带转换后的消息内容供 AgentRuntime 处理。
 pub struct LearnCommand;
 
 #[async_trait::async_trait]
@@ -36,9 +35,18 @@ impl SlashCommand for LearnCommand {
             ));
         }
 
-        // 返回 NotACommand，让消息被转发给 AgentRuntime
-        // CLI/Gateway 层会检测到这是 /learn 命令并特殊处理
-        CommandResult::NotACommand
+        // 构造转换后的消息内容，供 AgentRuntime 理解技能学习请求
+        let transformed_content = format!(
+            "Please learn the following skill: {}\n\n\
+            If this skill is already learned (has a record in list_skills query=learned), just tell me it's done.\n\
+            Otherwise, start learning this skill and report progress.",
+            description
+        );
+
+        CommandResult::ForwardToRuntime {
+            transformed_content,
+            original_command: format!("/learn {}", description),
+        }
     }
 }
 
@@ -65,7 +73,17 @@ mod tests {
         let ctx = CommandContext::test_context();
 
         let result = cmd.execute("data analysis skill", &ctx).await;
-        // /learn 返回 NotACommand，让消息被转发给 AgentRuntime
-        assert!(matches!(result, CommandResult::NotACommand));
+        // /learn 返回 ForwardToRuntime，包含转换后的消息
+        assert!(matches!(result, CommandResult::ForwardToRuntime { .. }));
+
+        if let CommandResult::ForwardToRuntime {
+            transformed_content,
+            original_command,
+        } = result
+        {
+            assert!(transformed_content.contains("data analysis skill"));
+            assert!(transformed_content.contains("Please learn"));
+            assert_eq!(original_command, "/learn data analysis skill");
+        }
     }
 }

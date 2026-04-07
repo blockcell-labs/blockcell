@@ -888,7 +888,7 @@ pub async fn run(
                             break;
                         }
                         CommandResult::NotACommand => {
-                            // 不是斜杠命令，或者 /learn 命令（需要转发给 LLM）
+                            // 不是斜杠命令，继续正常消息处理流程
                         }
                         CommandResult::PermissionDenied(msg) => {
                             eprintln!("权限不足: {}", msg);
@@ -898,17 +898,14 @@ pub async fn run(
                             eprintln!("命令执行错误: {}", e);
                             continue;
                         }
-                    }
-
-                    // 特殊处理 /learn 命令：将消息转发给 AgentRuntime
-                    if input.starts_with("/learn ") {
-                        let description = input.trim_start_matches("/learn ").trim();
-                        if !description.is_empty() {
-                            let learn_msg = format!(
-                                "Please learn the following skill: {}\n\n\
-                                If this skill is already learned (has a record in list_skills query=learned), just tell me it's done.\n\
-                                Otherwise, start learning this skill and report progress.",
-                                description
+                        CommandResult::ForwardToRuntime {
+                            transformed_content,
+                            original_command,
+                        } => {
+                            // 命令需要转发给 AgentRuntime（如 /learn）
+                            tracing::info!(
+                                command = %original_command,
+                                "Forwarding command to AgentRuntime"
                             );
                             let inbound = InboundMessage {
                                 channel: "cli".to_string(),
@@ -919,7 +916,7 @@ pub async fn run(
                                     .nth(1)
                                     .unwrap_or("default")
                                     .to_string(),
-                                content: learn_msg,
+                                content: transformed_content,
                                 media: vec![],
                                 metadata: serde_json::Value::Null,
                                 timestamp_ms: chrono::Utc::now().timestamp_millis(),

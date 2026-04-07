@@ -1260,7 +1260,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let interceptor_handle = tokio::spawn(async move {
         let mut inbound_rx = inbound_rx;
         loop {
-            let msg = tokio::select! {
+            let mut msg = tokio::select! {
                 msg = inbound_rx.recv() => match msg {
                     Some(m) => m,
                     None => break,
@@ -1318,7 +1318,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                         continue; // 不转发给 AgentRuntime
                     }
                     CommandResult::NotACommand => {
-                        // 非斜杠命令，或 /learn 命令（需要转发给 LLM）
+                        // 非斜杠命令，继续正常消息处理流程
                     }
                     CommandResult::PermissionDenied(err_msg) => {
                         let reply = OutboundMessage::new(
@@ -1347,6 +1347,20 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                         );
                         let _ = slash_outbound_tx.send(reply).await;
                         continue;
+                    }
+                    CommandResult::ForwardToRuntime {
+                        transformed_content,
+                        original_command,
+                    } => {
+                        // 命令需要转发给 AgentRuntime（如 /learn）
+                        info!(
+                            channel = %msg.channel,
+                            command = %original_command,
+                            "Forwarding command to AgentRuntime"
+                        );
+                        // 修改消息内容为转换后的内容
+                        msg.content = transformed_content;
+                        // 继续正常流程，转发给 AgentRuntime
                     }
                 }
             }

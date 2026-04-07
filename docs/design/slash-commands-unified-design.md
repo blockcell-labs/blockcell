@@ -268,6 +268,16 @@ pub enum CommandResult {
     Error(String),
     /// 请求退出交互模式 (仅 /quit 和 /exit)
     ExitRequested,
+    /// 命令需要转发给 AgentRuntime 处理（如 /learn）
+    ///
+    /// 用于那些需要 LLM 参与的命令。命令处理器会将原始命令转换为
+    /// AgentRuntime 可理解的消息格式，然后由各渠道的拦截层转发。
+    ForwardToRuntime {
+        /// 转换后的消息内容，供 AgentRuntime 使用
+        transformed_content: String,
+        /// 原始命令内容（用于日志）
+        original_command: String,
+    },
 }
 
 /// 命令响应
@@ -417,7 +427,184 @@ pub static SLASH_COMMAND_HANDLER: once_cell::sync::Lazy<Arc<SlashCommandHandler>
 
 > **设计说明**: 使用 `once_cell::sync::Lazy` 替代 `lazy_static`，更现代且无需宏依赖。Rust 1.70+ 可使用 `std::sync::OnceLock`。
 
-### 5.3 /clear 命令完整实现
+### 5.3 ForwardToRuntime 机制与 /learn 命令
+
+> **设计背景**: 某些斜杠命令需要 LLM 参与（如 `/learn`），但又需要在命令处理器中做参数验证和消息转换。为此引入 `ForwardToRuntime` 变体。
+
+#### 5.3.1 设计原理
+
+`/learn` 命令的处理流程如下：
+
+```
+用户输入: /learn 数据分析技能
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│ SlashCommandHandler.try_handle()                             │
+│                                                              │
+│  1. 解析命令: name="learn", args="数据分析技能"              │
+│  2. 找到 LearnCommand 处理器                                  │
+│  3. 调用 LearnCommand.execute("数据分析技能", ctx)           │
+│     │                                                        │
+│     ▼                                                        │
+│  LearnCommand:                                               │
+│    - 验证参数非空                                             │
+│    - 构造转换后的消息:                                        │
+│      "Please learn the following skill: 数据分析技能         │
+│       If this skill is already learned... Otherwise..."      │
+│    - 返回 CommandResult::ForwardToRuntime {                  │
+│        transformed_content: "Please learn...",               │
+│        original_command: "/learn 数据分析技能"               │
+│      }                                                       │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 拦截层处理 (CLI/Gateway/WebSocket)                           │
+│                                                              │
+│  match result {                                              │
+│    ForwardToRuntime { transformed_content, .. } => {        │
+│      // 使用转换后的内容创建 InboundMessage                   │
+│      inbound.content = transformed_content;                  │
+│      // 转发给 AgentRuntime                                  │
+│    }                                                         │
+│  }                                                           │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│ AgentRuntime                                                 │
+│                                                              │
+│  接收转换后的消息: "Please learn the following skill: ..."   │
+│  调用 LLM 处理技能学习请求                                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 5.3.2 为什么不直接返回 NotACommand？
+
+**旧方案的问题**（已废弃）：
+```rust
+// LearnCommand 旧实现
+async fn execute(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+    // ...验证参数
+    CommandResult::NotACommand  // 返回"不是命令"
+}
+
+// CLI 层需要再次检查
+if input.starts_with("/learn ") {
+    let description = input.trim_start_matches("/learn ");
+    let learn_msg = format!("Please learn...{}", description);
+    // 转发
+}
+```
+
+问题：
+1. **语义混乱**: 有效命令返回 `NotACommand`，违反直觉
+2. **重复逻辑**: 消息转换逻辑需要在 CLI/Gateway/WebSocket 三处重复实现
+3. **易出错**: 忘记在某个渠道添加转换逻辑会导致功能缺失
+
+**新方案的优势**：
+```rust
+// LearnCommand 新实现
+async fn execute(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+    let transformed_content = format!(
+        "Please learn the following skill: {}\n\n\
+        If this skill is already learned (has a record in list_skills query=learned), \
+        just tell me it's done.\n\
+        Otherwise, start learning this skill and report progress.",
+        args.trim()
+    );
+    CommandResult::ForwardToRuntime {
+        transformed_content,
+        original_command: format!("/learn {}", args.trim()),
+    }
+}
+```
+
+优势：
+1. **语义清晰**: 明确表示"转发给 Runtime"
+2. **单一职责**: 消息转换逻辑只在命令处理器中实现一次
+3. **类型安全**: 编译器强制所有渠道处理 `ForwardToRuntime` 变体
+4. **可追踪**: 包含 `original_command` 用于日志
+
+#### 5.3.3 LearnCommand 完整实现
+
+```rust
+// bin/blockcell/src/commands/slash_commands/handlers/learn.rs
+
+pub struct LearnCommand;
+
+#[async_trait::async_trait]
+impl SlashCommand for LearnCommand {
+    fn name(&self) -> &str { "learn" }
+    
+    fn description(&self) -> &str {
+        "Learn a new skill by description (uses LLM)"
+    }
+    
+    fn timeout_secs(&self) -> u64 { 120 }
+
+    async fn execute(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let description = args.trim();
+
+        if description.is_empty() {
+            return CommandResult::Handled(CommandResponse::text(
+                "  Usage: /learn <skill description>\n".to_string(),
+            ));
+        }
+
+        // 构造转换后的消息内容
+        let transformed_content = format!(
+            "Please learn the following skill: {}\n\n\
+            If this skill is already learned (has a record in list_skills query=learned), \
+            just tell me it's done.\n\
+            Otherwise, start learning this skill and report progress.",
+            description
+        );
+
+        CommandResult::ForwardToRuntime {
+            transformed_content,
+            original_command: format!("/learn {}", description),
+        }
+    }
+}
+```
+
+#### 5.3.4 各渠道处理 ForwardToRuntime
+
+**CLI (agent.rs)**:
+```rust
+CommandResult::ForwardToRuntime {
+    transformed_content,
+    original_command,
+} => {
+    tracing::info!(command = %original_command, "Forwarding command to AgentRuntime");
+    let inbound = InboundMessage {
+        content: transformed_content,  // 使用转换后的内容
+        ...
+    };
+    stdin_tx.blocking_send(inbound);
+    continue;
+}
+```
+
+**Gateway (gateway.rs)**:
+```rust
+CommandResult::ForwardToRuntime { transformed_content, .. } => {
+    msg.content = transformed_content;  // 替换消息内容
+    // 继续正常流程，转发给 AgentRuntime
+}
+```
+
+**WebSocket (websocket.rs)**:
+```rust
+CommandResult::ForwardToRuntime { transformed_content, .. } => {
+    content = transformed_content;  // 替换内容
+    // 继续正常流程
+}
+```
+
+### 5.4 /clear 命令完整实现
 
 > **设计说明**: AgentRuntime 的消息历史存储在 `run_loop` 的局部变量中，无法直接访问。因此 `/clear` 采用回调模式 + 文件清理的组合方案。
 
@@ -1100,6 +1287,7 @@ mod tests {
 ### Phase 1: 核心框架 (P0)
 
 - [x] `bin/blockcell/src/commands/slash_commands/mod.rs` - 核心接口
+- [x] `bin/blockcell/src/commands/slash_commands/context.rs` - CommandContext, CommandResult (含 ForwardToRuntime)
 - [x] `bin/blockcell/src/commands/slash_commands/registry.rs` - 命令注册
 - [x] `bin/blockcell/src/commands/slash_commands/handlers/help.rs` - /help 命令
 - [x] `bin/blockcell/src/commands/slash_commands/handlers/tasks.rs` - /tasks 命令
@@ -1110,12 +1298,16 @@ mod tests {
 
 - [x] 迁移 /skills 命令
 - [x] 迁移 /tools 命令
-- [x] 迁移 /learn 命令
+- [x] 迁移 /learn 命令（使用 ForwardToRuntime 机制）
+  - [x] LearnCommand 返回 ForwardToRuntime
+  - [x] CLI/Gateway/WebSocket 处理 ForwardToRuntime
+  - [x] 消息转换逻辑统一在命令处理器中
 - [x] 迁移 /clear 命令（完整实现）
   - [x] 清除会话历史文件 (`SessionStore::clear`)
   - [x] 清除 Session Memory 文件
   - [x] 清除 .active 标记文件
   - [x] 支持会话清除回调
+  - [x] 错误信息包含 session_key 上下文
 - [x] 迁移 /quit, /exit 命令（渠道限制）
 - [x] 迁移 /clear-skills, /forget-skill 命令
 - [x] 重构 agent.rs stdin 处理逻辑
@@ -1134,5 +1326,33 @@ mod tests {
 
 ---
 
-> 文档版本: 2026-04-07 (更新: 实现清单)
+## 附录: session_key 格式规范
+
+`session_key` 用于标识会话，格式为 `{channel}:{chat_id}`：
+
+| 渠道 | session_key 示例 | 说明 |
+|------|-----------------|------|
+| CLI | `cli:default` | channel="cli", chat_id 来自 agent_id |
+| WebSocket | `ws:abc123` | channel="ws", chat_id 由 assign_session_id 生成 |
+| Telegram | `telegram:123456789` | channel="telegram", chat_id 为 Telegram chat_id |
+| Slack | `slack:C12345678` | channel="slack", chat_id 为 Slack channel ID |
+
+**格式约定**:
+- 使用 `:` 作为分隔符
+- `session_key` 与 `SessionStore::session_file()` 的路径计算保持一致
+- 文件路径: `{workspace}/sessions/{chat_id}/session.json`
+
+**代码示例**:
+```rust
+// 构造 session_key
+let session_key = format!("{}:{}", ctx.source.channel, ctx.source.chat_id);
+
+// 清除会话文件
+let session_store = SessionStore::new(ctx.paths.clone());
+session_store.clear(&session_key)?;
+```
+
+---
+
+> 文档版本: 2026-04-07 (更新: ForwardToRuntime 机制、session_key 格式规范)
 > 目标框架: BlockCell Rust 多智能体框架

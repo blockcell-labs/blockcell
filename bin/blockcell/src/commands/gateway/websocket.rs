@@ -89,7 +89,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
 
                     match msg_type {
                         "chat" => {
-                            let content = parsed
+                            let mut content = parsed
                                 .get("content")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
@@ -163,7 +163,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                         continue; // 不转发给 AgentRuntime
                                     }
                                     CommandResult::NotACommand => {
-                                        // 非斜杠命令，或 /learn 命令（需要转发给 LLM）
+                                        // 非斜杠命令，继续正常消息处理流程
                                     }
                                     CommandResult::PermissionDenied(msg) => {
                                         let _ = ws_broadcast.send(serde_json::json!({
@@ -190,6 +190,19 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                             "message": "此命令仅在 CLI 模式可用",
                                         }).to_string());
                                         continue;
+                                    }
+                                    CommandResult::ForwardToRuntime {
+                                        transformed_content,
+                                        original_command,
+                                    } => {
+                                        // 命令需要转发给 AgentRuntime（如 /learn）
+                                        tracing::info!(
+                                            command = %original_command,
+                                            "Forwarding command to AgentRuntime"
+                                        );
+                                        // 使用转换后的内容替代原始内容
+                                        content = transformed_content;
+                                        // 继续正常流程，转发给 AgentRuntime
                                     }
                                 }
                             }

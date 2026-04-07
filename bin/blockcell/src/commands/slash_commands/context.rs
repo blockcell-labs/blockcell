@@ -145,6 +145,16 @@ pub enum CommandResult {
     Error(String),
     /// 请求退出交互模式 (仅 /quit 和 /exit)
     ExitRequested,
+    /// 命令需要转发给 AgentRuntime 处理（如 /learn）
+    ///
+    /// 包含转换后的消息内容，供 AgentRuntime 使用。
+    /// 用于那些需要 LLM 参与的命令，如学习新技能。
+    ForwardToRuntime {
+        /// 转换后的消息内容
+        transformed_content: String,
+        /// 原始命令内容（用于日志）
+        original_command: String,
+    },
 }
 
 /// 命令响应
