@@ -1,0 +1,9 @@
+name: tencent-news
+description: 获取腾讯新闻热点、早报、晚报和 AI 精选内容。
+tools:
+  - exec
+permissions:
+  - system.exec
+fallback:
+  strategy: degrade
+  message: 当前无法获取腾讯新闻数据，请先检查 CLI 安装、API Key 配置或网络环境。
