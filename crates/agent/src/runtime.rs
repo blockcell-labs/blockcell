@@ -2206,20 +2206,28 @@ impl AgentRuntime {
         info!(
             pre_compact_tokens,
             post_compact_tokens,
-            compression_ratio = (pre_compact_tokens - post_compact_tokens) as f64 / pre_compact_tokens as f64,
+            compression_ratio = if pre_compact_tokens > 0 {
+                (pre_compact_tokens - post_compact_tokens) as f64 / pre_compact_tokens as f64
+            } else {
+                0.0
+            },
             "[layer4] Compact completed successfully"
         );
 
         // ========== 10. 发送压缩成功通知 ==========
         if let (Some(ref tx), Some(ref ctx)) = (&self.outbound_tx, &compact_ctx) {
-            let compression_ratio = (pre_compact_tokens - post_compact_tokens)
-                as f64 / pre_compact_tokens as f64 * 100.0;
-            let notification_content = format!(
-                "✅ 已压缩对话历史，保留关键信息。\n📊 Token: {} → {} (压缩 {:.0}%)",
-                pre_compact_tokens,
-                post_compact_tokens,
-                compression_ratio
-            );
+            let notification_content = if pre_compact_tokens > 0 {
+                let compression_ratio = (pre_compact_tokens - post_compact_tokens)
+                    as f64 / pre_compact_tokens as f64 * 100.0;
+                format!(
+                    "✅ 已压缩对话历史，保留关键信息。\n📊 Token: {} → {} (压缩 {:.0}%)",
+                    pre_compact_tokens,
+                    post_compact_tokens,
+                    compression_ratio
+                )
+            } else {
+                "✅ 压缩完成（无历史内容需要压缩）".to_string()
+            };
             let mut notification = OutboundMessage::new(
                 ctx.channel,
                 ctx.chat_id,
@@ -3109,14 +3117,18 @@ impl AgentRuntime {
                 // Send WebSocket notification for ws channel
                 if msg.channel == "ws" {
                     if let Some(ref event_tx) = self.event_tx {
-                        let compression_ratio = (result.pre_compact_tokens - result.post_compact_tokens)
-                            as f64 / result.pre_compact_tokens as f64 * 100.0;
-                        let notification_content = format!(
-                            "✅ 已压缩对话历史，保留关键信息。\n📊 Token: {} → {} (压缩 {:.0}%)",
-                            result.pre_compact_tokens,
-                            result.post_compact_tokens,
-                            compression_ratio
-                        );
+                        let notification_content = if result.pre_compact_tokens > 0 {
+                            let compression_ratio = (result.pre_compact_tokens - result.post_compact_tokens)
+                                as f64 / result.pre_compact_tokens as f64 * 100.0;
+                            format!(
+                                "✅ 已压缩对话历史，保留关键信息。\n📊 Token: {} → {} (压缩 {:.0}%)",
+                                result.pre_compact_tokens,
+                                result.post_compact_tokens,
+                                compression_ratio
+                            )
+                        } else {
+                            "✅ 压缩完成（无历史内容需要压缩）".to_string()
+                        };
                         let event = serde_json::json!({
                             "type": "message_done",
                             "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
