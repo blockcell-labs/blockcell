@@ -16,7 +16,8 @@ mod summary;
 pub use memory::{MemoryMetrics, get_memory_metrics, Layer1Metrics, Layer2Metrics,
     Layer3Metrics, Layer4Metrics, Layer5Metrics, Layer6Metrics, Layer7Metrics};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState,
-    get_compact_circuit_breaker};
+    get_compact_circuit_breaker, get_memory_extraction_circuit_breaker,
+    get_dream_circuit_breaker, reset_all_circuit_breakers};
 pub use summary::{MetricsSummary, get_metrics_summary, reset_metrics, format_metrics_table};
 
 use std::time::Instant;

@@ -1,8 +1,23 @@
 //! Metrics Summary - Snapshot and formatting for CLI output.
 
 use super::memory::get_memory_metrics;
-use super::circuit_breaker::{get_compact_circuit_breaker, CircuitState};
+use super::circuit_breaker::{
+    get_compact_circuit_breaker,
+    get_memory_extraction_circuit_breaker,
+    get_dream_circuit_breaker,
+    reset_all_circuit_breakers,
+    CircuitState,
+};
 use serde::Serialize;
+
+/// Summary of a single circuit breaker.
+#[derive(Debug, Serialize)]
+pub struct CircuitBreakerSummary {
+    /// Current state of the circuit breaker.
+    pub state: CircuitState,
+    /// Number of consecutive failures.
+    pub failures: u64,
+}
 
 /// Snapshot of all memory metrics.
 #[derive(Debug, Serialize)]
@@ -14,8 +29,12 @@ pub struct MetricsSummary {
     pub layer5: Layer5Summary,
     pub layer6: Layer6Summary,
     pub layer7: Layer7Summary,
-    pub circuit_breaker_state: CircuitState,
-    pub circuit_breaker_failures: u64,
+    /// Layer 4: Compact circuit breaker (快速恢复 - 用户同步操作)
+    pub compact_circuit_breaker: CircuitBreakerSummary,
+    /// Layer 5: Memory Extraction circuit breaker (中等恢复 - 后台异步操作)
+    pub memory_extraction_circuit_breaker: CircuitBreakerSummary,
+    /// Layer 6: Dream Consolidation circuit breaker (慢恢复 - 定时后台任务)
+    pub dream_circuit_breaker: CircuitBreakerSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,7 +103,9 @@ pub struct Layer7Summary {
 /// Get a snapshot of all memory metrics.
 pub fn get_metrics_summary() -> MetricsSummary {
     let m = get_memory_metrics();
-    let cb = get_compact_circuit_breaker();
+    let compact_cb = get_compact_circuit_breaker();
+    let extraction_cb = get_memory_extraction_circuit_breaker();
+    let dream_cb = get_dream_circuit_breaker();
 
     MetricsSummary {
         layer1: Layer1Summary {
@@ -136,25 +157,34 @@ pub fn get_metrics_summary() -> MetricsSummary {
             total_tokens_used: m.layer7.total_tokens_used(),
             total_turns_used: m.layer7.total_turns_used(),
         },
-        circuit_breaker_state: cb.state(),
-        circuit_breaker_failures: cb.failure_count(),
+        compact_circuit_breaker: CircuitBreakerSummary {
+            state: compact_cb.state(),
+            failures: compact_cb.failure_count(),
+        },
+        memory_extraction_circuit_breaker: CircuitBreakerSummary {
+            state: extraction_cb.state(),
+            failures: extraction_cb.failure_count(),
+        },
+        dream_circuit_breaker: CircuitBreakerSummary {
+            state: dream_cb.state(),
+            failures: dream_cb.failure_count(),
+        },
     }
 }
 
 /// Reset all metrics to zero.
 pub fn reset_metrics() {
     let m = get_memory_metrics();
-    let cb = get_compact_circuit_breaker();
 
     // Reset all layer metrics
     m.reset();
 
-    // Reset circuit breaker
-    cb.reset();
+    // Reset all circuit breakers
+    reset_all_circuit_breakers();
 
     tracing::info!(
         target: "blockcell.session_metrics",
-        "All metrics counters have been reset"
+        "All metrics counters and circuit breakers have been reset"
     );
 }
 
@@ -331,17 +361,26 @@ pub fn format_metrics_table(summary: &MetricsSummary, layer_filter: Option<u8>) 
         ));
     }
 
-    // Circuit Breaker
+    // Circuit Breakers (三层熔断器)
     output.push_str("║                                                               ║\n");
-    let cb_display = match summary.circuit_breaker_state {
-        CircuitState::Open => ("○", "OPEN", "熔断中"),
-        CircuitState::HalfOpen => ("◐", "HALF_OPEN", "半开"),
-        CircuitState::Closed => ("●", "CLOSED", "正常"),
+    output.push_str("║  🔌 Circuit Breakers (多层熔断器)\n");
+
+    // 格式化单个熔断器状态
+    let format_cb = |cb: &CircuitBreakerSummary, name: &str| -> String {
+        let (icon, state_text, desc) = match cb.state {
+            CircuitState::Open => ("○", "OPEN", "熔断中"),
+            CircuitState::HalfOpen => ("◐", "HALF_OPEN", "半开"),
+            CircuitState::Closed => ("●", "CLOSED", "正常"),
+        };
+        format!("║    {} {}: {} {} (失败: {})\n", icon, name, state_text, desc, cb.failures)
     };
-    output.push_str(&format!(
-        "║  Circuit Breaker: {} {} ({})\n",
-        cb_display.0, cb_display.1, cb_display.2
-    ));
+
+    // Layer 4: Compact 熔断器
+    output.push_str(&format_cb(&summary.compact_circuit_breaker, "L4-Compact"));
+    // Layer 5: Memory Extraction 熔断器
+    output.push_str(&format_cb(&summary.memory_extraction_circuit_breaker, "L5-Extract"));
+    // Layer 6: Dream 熔断器
+    output.push_str(&format_cb(&summary.dream_circuit_breaker, "L6-Dream"));
 
     output.push_str("║                                                               ║\n");
     output.push_str("╚═══════════════════════════════════════════════════════════════╝\n");

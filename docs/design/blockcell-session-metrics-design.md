@@ -320,9 +320,70 @@ pub struct CircuitBreakerState {
 }
 ```
 
-### 4.5 熔断器与业务流程集成
+### 4.5 多层熔断器设计
 
-#### 4.5.1 压缩流程中的熔断
+#### 4.5.1 为什么需要多层熔断器？
+
+不同的记忆层有不同的故障模式和恢复需求：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           熔断器分层设计原理                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Layer 4 Compact (用户同步操作)                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ 触发方式: 用户发送消息时自动触发                                       │   │
+│  │ 失败影响: 用户等待超长，体验极差                                       │   │
+│  │ 恢复策略: 快速熔断 + 快速恢复                                          │   │
+│  │ 配置建议: max_failures=3, reset_timeout=60s                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Layer 5 Memory Extraction (后台异步操作)                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ 触发方式: 对话过程中异步提取记忆                                       │   │
+│  │ 失败影响: 不影响当前对话，但记忆不更新                                  │   │
+│  │ 恢复策略: 中等熔断 + 后台恢复                                          │   │
+│  │ 配置建议: max_failures=3, reset_timeout=300s                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Layer 6 Dream Consolidation (定时后台任务)                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ 触发方式: 定时触发，用户无感知                                         │   │
+│  │ 失败影响: 长期影响记忆质量，但不阻塞任何操作                            │   │
+│  │ 恢复策略: 慢熔断 + 长冷却期                                            │   │
+│  │ 配置建议: max_failures=2, reset_timeout=900s                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.5.2 三层熔断器配置对比
+
+| 层 | 熔断器名称 | max_failures | reset_timeout | half_open_max_calls | 说明 |
+|----|-----------|-------------|---------------|---------------------|------|
+| **Layer 4** | `COMPACT_CIRCUIT_BREAKER` | 3 | 60s | 1 | 用户在等待，需要快速恢复 |
+| **Layer 5** | `MEMORY_EXTRACTION_CIRCUIT_BREAKER` | 3 | 300s | 1 | 后台操作，可接受较长恢复时间 |
+| **Layer 6** | `DREAM_CIRCUIT_BREAKER` | 2 | 900s | 1 | 定时任务，失败可能意味着系统性问题 |
+
+#### 4.5.3 熔断器独立性原则
+
+每个熔断器独立运行，互不影响：
+
+```
+Layer 4 熔断器 OPEN ──► 不影响 Layer 5/6 的正常执行
+Layer 5 熔断器 OPEN ──► 不影响 Layer 4 的压缩操作
+Layer 6 熔断器 OPEN ──► 不影响任何用户操作
+
+原因:
+1. 不同层的故障原因可能不同（网络、API、资源等）
+2. 某一层失败不应阻塞其他层的功能
+3. 用户应该始终获得最佳可用服务
+```
+
+### 4.6 熔断器与业务流程集成
+
+#### 4.6.1 压缩流程中的熔断 (Layer 4)
 
 ```
 消息处理循环
@@ -363,7 +424,77 @@ pub struct CircuitBreakerState {
 └──────────────┘ └──────────────────────┘
 ```
 
-#### 4.5.2 熔断后的降级策略
+#### 4.6.2 Memory Extraction 熔断 (Layer 5)
+
+```
+记忆提取流程 (auto_memory)
+       │
+       ▼
+┌─────────────────────────────────────┐
+│ 1. 检查是否需要提取                  │
+│    messages > threshold?            │
+└──────────────┬──────────────────────┘
+               │ 是
+               ▼
+┌─────────────────────────────────────┐
+│ 2. 熔断器检查                       │
+│    extraction_cb.allow()?           │
+│    ├─ Closed  → 允许执行            │
+│    ├─ Open    → 跳过，不阻塞主流程  │
+│    └─ HalfOpen → 尝试一次           │
+└──────────────┬──────────────────────┘
+               │ 允许
+               ▼
+┌─────────────────────────────────────┐
+│ 3. 执行 LLM 记忆提取                │
+└──────────────┬──────────────────────┘
+               │
+       ┌───────┴───────┐
+    成功             失败
+       │               │
+       ▼               ▼
+  熔断器重置       熔断器记录失败
+  记录指标         跳过本次提取
+
+特点: 失败不阻塞主对话流程，用户无感知
+```
+
+#### 4.6.3 Dream Consolidation 熔断 (Layer 6)
+
+```
+定时整合任务 (scheduler/consolidator)
+       │
+       ▼
+┌─────────────────────────────────────┐
+│ 1. 门控检查                         │
+│    time_gate + session_gate         │
+└──────────────┬──────────────────────┘
+               │ 通过
+               ▼
+┌─────────────────────────────────────┐
+│ 2. 熔断器检查                       │
+│    dream_cb.allow()?                │
+│    ├─ Closed  → 执行整合            │
+│    ├─ Open    → 跳过本次运行        │
+│    └─ HalfOpen → 尝试一次           │
+└──────────────┬──────────────────────┘
+               │ 允许
+               ▼
+┌─────────────────────────────────────┐
+│ 3. 执行梦境整合 (LLM 调用)          │
+└──────────────┬──────────────────────┘
+               │
+       ┌───────┴───────┐
+    成功             失败
+       │               │
+       ▼               ▼
+  熔断器重置       熔断器记录失败
+  记录指标         900秒后再试
+
+特点: 完全后台任务，失败无用户影响，最长冷却期
+```
+
+#### 4.6.4 熔断后的降级策略
 
 当熔断器处于 Open 状态时，系统需要有降级策略：
 
@@ -1489,13 +1620,63 @@ impl CircuitBreaker {
     }
 }
 
-// 全局 Compact 熔断器
-// 使用 std::sync::OnceLock 替代 lazy_static (Rust 1.70+)
+// ============================================================================
+// 全局熔断器实例 - 每层一个独立熔断器
+// ============================================================================
+
+/// Layer 4: Compact 熔断器 (快速恢复)
+/// 用户同步操作，需要快速响应
 pub static COMPACT_CIRCUIT_BREAKER: std::sync::OnceLock<CircuitBreaker> =
     std::sync::OnceLock::new();
 
+/// Layer 5: Memory Extraction 熔断器 (中等恢复)
+/// 后台异步操作，可接受较长恢复时间
+pub static MEMORY_EXTRACTION_CIRCUIT_BREAKER: std::sync::OnceLock<CircuitBreaker> =
+    std::sync::OnceLock::new();
+
+/// Layer 6: Dream Consolidation 熔断器 (慢恢复)
+/// 定时后台任务，最长冷却期
+pub static DREAM_CIRCUIT_BREAKER: std::sync::OnceLock<CircuitBreaker> =
+    std::sync::OnceLock::new();
+
+// ============================================================================
+// 熔断器获取函数
+// ============================================================================
+
+/// 获取 Layer 4 Compact 熔断器
+/// 配置: max_failures=3, reset_timeout=60s
 pub fn get_compact_circuit_breaker() -> &'static CircuitBreaker {
-    COMPACT_CIRCUIT_BREAKER.get_or_init(|| CircuitBreaker::new(CircuitBreakerConfig::default()))
+    COMPACT_CIRCUIT_BREAKER.get_or_init(|| {
+        CircuitBreaker::new(CircuitBreakerConfig {
+            max_failures: 3,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        })
+    })
+}
+
+/// 获取 Layer 5 Memory Extraction 熔断器
+/// 配置: max_failures=3, reset_timeout=300s (5分钟)
+pub fn get_memory_extraction_circuit_breaker() -> &'static CircuitBreaker {
+    MEMORY_EXTRACTION_CIRCUIT_BREAKER.get_or_init(|| {
+        CircuitBreaker::new(CircuitBreakerConfig {
+            max_failures: 3,
+            reset_timeout: Duration::from_secs(300),
+            half_open_max_calls: 1,
+        })
+    })
+}
+
+/// 获取 Layer 6 Dream Consolidation 熔断器
+/// 配置: max_failures=2, reset_timeout=900s (15分钟)
+pub fn get_dream_circuit_breaker() -> &'static CircuitBreaker {
+    DREAM_CIRCUIT_BREAKER.get_or_init(|| {
+        CircuitBreaker::new(CircuitBreakerConfig {
+            max_failures: 2,
+            reset_timeout: Duration::from_secs(900),
+            half_open_max_calls: 1,
+        })
+    })
 }
 ```
 
@@ -1509,13 +1690,14 @@ pub fn get_compact_circuit_breaker() -> &'static CircuitBreaker {
 
 | 模块 | 文件 | 集成内容 |
 |------|------|---------|
-| Layer 4 Compact | `crates/agent/src/compact/mod.rs` | 熔断器、事件记录 |
-| Layer 4 Hooks | `crates/agent/src/compact/hooks.rs` | Pre/Post Compact 钩子 |
+| Layer 4 Compact | `crates/agent/src/runtime.rs` | 熔断器检查、事件记录、用户通知 |
+| Layer 5 Memory Extraction | `crates/agent/src/auto_memory/mod.rs` | 熔断器检查、事件记录 |
+| Layer 6 Dream Consolidation | `crates/scheduler/src/consolidator.rs` | 熔断器检查、事件记录 |
 | Layer 1 Storage | `crates/agent/src/response_cache.rs` | 事件记录 |
 | Layer 2 MicroCompact | `crates/agent/src/history_projector.rs` | 新增 tracing |
-| 全局指标 | `crates/agent/src/metrics.rs` (现有) → `session_metrics/mod.rs` (推荐) | 扩展 MemoryMetrics |
+| 全局指标 | `crates/agent/src/session_metrics/mod.rs` | MemoryMetrics 扩展 |
 
-### 7.1 熔断器与 Compact 集成时机
+### 7.1 Layer 4 Compact 熔断器集成
 
 > **📋 背景**: Layer 4 Full Compact 在 `runtime.rs` 的 `process_message()` 循环中被触发。
 > 现有实现使用 `compact/hooks.rs` 中的 `PreCompactHook` 和 `PostCompactHook` 进行扩展。
@@ -1761,7 +1943,109 @@ pub async fn persist_tool_result(
 }
 ```
 
-### 7.4 日志配置
+### 7.4 Layer 5 Memory Extraction 熔断器集成
+
+```rust
+// crates/agent/src/auto_memory/mod.rs (修改示例)
+
+use crate::session_metrics::{get_memory_extraction_circuit_breaker, memory_event};
+
+impl AutoMemory {
+    /// 执行记忆提取
+    pub async fn extract_memories(&mut self) -> Result<(), AutoMemoryError> {
+        // 1. 熔断器检查
+        let circuit_breaker = get_memory_extraction_circuit_breaker();
+        if !circuit_breaker.allow() {
+            tracing::warn!(
+                target: "blockcell.session_metrics.layer5",
+                "Memory extraction skipped - circuit breaker OPEN"
+            );
+            // 不阻塞主流程，静默跳过
+            return Ok(());
+        }
+
+        // 2. 执行提取逻辑
+        let result = self.do_extraction().await;
+
+        // 3. 记录结果
+        match result {
+            Ok(stats) => {
+                circuit_breaker.record_success();
+                memory_event!(layer5, memory_written, stats.memory_type, stats.filepath, stats.content_len);
+                Ok(())
+            }
+            Err(e) => {
+                circuit_breaker.record_failure();
+                tracing::error!(error = %e, "Memory extraction failed");
+                // 失败也不阻塞，返回 Ok
+                Ok(())
+            }
+        }
+    }
+}
+```
+
+**关键设计点**:
+- 失败不阻塞主对话流程
+- 用户无感知，静默跳过
+- 熔断后继续正常对话，只是记忆不更新
+
+### 7.5 Layer 6 Dream Consolidation 熔断器集成
+
+```rust
+// crates/scheduler/src/consolidator.rs (修改示例)
+
+use blockcell_agent::session_metrics::{get_dream_circuit_breaker, memory_event};
+
+impl Consolidator {
+    /// 执行梦境整合
+    pub async fn run_consolidation(&mut self) -> Result<(), ConsolidationError> {
+        // 1. 门控检查 (现有逻辑)
+        if !self.check_gates() {
+            return Ok(());
+        }
+
+        // 2. 熔断器检查
+        let circuit_breaker = get_dream_circuit_breaker();
+        if !circuit_breaker.allow() {
+            tracing::warn!(
+                target: "blockcell.session_metrics.layer6",
+                "Dream consolidation skipped - circuit breaker OPEN"
+            );
+            // 静默跳过，等待下一个周期
+            return Ok(());
+        }
+
+        // 3. 记录开始
+        let sessions_count = self.pending_sessions.len();
+        memory_event!(layer6, dream_started, sessions_count, self.hours_since_last());
+
+        // 4. 执行整合
+        let result = self.do_consolidation().await;
+
+        // 5. 记录结果
+        match result {
+            Ok(stats) => {
+                circuit_breaker.record_success();
+                memory_event!(layer6, dream_finished, stats.created, stats.updated, stats.deleted, stats.pruned);
+                Ok(())
+            }
+            Err(e) => {
+                circuit_breaker.record_failure();
+                tracing::error!(error = %e, "Dream consolidation failed");
+                Err(e)
+            }
+        }
+    }
+}
+```
+
+**关键设计点**:
+- 完全后台任务，无用户感知
+- 最长冷却期 (900s)，避免频繁重试
+- 失败可能是系统性问题，需要更长恢复时间
+
+### 7.6 日志配置
 
 ```rust
 // 配置 tracing 以输出结构化日志
@@ -2247,45 +2531,65 @@ fn print_metrics_summary(summary: &MetricsSummary, layer_filter: Option<u8>) {
 
 ## 附录 A: 实现清单
 
-### A.1 Phase 1: 核心指标结构 (P0)
+### A.1 Phase 1: 核心指标结构 (P0) ✅ 已完成
 
 > **📁 文件变更**：
 > - 现有文件：`crates/agent/src/metrics.rs`
-> - 推荐创建：`crates/agent/src/session_metrics/` 目录
-> - 将现有 `metrics.rs` 移动到 `session_metrics/mod.rs`
+> - 创建完成：`crates/agent/src/session_metrics/` 目录
+> - 现有 `metrics.rs` 已移动到 `session_metrics/mod.rs`
 
-- [ ] 扩展 `crates/agent/src/session_metrics/mod.rs` 添加 `MemoryMetrics` 结构体
-- [ ] 实现 `get_memory_metrics()` 全局访问函数
-- [ ] 添加 `Layer1Metrics` ~ `Layer7Metrics` 结构体
-- [ ] 添加 `circuit_breaker_state` 和 `circuit_breaker_failures` 字段
+- [x] 扩展 `crates/agent/src/session_metrics/mod.rs` 添加 `MemoryMetrics` 结构体
+- [x] 实现 `get_memory_metrics()` 全局访问函数
+- [x] 添加 `Layer1Metrics` ~ `Layer7Metrics` 结构体
+- [x] 添加 `circuit_breaker_state` 和 `circuit_breaker_failures` 字段
+- [x] 添加 `ProcessingMetrics` 和 `ScopedTimer` 结构体
 
-### A.2 Phase 2: 事件记录 (P0)
+### A.2 Phase 2: 事件记录 (P0) ✅ 已完成
 
-- [ ] 实现 `memory_event!` 宏
-- [ ] Layer 1 事件: `persisted`, `budget_exceeded`, `preview_generated`
-- [ ] Layer 2 事件: `triggered`, `cleared`, `evaluated` (**需新增 tracing**)
-- [ ] Layer 3 事件: `extraction_started`, `extraction_completed`, `loaded`
-- [ ] Layer 4 事件: `compact_started`, `compact_completed`, `compact_failed`
-- [ ] Layer 5 事件: `memory_written`, `cursor_updated`, `injection_completed`
-- [ ] Layer 6 事件: `dream_started`, `phase_completed`, `dream_finished`
-- [ ] Layer 7 事件: `agent_spawned`, `agent_completed`, `agent_failed`, `tool_denied`
+- [x] 实现 `memory_event!` 宏
+- [x] Layer 1 事件: `persisted`, `budget_exceeded`
+- [x] Layer 2 事件: `triggered`, `cleared`
+- [x] Layer 3 事件: `extraction_started`, `loaded`
+- [x] Layer 4 事件: `compact_started`, `compact_completed`, `compact_failed`
+- [x] Layer 5 事件: `memory_written`, `injection_completed`
+- [x] Layer 6 事件: `dream_started`, `dream_finished`
+- [x] Layer 7 事件: `agent_spawned`, `agent_completed`, `agent_failed`, `tool_denied`
 
-### A.3 Phase 3: 熔断器 (P1)
+### A.3 Phase 3: 熔断器 (P1) ✅ 已完成
 
-- [ ] 实现 `CircuitBreaker` 结构体
-- [ ] 实现 `CircuitBreakerConfig` 配置
-- [ ] 实现 `Closed` → `Open` → `HalfOpen` 状态转换
-- [ ] 集成到 `compact/mod.rs` 或 `runtime.rs`
+- [x] 实现 `CircuitBreaker` 结构体（无锁原子实现）
+- [x] 实现 `CircuitBreakerConfig` 配置
+- [x] 实现 `Closed` → `Open` → `HalfOpen` 状态转换
+- [x] 集成到 `compact/mod.rs` 或 `runtime.rs`
 
-### A.4 Phase 4: 斜杠命令 (P1)
+#### A.3.1 多层熔断器 ✅ 已完成 (2026-04-08)
 
-- [ ] 实现 `/session_metrics` 命令处理器
-- [ ] 集成到 `SlashCommandHandler` (参见 [slash-commands-unified-design.md](slash-commands-unified-design.md))
-- [ ] 支持 `--layer N` 过滤
-- [ ] 支持 `--json` 输出
-- [ ] 支持 `--reset` 重置
+- [x] 实现 `COMPACT_CIRCUIT_BREAKER` (Layer 4: 快速恢复 - 60s)
+- [x] 实现 `MEMORY_EXTRACTION_CIRCUIT_BREAKER` (Layer 5: 中等恢复 - 300s)
+- [x] 实现 `DREAM_CIRCUIT_BREAKER` (Layer 6: 慢恢复 - 900s)
+- [x] 添加 `get_compact_circuit_breaker()` 函数
+- [x] 添加 `get_memory_extraction_circuit_breaker()` 函数
+- [x] 添加 `get_dream_circuit_breaker()` 函数
+- [x] 添加 `reset_all_circuit_breakers()` 函数
+- [x] 更新 `summary.rs` 显示三层熔断器状态
+- [x] 更新 `MetricsSummary` 包含三个 `CircuitBreakerSummary`
+- [x] 更新 `format_metrics_table()` 显示所有熔断器状态
 
-### A.5 Phase 5: 用户通知 (P2)
+**相关文件**：
+- `crates/agent/src/session_metrics/circuit_breaker.rs`: 三层熔断器实现
+- `crates/agent/src/session_metrics/mod.rs`: 导出函数
+- `crates/agent/src/session_metrics/summary.rs`: 状态汇总和显示
+- `crates/agent/src/session_metrics/memory.rs`: 指标存储
+
+### A.4 Phase 4: 斜杠命令 (P1) ✅ 已完成
+
+- [x] 实现 `/session_metrics` 命令处理器
+- [x] 集成到 `SlashCommandHandler` (参见 [slash-commands-unified-design.md](slash-commands-unified-design.md))
+- [x] 支持 `--layer N` 过滤
+- [x] 支持 `--json` 输出
+- [x] 支持 `--reset` 重置
+
+### A.5 Phase 5: 用户通知 (P2) ⏳ 未实现
 
 - [ ] 实现 `CompactContext` 结构体
 - [ ] 压缩开始通知
