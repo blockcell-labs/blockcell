@@ -138,10 +138,6 @@ pub async fn get_session_memory_content_for_compact(
     let line_count = truncated.lines().count() as u64;
     let section_count = truncated.matches("## ").count() as u64;
     memory_event!(layer3, loaded, content_length, line_count, section_count);
-    // 单独更新 section_count（宏只记录 content_length）
-    crate::session_metrics::get_memory_metrics()
-        .layer3
-        .update_section_count(section_count);
 
     Ok(truncated)
 }

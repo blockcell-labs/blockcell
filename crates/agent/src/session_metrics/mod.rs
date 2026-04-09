@@ -236,7 +236,9 @@ macro_rules! memory_event {
             sections_count = $sections_count,
             "Session memory loaded"
         );
-        $crate::session_metrics::get_memory_metrics().layer3.record_load($content_length as u64);
+        let metrics = $crate::session_metrics::get_memory_metrics();
+        metrics.layer3.record_load($content_length as u64);
+        metrics.layer3.update_section_count($sections_count as u64);
     };
 
     // Layer 3: Config
@@ -598,6 +600,7 @@ mod tests {
 
         assert_eq!(metrics.layer3.load_count(), 1);
         assert_eq!(metrics.layer3.current_size(), 1234);
+        assert_eq!(metrics.layer3.section_count(), 5); // section_count 现在由宏自动更新
     }
 
     #[test]
