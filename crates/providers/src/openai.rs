@@ -1122,11 +1122,7 @@ impl OpenAIProvider {
     ///   顶层 `thinking` 和 `reasoning_effort` 字段
     /// - NVIDIA NIM 使用 `chat_template_kwargs` 包装
     /// - 其他 provider（OpenAI、Groq、Kimi、Zhipu 等）不支持，不注入
-    pub fn apply_reasoning_effort(
-        body: &mut Value,
-        effort: Option<&str>,
-        provider_name: &str,
-    ) {
+    pub fn apply_reasoning_effort(body: &mut Value, effort: Option<&str>, provider_name: &str) {
         let Some(effort) = effort else { return };
         // 仅对支持 thinking/reasoning 的 provider 生效
         if !supports_thinking_mode(provider_name) {

@@ -178,13 +178,13 @@ impl LearningCoordinator {
         } else if skill_due {
             "skill_nudge".to_string()
         } else {
-            self.throttle.review_completed(); // rollback — no nudge due
+            self.throttle.rollback_review(); // rollback — no nudge due
             return existing_action.cloned().unwrap_or(LearningAction::Skip);
         };
 
         if self.dedup.is_duplicate(&dedup_key) {
             // Counters NOT reset — next turn will still see the same counts
-            self.throttle.review_completed(); // rollback — dedup blocked
+            self.throttle.rollback_review(); // rollback — dedup blocked
             return existing_action.cloned().unwrap_or(LearningAction::Skip);
         }
 
@@ -215,7 +215,7 @@ impl LearningCoordinator {
                 },
             }
         } else {
-            self.throttle.review_completed(); // rollback — no nudge due after actual check
+            self.throttle.rollback_review(); // rollback — no nudge due after actual check
             return existing_action.cloned().unwrap_or(LearningAction::Skip);
         };
 
@@ -272,12 +272,12 @@ impl LearningCoordinator {
         let memory_due = memory_nudge != NudgeResult::NoNudge && has_memory_store;
 
         if !memory_due {
-            self.throttle.review_completed(); // rollback the try_start_review increment
+            self.throttle.rollback_review(); // rollback the try_start_review increment
             return None;
         }
 
         if self.dedup.is_duplicate("memory_nudge") {
-            self.throttle.review_completed(); // rollback the try_start_review increment
+            self.throttle.rollback_review(); // rollback the try_start_review increment
             return None;
         }
 
@@ -299,9 +299,18 @@ impl LearningCoordinator {
         if !self.self_improve_review_enabled {
             return None;
         }
-        // Atomically check throttle + increment counter
-        if !self.throttle.try_start_review() {
-            return None;
+        // Only claim a new throttle slot if there's no existing memory review.
+        // If memory review already claimed a slot, skill nudge reuses it
+        // (they'll be combined into a single review). Without this check,
+        // both check_memory_nudge() and check_skill_nudge() would call
+        // try_start_review(), incrementing the throttle counter twice,
+        // but only one review_completed() call would happen on completion,
+        // leaving a phantom active review that blocks future reviews.
+        if !existing_memory {
+            // Atomically check throttle + increment counter
+            if !self.throttle.try_start_review() {
+                return None;
+            }
         }
 
         let mut engine = self.nudge_engine.lock().unwrap_or_else(recover_mutex);
@@ -311,7 +320,9 @@ impl LearningCoordinator {
         let skill_due = skill_nudge != NudgeResult::NoNudge && has_skill_tool;
 
         if !skill_due {
-            self.throttle.review_completed(); // rollback
+            if !existing_memory {
+                self.throttle.rollback_review(); // rollback only if we claimed the slot
+            }
             return None;
         }
 
@@ -322,7 +333,9 @@ impl LearningCoordinator {
         };
 
         if self.dedup.is_duplicate(dedup_key) {
-            self.throttle.review_completed(); // rollback
+            if !existing_memory {
+                self.throttle.rollback_review(); // rollback only if we claimed the slot
+            }
             return None;
         }
 
@@ -394,9 +407,7 @@ impl LearningCoordinator {
     /// 从配置更新 ghost 学习策略（支持热重载）
     pub fn update_ghost_policy(&self, config: &blockcell_core::config::GhostLearningConfig) {
         let new_policy = GhostLearningPolicy::from_config(config);
-        if let Ok(mut guard) = self.ghost_policy.lock() {
-            *guard = new_policy;
-        }
+        *self.ghost_policy.lock().unwrap_or_else(recover_mutex) = new_policy;
     }
 
     /// Check if self-improve review is enabled

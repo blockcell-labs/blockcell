@@ -6355,7 +6355,11 @@ impl AgentRuntime {
         if !final_response.is_empty() {
             if let Some(mode) = deferred_review_mode.take() {
                 if self.learning_coordinator.is_self_improve_enabled() {
-                    self.learning_coordinator.review_started();
+                    // NOTE: Do NOT call review_started() here.
+                    // check_memory_nudge()/check_skill_nudge() already called
+                    // try_start_review() which incremented the throttle counter.
+                    // Calling review_started() again would double-increment,
+                    // leaving a phantom active review that blocks future reviews.
                     let notify = Some((msg.channel.clone(), msg.chat_id.clone()));
                     self.spawn_review(mode, deferred_review_snapshot, notify);
                 }

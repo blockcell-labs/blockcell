@@ -119,6 +119,27 @@ impl LearningThrottle {
         }
     }
 
+    /// 回滚 try_start_review 的递增（未实际启动 review 时调用）
+    ///
+    /// 仅递减计数器，不启动冷却计时器。
+    /// 与 review_completed() 的区别：review_completed 表示一个真实的
+    /// review 已完成，应启动冷却；rollback 表示获取了槽位但未使用，
+    /// 不应影响后续 review 的启动时机。
+    pub fn rollback_review(&self) {
+        let mut current = self.active_reviews.load(Ordering::Acquire);
+        while current > 0 {
+            match self.active_reviews.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     /// 获取当前活跃 review 数量
     pub fn active_count(&self) -> u32 {
         self.active_reviews.load(Ordering::Acquire)

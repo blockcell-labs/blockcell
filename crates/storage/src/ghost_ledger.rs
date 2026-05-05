@@ -404,15 +404,27 @@ impl GhostLedger {
             _updated_at,
         ) in rows
         {
-            tx.execute(
-                "
+            let affected = tx
+                .execute(
+                    "
                 UPDATE episodes
                 SET status = 'reviewing', updated_at = ?2
                 WHERE id = ?1 AND status IN ('pending_review', 'review_failed')
                 ",
-                params![id, now],
-            )
-            .map_err(map_sqlite_error)?;
+                    params![id, now],
+                )
+                .map_err(map_sqlite_error)?;
+            // Only add to claimed if the UPDATE actually affected a row.
+            // Without this check, concurrent processes could both SELECT the same
+            // episode but only one UPDATE succeeds — both would incorrectly add it
+            // to their claimed vector.
+            if affected == 0 {
+                tracing::debug!(
+                    episode_id = %id,
+                    "Episode already claimed by another process, skipping"
+                );
+                continue;
+            }
             claimed.push(GhostEpisodeRecord {
                 id,
                 boundary_kind,

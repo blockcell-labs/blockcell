@@ -191,16 +191,24 @@ pub async fn run_pending_background_reviews(
     let episodes = ledger.claim_reviewable_episodes(limit)?;
     let mut outcomes = Vec::with_capacity(episodes.len());
     for episode in episodes {
-        outcomes.push(
-            run_background_review_for_episode(
-                paths,
-                Arc::clone(&provider_pool),
-                &episode.id,
-                config,
-                &ledger,
-            )
-            .await?,
-        );
+        match run_background_review_for_episode(
+            paths,
+            Arc::clone(&provider_pool),
+            &episode.id,
+            config,
+            &ledger,
+        )
+        .await
+        {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(err) => {
+                tracing::warn!(
+                    episode_id = %episode.id,
+                    error = %err,
+                    "Background review for episode failed, continuing with remaining episodes"
+                );
+            }
+        }
     }
     Ok(outcomes)
 }
