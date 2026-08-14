@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use crate::{Tool, ToolContext, ToolSchema};
+use blockcell_skills::audit::static_audit;
+use blockcell_skills::SkillType;
 
 /// CommunityHubTool — interact with the Blockcell Community Hub.
 /// Used by Ghost Agent for social interactions and by users for skill discovery.
@@ -44,6 +46,93 @@ fn confined_skill_dir(workspace: &std::path::Path, name: &str) -> Result<std::pa
         }
     }
     Ok(target)
+}
+
+fn is_executable_candidate(root: &std::path::Path, path: &std::path::Path, content: &str) -> bool {
+    if content.starts_with("#!") {
+        return true;
+    }
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .is_some_and(|dir| matches!(dir, "scripts" | "bin" | "hooks"))
+}
+
+fn audit_hub_skill_dir(root: &std::path::Path) -> Result<()> {
+    fn visit(root: &std::path::Path, dir: &std::path::Path) -> Result<()> {
+        for entry in std::fs::read_dir(dir).map_err(blockcell_core::Error::Io)? {
+            let entry = entry.map_err(blockcell_core::Error::Io)?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(blockcell_core::Error::Io)?;
+            if file_type.is_dir() {
+                visit(root, &path)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let known_type = if file_name.eq_ignore_ascii_case("SKILL.md") {
+                Some(SkillType::PromptOnly)
+            } else {
+                match extension.as_str() {
+                    "py" => Some(SkillType::Python),
+                    "rhai" => Some(SkillType::Rhai),
+                    "sh" | "bash" | "zsh" | "js" | "php" | "rb" => Some(SkillType::LocalScript),
+                    _ => None,
+                }
+            };
+
+            let bytes = std::fs::read(&path).map_err(blockcell_core::Error::Io)?;
+            let content = match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(_) if known_type.is_some() => {
+                    return Err(blockcell_core::Error::Tool(format!(
+                        "Hub skill audit failed: executable file '{}' is not valid UTF-8",
+                        path.strip_prefix(root).unwrap_or(&path).display()
+                    )));
+                }
+                Err(_) => continue,
+            };
+            let skill_type = known_type.or_else(|| {
+                is_executable_candidate(root, &path, &content).then_some(SkillType::LocalScript)
+            });
+            let Some(skill_type) = skill_type else {
+                continue;
+            };
+
+            let audit = static_audit(&skill_type, &content);
+            let blocking = audit
+                .violations
+                .iter()
+                .filter(|violation| violation.severity == "error")
+                .map(|violation| format!("{}: {}", violation.rule, violation.message))
+                .collect::<Vec<_>>();
+            if !blocking.is_empty() {
+                return Err(blockcell_core::Error::Tool(format!(
+                    "Hub skill audit failed for '{}': {}",
+                    path.strip_prefix(root).unwrap_or(&path).display(),
+                    blocking.join("; ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    visit(root, root)
 }
 
 fn redact_hub_url(url: &str) -> String {
@@ -556,67 +645,117 @@ impl Tool for CommunityHubTool {
                     ));
                 }
 
-                // Extract to workspace/skills/{name}/
+                // Extract into a sibling staging directory so untrusted content is audited
+                // before it can replace an installed skill.
                 let skill_dir = confined_skill_dir(&ctx.workspace, name)?;
+                let skills_dir = skill_dir.parent().ok_or_else(|| {
+                    blockcell_core::Error::Tool("Invalid skills directory".to_string())
+                })?;
+                let install_id = uuid::Uuid::new_v4();
+                let staging_dir = skills_dir.join(format!(".{name}.install-{install_id}"));
+                std::fs::create_dir(&staging_dir).map_err(|e| {
+                    blockcell_core::Error::Tool(format!(
+                        "Failed to create skill staging dir: {}",
+                        e
+                    ))
+                })?;
+
+                let extraction_result = (|| -> Result<()> {
+                    let cursor = std::io::Cursor::new(&zip_bytes);
+                    let mut archive = zip::ZipArchive::new(cursor)
+                        .map_err(|e| blockcell_core::Error::Tool(format!("Invalid zip: {}", e)))?;
+                    if archive.len() > 2_000 {
+                        return Err(blockcell_core::Error::Tool(
+                            "Skill archive contains too many entries".to_string(),
+                        ));
+                    }
+                    let mut total_uncompressed = 0u64;
+                    for i in 0..archive.len() {
+                        let mut file = archive.by_index(i).map_err(|e| {
+                            blockcell_core::Error::Tool(format!("Zip read error: {}", e))
+                        })?;
+                        total_uncompressed = total_uncompressed.saturating_add(file.size());
+                        if file.size() > 20 * 1024 * 1024
+                            || total_uncompressed > 100 * 1024 * 1024
+                            || (file.compressed_size() > 0
+                                && file.size() / file.compressed_size() > 1_000)
+                        {
+                            return Err(blockcell_core::Error::Tool(
+                                "Skill archive exceeds extraction safety limits".to_string(),
+                            ));
+                        }
+                        let out_path = if let Some(enclosed) = file.enclosed_name() {
+                            // Strip the top-level directory if the zip contains one.
+                            let components: Vec<_> = enclosed.components().collect();
+                            if components.len() > 1 {
+                                staging_dir
+                                    .join(components[1..].iter().collect::<std::path::PathBuf>())
+                            } else {
+                                staging_dir.join(enclosed)
+                            }
+                        } else {
+                            continue;
+                        };
+                        if file.is_dir() {
+                            std::fs::create_dir_all(&out_path).map_err(|e| {
+                                blockcell_core::Error::Tool(format!(
+                                    "Failed to create skill directory: {}",
+                                    e
+                                ))
+                            })?;
+                        } else {
+                            if let Some(parent) = out_path.parent() {
+                                std::fs::create_dir_all(parent).map_err(|e| {
+                                    blockcell_core::Error::Tool(format!(
+                                        "Failed to create skill directory: {}",
+                                        e
+                                    ))
+                                })?;
+                            }
+                            let mut outfile = std::fs::File::create(&out_path).map_err(|e| {
+                                blockcell_core::Error::Tool(format!("Failed to create file: {}", e))
+                            })?;
+                            std::io::copy(&mut file, &mut outfile).map_err(|e| {
+                                blockcell_core::Error::Tool(format!("Failed to write file: {}", e))
+                            })?;
+                        }
+                    }
+                    audit_hub_skill_dir(&staging_dir)
+                })();
+
+                if let Err(error) = extraction_result {
+                    let _ = std::fs::remove_dir_all(&staging_dir);
+                    return Err(error);
+                }
+
+                let backup_dir = skills_dir.join(format!(".{name}.backup-{install_id}"));
                 if skill_dir.exists() {
-                    std::fs::remove_dir_all(&skill_dir).map_err(|e| {
+                    std::fs::rename(&skill_dir, &backup_dir).map_err(|e| {
+                        let _ = std::fs::remove_dir_all(&staging_dir);
                         blockcell_core::Error::Tool(format!(
-                            "Failed to remove existing skill dir: {}",
+                            "Failed to stage existing skill for replacement: {}",
                             e
                         ))
                     })?;
                 }
-                std::fs::create_dir_all(&skill_dir).map_err(|e| {
-                    blockcell_core::Error::Tool(format!("Failed to create skill dir: {}", e))
-                })?;
-
-                // Unzip
-                let cursor = std::io::Cursor::new(&zip_bytes);
-                let mut archive = zip::ZipArchive::new(cursor)
-                    .map_err(|e| blockcell_core::Error::Tool(format!("Invalid zip: {}", e)))?;
-                if archive.len() > 2_000 {
-                    return Err(blockcell_core::Error::Tool(
-                        "Skill archive contains too many entries".to_string(),
-                    ));
-                }
-                let mut total_uncompressed = 0u64;
-                for i in 0..archive.len() {
-                    let mut file = archive.by_index(i).map_err(|e| {
-                        blockcell_core::Error::Tool(format!("Zip read error: {}", e))
-                    })?;
-                    total_uncompressed = total_uncompressed.saturating_add(file.size());
-                    if file.size() > 20 * 1024 * 1024
-                        || total_uncompressed > 100 * 1024 * 1024
-                        || (file.compressed_size() > 0
-                            && file.size() / file.compressed_size() > 1_000)
-                    {
-                        return Err(blockcell_core::Error::Tool(
-                            "Skill archive exceeds extraction safety limits".to_string(),
-                        ));
+                if let Err(error) = std::fs::rename(&staging_dir, &skill_dir) {
+                    if backup_dir.exists() {
+                        let _ = std::fs::rename(&backup_dir, &skill_dir);
                     }
-                    let out_path = if let Some(enclosed) = file.enclosed_name() {
-                        // Strip the top-level directory if the zip contains one
-                        let components: Vec<_> = enclosed.components().collect();
-                        if components.len() > 1 {
-                            skill_dir.join(components[1..].iter().collect::<std::path::PathBuf>())
-                        } else {
-                            skill_dir.join(enclosed)
-                        }
-                    } else {
-                        continue;
-                    };
-                    if file.is_dir() {
-                        std::fs::create_dir_all(&out_path).ok();
-                    } else {
-                        if let Some(parent) = out_path.parent() {
-                            std::fs::create_dir_all(parent).ok();
-                        }
-                        let mut outfile = std::fs::File::create(&out_path).map_err(|e| {
-                            blockcell_core::Error::Tool(format!("Failed to create file: {}", e))
-                        })?;
-                        std::io::copy(&mut file, &mut outfile).map_err(|e| {
-                            blockcell_core::Error::Tool(format!("Failed to write file: {}", e))
-                        })?;
+                    let _ = std::fs::remove_dir_all(&staging_dir);
+                    return Err(blockcell_core::Error::Tool(format!(
+                        "Failed to promote audited skill: {}",
+                        error
+                    )));
+                }
+                if backup_dir.exists() {
+                    if let Err(error) = std::fs::remove_dir_all(&backup_dir) {
+                        warn!(
+                            skill = %name,
+                            path = %backup_dir.display(),
+                            error = %error,
+                            "Failed to remove replaced skill backup"
+                        );
                     }
                 }
 
@@ -666,6 +805,7 @@ impl Tool for CommunityHubTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_schema() {
@@ -725,5 +865,43 @@ mod tests {
         assert!(tool
             .validate(&json!({"action": "install_skill", "skill_name": "safe-skill"}))
             .is_ok());
+    }
+
+    #[test]
+    fn test_hub_skill_audit_rejects_python_bypass_payload() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        fs::write(
+            temp.path().join("SKILL.py"),
+            "import subprocess as sp\nsp.run(['sh', '-c', 'echo pwned'])\n",
+        )
+        .expect("write payload");
+
+        let error = audit_hub_skill_dir(temp.path()).expect_err("payload must be rejected");
+        assert!(error.to_string().contains("SKILL.py"));
+    }
+
+    #[test]
+    fn test_hub_skill_audit_rejects_shell_bypass_payload() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let scripts = temp.path().join("scripts");
+        fs::create_dir_all(&scripts).expect("create scripts dir");
+        fs::write(scripts.join("cleanup.sh"), "#!/bin/sh\nrm -Rf ~/.config\n")
+            .expect("write payload");
+
+        let error = audit_hub_skill_dir(temp.path()).expect_err("payload must be rejected");
+        assert!(error.to_string().contains("cleanup.sh"));
+    }
+
+    #[test]
+    fn test_hub_skill_audit_accepts_clean_skill() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        fs::write(
+            temp.path().join("SKILL.md"),
+            "# Safe skill\n\nThis skill formats local input without running external commands or changing files. It returns a concise text summary to the user.\n",
+        )
+        .expect("write skill manual");
+        fs::write(temp.path().join("SKILL.py"), "print('safe')\n").expect("write script");
+
+        audit_hub_skill_dir(temp.path()).expect("clean skill should pass");
     }
 }

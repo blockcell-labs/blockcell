@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use blockcell_skills::dispatcher::{SkillDispatchResult, SkillDispatcher};
+use blockcell_skills::SkillMeta;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::exec_local::{
@@ -28,6 +29,28 @@ fn resolve_runtime(path: &str) -> ScriptRuntime {
     } else {
         ScriptRuntime::Process
     }
+}
+
+fn load_declared_skill_tools(skill_dir: &std::path::Path) -> Result<HashSet<String>> {
+    let meta_path = skill_dir.join("meta.yaml");
+    if !meta_path.exists() {
+        return Ok(HashSet::new());
+    }
+    let metadata = std::fs::read_to_string(&meta_path).map_err(|error| {
+        Error::Tool(format!(
+            "Failed to read skill metadata '{}': {}",
+            meta_path.display(),
+            error
+        ))
+    })?;
+    let metadata: SkillMeta = serde_yaml::from_str(&metadata).map_err(|error| {
+        Error::Tool(format!(
+            "Failed to parse skill metadata '{}': {}",
+            meta_path.display(),
+            error
+        ))
+    })?;
+    Ok(metadata.effective_tools().into_iter().collect())
 }
 
 fn parse_args(params: &Value) -> Result<Vec<String>> {
@@ -204,6 +227,7 @@ impl Tool for ExecSkillScriptTool {
                 let handle = tokio::runtime::Handle::current();
                 let registry = &*DEFAULT_TOOL_REGISTRY;
                 let rhai_ctx = ctx.clone();
+                let declared_tools = load_declared_skill_tools(&skill_dir)?;
                 let dispatcher = SkillDispatcher::new();
                 let result = tokio::task::spawn_blocking(move || {
                     dispatcher.execute_sync(
@@ -215,6 +239,12 @@ impl Tool for ExecSkillScriptTool {
                                 return Err(Error::Tool(
                                     "Nested `exec_skill_script` execution is not supported inside Rhai assets".to_string(),
                                 ));
+                            }
+                            if !declared_tools.contains(tool_name) {
+                                return Err(Error::Tool(format!(
+                                    "Tool '{}' is not declared by this skill's metadata",
+                                    tool_name
+                                )));
                             }
                             let registry = registry.clone();
                             let ctx = rhai_ctx.clone();
@@ -262,8 +292,9 @@ mod tests {
     }
 
     fn tool_context(skill_dir: PathBuf) -> ToolContext {
+        let workspace = skill_dir.clone();
         ToolContext {
-            workspace: std::env::temp_dir(),
+            workspace,
             base: std::env::temp_dir().join("blockcell"),
             builtin_skills_dir: None,
             active_skill_dir: Some(skill_dir),
@@ -338,6 +369,42 @@ mod tests {
         assert_eq!(result["runtime"], "rhai");
         assert_eq!(result["success"], true);
         assert_eq!(result["output"]["message"], "nested-ok");
+    }
+
+    #[tokio::test]
+    async fn test_rhai_rejects_tool_not_declared_by_skill() {
+        let skill_dir = temp_skill_dir("blockcell-exec-skill-script-rhai-denied-tool");
+        fs::write(
+            skill_dir.join("SKILL.rhai"),
+            r#"let result = call_tool("list_dir", #{ path: "." }); set_output(result);"#,
+        )
+        .expect("write rhai script");
+
+        let result = run_exec_skill_script(skill_dir, json!({"path": "SKILL.rhai"})).await;
+        assert_eq!(result["tool_calls"][0]["success"], false);
+        assert!(result["tool_calls"][0]["result"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not declared"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_allows_tool_declared_by_skill() {
+        let skill_dir = temp_skill_dir("blockcell-exec-skill-script-rhai-allowed-tool");
+        fs::write(
+            skill_dir.join("meta.yaml"),
+            "name: allowed-tool\ndescription: test\ntools:\n  - list_dir\n",
+        )
+        .expect("write metadata");
+        fs::write(
+            skill_dir.join("SKILL.rhai"),
+            r#"let result = call_tool("list_dir", #{ path: "." }); set_output(result);"#,
+        )
+        .expect("write rhai script");
+
+        let result = run_exec_skill_script(skill_dir, json!({"path": "SKILL.rhai"})).await;
+        assert_eq!(result["runtime"], "rhai");
+        assert_eq!(result["success"], true);
     }
 
     #[cfg(not(target_os = "windows"))]
