@@ -6,7 +6,7 @@
 //! - 消费方（Ghost / Replay / Evaluation）通过 [`SessionEventReader`] 读取，
 //!   未来可替换为 SQLite / 远程存储而不影响调用方。
 
-use crate::file_lock::{lock_exclusive, lock_path_for};
+use crate::file_lock::lock_exclusive;
 use blockcell_core::{Paths, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,7 @@ impl JsonlSessionEventLog {
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
-            let lock = lock_exclusive(&path)?;
+            let _lock = lock_exclusive(&path)?;
             // 持锁后重新检查，避免删除刚被追加写入的日志
             let expired = std::fs::metadata(&path)
                 .and_then(|meta| meta.modified())
@@ -130,10 +130,7 @@ impl JsonlSessionEventLog {
             if expired && std::fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
-            drop(lock);
-            if expired {
-                let _ = std::fs::remove_file(lock_path_for(&path));
-            }
+            // 锁文件保留：unlink 会破坏互斥（详见 file_lock::lock_path_for）。
         }
         Ok(removed)
     }
@@ -245,6 +242,7 @@ fn truncate_payload(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_lock::lock_path_for;
     use serde_json::json;
 
     fn log() -> (tempfile::TempDir, JsonlSessionEventLog) {
@@ -328,7 +326,8 @@ mod tests {
 
         assert_eq!(removed, 1);
         assert!(!old_path.exists());
-        assert!(!lock_path_for(&old_path).exists());
+        // 锁文件是长期存在的同步锚点，清理时保留（见 file_lock::lock_path_for）
+        assert!(lock_path_for(&old_path).exists());
         assert_eq!(log.read("cli:new").unwrap().len(), 1);
     }
 

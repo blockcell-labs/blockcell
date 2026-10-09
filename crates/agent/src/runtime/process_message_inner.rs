@@ -863,13 +863,6 @@ impl AgentRuntime {
                         .get("skill_name")
                         .and_then(|value| value.as_str())
                         .unwrap_or("");
-                    let skill_name = normalize_selected_skill_name(raw_skill_name, &skill_cards)
-                        .ok_or_else(|| {
-                            blockcell_core::Error::Skill(format!(
-                                "Model selected unavailable skill '{}'",
-                                raw_skill_name
-                            ))
-                        })?;
                     let goal = skill_call
                         .arguments
                         .get("goal")
@@ -878,21 +871,47 @@ impl AgentRuntime {
                         .filter(|value| !value.is_empty())
                         .unwrap_or(msg.content.as_str())
                         .to_string();
-                    let skill_ctx = self
-                        .context_builder
-                        .resolve_active_skill_by_name(&skill_name, &disabled_skills)
-                        .map(|skill| {
-                            suppress_prompt_reinjection_for_continued_skill(
-                                skill,
-                                recent_skill_name.as_deref(),
+                    // 技能解析失败同样要关闭当前 step，避免留下只有 step/start 的悬空 step。
+                    let resolved_skill: Result<ActiveSkillContext> = (|| {
+                        let skill_name =
+                            normalize_selected_skill_name(raw_skill_name, &skill_cards).ok_or_else(
+                                || {
+                                    blockcell_core::Error::Skill(format!(
+                                        "Model selected unavailable skill '{}'",
+                                        raw_skill_name
+                                    ))
+                                },
+                            )?;
+                        let skill_ctx = self
+                            .context_builder
+                            .resolve_active_skill_by_name(&skill_name, &disabled_skills)
+                            .map(|skill| {
+                                suppress_prompt_reinjection_for_continued_skill(
+                                    skill,
+                                    recent_skill_name.as_deref(),
+                                )
+                            })
+                            .ok_or_else(|| {
+                                blockcell_core::Error::Skill(format!(
+                                    "Skill '{}' is not available",
+                                    skill_name
+                                ))
+                            })?;
+                        Ok(skill_ctx)
+                    })();
+                    let skill_ctx = match resolved_skill {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            self.end_step(
+                                &msg,
+                                &persist_session_key,
+                                step,
+                                response.tool_calls.len(),
                             )
-                        })
-                        .ok_or_else(|| {
-                            blockcell_core::Error::Skill(format!(
-                                "Skill '{}' is not available",
-                                skill_name
-                            ))
-                        })?;
+                            .await;
+                            return Err(error);
+                        }
+                    };
 
                     // Layer 4: Track skill activation for Post-Compact recovery
                     if let Some(memory_system) = self.memory_system.as_mut() {
@@ -909,14 +928,27 @@ impl AgentRuntime {
                     .await;
 
                     let skill_history_seed = history[..history.len().saturating_sub(1)].to_vec();
-                    let (skill_result, updated_metadata, allowed_tools) = self
+                    let skill_outcome = self
                         .run_skill_for_turn(
                             &skill_ctx,
                             &msg,
                             &skill_history_seed,
                             &persist_session_key,
                         )
-                        .await?;
+                        .await;
+                    let (skill_result, updated_metadata, allowed_tools) = match skill_outcome {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            self.end_step(
+                                &msg,
+                                &persist_session_key,
+                                step,
+                                response.tool_calls.len(),
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                    };
                     session_metadata = updated_metadata;
                     record_active_skill_name(&mut session_metadata, &skill_ctx.name);
                     append_activated_skill_history(

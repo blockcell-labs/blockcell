@@ -17,6 +17,13 @@ impl Drop for ExclusiveFileLock {
     }
 }
 
+/// Sidecar lock file path for `path` (`.{file_name}.lock`).
+///
+/// The lock file is a **permanent synchronization anchor** and must never be unlinked:
+/// `lock_exclusive` guards the lock file's inode, so if the path were removed a new
+/// locker would `create(true)` a fresh inode and acquire it immediately, bypassing a
+/// holder that still owns the (now orphaned) previous inode. Leaving the empty file in
+/// place keeps every locker on the same inode and preserves mutual exclusion.
 pub(crate) fn lock_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()

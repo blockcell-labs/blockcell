@@ -1,4 +1,4 @@
-use crate::file_lock::{lock_exclusive, lock_path_for};
+use crate::file_lock::lock_exclusive;
 use blockcell_core::types::ChatMessage;
 use blockcell_core::{session_file_stem, session_id_from_file_stem, Paths, Result};
 use serde::{Deserialize, Serialize};
@@ -350,15 +350,16 @@ impl SessionStore {
             }
         }
 
-        // 持事件日志自身的锁删除，避免与并发追加交错；同时清理锁文件
+        // 持事件日志自身的锁删除，避免与并发追加交错。
+        // 不删除锁文件：锁文件是长期存在的同步锚点，unlink 会让新的加锁者创建新 inode
+        // 并立即获得锁，从而绕过仍持有旧 inode 的调用方，破坏互斥
+        // （详见 file_lock::lock_path_for 的说明）。
         let events_path = self.paths.session_events_file(session_key);
         if events_path.exists() {
-            let events_lock = lock_exclusive(&events_path)?;
+            let _events_lock = lock_exclusive(&events_path)?;
             if let Err(error) = std::fs::remove_file(&events_path) {
                 warn!(path = %events_path.display(), error = %error, "Failed to delete session event log");
             }
-            drop(events_lock);
-            let _ = std::fs::remove_file(lock_path_for(&events_path));
         }
 
         let mut deleted = false;
@@ -491,6 +492,7 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_lock::lock_path_for;
     use fs2::FileExt;
     use serde_json::json;
     use std::sync::mpsc;
@@ -504,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_removes_session_event_log_and_its_lock_file() {
+    fn clear_removes_session_event_log_and_keeps_lock_file() {
         use crate::session_event::{
             JsonlSessionEventLog, NewSessionEvent, SessionEventKind, SessionEventWriter,
         };
@@ -532,7 +534,8 @@ mod tests {
         assert!(store.clear("cli:clear-events").unwrap());
 
         assert!(!events_path.exists());
-        assert!(!lock_path_for(&events_path).exists());
+        // 锁文件保留：删除它会破坏互斥（见 file_lock::lock_path_for）
+        assert!(lock_path_for(&events_path).exists());
     }
 
     #[test]
