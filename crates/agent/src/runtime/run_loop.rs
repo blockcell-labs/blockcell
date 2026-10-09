@@ -498,6 +498,22 @@ impl AgentRuntime {
                             .decrement_stored_count(removed_entries as u64);
                     }
 
+                    // session_events 清理：会话超过保留期未产生新事件时删除其事件日志
+                    let event_log = blockcell_storage::JsonlSessionEventLog::new(self.paths.clone());
+                    match tokio::task::spawn_blocking(move || {
+                        event_log.cleanup_older_than(std::time::Duration::from_secs(
+                            blockcell_storage::SESSION_EVENT_RETENTION_DAYS * 86_400,
+                        ))
+                    })
+                    .await
+                    {
+                        Ok(Ok(removed)) if removed > 0 => {
+                            debug!(removed, "Cleaned up expired session event logs");
+                        }
+                        Ok(Err(e)) => warn!(error = %e, "Session event log cleanup failed"),
+                        _ => {}
+                    }
+
                     let _ = self
                         .process_system_event_tick(chrono::Utc::now().timestamp_millis())
                         .await;

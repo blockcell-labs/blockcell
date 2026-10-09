@@ -6,7 +6,7 @@
 //! - 消费方（Ghost / Replay / Evaluation）通过 [`SessionEventReader`] 读取，
 //!   未来可替换为 SQLite / 远程存储而不影响调用方。
 
-use crate::file_lock::lock_exclusive;
+use crate::file_lock::{lock_exclusive, lock_path_for};
 use blockcell_core::{Paths, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ use std::path::Path;
 use tracing::debug;
 
 pub const SESSION_EVENT_SCHEMA_VERSION: u16 = 1;
+
+/// 会话超过该天数未产生新事件时，整个事件日志会被维护任务清理。
+pub const SESSION_EVENT_RETENTION_DAYS: u64 = 30;
 
 /// 单个字符串字段写入 payload 时的最大字符数，避免大工具结果撑爆日志。
 pub const MAX_PAYLOAD_STRING_CHARS: usize = 8_000;
@@ -102,6 +105,37 @@ pub struct JsonlSessionEventLog {
 impl JsonlSessionEventLog {
     pub fn new(paths: Paths) -> Self {
         Self { paths }
+    }
+
+    /// 删除最后写入时间早于 `max_age` 的会话事件日志，返回删除的日志数。
+    pub fn cleanup_older_than(&self, max_age: std::time::Duration) -> Result<usize> {
+        let dir = self.paths.session_events_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(0);
+        };
+        let Some(cutoff) = std::time::SystemTime::now().checked_sub(max_age) else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let lock = lock_exclusive(&path)?;
+            // 持锁后重新检查，避免删除刚被追加写入的日志
+            let expired = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified < cutoff);
+            if expired && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+            drop(lock);
+            if expired {
+                let _ = std::fs::remove_file(lock_path_for(&path));
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -268,6 +302,34 @@ mod tests {
         .unwrap();
         assert!(raw.contains("\"kind\":\"tool/result\""));
         assert!(raw.contains("<truncated 10 chars>"));
+    }
+
+    #[test]
+    fn cleanup_removes_only_expired_logs() {
+        let (_dir, log) = log();
+        log.append("cli:old", event(SessionEventKind::TurnStart, json!({})))
+            .unwrap();
+        log.append("cli:new", event(SessionEventKind::TurnStart, json!({})))
+            .unwrap();
+        let old_path = log.paths.session_events_file("cli:old");
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        File::options()
+            .write(true)
+            .open(&old_path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+
+        let removed = log
+            .cleanup_older_than(std::time::Duration::from_secs(
+                SESSION_EVENT_RETENTION_DAYS * 86_400,
+            ))
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!old_path.exists());
+        assert!(!lock_path_for(&old_path).exists());
+        assert_eq!(log.read("cli:new").unwrap().len(), 1);
     }
 
     #[test]

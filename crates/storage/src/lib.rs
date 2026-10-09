@@ -23,5 +23,5 @@ pub use memory::{MemoryStore, MemoryStoreOptions};
 pub use session::SessionStore;
 pub use session_event::{
     JsonlSessionEventLog, NewSessionEvent, SessionEvent, SessionEventKind, SessionEventReader,
-    SessionEventWriter,
+    SessionEventWriter, SESSION_EVENT_RETENTION_DAYS,
 };
