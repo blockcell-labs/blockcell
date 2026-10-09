@@ -161,7 +161,8 @@ opt-level = "z"          # Optimize for size (z = smallest, s = small, 3 = fast)
 lto = true               # Enable Link Time Optimization
 codegen-units = 1        # Better optimization (slower compile, smaller binary)
 strip = true             # Strip symbols from binary
-panic = "abort"          # Reduce panic handling overhead
+# Keep the default panic = "unwind": task supervisors (JoinError::is_panic) and
+# EventBus listener isolation (catch_unwind) rely on unwinding to contain panics.
 
 # Optional: even more aggressive size optimization profile
 # Use with: cargo build --profile release-min
@@ -171,4 +172,5 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+# Size over resilience: with abort, a panic in any task or listener terminates the process.
 panic = "abort"
