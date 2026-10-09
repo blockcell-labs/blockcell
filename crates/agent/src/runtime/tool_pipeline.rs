@@ -277,7 +277,7 @@ impl AgentRuntime {
             arguments: std::mem::take(&mut inv.args),
         };
         let decision = self
-            .dispatch_event(inv.msg, &inv.msg.session_key(), &mut event)
+            .dispatch_event(inv.msg, &persist_session_key_for(inv.msg), &mut event)
             .await;
         let AgentEvent::ToolPreExecute { arguments, .. } = event else {
             unreachable!("tool/pre-execute listeners cannot replace the event kind");
@@ -287,7 +287,7 @@ impl AgentRuntime {
             EventDecision::Continue => {
                 self.dispatch_event(
                     inv.msg,
-                    &inv.msg.session_key(),
+                    &persist_session_key_for(inv.msg),
                     &mut AgentEvent::ToolCall {
                         tool_name: inv.call.name.clone(),
                         call_id: inv.call.id.clone(),
@@ -444,7 +444,7 @@ impl AgentRuntime {
         let tool_call = inv.call;
         self.dispatch_event(
             inv.msg,
-            &inv.msg.session_key(),
+            &persist_session_key_for(inv.msg),
             &mut AgentEvent::ToolPostExecute {
                 tool_name: tool_call.name.clone(),
                 call_id: tool_call.id.clone(),
@@ -601,7 +601,7 @@ impl AgentRuntime {
         let msg = inv.msg;
         self.dispatch_event(
             msg,
-            &msg.session_key(),
+            &persist_session_key_for(msg),
             &mut AgentEvent::ToolResult {
                 tool_name: tool_call.name.clone(),
                 call_id: tool_call.id.clone(),

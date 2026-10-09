@@ -1649,6 +1649,15 @@ pub(crate) struct InteractionDecision {
     mode: InteractionMode,
 }
 
+/// 会话持久化归属：cron 投递消息归属到投递目标会话，其余归属到来源会话。
+/// 历史、事件日志与 hooks 都以它作为会话标识，保证同一回合的数据落在同一会话。
+pub(crate) fn persist_session_key_for(msg: &InboundMessage) -> String {
+    match resolve_cron_deliver_target(msg) {
+        Some((channel, to)) => blockcell_core::build_session_key(&channel, &to),
+        None => msg.session_key(),
+    }
+}
+
 pub(crate) struct FinalResponseContext<'a> {
     msg: &'a InboundMessage,
     persist_session_key: &'a str,

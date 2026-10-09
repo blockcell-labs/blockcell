@@ -5501,3 +5501,39 @@ async fn candidate_scope_isolates_listeners_and_prompt_sections_from_production(
     runtime.execute_tool_call(&call, &msg, None).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn cron_delivered_tool_events_are_logged_under_target_session() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime();
+    let mut msg = test_main_session_inbound("cron", "job-1");
+    msg.metadata = serde_json::json!({
+        "skill_run_mode": "cron",
+        "deliver": true,
+        "deliver_channel": "telegram",
+        "deliver_to": "chat-42",
+    });
+
+    runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo hi"})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let log = JsonlSessionEventLog::new(runtime.paths.clone());
+    let target = blockcell_core::build_session_key("telegram", "chat-42");
+    let kinds: Vec<SessionEventKind> = log
+        .read(&target)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![SessionEventKind::ToolCall, SessionEventKind::ToolResult]
+    );
+    assert!(log.read(&msg.session_key()).unwrap().is_empty());
+}

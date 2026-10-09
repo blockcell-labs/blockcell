@@ -5,11 +5,7 @@ impl AgentRuntime {
         let mut metrics = ProcessingMetrics::new();
         let session_key = msg.session_key();
         let cron_deliver_target = resolve_cron_deliver_target(&msg);
-        let persist_session_key = if let Some((channel, to)) = &cron_deliver_target {
-            blockcell_core::build_session_key(channel, to)
-        } else {
-            session_key.clone()
-        };
+        let persist_session_key = persist_session_key_for(&msg);
         info!(session_key = %session_key, channel = %msg.channel, "Processing message");
         info!(target: "chat::user", content = %msg.content, "User input");
         self.update_main_session_target(&msg).await;
