@@ -774,19 +774,19 @@ impl CapabilityRegistry {
         }
         let json = std::fs::read_to_string(&registry_file)?;
         let entries: Vec<serde_json::Value> = serde_json::from_str(&json)?;
-        // Skip unreadable entries (e.g. legacy `dynamic_library` providers that were removed)
-        // instead of dropping every evolved tool.
-        let descriptors = entries.into_iter().filter_map(|entry| {
-            serde_json::from_value::<CapabilityDescriptor>(entry.clone())
-                .map_err(|error| {
-                    warn!(
-                        id = entry.get("id").and_then(|id| id.as_str()).unwrap_or("?"),
-                        error = %error,
-                        "Skipping unsupported capability descriptor"
-                    );
-                })
-                .ok()
-        });
+        let mut descriptors = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // 原生动态库 provider 已移除：仅兼容跳过这类遗留条目，其余格式错误仍然报错
+            if entry.get("provider_kind").and_then(|kind| kind.as_str()) == Some("dynamic_library")
+            {
+                warn!(
+                    id = entry.get("id").and_then(|id| id.as_str()).unwrap_or("?"),
+                    "Skipping capability with removed dynamic_library provider"
+                );
+                continue;
+            }
+            descriptors.push(serde_json::from_value::<CapabilityDescriptor>(entry)?);
+        }
         for desc in descriptors {
             let id = desc.id.clone();
             self.descriptors.insert(id.clone(), desc);
@@ -948,7 +948,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_skips_legacy_native_descriptors_without_dropping_others() {
+    fn load_skips_only_legacy_native_descriptors() {
         let dir = std::env::temp_dir().join(format!(
             "blockcell-capability-legacy-{}",
             std::process::id()
@@ -977,6 +977,22 @@ mod tests {
 
         let ids: Vec<&str> = registry.list_all().iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, vec!["tool.ok"]);
+
+        let mut malformed = serde_json::to_value(CapabilityDescriptor::new(
+            "tool.bad",
+            "Bad",
+            "broken",
+            blockcell_core::CapabilityType::System,
+            ProviderKind::Process,
+        ))
+        .unwrap();
+        malformed["provider_kind"] = serde_json::json!("not_a_kind");
+        std::fs::write(
+            dir.join("evolved_tools.json"),
+            serde_json::to_string(&vec![malformed]).unwrap(),
+        )
+        .unwrap();
+        assert!(CapabilityRegistry::new(dir.clone()).load().is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
     use std::time::{Duration, Instant};
