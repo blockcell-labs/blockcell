@@ -131,6 +131,7 @@ impl EventBus {
         let mut snapshot = self.listeners.visible(ScopeView {
             agent_id: &ctx.agent_id,
             session_id: &ctx.session_id,
+            candidate_id: ctx.candidate_id.as_deref(),
         });
         snapshot.sort_by_key(|item| item.spec.priority);
 

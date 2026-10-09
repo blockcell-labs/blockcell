@@ -133,6 +133,8 @@ pub struct ContextBuilder {
     prompt_registry: PromptRegistry,
     /// Agent scope used when resolving prompt sections.
     agent_id: String,
+    /// Evolution candidate being evaluated; candidate-scoped sections are visible only then.
+    candidate_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -373,6 +375,7 @@ impl ContextBuilder {
             skill_index_summary: Arc::new(RwLock::new(None)),
             prompt_registry: PromptRegistry::with_builtin_sections(),
             agent_id: "default".to_string(),
+            candidate_id: None,
         }
     }
 
@@ -382,6 +385,10 @@ impl ContextBuilder {
 
     pub fn set_agent_id(&mut self, agent_id: Option<&str>) {
         self.agent_id = agent_id.unwrap_or("default").to_string();
+    }
+
+    pub fn set_candidate_scope(&mut self, candidate_id: Option<String>) {
+        self.candidate_id = candidate_id;
     }
 
     pub(crate) fn incremental_project_environment(&self, session_key: &str) -> Option<String> {
@@ -602,6 +609,7 @@ impl ContextBuilder {
         self.memory_store.is_some().hash(&mut hasher);
         self.prompt_registry.fingerprint().hash(&mut hasher);
         self.agent_id.hash(&mut hasher);
+        self.candidate_id.hash(&mut hasher);
         if let Some(skill) = active_skill {
             skill.name.hash(&mut hasher);
             skill.prompt_md.hash(&mut hasher);
@@ -795,6 +803,7 @@ impl ContextBuilder {
             ScopeView {
                 agent_id: &self.agent_id,
                 session_id: session_key.unwrap_or_default(),
+                candidate_id: self.candidate_id.as_deref(),
             },
             &ctx,
         );

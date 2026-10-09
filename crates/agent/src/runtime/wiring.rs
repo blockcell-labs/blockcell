@@ -343,6 +343,14 @@ impl AgentRuntime {
         &self.event_bus
     }
 
+    /// Enter (or leave with `None`) an evolution candidate scope. Candidate-scoped listeners
+    /// and prompt sections become visible only to this runtime; production runtimes never see them.
+    pub fn set_candidate_scope(&mut self, candidate_id: Option<String>) {
+        self.context_builder
+            .set_candidate_scope(candidate_id.clone());
+        self.candidate_scope = candidate_id;
+    }
+
     /// Replace the loop driver used by `process_message`.
     pub fn set_agent_loop(&mut self, agent_loop: Arc<dyn agent_loop::AgentLoop>) {
         self.agent_loop = agent_loop;
@@ -368,6 +376,7 @@ impl AgentRuntime {
             chat_id: msg.chat_id.clone(),
             turn_id: self.current_turn_id.clone(),
             step: self.current_step,
+            candidate_id: self.candidate_scope.clone(),
         };
         self.event_bus.dispatch(&ctx, event).await
     }

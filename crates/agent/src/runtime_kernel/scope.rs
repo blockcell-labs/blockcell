@@ -3,6 +3,9 @@
 //! Scope 同时控制**可见性**（谁能看到）与**生命周期**（RAII 注销）。
 //! 不存在隐式父子继承：子 agent 拥有自己的 agent_id，看不到父 agent 的 Agent 作用域条目；
 //! 如需共享，应显式在目标作用域重新注册（capability snapshot）。
+//!
+//! `Candidate` 作用域是 Self-Evolution 的隔离边界：候选 skill / prompt / policy 只对
+//! 显式进入该候选评估的视图可见，生产视图永远看不到。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
@@ -17,6 +20,8 @@ pub enum ScopeTarget {
     Global,
     Agent(String),
     Session(String),
+    /// 进化候选，仅对 `candidate_id` 相同的视图可见。
+    Candidate(String),
 }
 
 /// 查询方所处的位置，用于判定可见性。
@@ -24,6 +29,8 @@ pub enum ScopeTarget {
 pub struct ScopeView<'a> {
     pub agent_id: &'a str,
     pub session_id: &'a str,
+    /// 正在评估的进化候选；生产视图为 `None`。
+    pub candidate_id: Option<&'a str>,
 }
 
 impl ScopeTarget {
@@ -32,6 +39,7 @@ impl ScopeTarget {
             Self::Global => true,
             Self::Agent(agent_id) => agent_id == view.agent_id,
             Self::Session(session_id) => session_id == view.session_id,
+            Self::Candidate(candidate_id) => view.candidate_id == Some(candidate_id.as_str()),
         }
     }
 }
@@ -175,6 +183,7 @@ mod tests {
         ScopeView {
             agent_id,
             session_id,
+            candidate_id: None,
         }
     }
 
@@ -191,6 +200,25 @@ mod tests {
         );
         // 子 agent 不会隐式继承父 agent 作用域
         assert_eq!(registry.visible(view("parent/child", "s2")), vec!["global"]);
+    }
+
+    #[test]
+    fn candidate_entries_are_only_visible_inside_their_candidate_view() {
+        let registry = ScopedRegistry::new();
+        registry.insert(ScopeTarget::Global, "prod");
+        registry.insert(ScopeTarget::Candidate("evo-1".into()), "candidate");
+
+        assert_eq!(registry.visible(view("a", "s")), vec!["prod"]);
+        let candidate_view = ScopeView {
+            candidate_id: Some("evo-1"),
+            ..view("a", "s")
+        };
+        assert_eq!(registry.visible(candidate_view), vec!["prod", "candidate"]);
+        let other_candidate = ScopeView {
+            candidate_id: Some("evo-2"),
+            ..view("a", "s")
+        };
+        assert_eq!(registry.visible(other_candidate), vec!["prod"]);
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct AgentEventContext {
     pub chat_id: String,
     pub turn_id: Option<String>,
     pub step: Option<u32>,
+    /// 处于进化候选评估时的候选 id，用于命中 Candidate 作用域的 listener。
+    pub candidate_id: Option<String>,
 }
 
 /// Listener 对事件的处理结论。

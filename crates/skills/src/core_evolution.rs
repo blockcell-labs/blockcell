@@ -3,6 +3,9 @@ use crate::capability_provider::{
 };
 use crate::capability_versioning::{CapabilityVersionManager, CapabilityVersionSource};
 use crate::evolution::LLMProvider;
+use blockcell_core::evolution_boundary::{
+    ensure_single_path_component, evolvable_provider_artifact,
+};
 use blockcell_core::{
     CapabilityDescriptor, CapabilityStatus, CapabilityType, Error, PrivilegeLevel, ProviderKind,
     Result,
@@ -168,7 +171,6 @@ impl EvolutionStep {
 ///
 /// Unlike the Rhai skill evolution which generates scripts, this generates
 /// actual executable capabilities:
-/// - Rust source → compile to .dylib → hot-load
 /// - Python/Shell scripts → validate → register as ScriptProvider
 /// - Process commands → validate binary exists → register as ProcessProvider
 pub struct CoreEvolution {
@@ -191,6 +193,18 @@ pub struct CoreEvolution {
 mod generation;
 
 impl CoreEvolution {
+    /// Self-evolution may only produce out-of-process script capabilities whose artifact
+    /// name stays inside `artifacts_dir`. Returns the artifact-safe capability id.
+    fn check_evolution_boundary(
+        capability_id: &str,
+        provider_kind: &ProviderKind,
+    ) -> Result<String> {
+        evolvable_provider_artifact(provider_kind)?;
+        let safe_id = capability_id.replace('.', "_");
+        ensure_single_path_component(&safe_id)?;
+        Ok(safe_id)
+    }
+
     fn audit_generated_code(provider_kind: &ProviderKind, code: &str) -> Result<()> {
         let skill_type = match provider_kind {
             ProviderKind::ExternalApi => crate::evolution::SkillType::Python,
@@ -515,6 +529,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
+        Self::check_evolution_boundary(capability_id, &provider_kind)?;
         // For BuildPrompt, create the CoreEvolutionRecord if it doesn't exist
         if step == EvolutionStep::BuildPrompt && self.load_record(evolution_id).is_err() {
             let now = chrono::Utc::now().timestamp();
@@ -656,6 +671,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
+        Self::check_evolution_boundary(capability_id, &provider_kind)?;
         // Idempotency: return existing active record if present
         if let Some(existing_id) = self.find_active_record(capability_id)? {
             debug!(
@@ -920,10 +936,9 @@ impl CoreEvolution {
             .ok_or_else(|| Error::Evolution("No source code to compile".to_string()))?;
 
         Self::audit_generated_code(&record.provider_kind, code)?;
+        let safe_id = Self::check_evolution_boundary(&record.capability_id, &record.provider_kind)?;
 
         std::fs::create_dir_all(&self.artifacts_dir)?;
-
-        let safe_id = record.capability_id.replace('.', "_");
 
         match record.provider_kind {
             ProviderKind::Process | ProviderKind::BuiltIn => {
@@ -1013,39 +1028,9 @@ impl CoreEvolution {
 
                 Ok(script_path.to_string_lossy().to_string())
             }
-            ProviderKind::DynamicLibrary => {
-                // For now, dynamic library compilation requires a Rust toolchain.
-                // We generate a standalone Rust file and compile it.
-                let src_dir = self.artifacts_dir.join(format!("{}_src", safe_id));
-                std::fs::create_dir_all(&src_dir)?;
-
-                let src_path = src_dir.join("lib.rs");
-                std::fs::write(&src_path, code)?;
-
-                // Try to compile with rustc
-                let lib_name = format!("lib{}", safe_id);
-                let output_path = self.artifacts_dir.join(format!("{}.dylib", lib_name));
-
-                let output = tokio::process::Command::new("rustc")
-                    .arg("--crate-type=cdylib")
-                    .arg("--edition=2021")
-                    .arg("-o")
-                    .arg(&output_path)
-                    .arg(&src_path)
-                    .output()
-                    .await
-                    .map_err(|e| Error::Evolution(format!("Failed to invoke rustc: {}", e)))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(Error::Evolution(format!(
-                        "Rust compilation error:\n{}",
-                        stderr
-                    )));
-                }
-
-                Ok(output_path.to_string_lossy().to_string())
-            }
+            ProviderKind::DynamicLibrary => Err(Error::PermissionDenied(
+                "native providers are rejected by the evolution boundary".to_string(),
+            )),
         }
     }
 
@@ -1163,10 +1148,9 @@ impl CoreEvolution {
                 PathBuf::from(artifact_path),
             )),
             ProviderKind::DynamicLibrary => {
-                // Dynamic library loading would use libloading
-                // For now, wrap as a process that runs the .dylib via a helper
-                warn!("🧬 [核心进化] 动态库加载暂未完全实现，使用进程模式作为后备");
-                Arc::new(ProcessProvider::new(&record.capability_id, artifact_path))
+                return Err(Error::PermissionDenied(
+                    "native providers are rejected by the evolution boundary".to_string(),
+                ));
             }
         };
 
@@ -1396,6 +1380,33 @@ mod tests {
             "#!/bin/bash\nrm -rf /tmp/blockcell-generated-test\necho '{}'",
         );
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn evolution_boundary_rejects_native_providers_and_escaping_ids() {
+        let dir = std::env::temp_dir().join("test_core_evo_boundary");
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = crate::capability_provider::new_registry_handle(dir.clone());
+        let evo = CoreEvolution::new(dir, registry, 300);
+
+        let native = evo
+            .request_capability("test.native", "native", ProviderKind::DynamicLibrary)
+            .await
+            .unwrap_err();
+        assert!(
+            native.to_string().contains("evolution boundary"),
+            "{native}"
+        );
+
+        let escaping = evo
+            .request_capability("../../escape", "escape", ProviderKind::Process)
+            .await
+            .unwrap_err();
+        assert!(
+            escaping.to_string().contains("evolution boundary"),
+            "{escaping}"
+        );
+        assert!(evo.list_records().unwrap_or_default().is_empty());
     }
 
     #[tokio::test]

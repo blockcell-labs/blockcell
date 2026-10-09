@@ -5396,3 +5396,86 @@ async fn process_message_delegates_to_configured_agent_loop() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(reply.starts_with("echo:echo:"), "{reply}");
 }
+
+#[tokio::test]
+async fn candidate_scope_isolates_listeners_and_prompt_sections_from_production() {
+    use crate::prompt_registry::{PromptSection, SystemPromptContext};
+    use crate::runtime_kernel::{ListenerSpec, ScopeTarget};
+
+    struct CandidateListener {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime_kernel::AgentEventListener for CandidateListener {
+        fn spec(&self) -> ListenerSpec {
+            ListenerSpec::new("candidate-policy").scope(ScopeTarget::Candidate("evo-1".into()))
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &AgentEventContext,
+            event: &mut AgentEvent,
+        ) -> Result<EventDecision> {
+            if matches!(event, AgentEvent::ToolPreExecute { .. }) {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(EventDecision::Continue)
+        }
+    }
+
+    struct CandidatePrompt;
+
+    impl PromptSection for CandidatePrompt {
+        fn id(&self) -> &'static str {
+            "candidate_hint"
+        }
+        fn priority(&self) -> i32 {
+            15
+        }
+        fn render(&self, _ctx: &SystemPromptContext<'_>) -> Option<String> {
+            Some("CANDIDATE PROMPT\n".to_string())
+        }
+    }
+
+    let mut runtime = test_runtime();
+    let hits = Arc::new(AtomicUsize::new(0));
+    runtime
+        .event_bus()
+        .register(Arc::new(CandidateListener { hits: hits.clone() }));
+    runtime.context_builder().prompt_registry().register(
+        ScopeTarget::Candidate("evo-1".into()),
+        Arc::new(CandidatePrompt),
+    );
+
+    let render = |runtime: &AgentRuntime| {
+        runtime
+            .context_builder()
+            .build_system_prompt_for_mode_with_channel_and_session(
+                InteractionMode::Chat,
+                None,
+                &HashSet::new(),
+                &HashSet::new(),
+                "cli",
+                "",
+                &[],
+                &[],
+                Some("cli:candidate"),
+            )
+    };
+    let call = tool_call("exec", serde_json::json!({"command": "echo hi"}));
+    let msg = test_main_session_inbound("cli", "candidate");
+
+    runtime.execute_tool_call(&call, &msg, None).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert!(!render(&runtime).contains("CANDIDATE PROMPT"));
+
+    runtime.set_candidate_scope(Some("evo-1".to_string()));
+    runtime.execute_tool_call(&call, &msg, None).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(render(&runtime).contains("CANDIDATE PROMPT"));
+
+    runtime.set_candidate_scope(None);
+    runtime.execute_tool_call(&call, &msg, None).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}

@@ -2,7 +2,7 @@
 //!
 //! - 每个 [`PromptSection`] 只负责自己的内容与出现条件；
 //! - [`PromptRegistry`] 基于 [`ScopedRegistry`] 存放 section，同 id 时更具体的作用域
-//!   （Session > Agent > Global）覆盖默认值，同作用域后注册者覆盖先注册者；
+//!   （Candidate > Session > Agent > Global）覆盖默认值，同作用域后注册者覆盖先注册者；
 //! - 最终按 priority 排序拼装，再交给 `PromptBudgetAllocator` 做预算裁剪。
 
 use std::collections::HashMap;
@@ -139,6 +139,7 @@ impl PromptRegistry {
                 ScopeTarget::Global => 0,
                 ScopeTarget::Agent(_) => 1,
                 ScopeTarget::Session(_) => 2,
+                ScopeTarget::Candidate(_) => 3,
             };
             match chosen.get(section.id()) {
                 Some((existing, _, _)) if *existing > specificity => {}
@@ -437,6 +438,7 @@ mod tests {
             ScopeView {
                 agent_id,
                 session_id: "s1",
+                candidate_id: None,
             },
             &ctx,
         )

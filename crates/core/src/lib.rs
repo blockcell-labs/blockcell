@@ -7,6 +7,7 @@ pub mod budget;
 pub mod capability;
 pub mod config;
 pub mod error;
+pub mod evolution_boundary;
 pub mod file_store;
 pub mod logging;
 pub mod mcp_config;
