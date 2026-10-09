@@ -360,6 +360,31 @@ impl AgentRuntime {
         self.agent_loop.name()
     }
 
+    /// 开始新的 step：在整个 turn 内单调递增（包括嵌套技能循环），并设为当前 step。
+    pub(crate) fn begin_step(&mut self) -> u32 {
+        self.turn_step_counter = self.turn_step_counter.saturating_add(1);
+        self.current_step = Some(self.turn_step_counter);
+        self.turn_step_counter
+    }
+
+    pub(crate) async fn end_step(
+        &self,
+        msg: &InboundMessage,
+        session_id: &str,
+        iteration: u32,
+        tool_calls: usize,
+    ) {
+        self.dispatch_event(
+            msg,
+            session_id,
+            &mut AgentEvent::StepEnd {
+                iteration,
+                tool_calls,
+            },
+        )
+        .await;
+    }
+
     pub(crate) async fn dispatch_event(
         &self,
         msg: &InboundMessage,

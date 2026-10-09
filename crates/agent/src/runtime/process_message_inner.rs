@@ -108,6 +108,7 @@ impl AgentRuntime {
 
         self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
         self.current_step = None;
+        self.turn_step_counter = 0;
         self.dispatch_event(
             &msg,
             &persist_session_key,
@@ -657,10 +658,8 @@ impl AgentRuntime {
             }
         }
 
-        let mut step: u32 = 0;
         loop {
-            step = step.saturating_add(1);
-            self.current_step = Some(step);
+            let step = self.begin_step();
             debug!(iteration = ?tool_call_counts, "LLM call iteration");
             // Learning Coordinator: record iteration (replaces skill_nudge_engine.record_iteration)
             self.learning_coordinator.record_iteration();
@@ -759,6 +758,7 @@ impl AgentRuntime {
                         },
                     )
                     .await;
+                    self.end_step(&msg, &persist_session_key, step, 0).await;
                     llm_failed_after_retries = true;
                     let max_retries = self.config.agents.defaults.llm_max_retries;
                     warn!(error = %e, iteration = ?tool_call_counts, retries = max_retries, "LLM call failed after all retries");
@@ -806,6 +806,7 @@ impl AgentRuntime {
             // and the runtime stops before the next loop iteration.
             if let Err(e) = self.record_llm_budget(&persist_session_key, &response) {
                 error!(error = %e, "Budget exhausted, stopping agent loop");
+                self.end_step(&msg, &persist_session_key, step, 0).await;
                 final_response = format!("⚠️ {}", e.message);
                 history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
                 break;
@@ -928,6 +929,8 @@ impl AgentRuntime {
                         &skill_result.final_response,
                     );
                     final_response = skill_result.final_response;
+                    self.end_step(&msg, &persist_session_key, step, response.tool_calls.len())
+                        .await;
                     break;
                 }
 
@@ -1183,6 +1186,8 @@ impl AgentRuntime {
                     current_messages.pop();
                     history.pop();
                     // Do NOT push tool results — the LLM will retry from scratch
+                    self.end_step(&msg, &persist_session_key, step, response.tool_calls.len())
+                        .await;
                     continue;
                 }
 

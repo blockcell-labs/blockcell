@@ -158,7 +158,7 @@ impl AgentRuntime {
         tool_names: &[String],
         active_skill_dir: Option<PathBuf>,
     ) -> Result<PromptSkillLoopOutput> {
-        // 技能循环有自己的 step 编号；结束后恢复外层（主循环）的 step。
+        // 技能循环与主循环共用 turn 内单调递增的 step 编号；结束后恢复外层 step 为当前 step。
         let outer_step = self.current_step;
         let result = Box::pin(self.run_prompt_skill_steps(
             msg,
@@ -194,11 +194,9 @@ impl AgentRuntime {
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
         let mut trace_messages = Vec::new();
-        let mut step: u32 = 0;
 
         let final_response = loop {
-            step = step.saturating_add(1);
-            self.current_step = Some(step);
+            let step = self.begin_step();
             self.dispatch_event(
                 msg,
                 &session_id,
@@ -227,9 +225,16 @@ impl AgentRuntime {
                     environment
                 )));
             }
-            let response = self
+            let response = match self
                 .chat_with_provider_observed(msg, &session_id, &current_messages, &tools)
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    self.end_step(msg, &session_id, step, 0).await;
+                    return Err(error);
+                }
+            };
             let tool_call_count = response.tool_calls.len();
 
             if response.tool_calls.is_empty() {

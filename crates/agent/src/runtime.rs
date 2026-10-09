@@ -2246,6 +2246,8 @@ pub struct AgentRuntime {
     /// Current turn / step identity attached to every dispatched runtime event.
     current_turn_id: Option<String>,
     current_step: Option<u32>,
+    /// Steps already started in the current turn; nested skill loops share it so step ids stay unique.
+    turn_step_counter: u32,
     /// Evolution candidate scope this runtime is evaluating (`None` in production).
     candidate_scope: Option<String>,
     /// Loop driver for each turn; defaults to the built-in loop.
@@ -2414,6 +2416,7 @@ impl AgentRuntime {
             event_tx_slot,
             current_turn_id: None,
             current_step: None,
+            turn_step_counter: 0,
             candidate_scope: None,
             agent_loop: Arc::new(agent_loop::DefaultLoop),
             response_cache: crate::response_cache::ResponseCache::with_config(

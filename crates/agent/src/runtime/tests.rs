@@ -1662,12 +1662,11 @@ description: prompt demo
     }));
 
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
-    let kinds: Vec<SessionEventKind> = JsonlSessionEventLog::new(runtime.paths.clone())
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
         .read(&session_key)
-        .expect("read session events")
-        .into_iter()
-        .map(|event| event.kind)
-        .collect();
+        .expect("read session events");
+    assert_steps_balanced(&events);
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
     assert_eq!(
         kinds.first(),
         Some(&SessionEventKind::SessionStart),
@@ -2122,6 +2121,20 @@ description: local demo
 
     let result = runtime.process_message(msg).await.expect("process message");
     let session_key = blockcell_core::build_session_key("cli", "chat-activate-skill");
+    let events = blockcell_storage::SessionEventReader::read(
+        &blockcell_storage::JsonlSessionEventLog::new(runtime.paths.clone()),
+        &session_key,
+    )
+    .expect("read session events");
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.kind == blockcell_storage::SessionEventKind::StepStart)
+            .count()
+            >= 2,
+        "expected outer and nested skill steps: {events:?}"
+    );
+    assert_steps_balanced(&events);
     let history = runtime
         .session_store
         .load(&session_key)
@@ -5465,6 +5478,7 @@ async fn full_turn_produces_ordered_session_event_log() {
     assert!(events.iter().all(|event| event.turn_id == turn_id));
     assert_eq!(events[4].step, Some(1));
     assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
+    assert_steps_balanced(&events);
 }
 
 struct EchoLoop {
@@ -5623,4 +5637,29 @@ async fn cron_delivered_tool_events_are_logged_under_target_session() {
         vec![SessionEventKind::ToolCall, SessionEventKind::ToolResult]
     );
     assert!(log.read(&msg.session_key()).unwrap().is_empty());
+}
+
+/// 每个 step 只开始一次且都被关闭。
+fn assert_steps_balanced(events: &[blockcell_storage::SessionEvent]) {
+    use blockcell_storage::SessionEventKind;
+    let mut open: Vec<u32> = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    for event in events {
+        let step = event.payload["iteration"]
+            .as_u64()
+            .map(|value| value as u32);
+        match event.kind {
+            SessionEventKind::StepStart => {
+                let step = step.expect("step/start iteration");
+                assert!(seen.insert(step), "step {step} started twice: {events:?}");
+                open.push(step);
+            }
+            SessionEventKind::StepEnd => {
+                let step = step.expect("step/end iteration");
+                assert_eq!(open.pop(), Some(step), "unbalanced step/end: {events:?}");
+            }
+            _ => {}
+        }
+    }
+    assert!(open.is_empty(), "unclosed steps {open:?}");
 }
