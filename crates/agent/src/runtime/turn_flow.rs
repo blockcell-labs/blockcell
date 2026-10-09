@@ -368,6 +368,14 @@ impl AgentRuntime {
             memory_system.record_skill_load(&active_skill.name, &active_skill.prompt_md);
             debug!(skill_name = %active_skill.name, "[layer4] Tracked skill activation for recovery (auto-routed or manual)");
         }
+        self.dispatch_event(
+            msg,
+            persist_session_key,
+            &mut AgentEvent::SkillActivated {
+                name: active_skill.name.clone(),
+            },
+        )
+        .await;
 
         let history = self.session_store.load(persist_session_key)?;
         let (result, mut session_metadata, allowed_tools) = self

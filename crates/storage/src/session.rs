@@ -350,6 +350,11 @@ impl SessionStore {
             }
         }
 
+        let events_path = self.paths.session_events_file(session_key);
+        if events_path.exists() {
+            let _ = std::fs::remove_file(&events_path);
+        }
+
         let mut deleted = false;
         if path.exists() {
             std::fs::remove_file(&path)?;

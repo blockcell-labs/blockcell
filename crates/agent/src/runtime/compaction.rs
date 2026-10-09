@@ -165,7 +165,18 @@ impl AgentRuntime {
             warn!(error = ?compact_result.error, phase, "[layer4] Compact failed, continuing without compression");
             return false;
         }
+        let messages_before = current_messages.len();
         Self::rebuild_messages_after_compact(current_messages, &compact_result);
+        self.dispatch_event(
+            msg,
+            persist_session_key,
+            &mut AgentEvent::Compaction {
+                phase: phase.to_string(),
+                messages_before,
+                messages_after: current_messages.len(),
+            },
+        )
+        .await;
         info!(
             phase,
             post_compact_tokens = estimate_messages_tokens(current_messages),

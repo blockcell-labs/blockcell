@@ -110,6 +110,8 @@ impl AgentRuntime {
         let mut session_metadata = self.session_store.load_metadata(&persist_session_key)?;
         let is_new_session = history.is_empty();
 
+        self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
+        self.current_step = None;
         self.dispatch_event(
             &msg,
             &persist_session_key,
@@ -662,6 +664,7 @@ impl AgentRuntime {
         let mut step: u32 = 0;
         loop {
             step = step.saturating_add(1);
+            self.current_step = Some(step);
             debug!(iteration = ?tool_call_counts, "LLM call iteration");
             // Learning Coordinator: record iteration (replaces skill_nudge_engine.record_iteration)
             self.learning_coordinator.record_iteration();
@@ -791,6 +794,16 @@ impl AgentRuntime {
                 "LLM response received"
             );
             debug!(target: "chat::response", response = serde_json::to_string(&response).unwrap_or_default(), "Response detail");
+            self.dispatch_event(
+                &msg,
+                &persist_session_key,
+                &mut AgentEvent::ModelResponse {
+                    content: response.content.clone().unwrap_or_default(),
+                    tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
+                    finish_reason: response.finish_reason.clone(),
+                },
+            )
+            .await;
 
             // Budget usage is reported by providers after an LLM call completes, so this
             // is post-hoc enforcement: the current call may exceed the configured limit,
@@ -889,6 +902,14 @@ impl AgentRuntime {
                         memory_system.record_skill_load(&skill_ctx.name, &skill_ctx.prompt_md);
                         debug!(skill_name = %skill_ctx.name, "[layer4] Tracked skill activation for recovery");
                     }
+                    self.dispatch_event(
+                        &msg,
+                        &persist_session_key,
+                        &mut AgentEvent::SkillActivated {
+                            name: skill_ctx.name.clone(),
+                        },
+                    )
+                    .await;
 
                     let skill_history_seed = history[..history.len().saturating_sub(1)].to_vec();
                     let (skill_result, updated_metadata, allowed_tools) = self
@@ -1441,6 +1462,8 @@ impl AgentRuntime {
                 break;
             }
         }
+
+        self.current_step = None;
 
         // ── 等待运行中的子agent任务并汇总结果 ──
         // 主LLM循环结束后，检查是否还有类型化子agent任务在运行。

@@ -356,6 +356,8 @@ impl AgentRuntime {
             session_id: session_id.to_string(),
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
+            turn_id: self.current_turn_id.clone(),
+            step: self.current_step,
         };
         self.event_bus.dispatch(&ctx, event).await
     }

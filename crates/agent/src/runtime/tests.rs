@@ -5228,9 +5228,14 @@ async fn tool_pre_execute_listener_rewrites_arguments_for_downstream_events() {
     let names: Vec<&str> = recorded.iter().map(AgentEvent::name).collect();
     assert_eq!(
         names,
-        vec!["tool/pre-execute", "tool/post-execute", "tool/result"]
+        vec![
+            "tool/pre-execute",
+            "tool/call",
+            "tool/post-execute",
+            "tool/result"
+        ]
     );
-    match &recorded[1] {
+    match &recorded[2] {
         AgentEvent::ToolPostExecute { arguments, .. } => {
             assert_eq!(arguments["command"], "echo rewritten")
         }
@@ -5276,4 +5281,79 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
         .map(AgentEvent::name)
         .collect();
     assert_eq!(names, vec!["tool/pre-execute"]);
+}
+
+#[tokio::test]
+async fn durable_tool_events_are_appended_to_session_event_log() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime();
+    runtime.current_turn_id = Some("turn-1".to_string());
+    runtime.current_step = Some(3);
+    let msg = test_main_session_inbound("cli", "event-log");
+
+    runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo hi"})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&msg.session_key())
+        .expect("read session events");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![SessionEventKind::ToolCall, SessionEventKind::ToolResult]
+    );
+    assert_eq!(events[0].payload["arguments"]["command"], "echo hi");
+    assert_eq!(events[1].seq, 2);
+    assert!(events
+        .iter()
+        .all(|event| event.turn_id.as_deref() == Some("turn-1") && event.step == Some(3)));
+}
+
+#[tokio::test]
+async fn full_turn_produces_ordered_session_event_log() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(TestProvider));
+    let msg = InboundMessage {
+        channel: "cli".to_string(),
+        account_id: None,
+        sender_id: "user".to_string(),
+        chat_id: "event-log-turn".to_string(),
+        content: "hello".to_string(),
+        media: vec![],
+        metadata: serde_json::Value::Null,
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    let session_key = msg.session_key();
+    runtime.process_message(msg).await.unwrap();
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            SessionEventKind::SessionStart,
+            SessionEventKind::TurnStart,
+            SessionEventKind::UserMessage,
+            SessionEventKind::StepStart,
+            SessionEventKind::ModelRequest,
+            SessionEventKind::ModelResponse,
+            SessionEventKind::StepEnd,
+            SessionEventKind::AssistantMessage,
+            SessionEventKind::TurnEnd,
+        ]
+    );
+    let turn_id = events[0].turn_id.clone();
+    assert!(turn_id.is_some());
+    assert!(events.iter().all(|event| event.turn_id == turn_id));
+    assert_eq!(events[4].step, Some(1));
+    assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
 }

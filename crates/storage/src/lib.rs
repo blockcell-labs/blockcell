@@ -11,6 +11,7 @@ pub mod memory_service;
 pub mod rabitq_index;
 pub mod retriever;
 pub mod session;
+pub mod session_event;
 pub mod vector;
 
 pub use audit::{AuditEvent, AuditLogger, AuditRecord, ChainVerifyResult};
@@ -20,3 +21,7 @@ pub use ghost_ledger::GhostLedger;
 pub use knowledge_index::{KnowledgeIndex, KnowledgeIndexEntry, KnowledgeIndexRebuildResult};
 pub use memory::{MemoryStore, MemoryStoreOptions};
 pub use session::SessionStore;
+pub use session_event::{
+    JsonlSessionEventLog, NewSessionEvent, SessionEvent, SessionEventKind, SessionEventReader,
+    SessionEventWriter,
+};

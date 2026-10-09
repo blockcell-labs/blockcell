@@ -3,7 +3,7 @@
 //! ```text
 //! ToolCall
 //!  → guards: Toggle → Policy → DangerousOperation → PathAccess → ShellFullAccess
-//!  → tool/pre-execute（listener 可改写参数或拒绝）
+//!  → tool/pre-execute（listener 可改写参数或拒绝）→ tool/call
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
 //!  → classify outcome（自进化上报 / 学习提示）
@@ -284,7 +284,19 @@ impl AgentRuntime {
         };
         inv.args = arguments;
         match decision {
-            EventDecision::Continue => Ok(()),
+            EventDecision::Continue => {
+                self.dispatch_event(
+                    inv.msg,
+                    &inv.msg.session_key(),
+                    &mut AgentEvent::ToolCall {
+                        tool_name: inv.call.name.clone(),
+                        call_id: inv.call.id.clone(),
+                        arguments: inv.args.clone(),
+                    },
+                )
+                .await;
+                Ok(())
+            }
             EventDecision::Reject { reason } => Err(serde_json::json!({
                 "error": reason,
                 "tool": inv.call.name,

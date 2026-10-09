@@ -2233,6 +2233,9 @@ pub struct AgentRuntime {
     event_bus: EventBus,
     /// Shared WebSocket sender slot read by the WS tool event listener.
     event_tx_slot: event_listeners::EventTxSlot,
+    /// Current turn / step identity attached to every dispatched runtime event.
+    current_turn_id: Option<String>,
+    current_step: Option<u32>,
     /// Per-session cache for large list/table responses (prevents history token explosion).
     response_cache: crate::response_cache::ResponseCache,
     /// 7-Layer Memory System integration.
@@ -2296,6 +2299,9 @@ impl AgentRuntime {
                 paths.workspace().display().to_string(),
             )));
         }
+        event_bus.register(Arc::new(event_listeners::SessionEventRecorder::new(
+            Arc::new(blockcell_storage::JsonlSessionEventLog::new(paths.clone())),
+        )));
         let event_tx_slot: event_listeners::EventTxSlot = Arc::default();
         event_bus.register(Arc::new(event_listeners::WsToolEventListener::new(
             event_tx_slot.clone(),
@@ -2392,6 +2398,8 @@ impl AgentRuntime {
             tool_policy,
             event_bus,
             event_tx_slot,
+            current_turn_id: None,
+            current_step: None,
             response_cache: crate::response_cache::ResponseCache::with_config(
                 response_cache_config,
             ),

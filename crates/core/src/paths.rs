@@ -205,6 +205,17 @@ impl Paths {
             .join(format!("{}.jsonl", legacy_session_file_stem(session_key)))
     }
 
+    /// Append-only session event logs. Kept outside `sessions/` so transcript
+    /// listings that scan `sessions/*.jsonl` never pick them up.
+    pub fn session_events_dir(&self) -> PathBuf {
+        self.base.join("session_events")
+    }
+
+    pub fn session_events_file(&self, session_key: &str) -> PathBuf {
+        self.session_events_dir()
+            .join(format!("{}.jsonl", session_file_stem(session_key)))
+    }
+
     pub fn audit_dir(&self) -> PathBuf {
         self.base.join("audit")
     }

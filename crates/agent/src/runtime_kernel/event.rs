@@ -12,13 +12,15 @@ pub enum EventClass {
     Capability,
 }
 
-/// 事件派发上下文：标识事件属于哪个 agent / session / 会话来源。
+/// 事件派发上下文：标识事件属于哪个 agent / session / turn / step 以及会话来源。
 #[derive(Debug, Clone, Default)]
 pub struct AgentEventContext {
     pub agent_id: String,
     pub session_id: String,
     pub channel: String,
     pub chat_id: String,
+    pub turn_id: Option<String>,
+    pub step: Option<u32>,
 }
 
 /// Listener 对事件的处理结论。
@@ -58,7 +60,19 @@ pub enum AgentEvent {
     AgentRequestError {
         error: String,
     },
+    /// 模型返回（包含模型提议但可能未被执行的 tool calls，用于对比"想做什么"与"做了什么"）。
+    ModelResponse {
+        content: String,
+        tool_calls: Value,
+        finish_reason: String,
+    },
     ToolPreExecute {
+        tool_name: String,
+        call_id: String,
+        arguments: Value,
+    },
+    /// 通过所有 guard 与 pre-execute 拦截后真正发起的工具调用。
+    ToolCall {
         tool_name: String,
         call_id: String,
         arguments: Value,
@@ -78,6 +92,14 @@ pub enum AgentEvent {
         is_error: bool,
         duration_ms: u64,
     },
+    SkillActivated {
+        name: String,
+    },
+    Compaction {
+        phase: String,
+        messages_before: usize,
+        messages_after: usize,
+    },
 }
 
 impl AgentEvent {
@@ -90,23 +112,30 @@ impl AgentEvent {
             Self::StepEnd { .. } => "step/end",
             Self::AgentRequest { .. } => "agent/request",
             Self::AgentRequestError { .. } => "agent/request-error",
+            Self::ModelResponse { .. } => "model/response",
             Self::ToolPreExecute { .. } => "tool/pre-execute",
+            Self::ToolCall { .. } => "tool/call",
             Self::ToolPostExecute { .. } => "tool/post-execute",
             Self::ToolResult { .. } => "tool/result",
+            Self::SkillActivated { .. } => "skill/load",
+            Self::Compaction { .. } => "compaction",
         }
     }
 
     pub fn class(&self) -> EventClass {
         match self {
-            Self::TurnStart { .. } | Self::TurnEnd { .. } | Self::ToolResult { .. } => {
-                EventClass::Durable
-            }
-            Self::ToolPreExecute { .. } | Self::ToolPostExecute { .. } => EventClass::Capability,
-            Self::AgentPreStep { .. }
+            Self::TurnStart { .. }
+            | Self::TurnEnd { .. }
             | Self::StepStart { .. }
             | Self::StepEnd { .. }
             | Self::AgentRequest { .. }
-            | Self::AgentRequestError { .. } => EventClass::Live,
+            | Self::ModelResponse { .. }
+            | Self::ToolCall { .. }
+            | Self::ToolResult { .. }
+            | Self::SkillActivated { .. }
+            | Self::Compaction { .. } => EventClass::Durable,
+            Self::ToolPreExecute { .. } | Self::ToolPostExecute { .. } => EventClass::Capability,
+            Self::AgentPreStep { .. } | Self::AgentRequestError { .. } => EventClass::Live,
         }
     }
 
@@ -118,6 +147,7 @@ impl AgentEvent {
     pub fn tool_name(&self) -> Option<&str> {
         match self {
             Self::ToolPreExecute { tool_name, .. }
+            | Self::ToolCall { tool_name, .. }
             | Self::ToolPostExecute { tool_name, .. }
             | Self::ToolResult { tool_name, .. } => Some(tool_name),
             _ => None,
@@ -148,7 +178,7 @@ mod tests {
         assert_eq!(end.class(), EventClass::Durable);
         assert!(!end.can_reject());
 
-        let step = AgentEvent::StepStart { iteration: 1 };
+        let step = AgentEvent::AgentPreStep { iteration: 1 };
         assert_eq!(step.class(), EventClass::Live);
         assert_eq!(step.tool_name(), None);
     }
