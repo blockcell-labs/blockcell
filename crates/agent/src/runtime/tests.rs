@@ -5357,3 +5357,38 @@ async fn full_turn_produces_ordered_session_event_log() {
     assert_eq!(events[4].step, Some(1));
     assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
 }
+
+struct EchoLoop {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::AgentLoop for EchoLoop {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    async fn run(&self, runtime: &mut AgentRuntime, msg: InboundMessage) -> Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(format!("echo:{}:{}", runtime.agent_loop_name(), msg.content))
+    }
+}
+
+#[tokio::test]
+async fn process_message_delegates_to_configured_agent_loop() {
+    let mut runtime = test_runtime();
+    assert_eq!(runtime.agent_loop_name(), "default");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    runtime.set_agent_loop(Arc::new(EchoLoop {
+        calls: calls.clone(),
+    }));
+    let reply = runtime
+        .process_message(test_main_session_inbound("cli", "custom-loop"))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.agent_loop_name(), "echo");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(reply.starts_with("echo:echo:"), "{reply}");
+}

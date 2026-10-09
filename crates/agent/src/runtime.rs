@@ -67,6 +67,7 @@ pub mod learning;
 pub mod path_security;
 
 // --- submodules extracted from the original monolithic runtime.rs ---
+pub mod agent_loop;
 mod compaction;
 mod event_listeners;
 mod fork_spawn;
@@ -2236,6 +2237,8 @@ pub struct AgentRuntime {
     /// Current turn / step identity attached to every dispatched runtime event.
     current_turn_id: Option<String>,
     current_step: Option<u32>,
+    /// Loop driver for each turn; defaults to the built-in loop.
+    agent_loop: Arc<dyn agent_loop::AgentLoop>,
     /// Per-session cache for large list/table responses (prevents history token explosion).
     response_cache: crate::response_cache::ResponseCache,
     /// 7-Layer Memory System integration.
@@ -2400,6 +2403,7 @@ impl AgentRuntime {
             event_tx_slot,
             current_turn_id: None,
             current_step: None,
+            agent_loop: Arc::new(agent_loop::DefaultLoop),
             response_cache: crate::response_cache::ResponseCache::with_config(
                 response_cache_config,
             ),

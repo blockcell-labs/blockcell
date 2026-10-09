@@ -342,6 +342,15 @@ impl AgentRuntime {
         &self.event_bus
     }
 
+    /// Replace the loop driver used by `process_message`.
+    pub fn set_agent_loop(&mut self, agent_loop: Arc<dyn agent_loop::AgentLoop>) {
+        self.agent_loop = agent_loop;
+    }
+
+    pub fn agent_loop_name(&self) -> &'static str {
+        self.agent_loop.name()
+    }
+
     pub(crate) async fn dispatch_event(
         &self,
         msg: &InboundMessage,

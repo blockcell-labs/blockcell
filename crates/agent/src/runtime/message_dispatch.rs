@@ -290,8 +290,9 @@ impl AgentRuntime {
             .clone()
             .unwrap_or_else(|| "default".to_string());
         let identity = AgentIdentity::lead(agent_id, "lead".to_string());
+        let agent_loop = Arc::clone(&self.agent_loop);
         scope_agent_context(identity, async move {
-            scope_abort_token(abort_token, self.process_message_inner(msg)).await
+            scope_abort_token(abort_token, agent_loop.run(self, msg)).await
         })
         .await
     }
