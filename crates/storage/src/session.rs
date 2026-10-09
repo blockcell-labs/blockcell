@@ -1,4 +1,4 @@
-use crate::file_lock::lock_exclusive;
+use crate::file_lock::{lock_exclusive, lock_path_for};
 use blockcell_core::types::ChatMessage;
 use blockcell_core::{session_file_stem, session_id_from_file_stem, Paths, Result};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::debug;
+use tracing::{debug, warn};
 
 static SESSION_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -350,9 +350,15 @@ impl SessionStore {
             }
         }
 
+        // 持事件日志自身的锁删除，避免与并发追加交错；同时清理锁文件
         let events_path = self.paths.session_events_file(session_key);
         if events_path.exists() {
-            let _ = std::fs::remove_file(&events_path);
+            let events_lock = lock_exclusive(&events_path)?;
+            if let Err(error) = std::fs::remove_file(&events_path) {
+                warn!(path = %events_path.display(), error = %error, "Failed to delete session event log");
+            }
+            drop(events_lock);
+            let _ = std::fs::remove_file(lock_path_for(&events_path));
         }
 
         let mut deleted = false;
@@ -495,6 +501,38 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let paths = Paths::with_base(dir.path().to_path_buf());
         (SessionStore::new(paths), dir)
+    }
+
+    #[test]
+    fn clear_removes_session_event_log_and_its_lock_file() {
+        use crate::session_event::{
+            JsonlSessionEventLog, NewSessionEvent, SessionEventKind, SessionEventWriter,
+        };
+
+        let (store, dir) = test_store();
+        let paths = Paths::with_base(dir.path().to_path_buf());
+        store
+            .save("cli:clear-events", &[ChatMessage::user("hi")])
+            .unwrap();
+        JsonlSessionEventLog::new(paths.clone())
+            .append(
+                "cli:clear-events",
+                NewSessionEvent {
+                    turn_id: None,
+                    step: None,
+                    kind: SessionEventKind::TurnStart,
+                    payload: json!({}),
+                },
+            )
+            .unwrap();
+        let events_path = paths.session_events_file("cli:clear-events");
+        assert!(events_path.exists());
+        assert!(lock_path_for(&events_path).exists());
+
+        assert!(store.clear("cli:clear-events").unwrap());
+
+        assert!(!events_path.exists());
+        assert!(!lock_path_for(&events_path).exists());
     }
 
     #[test]
