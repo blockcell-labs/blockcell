@@ -2,8 +2,9 @@
 //!
 //! ```text
 //! ToolCall
-//!  → guards: Toggle → Policy → DangerousOperation → PathAccess → ShellFullAccess
-//!  → tool/pre-execute（listener 可改写参数或拒绝）→ tool/call
+//!  → admission: Toggle → tool/pre-execute（listener 可改写参数或拒绝）
+//!               → Policy → DangerousOperation → PathAccess → ShellFullAccess
+//!  → tool/call（任一阶段拒绝则直接记录 is_error 的 tool/result）
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
 //!  → classify outcome（自进化上报 / 学习提示）
@@ -11,6 +12,7 @@
 //! ```
 //!
 //! 具体工具只需实现业务 `execute`，不再自行处理 permission / approval / audit。
+//! 所有安全检查都作用于 listener 改写之后的最终参数。
 
 use super::tool_exec::{
     full_access_retry_args, shell_action_is_run, shell_requests_full_access,
@@ -22,38 +24,41 @@ use super::*;
 pub(crate) struct ToolInvocation<'a> {
     pub(crate) call: &'a ToolCallRequest,
     pub(crate) msg: &'a InboundMessage,
-    /// 经过 guard / listener 处理后真正交给工具的参数。
+    /// 经 listener 改写后、被所有 guard 检查并最终交给工具的参数。
     pub(crate) args: serde_json::Value,
     /// Policy 阶段已获得用户显式确认，后续审批阶段不再重复询问。
     pub(crate) policy_confirmed: bool,
 }
 
-/// 工具执行结果的规范化表示。
-pub(crate) struct ToolOutcome {
+/// 工具实际执行后的返回内容。
+pub(crate) struct ToolExecution {
     pub(crate) result_str: String,
     pub(crate) result_json: serde_json::Value,
     pub(crate) is_error: bool,
     pub(crate) duration_ms: u64,
 }
 
-/// Guard 拒绝时直接作为工具结果返回给模型的字符串。
+/// 准入阶段拒绝时直接作为工具结果返回给模型的字符串。
 type GuardResult = std::result::Result<(), String>;
 
 #[derive(Debug, Clone, Copy)]
-enum ToolGuard {
+enum AdmissionStage {
     Toggle,
+    PreExecute,
     Policy,
     DangerousOperation,
     PathAccess,
     ShellFullAccess,
 }
 
-const TOOL_GUARDS: [ToolGuard; 5] = [
-    ToolGuard::Toggle,
-    ToolGuard::Policy,
-    ToolGuard::DangerousOperation,
-    ToolGuard::PathAccess,
-    ToolGuard::ShellFullAccess,
+/// pre-execute 必须先于所有安全检查，确保检查的是 listener 改写后的最终参数。
+const ADMISSION_STAGES: [AdmissionStage; 6] = [
+    AdmissionStage::Toggle,
+    AdmissionStage::PreExecute,
+    AdmissionStage::Policy,
+    AdmissionStage::DangerousOperation,
+    AdmissionStage::PathAccess,
+    AdmissionStage::ShellFullAccess,
 ];
 
 impl AgentRuntime {
@@ -79,12 +84,20 @@ impl AgentRuntime {
             args: tool_call.arguments.clone(),
             policy_confirmed: false,
         };
-        if let Err(denied) = self.run_tool_guards(&mut inv).await {
+        if let Err(denied) = self.admit_tool_call(&mut inv).await {
+            self.record_rejected_tool_call(&inv, &denied).await;
             return denied;
         }
-        if let Err(denied) = self.dispatch_tool_pre_execute(&mut inv).await {
-            return denied;
-        }
+        self.dispatch_event(
+            msg,
+            &persist_session_key_for(msg),
+            &mut AgentEvent::ToolCall {
+                tool_name: tool_call.name.clone(),
+                call_id: tool_call.id.clone(),
+                arguments: inv.args.clone(),
+            },
+        )
+        .await;
 
         let ctx = self.build_tool_context(msg, active_skill_dir);
         let outcome = self.execute_guarded_tool(&mut inv, ctx).await;
@@ -100,17 +113,38 @@ impl AgentRuntime {
         }
     }
 
-    async fn run_tool_guards(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
-        for guard in TOOL_GUARDS {
-            match guard {
-                ToolGuard::Toggle => self.guard_disabled_toggles(inv),
-                ToolGuard::Policy => self.guard_tool_policy(inv).await,
-                ToolGuard::DangerousOperation => self.guard_dangerous_operation(inv).await,
-                ToolGuard::PathAccess => self.guard_path_access(inv).await,
-                ToolGuard::ShellFullAccess => self.guard_shell_full_access(inv).await,
+    async fn admit_tool_call(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
+        for stage in ADMISSION_STAGES {
+            match stage {
+                AdmissionStage::Toggle => self.guard_disabled_toggles(inv),
+                AdmissionStage::PreExecute => self.dispatch_tool_pre_execute(inv).await,
+                AdmissionStage::Policy => self.guard_tool_policy(inv).await,
+                AdmissionStage::DangerousOperation => self.guard_dangerous_operation(inv).await,
+                AdmissionStage::PathAccess => self.guard_path_access(inv).await,
+                AdmissionStage::ShellFullAccess => self.guard_shell_full_access(inv).await,
             }?;
         }
         Ok(())
+    }
+
+    /// 被拒绝的调用同样产生 durable 的 tool/result，保证拦截行为可审计、可回放。
+    async fn record_rejected_tool_call(&mut self, inv: &ToolInvocation<'_>, denied: &str) {
+        let result = serde_json::from_str::<serde_json::Value>(denied)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({ "error": denied }));
+        self.dispatch_event(
+            inv.msg,
+            &persist_session_key_for(inv.msg),
+            &mut AgentEvent::ToolResult {
+                tool_name: inv.call.name.clone(),
+                call_id: inv.call.id.clone(),
+                result,
+                is_error: true,
+                duration_ms: 0,
+            },
+        )
+        .await;
     }
 
     /// 非交互通道依据用户原文中的显式确认，交互通道走确认请求。
@@ -143,7 +177,7 @@ impl AgentRuntime {
 
     async fn guard_tool_policy(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
         match self
-            .check_tool_policy(&inv.call.name, &inv.call.arguments, inv.msg)
+            .check_tool_policy(&inv.call.name, &inv.args, inv.msg)
             .await
         {
             PolicyOutcome::Proceed => Ok(()),
@@ -166,7 +200,7 @@ impl AgentRuntime {
         if inv.policy_confirmed {
             return Ok(());
         }
-        let args = &inv.call.arguments;
+        let args = &inv.args;
         match inv.call.name.as_str() {
             "exec" => {
                 let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
@@ -225,7 +259,7 @@ impl AgentRuntime {
         if self
             .check_path_permission_with_confirmation(
                 &inv.call.name,
-                &inv.call.arguments,
+                &inv.args,
                 inv.msg,
                 inv.policy_confirmed,
             )
@@ -274,29 +308,21 @@ impl AgentRuntime {
         let mut event = AgentEvent::ToolPreExecute {
             tool_name: inv.call.name.clone(),
             call_id: inv.call.id.clone(),
-            arguments: std::mem::take(&mut inv.args),
+            arguments: inv.args.clone(),
         };
         let decision = self
             .dispatch_event(inv.msg, &persist_session_key_for(inv.msg), &mut event)
             .await;
-        let AgentEvent::ToolPreExecute { arguments, .. } = event else {
-            unreachable!("tool/pre-execute listeners cannot replace the event kind");
-        };
-        inv.args = arguments;
+        match event {
+            AgentEvent::ToolPreExecute { arguments, .. } => inv.args = arguments,
+            other => warn!(
+                tool = %inv.call.name,
+                event = other.name(),
+                "tool/pre-execute listener replaced the event kind; keeping original arguments"
+            ),
+        }
         match decision {
-            EventDecision::Continue => {
-                self.dispatch_event(
-                    inv.msg,
-                    &persist_session_key_for(inv.msg),
-                    &mut AgentEvent::ToolCall {
-                        tool_name: inv.call.name.clone(),
-                        call_id: inv.call.id.clone(),
-                        arguments: inv.args.clone(),
-                    },
-                )
-                .await;
-                Ok(())
-            }
+            EventDecision::Continue => Ok(()),
             EventDecision::Reject { reason } => Err(serde_json::json!({
                 "error": reason,
                 "tool": inv.call.name,
@@ -387,7 +413,7 @@ impl AgentRuntime {
         &mut self,
         inv: &mut ToolInvocation<'_>,
         ctx: blockcell_tools::ToolContext,
-    ) -> ToolOutcome {
+    ) -> ToolExecution {
         let tool_name = &inv.call.name;
         let start = std::time::Instant::now();
         let mut result = self
@@ -431,7 +457,7 @@ impl AgentRuntime {
                 (err_str.clone(), serde_json::json!({"error": err_str}))
             }
         };
-        ToolOutcome {
+        ToolExecution {
             result_str,
             result_json,
             is_error,
@@ -440,7 +466,7 @@ impl AgentRuntime {
     }
 
     /// tool/post-execute 事件以及依赖执行结果的运行时副作用（技能热加载、索引刷新）。
-    async fn after_tool_execute(&mut self, inv: &ToolInvocation<'_>, outcome: &ToolOutcome) {
+    async fn after_tool_execute(&mut self, inv: &ToolInvocation<'_>, outcome: &ToolExecution) {
         let tool_call = inv.call;
         self.dispatch_event(
             inv.msg,
@@ -465,7 +491,7 @@ impl AgentRuntime {
             tool_call.name.as_str(),
             "write_file" | "edit_file" | "skill_manage"
         ) {
-            if let Some(path_str) = tool_call.arguments.get("path").and_then(|v| v.as_str()) {
+            if let Some(path_str) = inv.args.get("path").and_then(|v| v.as_str()) {
                 let resolved = self.resolve_path(path_str);
                 let skills_dir = self.paths.skills_dir();
                 let in_skills = resolved.starts_with(&skills_dir)
@@ -497,8 +523,8 @@ impl AgentRuntime {
 
         // Detect skill_manage changes and refresh Skill index summary
         if tool_call.name == "skill_manage" {
-            let action = tool_call
-                .arguments
+            let action = inv
+                .args
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
@@ -519,7 +545,7 @@ impl AgentRuntime {
     async fn classify_tool_outcome(
         &mut self,
         tool_call: &ToolCallRequest,
-        outcome: &ToolOutcome,
+        outcome: &ToolExecution,
     ) -> Option<String> {
         let mut learning_hint: Option<String> = None;
         if outcome.is_error {
@@ -596,7 +622,7 @@ impl AgentRuntime {
     }
 
     /// tool/result 事件、审计日志、学习计数与 Layer4 文件追踪。
-    async fn record_tool_result(&mut self, inv: &ToolInvocation<'_>, outcome: &ToolOutcome) {
+    async fn record_tool_result(&mut self, inv: &ToolInvocation<'_>, outcome: &ToolExecution) {
         let tool_call = inv.call;
         let msg = inv.msg;
         self.dispatch_event(
@@ -629,8 +655,7 @@ impl AgentRuntime {
         let tool_name_str = tool_call.name.as_str();
         let is_skill_write_tool = tool_name_str == "skill_manage"
             && matches!(
-                tool_call
-                    .arguments
+                inv.args
                     .get("action")
                     .and_then(|v| v.as_str())
                     .unwrap_or(""),
@@ -657,9 +682,7 @@ impl AgentRuntime {
                 match tool_call.name.as_str() {
                     "read_file" => {
                         // read_file: 直接追踪文件内容
-                        if let Some(path_str) =
-                            tool_call.arguments.get("path").and_then(|v| v.as_str())
-                        {
+                        if let Some(path_str) = inv.args.get("path").and_then(|v| v.as_str()) {
                             Some((self.resolve_path(path_str), result_str))
                         } else {
                             None
@@ -667,20 +690,12 @@ impl AgentRuntime {
                     }
                     "grep" | "rg" => {
                         // grep/rg: 追踪搜索路径和匹配结果
-                        let path = tool_call
-                            .arguments
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(".");
+                        let path = inv.args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                         Some((self.resolve_path(path), result_str))
                     }
                     "glob" => {
                         // glob: 追踪匹配的文件列表
-                        let path = tool_call
-                            .arguments
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(".");
+                        let path = inv.args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                         Some((self.resolve_path(path), result_str))
                     }
                     _ => None,

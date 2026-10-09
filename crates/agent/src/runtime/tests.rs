@@ -5211,6 +5211,7 @@ async fn tool_policy_channel_condition_only_applies_to_matching_channel() {
 struct RecordingToolListener {
     events: Arc<Mutex<Vec<crate::runtime_kernel::AgentEvent>>>,
     reject: bool,
+    rewrite: serde_json::Value,
 }
 
 #[async_trait::async_trait]
@@ -5231,7 +5232,7 @@ impl crate::runtime_kernel::AgentEventListener for RecordingToolListener {
                     reason: "blocked by recording listener".to_string(),
                 });
             }
-            *arguments = serde_json::json!({"command": "echo rewritten"});
+            *arguments = self.rewrite.clone();
         }
         self.events.lock().unwrap().push(event.clone());
         Ok(EventDecision::Continue)
@@ -5247,6 +5248,7 @@ async fn tool_pre_execute_listener_rewrites_arguments_for_downstream_events() {
         .register(Arc::new(RecordingToolListener {
             events: events.clone(),
             reject: false,
+            rewrite: serde_json::json!({"command": "echo rewritten"}),
         }));
     let (event_tx, mut event_rx) = broadcast::channel(16);
     runtime.set_event_tx(event_tx);
@@ -5296,6 +5298,7 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
         .register(Arc::new(RecordingToolListener {
             events: events.clone(),
             reject: true,
+            rewrite: serde_json::Value::Null,
         }));
 
     let result = runtime
@@ -5309,13 +5312,84 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
     assert!(result.contains("blocked by recording listener"), "{result}");
     assert!(result.contains("event_listener"), "{result}");
     assert!(!result.contains("Unknown tool"), "{result}");
+    let recorded = events.lock().unwrap().clone();
+    let names: Vec<&str> = recorded.iter().map(AgentEvent::name).collect();
+    assert_eq!(names, vec!["tool/pre-execute", "tool/result"]);
+    match &recorded[1] {
+        AgentEvent::ToolResult {
+            result, is_error, ..
+        } => {
+            assert!(*is_error);
+            assert_eq!(result["policy"], "event_listener");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn guards_check_arguments_rewritten_by_pre_execute_listener() {
+    let mut runtime = test_runtime();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: false,
+            rewrite: serde_json::json!({"command": "pkill -9 blockcell"}),
+        }));
+
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "ls"})),
+            &test_main_session_inbound("cli", "rewrite-bypass"),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.contains("dangerous exec command requires explicit user confirmation"),
+        "{result}"
+    );
     let names: Vec<&str> = events
         .lock()
         .unwrap()
         .iter()
         .map(AgentEvent::name)
         .collect();
-    assert_eq!(names, vec!["tool/pre-execute"]);
+    assert_eq!(names, vec!["tool/pre-execute", "tool/result"]);
+}
+
+#[tokio::test]
+async fn policy_denied_tool_call_is_recorded_in_session_event_log() {
+    use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime();
+    runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![tool_policy_rule(
+            "deny-exec",
+            "exec",
+            ToolPolicyDecision::Deny,
+        )],
+        ..Default::default()
+    });
+    let msg = test_main_session_inbound("cli", "policy-log");
+
+    runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo hi"})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&msg.session_key())
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, SessionEventKind::ToolResult);
+    assert_eq!(events[0].payload["is_error"], true);
+    assert_eq!(events[0].payload["result"]["policy"], "tool_policy");
 }
 
 #[tokio::test]
