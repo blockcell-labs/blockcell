@@ -1,6 +1,7 @@
 //! Self-Evolution 的信任边界：Block = trusted host，Cell = mutable skill layer。
 //!
-//! 进化只能产出 [`EvolvableArtifact`]，不得修改 [`TrustedComponent`]。
+//! 进化只能产出可变层产物（Skill / Prompt / Workflow / Memory policy / Tool composition /
+//! Learned procedure，以及在宿主进程外解释执行的脚本能力），不得修改 [`TrustedComponent`]。
 //! 合法路径是 `Candidate → Static Check → Test → Sandbox → Observe → Promote`，
 //! 而不是 `LLM → 生成原生代码 → 加载进宿主进程`。
 
@@ -21,30 +22,21 @@ pub enum TrustedComponent {
     NativeCode,
 }
 
-/// 允许由进化产生或修改的产物。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvolvableArtifact {
-    Skill,
-    Prompt,
-    Workflow,
-    MemoryPolicy,
-    ToolComposition,
-    LearnedProcedure,
-    /// 以独立进程 / 解释器运行的脚本能力（bash / python / rhai）。
-    ScriptCapability,
-}
-
 /// 解析能力进化请求中的 provider 类型。只允许在宿主进程外解释执行的脚本；
-/// 请求原生代码（rust / dylib）属于越界，未知值沿用默认的 bash 脚本。
+/// 请求原生代码（rust / dylib）属于越界，未知值报错而不是猜测成 bash 脚本。
 pub fn parse_evolvable_provider_kind(provider: &str) -> Result<ProviderKind> {
     match provider {
+        "" | "script" | "bash" | "shell" | "sh" | "process" | "Process" | "builtin"
+        | "BuiltIn" => Ok(ProviderKind::Process),
         "python" | "ExternalApi" => Ok(ProviderKind::ExternalApi),
         "rhai" | "RhaiScript" => Ok(ProviderKind::RhaiScript),
         "rust" | "dylib" | "DynamicLibrary" => Err(boundary_violation(
             TrustedComponent::NativeCode,
             "self-evolution must not generate native libraries; use a script provider (script / python / process / rhai)",
         )),
-        _ => Ok(ProviderKind::Process),
+        other => Err(Error::Validation(format!(
+            "unknown evolution provider '{other}'; expected one of script / python / process / rhai"
+        ))),
     }
 }
 
@@ -80,12 +72,16 @@ mod tests {
             parse_evolvable_provider_kind("rhai").unwrap(),
             ProviderKind::RhaiScript
         );
-        for default in ["script", "process", "Process", "unknown"] {
+        for default in ["", "script", "process", "Process", "BuiltIn"] {
             assert_eq!(
                 parse_evolvable_provider_kind(default).unwrap(),
                 ProviderKind::Process
             );
         }
+        assert!(matches!(
+            parse_evolvable_provider_kind("pyhton"),
+            Err(Error::Validation(_))
+        ));
         for native in ["rust", "dylib", "DynamicLibrary"] {
             let err = parse_evolvable_provider_kind(native).unwrap_err();
             assert!(err.to_string().contains("NativeCode"), "{err}");

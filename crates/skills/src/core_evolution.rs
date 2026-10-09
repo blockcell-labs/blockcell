@@ -198,6 +198,31 @@ impl CoreEvolution {
         Ok(safe_id)
     }
 
+    /// Artifact and version paths use `.` → `_`, so `a.b` and `a_b` would share files.
+    /// Refuse a new capability whose artifact name is already owned by a different capability.
+    async fn ensure_artifact_name_available(&self, capability_id: &str) -> Result<()> {
+        let safe_id = Self::check_evolution_boundary(capability_id)?;
+        let collides = |other: &str| other != capability_id && other.replace('.', "_") == safe_id;
+        let registered = self
+            .registry
+            .lock()
+            .await
+            .list_all()
+            .iter()
+            .any(|descriptor| collides(&descriptor.id));
+        if registered
+            || self
+                .list_records()?
+                .iter()
+                .any(|record| collides(&record.capability_id))
+        {
+            return Err(Error::Validation(format!(
+                "capability '{capability_id}' would share artifact name '{safe_id}' with an existing capability"
+            )));
+        }
+        Ok(())
+    }
+
     fn audit_generated_code(provider_kind: &ProviderKind, code: &str) -> Result<()> {
         let skill_type = match provider_kind {
             ProviderKind::ExternalApi => crate::evolution::SkillType::Python,
@@ -522,7 +547,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
-        Self::check_evolution_boundary(capability_id)?;
+        self.ensure_artifact_name_available(capability_id).await?;
         // For BuildPrompt, create the CoreEvolutionRecord if it doesn't exist
         if step == EvolutionStep::BuildPrompt && self.load_record(evolution_id).is_err() {
             let now = chrono::Utc::now().timestamp();
@@ -664,7 +689,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
-        Self::check_evolution_boundary(capability_id)?;
+        self.ensure_artifact_name_available(capability_id).await?;
         // Idempotency: return existing active record if present
         if let Some(existing_id) = self.find_active_record(capability_id)? {
             debug!(
@@ -1383,6 +1408,30 @@ mod tests {
             "{escaping}"
         );
         assert!(evo.list_records().unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn colliding_artifact_names_are_rejected() {
+        let dir = std::env::temp_dir().join("test_core_evo_artifact_collision");
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = crate::capability_provider::new_registry_handle(dir.clone());
+        let evo = CoreEvolution::new(dir, registry, 300);
+
+        let first = evo
+            .request_capability("api.weather", "weather", ProviderKind::Process)
+            .await
+            .unwrap();
+        let err = evo
+            .request_capability("api_weather", "weather again", ProviderKind::Process)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("artifact name"), "{err}");
+        assert_eq!(
+            evo.request_capability("api.weather", "same", ProviderKind::Process)
+                .await
+                .unwrap(),
+            first
+        );
     }
 
     #[tokio::test]
