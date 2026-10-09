@@ -502,6 +502,7 @@ dependencies = [
  "blockcell-tools",
  "chrono",
  "dirs",
+ "futures",
  "glob",
  "libc",
  "once_cell",

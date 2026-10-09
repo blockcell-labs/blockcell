@@ -33,6 +33,7 @@ pub mod prompt_skill_executor;
 pub mod response_cache;
 pub mod retrieval;
 pub mod runtime;
+pub mod runtime_kernel;
 pub mod session_memory;
 pub mod session_metrics;
 pub mod skill_decision;
