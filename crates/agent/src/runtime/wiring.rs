@@ -324,6 +324,7 @@ impl AgentRuntime {
     }
 
     pub fn set_agent_id(&mut self, agent_id: Option<String>) {
+        self.context_builder.set_agent_id(agent_id.as_deref());
         self.agent_id = agent_id;
         self.sync_task_manager_event_emitter();
     }

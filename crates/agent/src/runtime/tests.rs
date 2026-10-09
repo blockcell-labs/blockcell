@@ -5370,7 +5370,11 @@ impl crate::AgentLoop for EchoLoop {
 
     async fn run(&self, runtime: &mut AgentRuntime, msg: InboundMessage) -> Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(format!("echo:{}:{}", runtime.agent_loop_name(), msg.content))
+        Ok(format!(
+            "echo:{}:{}",
+            runtime.agent_loop_name(),
+            msg.content
+        ))
     }
 }
 

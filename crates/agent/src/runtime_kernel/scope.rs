@@ -106,6 +106,31 @@ impl<T: Clone> ScopedRegistry<T> {
             .collect()
     }
 
+    /// 与 [`Self::visible`] 相同，但同时返回条目所属作用域，供调用方做覆盖决策。
+    pub fn visible_with_target(&self, view: ScopeView<'_>) -> Vec<(ScopeTarget, T)> {
+        self.entries
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|entry| entry.target.is_visible_to(view))
+            .map(|entry| (entry.target.clone(), entry.value.clone()))
+            .collect()
+    }
+
+    /// 注册集合的指纹：任何注册或注销都会改变它，可用于缓存失效判断。
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for entry in self
+            .entries
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            std::hash::Hash::hash(&entry.id, &mut hasher);
+        }
+        std::hash::Hasher::finish(&hasher)
+    }
+
     pub fn len(&self) -> usize {
         self.entries.read().unwrap_or_else(|p| p.into_inner()).len()
     }

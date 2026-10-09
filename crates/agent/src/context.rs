@@ -1,7 +1,9 @@
 use crate::auto_memory::MemoryInjector;
+use crate::prompt_registry::{PromptRegistry, SystemPromptContext};
 use crate::retrieval::{
     PromptBudgetAllocator, PromptSections, RetrievalOrchestrator, RetrievalSource,
 };
+use crate::runtime_kernel::ScopeView;
 use blockcell_core::config::{MemoryRecallConfig, MemoryRecallMode};
 use blockcell_core::types::ChatMessage;
 use blockcell_core::{Config, Paths};
@@ -13,11 +15,11 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
-const MAX_AGENTS_MD_TOKENS: usize = 4_000;
-const MAX_SOUL_MD_TOKENS: usize = 2_000;
+pub(crate) const MAX_AGENTS_MD_TOKENS: usize = 4_000;
+pub(crate) const MAX_SOUL_MD_TOKENS: usize = 2_000;
 const MAX_RETRIEVED_ITEM_TOKENS: usize = 500;
-const MAX_ACTIVE_SKILL_TOKENS: usize = 10_000;
-const MAX_TOOL_RULE_TOKENS: usize = 1_000;
+pub(crate) const MAX_ACTIVE_SKILL_TOKENS: usize = 10_000;
+pub(crate) const MAX_TOOL_RULE_TOKENS: usize = 1_000;
 const MAX_CACHED_SESSIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,7 +30,7 @@ pub enum InteractionMode {
     General,
 }
 
-const CODING_MODE_PROMPT: &str = r#"
+pub(crate) const CODING_MODE_PROMPT: &str = r#"
 ## Editing Discipline
 - Read relevant files before editing. Make the smallest coherent diff and do not modify unrelated files.
 - Preserve user changes in a dirty worktree. If an edit fails, reread the current file before retrying.
@@ -66,7 +68,7 @@ pub struct ActiveSkillContext {
 /// Skill 系统引导 (参考 Hermes MEMORY_GUIDANCE)
 ///
 /// 注入到系统提示词中, 引导 Agent 正确使用 Skill 系统。
-const SKILL_GUIDANCE: &str = r#"
+pub(crate) const SKILL_GUIDANCE: &str = r#"
 ## Skill System Guidance
 
 You have a skill system for reusable procedural knowledge.
@@ -87,7 +89,7 @@ and patch them when you find stale instructions or missing steps.
 /// Memory 使用指导 — 参考 Hermes MEMORY_GUIDANCE
 ///
 /// 注入到系统提示词中, 引导 Agent 正确使用 Memory 系统。
-const MEMORY_GUIDANCE_BODY: &str = r#"
+pub(crate) const MEMORY_GUIDANCE_BODY: &str = r#"
 ### Durable memory
 Use memory for durable facts about the user and environment.
 
@@ -127,6 +129,10 @@ pub struct ContextBuilder {
     /// Skill 索引摘要 (可用 Skill 列表, 注入到系统提示词)
     /// 使用 Arc<RwLock> 允许后台 Review Agent 在创建/修改 Skill 后刷新
     skill_index_summary: Arc<RwLock<Option<String>>>,
+    /// System prompt sections; agent / session scoped sections override global defaults.
+    prompt_registry: PromptRegistry,
+    /// Agent scope used when resolving prompt sections.
+    agent_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -365,7 +371,17 @@ impl ContextBuilder {
             memory_injector: None,
             capability_brief: None,
             skill_index_summary: Arc::new(RwLock::new(None)),
+            prompt_registry: PromptRegistry::with_builtin_sections(),
+            agent_id: "default".to_string(),
         }
+    }
+
+    pub fn prompt_registry(&self) -> &PromptRegistry {
+        &self.prompt_registry
+    }
+
+    pub fn set_agent_id(&mut self, agent_id: Option<&str>) {
+        self.agent_id = agent_id.unwrap_or("default").to_string();
     }
 
     pub(crate) fn incremental_project_environment(&self, session_key: &str) -> Option<String> {
@@ -584,6 +600,8 @@ impl ContextBuilder {
         tool_prompt_rules.hash(&mut hasher);
         self.capability_brief.hash(&mut hasher);
         self.memory_store.is_some().hash(&mut hasher);
+        self.prompt_registry.fingerprint().hash(&mut hasher);
+        self.agent_id.hash(&mut hasher);
         if let Some(skill) = active_skill {
             skill.name.hash(&mut hasher);
             skill.prompt_md.hash(&mut hasher);
@@ -608,6 +626,7 @@ impl ContextBuilder {
             active_skill,
             available_tool_names,
             tool_prompt_rules,
+            Some(session_key),
         );
         let mut cache = self
             .session_cache
@@ -743,9 +762,15 @@ impl ContextBuilder {
         _user_query: &str,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
-        _session_key: Option<&str>,
+        session_key: Option<&str>,
     ) -> String {
-        self.build_system_prompt_inner(mode, active_skill, available_tool_names, tool_prompt_rules)
+        self.build_system_prompt_inner(
+            mode,
+            active_skill,
+            available_tool_names,
+            tool_prompt_rules,
+            session_key,
+        )
     }
 
     fn build_system_prompt_inner(
@@ -754,139 +779,30 @@ impl ContextBuilder {
         active_skill: Option<&ActiveSkillContext>,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
+        session_key: Option<&str>,
     ) -> String {
-        let mut prompt = String::new();
-        let is_chat = matches!(mode, InteractionMode::Chat);
-        let is_skill_mode = matches!(mode, InteractionMode::Skill);
-        let is_coding = matches!(mode, InteractionMode::Coding);
-        let is_general = matches!(mode, InteractionMode::General | InteractionMode::Coding);
-        let mut active_skill_context = String::new();
-
-        prompt.push_str("You are blockcell, an AI assistant with access to tools.\n\n");
-
-        if let Some(content) = self.load_file_if_exists(self.paths.agents_md()) {
-            prompt.push_str("## Agent Guidelines\n");
-            prompt.push_str(&crate::retrieval::truncate_to_token_budget(
-                &content,
-                MAX_AGENTS_MD_TOKENS,
-            ));
-            prompt.push_str("\n\n");
-        }
-
-        if let Some(content) = self.load_file_if_exists(self.paths.soul_md()) {
-            prompt.push_str("## Personality\n");
-            prompt.push_str(&crate::retrieval::truncate_to_token_budget(
-                &content,
-                MAX_SOUL_MD_TOKENS,
-            ));
-            prompt.push_str("\n\n");
-        }
-
-        if self.ghost_learning_enabled && !is_chat {
-            prompt.push_str("## Ghost Learning\n");
-            prompt.push_str(
-                "BlockCell may review successful interactions after the response to learn durable user preferences, stable project facts, reusable workflows, and prompt-only learned skills.\n",
-            );
-            prompt.push_str(MEMORY_GUIDANCE_BODY);
-            prompt.push('\n');
-            prompt.push_str(
-                "- Write memories as declarative facts, not commands to yourself. Example: 'User prefers concise responses' is good; 'Always respond concisely' is not.\n",
-            );
-            prompt.push_str(
-                "- If the user references prior conversations or you suspect relevant history exists, use `session_search` before asking the user to repeat context.\n",
-            );
-            prompt.push_str(
-                "- If an available learned skill is relevant, load it with `skill_view` before proceeding, even if you think you already know the task.\n",
-            );
-            prompt.push_str(
-                "- If a loaded skill is stale, incomplete, or wrong, patch it with `skill_manage(action=\"patch\")` after validating the fix.\n",
-            );
-            prompt.push_str(
-                "- Current user instructions always override learned memory and generated skills.\n\n",
-            );
-        }
-
-        if !is_chat {
-            prompt.push_str("\n## Tools\n");
-            prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
-            prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
-            prompt.push_str("- Validate tool parameters against schema.\n");
-            prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
-            prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
-            prompt.push_str(
-                "- Never hardcode credentials — ask the user or read from config/memory.\n",
-            );
-            if available_tool_names.is_empty() {
-                prompt.push_str("- There are no callable tools available in the current agent scope for this interaction. Do not claim tools outside the current scope.\n");
-            } else {
-                prompt.push_str("- The current callable tools are defined by the attached tool schemas. When asked about capabilities, answer only from those schemas.\n");
-            }
-            for rule in tool_prompt_rules {
-                let rule = crate::retrieval::truncate_to_token_budget(rule, MAX_TOOL_RULE_TOKENS);
-                prompt.push_str(&rule);
-                if !rule.ends_with('\n') {
-                    prompt.push('\n');
-                }
-            }
-            prompt.push('\n');
-        }
-
-        if is_coding {
-            prompt.push_str(CODING_MODE_PROMPT);
-            prompt.push('\n');
-        }
-
-        if is_skill_mode {
-            if let Some(ref brief) = self.capability_brief {
-                prompt.push_str("## Dynamic Evolved Tools\n");
-                prompt.push_str("The following tools have been dynamically evolved and are available. Use `capability_evolve` tool with action='execute' to invoke them.\n");
-                prompt.push_str(brief);
-                prompt.push_str("\n\n");
-            }
-        }
-
-        if let Some(skill) = active_skill {
-            active_skill_context.push_str(&format!("## Active Skill: {}\n", skill.name));
-            if skill.inject_prompt_md {
-                active_skill_context.push_str("The user's input matches this installed skill. Follow the skill's instructions below. Prefer the skill's scoped tools and avoid unrelated tools.\n\n");
-                active_skill_context.push_str(&crate::retrieval::truncate_to_token_budget(
-                    &skill.prompt_md,
-                    MAX_ACTIVE_SKILL_TOKENS,
-                ));
-                active_skill_context.push_str("\n\n");
-            } else {
-                active_skill_context.push_str("The user's input matches this installed skill. Use the skill's scoped tools and avoid unrelated tools.\n\n");
-            }
-            if let Some(fallback_message) = &skill.fallback_message {
-                active_skill_context.push_str("## Skill Fallback\n");
-                active_skill_context.push_str(fallback_message);
-                active_skill_context.push_str("\n\n");
-            }
-        }
-
-        if is_general {
-            prompt.push_str("## Core Tool Scope\n");
-            prompt.push_str("You currently have access to the minimal built-in tool kernel only. Specialized domain tools are activated by matching installed skills. Prefer the available core tools unless a skill is explicitly active. If the user's request would be better served by specialized domain capabilities that are not currently active, briefly remind the user that they can install the corresponding skills to extend blockcell.\n\n");
-        }
-
-        // 注入 Skill 系统引导 (参考 Hermes MEMORY_GUIDANCE)
-        if !is_chat {
-            prompt.push_str(SKILL_GUIDANCE);
-            prompt.push('\n');
-        }
-
-        // 注入 Memory 使用指导 (与 Hermes MEMORY_GUIDANCE 对齐)
-        if self.memory_store.is_some() && (!self.ghost_learning_enabled || is_chat) {
-            prompt.push_str("## Memory Guidance\n");
-            prompt.push_str(MEMORY_GUIDANCE_BODY);
-            prompt.push('\n');
-        }
-
+        let ctx = SystemPromptContext {
+            mode,
+            active_skill,
+            available_tool_names,
+            tool_prompt_rules,
+            paths: &self.paths,
+            ghost_learning_enabled: self.ghost_learning_enabled,
+            has_memory_store: self.memory_store.is_some(),
+            capability_brief: self.capability_brief.as_deref(),
+        };
+        let rendered = self.prompt_registry.render(
+            ScopeView {
+                agent_id: &self.agent_id,
+                session_id: session_key.unwrap_or_default(),
+            },
+            &ctx,
+        );
         PromptBudgetAllocator::new(self.prompt_budget.clone()).assemble(PromptSections {
-            rules: prompt,
+            rules: rendered.rules,
             user_profile: String::new(),
             retrieved: String::new(),
-            active_skill: active_skill_context,
+            active_skill: rendered.active_skill,
             session_recovery: String::new(),
         })
     }
@@ -1280,10 +1196,6 @@ impl ContextBuilder {
         }
 
         i
-    }
-
-    fn load_file_if_exists<P: AsRef<Path>>(&self, path: P) -> Option<String> {
-        std::fs::read_to_string(path).ok()
     }
 }
 
@@ -2532,4 +2444,43 @@ fn frozen_system_prompt_reader_exposes_parent_prefix_for_typed_agents() {
         .get(session_key)
         .expect("frozen prompt should be shared");
     assert_eq!(frozen, messages[0].content.as_str().unwrap());
+}
+
+#[test]
+fn agent_scoped_prompt_section_overrides_global_and_invalidates_frozen_prompt() {
+    use crate::prompt_registry::{PromptSection, SystemPromptContext};
+    use crate::runtime_kernel::ScopeTarget;
+
+    struct Persona;
+    impl PromptSection for Persona {
+        fn id(&self) -> &'static str {
+            "identity"
+        }
+        fn priority(&self) -> i32 {
+            10
+        }
+        fn render(&self, _ctx: &SystemPromptContext<'_>) -> Option<String> {
+            Some("You are the ops agent.\n\n".to_string())
+        }
+    }
+
+    let mut builder = ContextBuilder::new(
+        Paths::with_base(
+            std::env::temp_dir().join(format!("blockcell-prompt-scope-{}", uuid::Uuid::new_v4())),
+        ),
+        Config::default(),
+    );
+    let before = builder.frozen_system_prompt("s", InteractionMode::Chat, None, &[], &[]);
+    assert!(before.contains("You are blockcell"));
+
+    builder
+        .prompt_registry()
+        .register(ScopeTarget::Agent("ops".into()), Arc::new(Persona));
+    let other_agent = builder.frozen_system_prompt("s", InteractionMode::Chat, None, &[], &[]);
+    assert!(other_agent.contains("You are blockcell"));
+
+    builder.set_agent_id(Some("ops"));
+    let ops = builder.frozen_system_prompt("s", InteractionMode::Chat, None, &[], &[]);
+    assert!(ops.contains("You are the ops agent."), "{ops}");
+    assert!(!ops.contains("You are blockcell"));
 }

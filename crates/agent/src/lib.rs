@@ -29,6 +29,7 @@ pub mod memory_adapter;
 pub mod memory_file_store;
 pub mod memory_system;
 pub mod progress;
+pub mod prompt_registry;
 pub mod prompt_skill_executor;
 pub mod response_cache;
 pub mod retrieval;
