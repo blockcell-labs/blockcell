@@ -12,15 +12,13 @@ pub enum EventClass {
     Capability,
 }
 
-/// 事件派发上下文：标识事件属于哪个 agent / session / turn / step。
+/// 事件派发上下文：标识事件属于哪个 agent / session / 会话来源。
 #[derive(Debug, Clone, Default)]
 pub struct AgentEventContext {
     pub agent_id: String,
     pub session_id: String,
     pub channel: String,
     pub chat_id: String,
-    pub turn_id: Option<String>,
-    pub step: Option<u32>,
 }
 
 /// Listener 对事件的处理结论。
@@ -76,8 +74,9 @@ pub enum AgentEvent {
     ToolResult {
         tool_name: String,
         call_id: String,
-        result: String,
+        result: Value,
         is_error: bool,
+        duration_ms: u64,
     },
 }
 

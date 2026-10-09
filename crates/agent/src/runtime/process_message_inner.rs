@@ -110,29 +110,15 @@ impl AgentRuntime {
         let mut session_metadata = self.session_store.load_metadata(&persist_session_key)?;
         let is_new_session = history.is_empty();
 
-        if !self.hook_manager.is_empty() {
-            if is_new_session {
-                let _ = self
-                    .hook_manager
-                    .fire(&HookContext {
-                        event: HookEvent::SessionStart,
-                        session_id: persist_session_key.clone(),
-                        cwd: self.paths.workspace().display().to_string(),
-                        ..HookContext::default()
-                    })
-                    .await;
-            }
-            let _ = self
-                .hook_manager
-                .fire(&HookContext {
-                    event: HookEvent::UserPrompt,
-                    result: Some(msg.content.clone()),
-                    session_id: persist_session_key.clone(),
-                    cwd: self.paths.workspace().display().to_string(),
-                    ..HookContext::default()
-                })
-                .await;
-        }
+        self.dispatch_event(
+            &msg,
+            &persist_session_key,
+            &mut AgentEvent::TurnStart {
+                user_input: msg.content.clone(),
+                is_new_session,
+            },
+        )
+        .await;
 
         // Dream session count：使用独立 marker 文件 + create_new 实现原子计数
         // 解决 metadata save 的 TOCTOU 竞态：两个 runtime 可能同时读到 dream_counted=false，
@@ -673,10 +659,24 @@ impl AgentRuntime {
             }
         }
 
+        let mut step: u32 = 0;
         loop {
+            step = step.saturating_add(1);
             debug!(iteration = ?tool_call_counts, "LLM call iteration");
             // Learning Coordinator: record iteration (replaces skill_nudge_engine.record_iteration)
             self.learning_coordinator.record_iteration();
+            self.dispatch_event(
+                &msg,
+                &persist_session_key,
+                &mut AgentEvent::AgentPreStep { iteration: step },
+            )
+            .await;
+            self.dispatch_event(
+                &msg,
+                &persist_session_key,
+                &mut AgentEvent::StepStart { iteration: step },
+            )
+            .await;
 
             if let Some(plan) =
                 blockcell_tools::plan::take_changed_plan_context(&persist_session_key)
@@ -725,6 +725,16 @@ impl AgentRuntime {
                 );
             }
 
+            self.dispatch_event(
+                &msg,
+                &persist_session_key,
+                &mut AgentEvent::AgentRequest {
+                    message_count: current_messages.len(),
+                    tool_count: tools.len(),
+                },
+            )
+            .await;
+
             // Call LLM with extracted sub-function (#15)
             let llm_timer = ScopedTimer::new();
             let llm_result = self
@@ -742,6 +752,14 @@ impl AgentRuntime {
             let response = match llm_result {
                 Ok(r) => r,
                 Err(e) => {
+                    self.dispatch_event(
+                        &msg,
+                        &persist_session_key,
+                        &mut AgentEvent::AgentRequestError {
+                            error: e.to_string(),
+                        },
+                    )
+                    .await;
                     llm_failed_after_retries = true;
                     let max_retries = self.config.agents.defaults.llm_max_retries;
                     warn!(error = %e, iteration = ?tool_call_counts, retries = max_retries, "LLM call failed after all retries");
@@ -1227,6 +1245,15 @@ impl AgentRuntime {
                         warn!(task_id = %task_id, error = %e, "Failed to save task checkpoint after tool round");
                     }
                 }
+                self.dispatch_event(
+                    &msg,
+                    &persist_session_key,
+                    &mut AgentEvent::StepEnd {
+                        iteration: step,
+                        tool_calls: response.tool_calls.len(),
+                    },
+                )
+                .await;
 
                 if wants_forced_answer && !over_iteration {
                     if !web_search_thin_results.is_empty() {
@@ -1394,6 +1421,15 @@ impl AgentRuntime {
                     break;
                 }
             } else {
+                self.dispatch_event(
+                    &msg,
+                    &persist_session_key,
+                    &mut AgentEvent::StepEnd {
+                        iteration: step,
+                        tool_calls: 0,
+                    },
+                )
+                .await;
                 // No tool calls, we have the final response
                 final_response = response.content.unwrap_or_default();
 

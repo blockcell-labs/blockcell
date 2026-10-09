@@ -5172,3 +5172,108 @@ async fn tool_policy_channel_condition_only_applies_to_matching_channel() {
     assert!(!result.contains("Policy denied"));
     assert!(result.contains("Unknown tool"));
 }
+
+struct RecordingToolListener {
+    events: Arc<Mutex<Vec<crate::runtime_kernel::AgentEvent>>>,
+    reject: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime_kernel::AgentEventListener for RecordingToolListener {
+    fn spec(&self) -> crate::runtime_kernel::ListenerSpec {
+        crate::runtime_kernel::ListenerSpec::new("recording")
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &AgentEventContext,
+        event: &mut AgentEvent,
+    ) -> Result<EventDecision> {
+        if let AgentEvent::ToolPreExecute { arguments, .. } = event {
+            if self.reject {
+                self.events.lock().unwrap().push(event.clone());
+                return Ok(EventDecision::Reject {
+                    reason: "blocked by recording listener".to_string(),
+                });
+            }
+            *arguments = serde_json::json!({"command": "echo rewritten"});
+        }
+        self.events.lock().unwrap().push(event.clone());
+        Ok(EventDecision::Continue)
+    }
+}
+
+#[tokio::test]
+async fn tool_pre_execute_listener_rewrites_arguments_for_downstream_events() {
+    let mut runtime = test_runtime();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: false,
+        }));
+    let (event_tx, mut event_rx) = broadcast::channel(16);
+    runtime.set_event_tx(event_tx);
+
+    runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo original"})),
+            &test_main_session_inbound("cli", "event-rewrite"),
+            None,
+        )
+        .await;
+
+    let recorded = events.lock().unwrap().clone();
+    let names: Vec<&str> = recorded.iter().map(AgentEvent::name).collect();
+    assert_eq!(
+        names,
+        vec!["tool/pre-execute", "tool/post-execute", "tool/result"]
+    );
+    match &recorded[1] {
+        AgentEvent::ToolPostExecute { arguments, .. } => {
+            assert_eq!(arguments["command"], "echo rewritten")
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let start: serde_json::Value =
+        serde_json::from_str(&event_rx.recv().await.expect("tool_call_start")).unwrap();
+    assert_eq!(start["type"], "tool_call_start");
+    assert_eq!(start["params"]["command"], "echo rewritten");
+    let result: serde_json::Value =
+        serde_json::from_str(&event_rx.recv().await.expect("tool_call_result")).unwrap();
+    assert_eq!(result["type"], "tool_call_result");
+    assert_eq!(result["chat_id"], "event-rewrite");
+}
+
+#[tokio::test]
+async fn tool_pre_execute_listener_can_reject_before_execution() {
+    let mut runtime = test_runtime();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: true,
+        }));
+
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo hello"})),
+            &test_main_session_inbound("cli", "event-reject"),
+            None,
+        )
+        .await;
+
+    assert!(result.contains("blocked by recording listener"), "{result}");
+    assert!(result.contains("event_listener"), "{result}");
+    assert!(!result.contains("Unknown tool"), "{result}");
+    let names: Vec<&str> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(AgentEvent::name)
+        .collect();
+    assert_eq!(names, vec!["tool/pre-execute"]);
+}

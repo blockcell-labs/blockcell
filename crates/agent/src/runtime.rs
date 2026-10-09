@@ -38,12 +38,13 @@ use crate::ghost_learning::{
 };
 use crate::ghost_recall::should_inject_ghost_recall;
 use crate::history_projector::{HistoryProjector, TimeBasedMCConfig};
-use crate::hooks::{HookContext, HookEvent, HookManager};
+use crate::hooks::{HookAdapter, HookManager};
 use crate::intent::{IntentCategory, IntentToolResolver};
 use crate::learning_coordinator::LearningReviewReservationGuard;
 use crate::memory_event;
 use crate::memory_file_store::MemoryFileStore;
 use crate::response_cache::{cleanup_tool_results, sanitize_session_key, sanitize_tool_use_id};
+use crate::runtime_kernel::{AgentEvent, AgentEventContext, EventBus, EventDecision};
 use crate::session_metrics::{ProcessingMetrics, ScopedTimer};
 use crate::skill_executor::{determine_manual_load_mode, SkillExecutionResult};
 use crate::skill_file_store::SkillFileStore;
@@ -67,6 +68,7 @@ pub mod path_security;
 
 // --- submodules extracted from the original monolithic runtime.rs ---
 mod compaction;
+mod event_listeners;
 mod fork_spawn;
 mod ghost_boundary;
 mod lightweight_handle;
@@ -2226,8 +2228,10 @@ pub struct AgentRuntime {
     path_policy: PathPolicy,
     /// Loaded tool-call policy engine (from `~/.blockcell/tool_policy.yaml`).
     tool_policy: ToolPolicy,
-    /// User-configured lifecycle hooks (from `~/.blockcell/hooks.yaml`).
-    hook_manager: HookManager,
+    /// Runtime event bus: hooks (`~/.blockcell/hooks.yaml`) and other listeners subscribe here.
+    event_bus: EventBus,
+    /// Shared WebSocket sender slot read by the WS tool event listener.
+    event_tx_slot: event_listeners::EventTxSlot,
     /// Per-session cache for large list/table responses (prevents history token explosion).
     response_cache: crate::response_cache::ResponseCache,
     /// 7-Layer Memory System integration.
@@ -2283,7 +2287,18 @@ impl AgentRuntime {
         let channel_contacts = blockcell_storage::ChannelContacts::new(paths.clone());
         let path_policy = load_path_policy(&config, &paths);
         let tool_policy = ToolPolicy::load(&paths.base.join("tool_policy.yaml"));
+        let event_bus = EventBus::new();
         let hook_manager = HookManager::load(&paths.base.join("hooks.yaml"));
+        if !hook_manager.is_empty() {
+            event_bus.register(Arc::new(HookAdapter::new(
+                hook_manager,
+                paths.workspace().display().to_string(),
+            )));
+        }
+        let event_tx_slot: event_listeners::EventTxSlot = Arc::default();
+        event_bus.register(Arc::new(event_listeners::WsToolEventListener::new(
+            event_tx_slot.clone(),
+        )));
         let system_event_store = InMemorySystemEventStore::with_persistence(
             paths.workspace().join(".system_events.json"),
         )?;
@@ -2374,7 +2389,8 @@ impl AgentRuntime {
             channel_contacts,
             path_policy,
             tool_policy,
-            hook_manager,
+            event_bus,
+            event_tx_slot,
             response_cache: crate::response_cache::ResponseCache::with_config(
                 response_cache_config,
             ),

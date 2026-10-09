@@ -408,34 +408,25 @@ impl AgentRuntime {
             }
         }
 
-        if !self.hook_manager.is_empty() {
-            let _ = self
-                .hook_manager
-                .fire(&HookContext {
-                    event: HookEvent::PreToolUse,
-                    tool_name: Some(tool_call.name.clone()),
-                    tool_args: effective_args.clone(),
-                    result: None,
-                    is_error: false,
-                    session_id: msg.session_key(),
-                    cwd: self.paths.workspace().display().to_string(),
-                })
-                .await;
-        }
-
-        // Emit tool_call_start event to WebSocket clients
-        if let Some(ref event_tx) = self.event_tx {
-            let event = serde_json::json!({
-                "type": "tool_call_start",
-                "channel": msg.channel,
-                "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                "chat_id": msg.chat_id,
-                "task_id": "",
+        let mut pre_execute = AgentEvent::ToolPreExecute {
+            tool_name: tool_call.name.clone(),
+            call_id: tool_call.id.clone(),
+            arguments: effective_args,
+        };
+        let pre_decision = self
+            .dispatch_event(msg, &msg.session_key(), &mut pre_execute)
+            .await;
+        let AgentEvent::ToolPreExecute { arguments, .. } = pre_execute else {
+            unreachable!("tool/pre-execute listeners cannot replace the event kind");
+        };
+        effective_args = arguments;
+        if let EventDecision::Reject { reason } = pre_decision {
+            return serde_json::json!({
+                "error": reason,
                 "tool": tool_call.name,
-                "call_id": tool_call.id,
-                "params": effective_args,
-            });
-            let _ = event_tx.send(event.to_string());
+                "policy": "event_listener"
+            })
+            .to_string();
         }
 
         let start = std::time::Instant::now();
@@ -484,20 +475,19 @@ impl AgentRuntime {
             }
         };
 
-        if !self.hook_manager.is_empty() {
-            let _ = self
-                .hook_manager
-                .fire(&HookContext {
-                    event: HookEvent::PostToolUse,
-                    tool_name: Some(tool_call.name.clone()),
-                    tool_args: effective_args.clone(),
-                    result: Some(result_str.clone()),
-                    is_error,
-                    session_id: msg.session_key(),
-                    cwd: self.paths.workspace().display().to_string(),
-                })
-                .await;
-        }
+        self.dispatch_event(
+            msg,
+            &msg.session_key(),
+            &mut AgentEvent::ToolPostExecute {
+                tool_name: tool_call.name.clone(),
+                call_id: tool_call.id.clone(),
+                arguments: effective_args.clone(),
+                result: result_json.clone(),
+                is_error,
+                duration_ms,
+            },
+        )
+        .await;
 
         // Detect writes to the skills directory and trigger hot-reload + Dashboard refresh
         if !is_error
@@ -627,21 +617,18 @@ impl AgentRuntime {
             }
         }
 
-        // Emit tool_call_result event to WebSocket clients
-        if let Some(ref event_tx) = self.event_tx {
-            let event = serde_json::json!({
-                "type": "tool_call_result",
-                "channel": msg.channel,
-                "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                "chat_id": msg.chat_id,
-                "task_id": "",
-                "tool": tool_call.name,
-                "call_id": tool_call.id,
-                "result": result_json,
-                "duration_ms": duration_ms,
-            });
-            let _ = event_tx.send(event.to_string());
-        }
+        self.dispatch_event(
+            msg,
+            &msg.session_key(),
+            &mut AgentEvent::ToolResult {
+                tool_name: tool_call.name.clone(),
+                call_id: tool_call.id.clone(),
+                result: result_json.clone(),
+                is_error,
+                duration_ms,
+            },
+        )
+        .await;
 
         // Log to audit
         self.audit_logger.set_session_id(&msg.session_key());

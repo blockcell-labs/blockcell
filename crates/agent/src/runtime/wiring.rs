@@ -330,7 +330,34 @@ impl AgentRuntime {
 
     /// Set the broadcast sender for streaming events to WebSocket clients.
     pub fn set_event_tx(&mut self, tx: broadcast::Sender<String>) {
+        *self
+            .event_tx_slot
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(tx.clone());
         self.event_tx = Some(tx);
+    }
+
+    /// Runtime event bus. Registering a listener here does not require touching the agent loop.
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    pub(crate) async fn dispatch_event(
+        &self,
+        msg: &InboundMessage,
+        session_id: &str,
+        event: &mut AgentEvent,
+    ) -> EventDecision {
+        let ctx = AgentEventContext {
+            agent_id: self
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            session_id: session_id.to_string(),
+            channel: msg.channel.clone(),
+            chat_id: msg.chat_id.clone(),
+        };
+        self.event_bus.dispatch(&ctx, event).await
     }
 
     pub fn steering_sender(&self) -> SteeringSender {

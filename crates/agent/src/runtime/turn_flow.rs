@@ -507,18 +507,14 @@ impl AgentRuntime {
             overwrite_last_assistant_message(history, &stub);
         }
 
-        if !self.hook_manager.is_empty() {
-            let _ = self
-                .hook_manager
-                .fire(&HookContext {
-                    event: HookEvent::AgentStop,
-                    result: Some(final_response.clone()),
-                    session_id: persist_session_key.to_string(),
-                    cwd: self.paths.workspace().display().to_string(),
-                    ..HookContext::default()
-                })
-                .await;
-        }
+        self.dispatch_event(
+            msg,
+            persist_session_key,
+            &mut AgentEvent::TurnEnd {
+                final_response: final_response.clone(),
+            },
+        )
+        .await;
 
         self.session_store
             .save_with_metadata(persist_session_key, history, session_metadata)?;

@@ -1,11 +1,16 @@
 use std::path::Path;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
 use tracing::{info, warn};
+
+use crate::runtime_kernel::{
+    AgentEvent, AgentEventContext, AgentEventListener, EventDecision, ListenerSpec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,6 +251,106 @@ impl HookManager {
     }
 }
 
+/// 将用户配置的 `hooks.yaml` 适配为 EventBus listener，现有配置无需迁移。
+///
+/// 映射：`turn/start` → SessionStart(新会话) + UserPrompt；`tool/pre-execute` → PreToolUse；
+/// `tool/post-execute` → PostToolUse；`turn/end` → AgentStop。Hook 结果仅观察，不阻断执行。
+pub struct HookAdapter {
+    manager: HookManager,
+    cwd: String,
+}
+
+impl HookAdapter {
+    pub fn new(manager: HookManager, cwd: String) -> Self {
+        Self { manager, cwd }
+    }
+
+    fn context(&self, event: HookEvent, ctx: &AgentEventContext) -> HookContext {
+        HookContext {
+            event,
+            session_id: ctx.session_id.clone(),
+            cwd: self.cwd.clone(),
+            ..HookContext::default()
+        }
+    }
+}
+
+#[async_trait]
+impl AgentEventListener for HookAdapter {
+    fn spec(&self) -> ListenerSpec {
+        ListenerSpec::new("hooks")
+    }
+
+    async fn handle(
+        &self,
+        ctx: &AgentEventContext,
+        event: &mut AgentEvent,
+    ) -> blockcell_core::Result<EventDecision> {
+        match event {
+            AgentEvent::TurnStart {
+                user_input,
+                is_new_session,
+            } => {
+                if *is_new_session {
+                    self.manager
+                        .fire(&self.context(HookEvent::SessionStart, ctx))
+                        .await;
+                }
+                self.manager
+                    .fire(&HookContext {
+                        result: Some(user_input.clone()),
+                        ..self.context(HookEvent::UserPrompt, ctx)
+                    })
+                    .await;
+            }
+            AgentEvent::ToolPreExecute {
+                tool_name,
+                arguments,
+                ..
+            } => {
+                self.manager
+                    .fire(&HookContext {
+                        tool_name: Some(tool_name.clone()),
+                        tool_args: arguments.clone(),
+                        ..self.context(HookEvent::PreToolUse, ctx)
+                    })
+                    .await;
+            }
+            AgentEvent::ToolPostExecute {
+                tool_name,
+                arguments,
+                result,
+                is_error,
+                ..
+            } => {
+                let result = match result.get("error").and_then(Value::as_str) {
+                    Some(error) if *is_error => error.to_string(),
+                    _ => result.to_string(),
+                };
+                self.manager
+                    .fire(&HookContext {
+                        tool_name: Some(tool_name.clone()),
+                        tool_args: arguments.clone(),
+                        result: Some(result),
+                        is_error: *is_error,
+                        ..self.context(HookEvent::PostToolUse, ctx)
+                    })
+                    .await;
+            }
+            AgentEvent::TurnEnd { final_response } => {
+                self.manager
+                    .fire(&HookContext {
+                        result: Some(final_response.clone()),
+                        ..self.context(HookEvent::AgentStop, ctx)
+                    })
+                    .await;
+            }
+            _ => {}
+        }
+        Ok(EventDecision::Continue)
+    }
+}
+
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -367,6 +472,74 @@ hooks:
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
         assert_eq!(results[0].output, "hook-ok");
+    }
+
+    #[tokio::test]
+    async fn hook_adapter_maps_runtime_events_to_hook_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("events.log");
+        let command = format!("echo {{event}}:{{tool_name}} >> '{}'", log.display());
+        let manager = HookManager::new(
+            [
+                HookEvent::SessionStart,
+                HookEvent::UserPrompt,
+                HookEvent::PreToolUse,
+                HookEvent::PostToolUse,
+                HookEvent::AgentStop,
+            ]
+            .into_iter()
+            .map(|event| HookConfig {
+                event,
+                command: command.clone(),
+                matcher: None,
+                timeout: 5.0,
+            })
+            .collect(),
+        );
+        let adapter = HookAdapter::new(manager, dir.path().display().to_string());
+        let ctx = AgentEventContext::default();
+        let mut events = vec![
+            AgentEvent::TurnStart {
+                user_input: "hi".into(),
+                is_new_session: true,
+            },
+            AgentEvent::ToolPreExecute {
+                tool_name: "exec".into(),
+                call_id: "c1".into(),
+                arguments: json!({}),
+            },
+            AgentEvent::ToolPostExecute {
+                tool_name: "exec".into(),
+                call_id: "c1".into(),
+                arguments: json!({}),
+                result: json!({"ok": true}),
+                is_error: false,
+                duration_ms: 1,
+            },
+            AgentEvent::StepStart { iteration: 1 },
+            AgentEvent::TurnEnd {
+                final_response: "done".into(),
+            },
+        ];
+        for event in &mut events {
+            assert_eq!(
+                adapter.handle(&ctx, event).await.unwrap(),
+                EventDecision::Continue
+            );
+        }
+
+        let logged = fs::read_to_string(&log).expect("read log");
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "session_start:",
+                "user_prompt:",
+                "pre_tool_use:exec",
+                "post_tool_use:exec",
+                "agent_stop:"
+            ]
+        );
     }
 
     #[tokio::test]
