@@ -1,5 +1,5 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,6 +8,7 @@ use futures::FutureExt;
 use tracing::warn;
 
 use super::event::{AgentEvent, AgentEventContext, EventDecision};
+use super::scope::{ScopeGuard, ScopeId, ScopeTarget, ScopeView, ScopedRegistry};
 
 /// Listener 失败（返回错误 / 超时 / panic）时的处理策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,31 +19,13 @@ pub enum FailureMode {
     FailClosed,
 }
 
-/// Listener 的可见范围。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ListenerScope {
-    Global,
-    Agent(String),
-    Session(String),
-}
-
-impl ListenerScope {
-    pub fn matches(&self, ctx: &AgentEventContext) -> bool {
-        match self {
-            Self::Global => true,
-            Self::Agent(agent_id) => agent_id == &ctx.agent_id,
-            Self::Session(session_id) => session_id == &ctx.session_id,
-        }
-    }
-}
-
 /// Listener 元数据。`priority` 越小越先执行，同优先级按注册顺序执行。
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
     pub name: &'static str,
     pub priority: i32,
     pub failure_mode: FailureMode,
-    pub scope: ListenerScope,
+    pub scope: ScopeTarget,
     pub timeout: Option<Duration>,
 }
 
@@ -52,7 +35,7 @@ impl ListenerSpec {
             name,
             priority: 0,
             failure_mode: FailureMode::FailOpen,
-            scope: ListenerScope::Global,
+            scope: ScopeTarget::Global,
             timeout: None,
         }
     }
@@ -67,7 +50,7 @@ impl ListenerSpec {
         self
     }
 
-    pub fn scope(mut self, scope: ListenerScope) -> Self {
+    pub fn scope(mut self, scope: ScopeTarget) -> Self {
         self.scope = scope;
         self
     }
@@ -89,15 +72,17 @@ pub trait AgentEventListener: Send + Sync {
     ) -> Result<EventDecision>;
 }
 
-struct Registered {
+/// EventBus 内部存放的 listener 条目。
+pub struct RegisteredListener {
     spec: ListenerSpec,
     listener: Arc<dyn AgentEventListener>,
 }
 
-/// Agent 事件总线。克隆共享同一份 listener 列表。
+/// Agent 事件总线。listener 按 [`ListenerSpec::scope`] 存入 [`ScopedRegistry`]，
+/// 克隆共享同一份 listener 列表。
 #[derive(Clone, Default)]
 pub struct EventBus {
-    listeners: Arc<RwLock<Vec<Arc<Registered>>>>,
+    listeners: ScopedRegistry<Arc<RegisteredListener>>,
 }
 
 impl EventBus {
@@ -105,38 +90,49 @@ impl EventBus {
         Self::default()
     }
 
-    pub fn register(&self, listener: Arc<dyn AgentEventListener>) {
+    /// 注册长期存在的 listener。
+    pub fn register(&self, listener: Arc<dyn AgentEventListener>) -> ScopeId {
+        let (scope, registered) = Self::entry(listener);
+        self.listeners.insert(scope, registered)
+    }
+
+    /// 注册随 guard 销毁而注销的 listener（例如只在某次候选评估期间生效）。
+    pub fn register_scoped(
+        &self,
+        listener: Arc<dyn AgentEventListener>,
+    ) -> ScopeGuard<Arc<RegisteredListener>> {
+        let (scope, registered) = Self::entry(listener);
+        self.listeners.register(scope, registered)
+    }
+
+    pub fn unregister(&self, id: ScopeId) -> bool {
+        self.listeners.remove(id).is_some()
+    }
+
+    fn entry(listener: Arc<dyn AgentEventListener>) -> (ScopeTarget, Arc<RegisteredListener>) {
         let spec = listener.spec();
-        let mut listeners = self.listeners.write().unwrap_or_else(|p| p.into_inner());
-        let index = listeners.partition_point(|item| item.spec.priority <= spec.priority);
-        listeners.insert(index, Arc::new(Registered { spec, listener }));
+        (
+            spec.scope.clone(),
+            Arc::new(RegisteredListener { spec, listener }),
+        )
     }
 
     pub fn is_empty(&self) -> bool {
-        self.listeners
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_empty()
+        self.listeners.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.listeners
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .len()
+        self.listeners.len()
     }
 
     /// 按优先级串行派发事件。listener 可修改 `event`；
     /// 仅在 [`AgentEvent::can_reject`] 为真时，拒绝或 fail-closed 失败才会短路返回。
     pub async fn dispatch(&self, ctx: &AgentEventContext, event: &mut AgentEvent) -> EventDecision {
-        let snapshot: Vec<Arc<Registered>> = self
-            .listeners
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .filter(|item| item.spec.scope.matches(ctx))
-            .cloned()
-            .collect();
+        let mut snapshot = self.listeners.visible(ScopeView {
+            agent_id: &ctx.agent_id,
+            session_id: &ctx.session_id,
+        });
+        snapshot.sort_by_key(|item| item.spec.priority);
 
         for item in snapshot {
             let spec = &item.spec;
@@ -355,17 +351,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_registration_is_removed_with_guard_or_id() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let bus = EventBus::new();
+        let id = bus.register(listener(
+            &log,
+            ListenerSpec::new("kept"),
+            Behavior::Continue,
+        ));
+        {
+            let _guard = bus.register_scoped(listener(
+                &log,
+                ListenerSpec::new("temp"),
+                Behavior::Continue,
+            ));
+            bus.dispatch(&ctx(), &mut pre_execute()).await;
+        }
+        bus.dispatch(&ctx(), &mut pre_execute()).await;
+        assert_eq!(*log.lock().unwrap(), vec!["kept", "temp", "kept"]);
+
+        assert!(bus.unregister(id));
+        assert!(bus.is_empty());
+    }
+
+    #[tokio::test]
     async fn scope_filters_listeners_and_mutations_flow_through() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let bus = EventBus::new();
         bus.register(listener(
             &log,
-            ListenerSpec::new("other-agent").scope(ListenerScope::Agent("ops".into())),
+            ListenerSpec::new("other-agent").scope(ScopeTarget::Agent("ops".into())),
             Behavior::Reject,
         ));
         bus.register(listener(
             &log,
-            ListenerSpec::new("rewrite").scope(ListenerScope::Session("s1".into())),
+            ListenerSpec::new("rewrite").scope(ScopeTarget::Session("s1".into())),
             Behavior::RewriteArgs,
         ));
 
