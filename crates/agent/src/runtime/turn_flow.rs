@@ -118,6 +118,38 @@ impl AgentRuntime {
         }
     }
 
+    /// 带 agent/request、agent/request-error、model/response 事件的模型调用。
+    async fn chat_with_provider_observed(
+        &self,
+        msg: &InboundMessage,
+        session_id: &str,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<LLMResponse> {
+        self.dispatch_event(
+            msg,
+            session_id,
+            &mut AgentEvent::AgentRequest {
+                message_count: messages.len(),
+                tool_count: tools.len(),
+            },
+        )
+        .await;
+        let result = self.chat_with_provider(messages, tools).await;
+        let mut event = match &result {
+            Ok(response) => AgentEvent::ModelResponse {
+                content: response.content.clone().unwrap_or_default(),
+                tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
+                finish_reason: response.finish_reason.clone(),
+            },
+            Err(error) => AgentEvent::AgentRequestError {
+                error: error.to_string(),
+            },
+        };
+        self.dispatch_event(msg, session_id, &mut event).await;
+        result
+    }
+
     pub(crate) async fn run_prompt_skill_loop(
         &mut self,
         msg: &InboundMessage,
@@ -126,6 +158,29 @@ impl AgentRuntime {
         tool_names: &[String],
         active_skill_dir: Option<PathBuf>,
     ) -> Result<PromptSkillLoopOutput> {
+        // 技能循环有自己的 step 编号；结束后恢复外层（主循环）的 step。
+        let outer_step = self.current_step;
+        let result = Box::pin(self.run_prompt_skill_steps(
+            msg,
+            messages,
+            tools,
+            tool_names,
+            active_skill_dir,
+        ))
+        .await;
+        self.current_step = outer_step;
+        result
+    }
+
+    async fn run_prompt_skill_steps(
+        &mut self,
+        msg: &InboundMessage,
+        messages: Vec<ChatMessage>,
+        tools: Vec<serde_json::Value>,
+        tool_names: &[String],
+        active_skill_dir: Option<PathBuf>,
+    ) -> Result<PromptSkillLoopOutput> {
+        let session_id = persist_session_key_for(msg);
         let allowed_tool_names = tool_names.iter().cloned().collect::<HashSet<_>>();
         let max_iterations = self.config.agents.defaults.max_tool_iterations.max(1);
         let tools_max_iterations = self
@@ -139,8 +194,23 @@ impl AgentRuntime {
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
         let mut trace_messages = Vec::new();
+        let mut step: u32 = 0;
 
         let final_response = loop {
+            step = step.saturating_add(1);
+            self.current_step = Some(step);
+            self.dispatch_event(
+                msg,
+                &session_id,
+                &mut AgentEvent::AgentPreStep { iteration: step },
+            )
+            .await;
+            self.dispatch_event(
+                msg,
+                &session_id,
+                &mut AgentEvent::StepStart { iteration: step },
+            )
+            .await;
             if let Some(plan) = blockcell_tools::plan::take_changed_plan_context(&msg.session_key())
             {
                 current_messages.push(ChatMessage::user(&format!(
@@ -157,9 +227,21 @@ impl AgentRuntime {
                     environment
                 )));
             }
-            let response = self.chat_with_provider(&current_messages, &tools).await?;
+            let response = self
+                .chat_with_provider_observed(msg, &session_id, &current_messages, &tools)
+                .await?;
+            let tool_call_count = response.tool_calls.len();
 
             if response.tool_calls.is_empty() {
+                self.dispatch_event(
+                    msg,
+                    &session_id,
+                    &mut AgentEvent::StepEnd {
+                        iteration: step,
+                        tool_calls: 0,
+                    },
+                )
+                .await;
                 break response.content.unwrap_or_default();
             }
 
@@ -228,6 +310,15 @@ impl AgentRuntime {
                 current_messages.push(tool_message.clone());
                 trace_messages.push(tool_message);
             }
+            self.dispatch_event(
+                msg,
+                &session_id,
+                &mut AgentEvent::StepEnd {
+                    iteration: step,
+                    tool_calls: tool_call_count,
+                },
+            )
+            .await;
 
             if over_iteration {
                 let mut final_messages = current_messages.clone();
@@ -235,7 +326,7 @@ impl AgentRuntime {
                     "请基于以上技能上下文和工具结果，直接给出最终答案。不要再调用任何工具。",
                 ));
                 let final_response = self
-                    .chat_with_provider(&final_messages, &[])
+                    .chat_with_provider_observed(msg, &session_id, &final_messages, &[])
                     .await?
                     .content
                     .unwrap_or_default();

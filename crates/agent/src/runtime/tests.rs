@@ -1673,7 +1673,20 @@ description: prompt demo
         Some(&SessionEventKind::SessionStart),
         "{kinds:?}"
     );
-    assert!(kinds.contains(&SessionEventKind::SkillLoad), "{kinds:?}");
+    let skill_load = kinds
+        .iter()
+        .position(|kind| *kind == SessionEventKind::SkillLoad)
+        .expect("skill/load recorded");
+    assert_eq!(
+        &kinds[skill_load + 1..skill_load + 5],
+        &[
+            SessionEventKind::StepStart,
+            SessionEventKind::ModelRequest,
+            SessionEventKind::ModelResponse,
+            SessionEventKind::StepEnd,
+        ],
+        "{kinds:?}"
+    );
     assert_eq!(
         &kinds[kinds.len() - 2..],
         &[
