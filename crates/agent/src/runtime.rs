@@ -80,6 +80,7 @@ mod run_loop;
 mod skill_session;
 mod subagent;
 mod tool_exec;
+mod tool_pipeline;
 mod turn_flow;
 mod wiring;
 
