@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const DEFAULT_CAPABILITY_TIMEOUT_SECS: u64 = 30;
 const MAX_CAPABILITY_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -773,7 +773,20 @@ impl CapabilityRegistry {
             return Ok(());
         }
         let json = std::fs::read_to_string(&registry_file)?;
-        let descriptors: Vec<CapabilityDescriptor> = serde_json::from_str(&json)?;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&json)?;
+        // Skip unreadable entries (e.g. legacy `dynamic_library` providers that were removed)
+        // instead of dropping every evolved tool.
+        let descriptors = entries.into_iter().filter_map(|entry| {
+            serde_json::from_value::<CapabilityDescriptor>(entry.clone())
+                .map_err(|error| {
+                    warn!(
+                        id = entry.get("id").and_then(|id| id.as_str()).unwrap_or("?"),
+                        error = %error,
+                        "Skipping unsupported capability descriptor"
+                    );
+                })
+                .ok()
+        });
         for desc in descriptors {
             let id = desc.id.clone();
             self.descriptors.insert(id.clone(), desc);
@@ -933,6 +946,39 @@ pub fn new_registry_handle(registry_dir: PathBuf) -> CapabilityRegistryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_skips_legacy_native_descriptors_without_dropping_others() {
+        let dir = std::env::temp_dir().join(format!(
+            "blockcell-capability-legacy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let valid = serde_json::to_value(CapabilityDescriptor::new(
+            "tool.ok",
+            "OK",
+            "kept",
+            blockcell_core::CapabilityType::System,
+            ProviderKind::Process,
+        ))
+        .unwrap();
+        let mut legacy = valid.clone();
+        legacy["id"] = serde_json::json!("tool.native");
+        legacy["provider_kind"] = serde_json::json!("dynamic_library");
+        std::fs::write(
+            dir.join("evolved_tools.json"),
+            serde_json::to_string(&vec![valid, legacy]).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = CapabilityRegistry::new(dir.clone());
+        registry.load().unwrap();
+
+        let ids: Vec<&str> = registry.list_all().iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["tool.ok"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::time::{Duration, Instant};
     struct MockExecutor;
 

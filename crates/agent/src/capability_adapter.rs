@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use blockcell_core::types::ChatMessage;
-use blockcell_core::{Error, ProviderKind, Result};
+use blockcell_core::{Error, Result};
 use blockcell_providers::Provider;
 use blockcell_skills::{CapabilityRegistry, CoreEvolution, LLMProvider};
 use blockcell_storage::EvolutionWorkflowStore;
@@ -172,13 +172,8 @@ impl CoreEvolutionOps for CoreEvolutionAdapter {
         description: &str,
         provider_kind_str: &str,
     ) -> Result<Value> {
-        let provider_kind = match provider_kind_str {
-            "python" => ProviderKind::ExternalApi,
-            "process" => ProviderKind::Process,
-            "rust" | "dylib" => ProviderKind::DynamicLibrary,
-            "rhai" => ProviderKind::RhaiScript,
-            _ => ProviderKind::Process, // "script" / default → bash
-        };
+        let provider_kind =
+            blockcell_core::evolution_boundary::parse_evolvable_provider_kind(provider_kind_str)?;
 
         let core_evo = self.inner.lock().await;
         let evolution_id = core_evo
@@ -321,7 +316,9 @@ impl EvolutionWorkflowStoreOps for EvolutionWorkflowStoreAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockcell_core::{CapabilityDescriptor, CapabilityStatus, CapabilityType, PrivilegeLevel};
+    use blockcell_core::{
+        CapabilityDescriptor, CapabilityStatus, CapabilityType, PrivilegeLevel, ProviderKind,
+    };
     use blockcell_skills::CapabilityExecutor;
     use std::time::Duration;
 

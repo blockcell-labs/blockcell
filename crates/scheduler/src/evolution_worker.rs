@@ -7,7 +7,6 @@
 //! Follows the DreamService pattern: `run_loop(self, shutdown)` + `tokio::select!`.
 
 use blockcell_agent::EvolutionNotifier;
-use blockcell_core::ProviderKind;
 use blockcell_skills::{CoreEvolution, EvolutionStep};
 use blockcell_storage::evolution_workflow::WorkflowRecord;
 use blockcell_storage::EvolutionWorkflowStore;
@@ -440,13 +439,9 @@ impl EvolutionWorker {
         let engine = self.engine.lock().await;
 
         // Parse provider_kind from workflow record
-        let provider_kind = match workflow.provider_kind.as_str() {
-            "python" | "ExternalApi" => ProviderKind::ExternalApi,
-            "process" | "Process" => ProviderKind::Process,
-            "rust" | "dylib" | "DynamicLibrary" => ProviderKind::DynamicLibrary,
-            "rhai" | "RhaiScript" => ProviderKind::RhaiScript,
-            _ => ProviderKind::Process,
-        };
+        let provider_kind = blockcell_core::evolution_boundary::parse_evolvable_provider_kind(
+            &workflow.provider_kind,
+        )?;
 
         if step == EvolutionStep::BuildPrompt {
             engine

@@ -68,8 +68,6 @@ pub enum ProviderKind {
     BuiltIn,
     /// Rhai 脚本（现有 skill 系统）
     RhaiScript,
-    /// 动态库（.dylib / .so / .dll）
-    DynamicLibrary,
     /// 独立进程（通过 IPC 通信）
     Process,
     /// 外部 API
@@ -234,7 +232,7 @@ mod tests {
             "Camera Observation",
             "Observe the environment through camera",
             CapabilityType::Hardware,
-            ProviderKind::DynamicLibrary,
+            ProviderKind::Process,
         )
         .with_privilege(PrivilegeLevel::Full)
         .with_status(CapabilityStatus::Available);

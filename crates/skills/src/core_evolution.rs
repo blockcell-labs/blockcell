@@ -3,9 +3,7 @@ use crate::capability_provider::{
 };
 use crate::capability_versioning::{CapabilityVersionManager, CapabilityVersionSource};
 use crate::evolution::LLMProvider;
-use blockcell_core::evolution_boundary::{
-    ensure_single_path_component, evolvable_provider_artifact,
-};
+use blockcell_core::evolution_boundary::ensure_single_path_component;
 use blockcell_core::{
     CapabilityDescriptor, CapabilityStatus, CapabilityType, Error, PrivilegeLevel, ProviderKind,
     Result,
@@ -193,13 +191,8 @@ pub struct CoreEvolution {
 mod generation;
 
 impl CoreEvolution {
-    /// Self-evolution may only produce out-of-process script capabilities whose artifact
-    /// name stays inside `artifacts_dir`. Returns the artifact-safe capability id.
-    fn check_evolution_boundary(
-        capability_id: &str,
-        provider_kind: &ProviderKind,
-    ) -> Result<String> {
-        evolvable_provider_artifact(provider_kind)?;
+    /// Evolved artifact names must stay inside `artifacts_dir`. Returns the artifact-safe capability id.
+    fn check_evolution_boundary(capability_id: &str) -> Result<String> {
         let safe_id = capability_id.replace('.', "_");
         ensure_single_path_component(&safe_id)?;
         Ok(safe_id)
@@ -529,7 +522,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
-        Self::check_evolution_boundary(capability_id, &provider_kind)?;
+        Self::check_evolution_boundary(capability_id)?;
         // For BuildPrompt, create the CoreEvolutionRecord if it doesn't exist
         if step == EvolutionStep::BuildPrompt && self.load_record(evolution_id).is_err() {
             let now = chrono::Utc::now().timestamp();
@@ -671,7 +664,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
-        Self::check_evolution_boundary(capability_id, &provider_kind)?;
+        Self::check_evolution_boundary(capability_id)?;
         // Idempotency: return existing active record if present
         if let Some(existing_id) = self.find_active_record(capability_id)? {
             debug!(
@@ -936,7 +929,7 @@ impl CoreEvolution {
             .ok_or_else(|| Error::Evolution("No source code to compile".to_string()))?;
 
         Self::audit_generated_code(&record.provider_kind, code)?;
-        let safe_id = Self::check_evolution_boundary(&record.capability_id, &record.provider_kind)?;
+        let safe_id = Self::check_evolution_boundary(&record.capability_id)?;
 
         std::fs::create_dir_all(&self.artifacts_dir)?;
 
@@ -1028,9 +1021,6 @@ impl CoreEvolution {
 
                 Ok(script_path.to_string_lossy().to_string())
             }
-            ProviderKind::DynamicLibrary => Err(Error::PermissionDenied(
-                "native providers are rejected by the evolution boundary".to_string(),
-            )),
         }
     }
 
@@ -1147,11 +1137,6 @@ impl CoreEvolution {
                 &record.capability_id,
                 PathBuf::from(artifact_path),
             )),
-            ProviderKind::DynamicLibrary => {
-                return Err(Error::PermissionDenied(
-                    "native providers are rejected by the evolution boundary".to_string(),
-                ));
-            }
         };
 
         // A rollback snapshot is a required activation precondition. Do this before
@@ -1383,20 +1368,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evolution_boundary_rejects_native_providers_and_escaping_ids() {
+    async fn evolution_boundary_rejects_escaping_capability_ids() {
         let dir = std::env::temp_dir().join("test_core_evo_boundary");
         let _ = std::fs::remove_dir_all(&dir);
         let registry = crate::capability_provider::new_registry_handle(dir.clone());
         let evo = CoreEvolution::new(dir, registry, 300);
-
-        let native = evo
-            .request_capability("test.native", "native", ProviderKind::DynamicLibrary)
-            .await
-            .unwrap_err();
-        assert!(
-            native.to_string().contains("evolution boundary"),
-            "{native}"
-        );
 
         let escaping = evo
             .request_capability("../../escape", "escape", ProviderKind::Process)
