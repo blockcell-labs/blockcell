@@ -1660,6 +1660,28 @@ description: prompt demo
             })
             .unwrap_or(false)
     }));
+
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+    let kinds: Vec<SessionEventKind> = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events")
+        .into_iter()
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        kinds.first(),
+        Some(&SessionEventKind::SessionStart),
+        "{kinds:?}"
+    );
+    assert!(kinds.contains(&SessionEventKind::SkillLoad), "{kinds:?}");
+    assert_eq!(
+        &kinds[kinds.len() - 2..],
+        &[
+            SessionEventKind::AssistantMessage,
+            SessionEventKind::TurnEnd
+        ],
+        "{kinds:?}"
+    );
 }
 
 #[cfg(not(target_os = "windows"))]

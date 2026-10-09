@@ -391,6 +391,14 @@ impl AgentRuntime {
             &result.trace_messages,
             &result.final_response,
         );
+        self.dispatch_event(
+            msg,
+            persist_session_key,
+            &mut AgentEvent::TurnEnd {
+                final_response: result.final_response.clone(),
+            },
+        )
+        .await;
         self.session_store.save_with_metadata(
             persist_session_key,
             &updated_history,
