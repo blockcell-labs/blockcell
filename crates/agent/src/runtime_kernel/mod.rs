@@ -13,6 +13,9 @@ pub mod scope;
 pub mod waterfall;
 
 pub use event::{AgentEvent, AgentEventContext, EventClass, EventDecision};
-pub use event_bus::{AgentEventListener, EventBus, FailureMode, ListenerSpec, RegisteredListener};
+pub use event_bus::{
+    AgentEventListener, EventBus, FailureMode, ListenerSpec, RegisteredListener,
+    DEFAULT_LISTENER_TIMEOUT,
+};
 pub use scope::{ScopeGuard, ScopeId, ScopeTarget, ScopeView, ScopedRegistry};
 pub use waterfall::{Next, Waterfall, WaterfallChain};

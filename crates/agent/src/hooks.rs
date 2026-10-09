@@ -278,7 +278,8 @@ impl HookAdapter {
 #[async_trait]
 impl AgentEventListener for HookAdapter {
     fn spec(&self) -> ListenerSpec {
-        ListenerSpec::new("hooks")
+        // 每个 hook 已按配置的 timeout 单独限时，整体不再叠加总超时。
+        ListenerSpec::new("hooks").without_timeout()
     }
 
     async fn handle(

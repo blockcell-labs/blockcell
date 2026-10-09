@@ -19,6 +19,9 @@ pub enum FailureMode {
     FailClosed,
 }
 
+/// Listener 默认超时：卡住的 listener 不会无限期挂起当前回合。
+pub const DEFAULT_LISTENER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Listener 元数据。`priority` 越小越先执行，同优先级按注册顺序执行。
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
@@ -36,7 +39,7 @@ impl ListenerSpec {
             priority: 0,
             failure_mode: FailureMode::FailOpen,
             scope: ScopeTarget::Global,
-            timeout: None,
+            timeout: Some(DEFAULT_LISTENER_TIMEOUT),
         }
     }
 
@@ -57,6 +60,12 @@ impl ListenerSpec {
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// 取消超时，仅用于自身已有更细粒度超时控制的 listener。
+    pub fn without_timeout(mut self) -> Self {
+        self.timeout = None;
         self
     }
 }
@@ -349,6 +358,15 @@ mod tests {
             EventDecision::Reject { reason } => assert!(reason.contains("policy")),
             other => panic!("expected reject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn listeners_get_a_default_timeout_unless_opted_out() {
+        assert_eq!(
+            ListenerSpec::new("x").timeout,
+            Some(DEFAULT_LISTENER_TIMEOUT)
+        );
+        assert_eq!(ListenerSpec::new("x").without_timeout().timeout, None);
     }
 
     #[tokio::test]

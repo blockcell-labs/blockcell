@@ -83,6 +83,7 @@ impl AgentEventListener for WsToolEventListener {
 /// 将 Durable 事件追加到会话事件日志（Session Event Log）。
 ///
 /// 只记录事实，不参与控制流；写入失败按 fail-open 记录 warning。
+/// 文件 I/O（加锁、读尾部 seq、追加）在 blocking 线程池执行，不占用 async worker。
 pub(crate) struct SessionEventRecorder {
     writer: Arc<dyn SessionEventWriter>,
 }
@@ -217,17 +218,27 @@ impl AgentEventListener for SessionEventRecorder {
         if event.class() != EventClass::Durable || ctx.session_id.is_empty() {
             return Ok(EventDecision::Continue);
         }
-        for (kind, payload) in session_events_for(event) {
-            self.writer.append(
-                &ctx.session_id,
-                NewSessionEvent {
-                    turn_id: ctx.turn_id.clone(),
-                    step: ctx.step,
-                    kind,
-                    payload,
-                },
-            )?;
+        let events: Vec<NewSessionEvent> = session_events_for(event)
+            .into_iter()
+            .map(|(kind, payload)| NewSessionEvent {
+                turn_id: ctx.turn_id.clone(),
+                step: ctx.step,
+                kind,
+                payload,
+            })
+            .collect();
+        if events.is_empty() {
+            return Ok(EventDecision::Continue);
         }
+        let writer = Arc::clone(&self.writer);
+        let session_id = ctx.session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            events
+                .into_iter()
+                .try_for_each(|event| writer.append(&session_id, event).map(|_| ()))
+        })
+        .await
+        .map_err(|error| blockcell_core::Error::Storage(error.to_string()))??;
         Ok(EventDecision::Continue)
     }
 }
