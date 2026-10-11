@@ -150,6 +150,28 @@ impl AgentRuntime {
         result
     }
 
+    /// 不带工具的收尾模型调用（强制最终回答、子代理结果汇总）作为独立 step 记录，
+    /// 保证 model/request、model/response 落在某个 step 内，事件日志可完整重放。
+    pub(crate) async fn run_final_model_step(
+        &mut self,
+        msg: &InboundMessage,
+        session_id: &str,
+        messages: &[ChatMessage],
+    ) -> Result<LLMResponse> {
+        let step = self.begin_step();
+        self.dispatch_event(
+            msg,
+            session_id,
+            &mut AgentEvent::StepStart { iteration: step },
+        )
+        .await;
+        let result = self
+            .chat_with_provider_observed(msg, session_id, messages, &[])
+            .await;
+        self.end_step(msg, session_id, step, 0).await;
+        result
+    }
+
     pub(crate) async fn run_prompt_skill_loop(
         &mut self,
         msg: &InboundMessage,
@@ -331,7 +353,7 @@ impl AgentRuntime {
                     "请基于以上技能上下文和工具结果，直接给出最终答案。不要再调用任何工具。",
                 ));
                 let final_response = self
-                    .chat_with_provider_observed(msg, &session_id, &final_messages, &[])
+                    .run_final_model_step(msg, &session_id, &final_messages)
                     .await?
                     .content
                     .unwrap_or_default();

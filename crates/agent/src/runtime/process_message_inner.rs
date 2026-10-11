@@ -1439,20 +1439,9 @@ impl AgentRuntime {
                         ghost_recall_context_block.as_deref(),
                     );
 
-                    let chat_result = if let Some((pidx, p)) = self.provider_pool.acquire() {
-                        let r = p.chat(&final_messages, &[]).await;
-                        match &r {
-                            Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
-                            Err(e) => self
-                                .provider_pool
-                                .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
-                        }
-                        r
-                    } else {
-                        Err(blockcell_core::Error::Config(
-                            "ProviderPool: no healthy providers".to_string(),
-                        ))
-                    };
+                    let chat_result = self
+                        .run_final_model_step(&msg, &persist_session_key, &final_messages)
+                        .await;
                     match chat_result {
                         Ok(r) => {
                             final_response = r.content.unwrap_or_default();
@@ -1628,20 +1617,10 @@ impl AgentRuntime {
                     }
 
                     // 做一次额外的LLM调用来生成汇总
-                    let summary_result = if let Some((pidx, p)) = self.provider_pool.acquire() {
-                        let r = p.chat(&current_messages, &[]).await;
-                        match &r {
-                            Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
-                            Err(e) => self
-                                .provider_pool
-                                .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
-                        }
-                        r
-                    } else {
-                        Err(blockcell_core::Error::Config(
-                            "ProviderPool: no healthy providers".to_string(),
-                        ))
-                    };
+                    let summary_result = self
+                        .run_final_model_step(&msg, &persist_session_key, &current_messages)
+                        .await;
+                    self.current_step = None;
 
                     match summary_result {
                         Ok(r) => {

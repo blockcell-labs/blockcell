@@ -5483,6 +5483,91 @@ async fn full_turn_produces_ordered_session_event_log() {
     assert!(runtime.current_step.is_none());
 }
 
+/// 只要有工具可用就一直调用 read_file；无工具时给出最终回答。
+struct EndlessToolProvider;
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for EndlessToolProvider {
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        if tools.is_empty() {
+            return Ok(LLMResponse {
+                content: Some("forced final answer".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                finish_reason: "stop".to_string(),
+                usage: serde_json::Value::Null,
+            });
+        }
+        Ok(LLMResponse {
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ToolCallRequest {
+                id: format!("call-{}", uuid::Uuid::new_v4()),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "missing-file.txt"}),
+                thought_signature: None,
+            }],
+            finish_reason: "tool_calls".to_string(),
+            usage: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn forced_final_answer_is_logged_as_its_own_step() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.max_tool_iterations = 1;
+    let base =
+        std::env::temp_dir().join(format!("blockcell-forced-final-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(EndlessToolProvider),
+        config,
+    );
+    let msg = test_main_session_inbound("cli", "event-log-forced-final");
+    let session_key = msg.session_key();
+
+    let reply = runtime.process_message(msg).await.unwrap();
+    assert_eq!(reply, "forced final answer");
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    assert_steps_balanced(&events);
+    let final_response = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == SessionEventKind::ModelResponse)
+        .expect("forced final model/response");
+    assert_eq!(final_response.payload["content"], "forced final answer");
+    let final_step = final_response
+        .step
+        .expect("forced final call belongs to a step");
+    let step_events: Vec<SessionEventKind> = events
+        .iter()
+        .filter(|event| event.step == Some(final_step))
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        step_events,
+        vec![
+            SessionEventKind::StepStart,
+            SessionEventKind::ModelRequest,
+            SessionEventKind::ModelResponse,
+            SessionEventKind::StepEnd,
+        ]
+    );
+}
+
 #[tokio::test]
 async fn failed_turn_is_closed_with_error_turn_end() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
