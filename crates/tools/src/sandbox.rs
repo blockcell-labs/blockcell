@@ -112,46 +112,115 @@ fn escape_seatbelt_path(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
-pub fn sandboxed_shell_command(
-    shell: &str,
-    shell_args: &[&str],
-    policy: SandboxPolicy,
-    writable_roots: &[PathBuf],
-) -> Result<(Command, SandboxBackend)> {
-    let backend = native_backend(policy);
-    let mut command = match backend {
-        SandboxBackend::FullAccess => {
-            let mut command = Command::new(shell);
-            command.args(shell_args);
-            command
+impl SandboxBackend {
+    /// 该后端是否真正执行了给定的策略。
+    pub fn enforces(self, policy: SandboxPolicy) -> bool {
+        match self {
+            Self::FullAccess => policy == SandboxPolicy::FullAccess,
+            Self::MacOsSeatbelt | Self::LinuxLandlockSeccomp => true,
+            Self::ApprovalRequired => false,
         }
-        SandboxBackend::MacOsSeatbelt => {
-            let profile = build_seatbelt_profile(policy, writable_roots);
-            let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.arg("-p").arg(profile).arg(shell).args(shell_args);
-            command
-        }
-        SandboxBackend::LinuxLandlockSeccomp => {
-            let roots = if policy == SandboxPolicy::ReadOnly {
-                Vec::new()
-            } else {
-                writable_roots.to_vec()
-            };
-            let mut command = Command::new(shell);
-            command.args(shell_args);
-            // SAFETY: the closure performs only async-signal-safe syscalls in the
-            // child immediately before exec and captures owned path buffers.
-            unsafe {
-                command.pre_exec(move || apply_linux_sandbox(&roots));
+    }
+}
+
+/// 一次沙箱化进程启动请求。`policy` 由上层安全 contract 决定，provider 只负责执行。
+#[derive(Debug, Clone)]
+pub struct SandboxRequest {
+    pub agent_id: String,
+    pub session_id: String,
+    pub policy: SandboxPolicy,
+    /// `WorkspaceWrite` 时允许写入的根目录。
+    pub writable_roots: Vec<PathBuf>,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// provider 准备好的、尚未启动的进程。
+pub struct SandboxHandle {
+    pub command: Command,
+    pub backend: SandboxBackend,
+}
+
+/// 沙箱实现（本机 Seatbelt / Landlock，未来可以是 Docker / VM / Remote）。
+///
+/// provider 不能放宽请求中的策略：无法执行时必须返回错误，而不是降级为不受限执行。
+#[async_trait::async_trait]
+pub trait SandboxProvider: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn prepare(&self, request: SandboxRequest) -> Result<SandboxHandle>;
+}
+
+/// 通过 provider 准备进程，并校验 provider 返回的后端确实执行了请求的策略。
+pub async fn prepare_sandboxed(
+    provider: &dyn SandboxProvider,
+    request: SandboxRequest,
+) -> Result<SandboxHandle> {
+    let policy = request.policy;
+    let handle = provider.prepare(request).await?;
+    if !handle.backend.enforces(policy) {
+        return Err(Error::PermissionDenied(format!(
+            "sandbox provider '{}' returned backend {:?} that does not enforce policy {}",
+            provider.name(),
+            handle.backend,
+            policy.as_str()
+        )));
+    }
+    Ok(handle)
+}
+
+/// 本机原生沙箱：macOS Seatbelt / Linux Landlock + seccomp；不可用时要求审批。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NativeSandboxProvider;
+
+#[async_trait::async_trait]
+impl SandboxProvider for NativeSandboxProvider {
+    fn name(&self) -> &'static str {
+        "native"
+    }
+
+    async fn prepare(&self, request: SandboxRequest) -> Result<SandboxHandle> {
+        let SandboxRequest {
+            policy,
+            writable_roots,
+            program,
+            args,
+            ..
+        } = request;
+        let backend = native_backend(policy);
+        let mut command = match backend {
+            SandboxBackend::FullAccess => {
+                let mut command = Command::new(&program);
+                command.args(&args);
+                command
             }
-            command
-        }
-        SandboxBackend::ApprovalRequired => {
-            return Err(Error::PermissionDenied(APPROVAL_REQUIRED.to_string()));
-        }
-    };
-    command.kill_on_drop(true);
-    Ok((command, backend))
+            SandboxBackend::MacOsSeatbelt => {
+                let profile = build_seatbelt_profile(policy, &writable_roots);
+                let mut command = Command::new("/usr/bin/sandbox-exec");
+                command.arg("-p").arg(profile).arg(&program).args(&args);
+                command
+            }
+            SandboxBackend::LinuxLandlockSeccomp => {
+                let roots = if policy == SandboxPolicy::ReadOnly {
+                    Vec::new()
+                } else {
+                    writable_roots
+                };
+                let mut command = Command::new(&program);
+                command.args(&args);
+                // SAFETY: the closure performs only async-signal-safe syscalls in the
+                // child immediately before exec and captures owned path buffers.
+                unsafe {
+                    command.pre_exec(move || apply_linux_sandbox(&roots));
+                }
+                command
+            }
+            SandboxBackend::ApprovalRequired => {
+                return Err(Error::PermissionDenied(APPROVAL_REQUIRED.to_string()));
+            }
+        };
+        command.kill_on_drop(true);
+        Ok(SandboxHandle { command, backend })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -407,6 +476,47 @@ mod tests {
         assert!(profile.contains("/tmp/blockcell workspace/src"));
         assert!(profile.contains("/tmp/blockcell workspace/Cargo.toml"));
         assert!(!profile.contains("(allow file-write*)"));
+    }
+
+    /// 违反 contract 的 provider：无论请求什么策略都返回不受限进程。
+    struct PermissiveProvider;
+
+    #[async_trait::async_trait]
+    impl SandboxProvider for PermissiveProvider {
+        fn name(&self) -> &'static str {
+            "permissive"
+        }
+        async fn prepare(&self, request: SandboxRequest) -> Result<SandboxHandle> {
+            Ok(SandboxHandle {
+                command: Command::new(request.program),
+                backend: SandboxBackend::FullAccess,
+            })
+        }
+    }
+
+    fn request(policy: SandboxPolicy) -> SandboxRequest {
+        SandboxRequest {
+            agent_id: "default".into(),
+            session_id: "cli:test".into(),
+            policy,
+            writable_roots: vec![PathBuf::from("/tmp")],
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_cannot_weaken_requested_policy() {
+        let error = prepare_sandboxed(&PermissiveProvider, request(SandboxPolicy::WorkspaceWrite))
+            .await
+            .err()
+            .expect("weakened policy must be rejected");
+        assert!(error.to_string().contains("does not enforce"), "{error}");
+
+        let handle = prepare_sandboxed(&PermissiveProvider, request(SandboxPolicy::FullAccess))
+            .await
+            .expect("full-access request may run unrestricted");
+        assert_eq!(handle.backend, SandboxBackend::FullAccess);
     }
 
     #[test]

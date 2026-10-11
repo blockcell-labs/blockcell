@@ -45,6 +45,7 @@ pub mod security_scan;
 pub mod send_message;
 pub mod session_recall;
 pub mod session_search;
+pub mod shell_executor;
 pub mod shell_session;
 pub mod skill_manage;
 pub mod skills;

@@ -12,7 +12,15 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 
 pub use crate::sandbox::SandboxPolicy;
+use crate::sandbox::{prepare_sandboxed, NativeSandboxProvider, SandboxProvider, SandboxRequest};
 use crate::{Tool, ToolContext, ToolSchema};
+
+/// 发起 shell 会话的 agent / 会话，随沙箱请求交给 provider。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SessionOwner<'a> {
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+}
 
 const MAX_SESSION_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -75,12 +83,18 @@ struct ShellSession {
 #[derive(Clone)]
 pub(crate) struct ShellSessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ShellSession>>>>>,
+    sandbox: Arc<dyn SandboxProvider>,
 }
 
 impl ShellSessionManager {
     pub(crate) fn new() -> Self {
+        Self::with_sandbox(Arc::new(NativeSandboxProvider))
+    }
+
+    pub(crate) fn with_sandbox(sandbox: Arc<dyn SandboxProvider>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            sandbox,
         }
     }
 
@@ -88,12 +102,21 @@ impl ShellSessionManager {
         &self,
         workspace: &Path,
         sandbox_policy: SandboxPolicy,
+        owner: SessionOwner<'_>,
     ) -> Result<String> {
+        let request = SandboxRequest {
+            agent_id: owner.agent_id.to_string(),
+            session_id: owner.session_id.to_string(),
+            policy: sandbox_policy,
+            writable_roots: vec![workspace.to_path_buf()],
+            program: String::new(),
+            args: Vec::new(),
+        };
         #[cfg(unix)]
         let (mut command, command_input, child_control) =
-            build_interactive_shell(workspace, sandbox_policy)?;
+            build_interactive_shell(self.sandbox.as_ref(), request).await?;
         #[cfg(windows)]
-        let mut command = build_interactive_shell(workspace, sandbox_policy)?;
+        let mut command = build_interactive_shell(self.sandbox.as_ref(), request).await?;
         command
             .current_dir(workspace)
             .stdin(Stdio::piped())
@@ -448,7 +471,21 @@ impl Tool for ShellTool {
                 } else {
                     let policy =
                         SandboxPolicy::parse(params.get("sandbox_policy").and_then(Value::as_str))?;
-                    let session_id = SHELL_SESSIONS.create(&ctx.workspace, policy).await?;
+                    let agent_id = ctx
+                        .agent_identity
+                        .as_ref()
+                        .map(|identity| identity.agent_id.as_str())
+                        .unwrap_or_default();
+                    let session_id = SHELL_SESSIONS
+                        .create(
+                            &ctx.workspace,
+                            policy,
+                            SessionOwner {
+                                agent_id,
+                                session_id: &ctx.session_key,
+                            },
+                        )
+                        .await?;
                     if let (Some(task_manager), (Some(pid), _)) = (
                         ctx.task_manager.as_ref(),
                         SHELL_SESSIONS.session_metadata(&session_id).await?,
@@ -524,9 +561,9 @@ where
 }
 
 #[cfg(unix)]
-fn build_interactive_shell(
-    workspace: &Path,
-    sandbox_policy: SandboxPolicy,
+async fn build_interactive_shell(
+    sandbox: &dyn SandboxProvider,
+    mut request: SandboxRequest,
 ) -> Result<(Command, tokio::fs::File, std::fs::File)> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -550,12 +587,11 @@ fn build_interactive_shell(
     }
     let command_input = tokio::fs::File::from_std(parent_control);
     let control_fd = child_control.as_raw_fd();
-    let (mut command, _) = crate::sandbox::sandboxed_shell_command(
-        "bash",
-        &["--noprofile", "--norc", "/dev/fd/3"],
-        sandbox_policy,
-        &[workspace.to_path_buf()],
-    )?;
+    request.program = "bash".to_string();
+    request.args = ["--noprofile", "--norc", "/dev/fd/3"]
+        .map(String::from)
+        .to_vec();
+    let mut command = prepare_sandboxed(sandbox, request).await?.command;
     // SAFETY: dup2 only remaps the inherited command channel in the child just
     // before exec; no allocation or shared-state access occurs in the closure.
     unsafe {
@@ -574,14 +610,13 @@ fn build_interactive_shell(
 }
 
 #[cfg(windows)]
-fn build_interactive_shell(workspace: &Path, sandbox_policy: SandboxPolicy) -> Result<Command> {
-    crate::sandbox::sandboxed_shell_command(
-        "cmd.exe",
-        &["/Q"],
-        sandbox_policy,
-        &[workspace.to_path_buf()],
-    )
-    .map(|(command, _)| command)
+async fn build_interactive_shell(
+    sandbox: &dyn SandboxProvider,
+    mut request: SandboxRequest,
+) -> Result<Command> {
+    request.program = "cmd.exe".to_string();
+    request.args = vec!["/Q".to_string()];
+    Ok(prepare_sandboxed(sandbox, request).await?.command)
 }
 
 fn build_command_payload(command: &str, marker: &str) -> String {
@@ -635,8 +670,17 @@ mod tests {
         use std::os::fd::AsRawFd;
 
         let workspace = tempfile::tempdir().expect("temp workspace");
+        let request = SandboxRequest {
+            agent_id: String::new(),
+            session_id: String::new(),
+            policy: SandboxPolicy::FullAccess,
+            writable_roots: vec![workspace.path().to_path_buf()],
+            program: String::new(),
+            args: Vec::new(),
+        };
         let (_command, _parent_writer, child_reader) =
-            build_interactive_shell(workspace.path(), SandboxPolicy::FullAccess)
+            build_interactive_shell(&NativeSandboxProvider, request)
+                .await
                 .expect("build interactive shell");
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
 
@@ -653,7 +697,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let manager = ShellSessionManager::new();
         let session_id = manager
-            .create(workspace.path(), SandboxPolicy::FullAccess)
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
             .await
             .expect("create shell session");
 
@@ -680,7 +728,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let manager = ShellSessionManager::new();
         let session_id = manager
-            .create(workspace.path(), SandboxPolicy::FullAccess)
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
             .await
             .expect("create shell session");
 
@@ -709,7 +761,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let manager = ShellSessionManager::new();
         let session_id = manager
-            .create(workspace.path(), SandboxPolicy::FullAccess)
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
             .await
             .expect("create shell session");
 
@@ -741,7 +797,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let manager = ShellSessionManager::new();
         let session_id = manager
-            .create(workspace.path(), SandboxPolicy::FullAccess)
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
             .await
             .expect("create shell session");
 
@@ -770,7 +830,11 @@ mod tests {
         let manager = ShellSessionManager::new();
 
         let error = manager
-            .create(workspace.path(), SandboxPolicy::WorkspaceWrite)
+            .create(
+                workspace.path(),
+                SandboxPolicy::WorkspaceWrite,
+                SessionOwner::default(),
+            )
             .await
             .expect_err("unavailable sandbox must not silently run unrestricted");
 

@@ -1,4 +1,5 @@
 use super::*;
+use blockcell_tools::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
 
 pub(crate) fn validate_path_safety(path: &str) -> Result<(), ForkedAgentError> {
     // 检查空字节注入
@@ -203,44 +204,35 @@ pub(crate) async fn execute_shell_command(
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>()
     };
-    #[cfg(windows)]
-    let (mut cmd, _) = blockcell_tools::sandbox::sandboxed_shell_command(
-        "cmd",
-        &["/C", command],
-        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
-        &writable_roots,
-    )
-    .map_err(|error| ForkedAgentError::ToolError(error.to_string()))?;
-    #[cfg(not(windows))]
-    let (mut cmd, _) = blockcell_tools::sandbox::sandboxed_shell_command(
-        "sh",
-        &["-c", command],
-        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
-        &writable_roots,
-    )
-    .map_err(|error| ForkedAgentError::ToolError(error.to_string()))?;
-
-    if let Some(dir) = command_working_dir {
-        cmd.current_dir(dir);
-    }
-    cmd.kill_on_drop(true);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let output = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+    let identity = blockcell_core::current_agent_context();
+    let output = LocalShellExecutor::default()
+        .execute(ShellRequest {
+            agent_id: identity
+                .as_ref()
+                .map(|identity| identity.agent_id.clone())
+                .unwrap_or_default(),
+            session_id: String::new(),
+            command: command.to_string(),
+            working_dir: command_working_dir
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default(),
+            policy: blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
+            writable_roots,
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 40_000,
+        })
         .await
-        .map_err(|_| ForkedAgentError::ToolError("Command timed out after 60 seconds".to_string()))?
-        .map_err(|e| ForkedAgentError::ToolError(format!("Failed to execute command: {}", e)))?;
+        .map_err(|error| ForkedAgentError::ToolError(error.to_string()))?;
 
     let stdout = truncate_output(String::from_utf8_lossy(&output.stdout).to_string(), 10_000);
     let stderr = truncate_output(String::from_utf8_lossy(&output.stderr).to_string(), 10_000);
 
     // 命令非零退出码视为工具失败，防止失败的命令被误记为提取成功
-    if !output.status.success() {
+    if !output.success() {
         return Err(ForkedAgentError::ToolError(format!(
             "Command exited with non-zero status (exit_code: {})\nstdout: {}\nstderr: {}",
             output
-                .status
-                .code()
+                .exit_code
                 .map_or("N/A".to_string(), |c| c.to_string()),
             stdout,
             stderr,
@@ -248,7 +240,7 @@ pub(crate) async fn execute_shell_command(
     }
 
     Ok(json!({
-        "exit_code": output.status.code(),
+        "exit_code": output.exit_code,
         "stdout": stdout,
         "stderr": stderr,
     })

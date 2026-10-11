@@ -108,7 +108,7 @@ impl ToolRegistry {
         registry.register(Arc::new(GetContextRemainingTool));
 
         // Exec tool
-        registry.register(Arc::new(ExecTool));
+        registry.register(Arc::new(ExecTool::default()));
         registry.register(Arc::new(ShellTool));
         registry.register(Arc::new(ExecLocalTool));
         registry.register(Arc::new(ExecSkillScriptTool));
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn test_registry_register_custom() {
         let mut reg = ToolRegistry::new();
-        reg.register(Arc::new(crate::exec::ExecTool));
+        reg.register(Arc::new(crate::exec::ExecTool::default()));
         assert!(reg.get("exec").is_some());
         assert_eq!(reg.tool_names().len(), 1);
     }

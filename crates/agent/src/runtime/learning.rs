@@ -922,7 +922,7 @@ impl super::AgentRuntime {
         registry.register(Arc::new(WriteFileTool));
         registry.register(Arc::new(EditFileTool));
         registry.register(Arc::new(ListDirTool));
-        registry.register(Arc::new(ExecTool));
+        registry.register(Arc::new(ExecTool::default()));
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(WebFetchTool));
         registry.register(Arc::new(ListTasksTool));

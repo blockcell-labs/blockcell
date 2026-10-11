@@ -3,13 +3,29 @@ use blockcell_core::{Error, Result};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
-use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
 
+use crate::sandbox::SandboxPolicy;
+use crate::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
 use crate::{Tool, ToolContext, ToolSchema};
 
-pub struct ExecTool;
+/// 一次性命令执行。执行位置由注入的 [`ShellExecutor`] 决定，工具本身只描述命令。
+pub struct ExecTool {
+    executor: Arc<dyn ShellExecutor>,
+}
+
+impl ExecTool {
+    pub fn new(executor: Arc<dyn ShellExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+impl Default for ExecTool {
+    fn default() -> Self {
+        Self::new(Arc::new(LocalShellExecutor::default()))
+    }
+}
 
 /// Static destructive-command patterns, compiled once. Matched against a
 /// whitespace-normalized, case-insensitive form of the command.
@@ -96,23 +112,6 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
     DENY_PATTERNS.iter().any(|re| re.is_match(&normalized))
 }
 
-/// Build the platform-appropriate shell command. Unix uses `sh -c`,
-/// Windows uses `cmd /C`.
-fn build_shell_command(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
 #[async_trait]
 impl Tool for ExecTool {
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
@@ -176,20 +175,25 @@ impl Tool for ExecTool {
         let timeout_secs = ctx.config.tools.exec.timeout as u64;
         let max_output_chars = 10000;
 
-        let mut cmd = build_shell_command(command);
-        cmd.current_dir(&working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Ensure the spawned child is killed if the future is dropped
-            // (e.g. on timeout), so timed-out commands don't leak as orphans.
-            .kill_on_drop(true);
-
-        let result = crate::process::run_command_bounded(
-            cmd,
-            Duration::from_secs(timeout_secs),
-            max_output_chars * 4,
-        )
-        .await;
+        // exec 历史上不受沙箱限制（安全由 Guarded Tool Pipeline 的 policy / 路径检查保证），
+        // 这里显式声明 FullAccess；受限执行请使用 shell 工具的 sandbox_policy。
+        let result = self
+            .executor
+            .execute(ShellRequest {
+                agent_id: ctx
+                    .agent_identity
+                    .as_ref()
+                    .map(|identity| identity.agent_id.clone())
+                    .unwrap_or_default(),
+                session_id: ctx.session_key.clone(),
+                command: command.to_string(),
+                working_dir,
+                policy: SandboxPolicy::FullAccess,
+                writable_roots: Vec::new(),
+                timeout: Duration::from_secs(timeout_secs),
+                max_output_bytes: max_output_chars * 4,
+            })
+            .await;
 
         match result {
             Ok(output) => {
@@ -214,7 +218,7 @@ impl Tool for ExecTool {
                 }
 
                 Ok(json!({
-                    "exit_code": output.status.code(),
+                    "exit_code": output.exit_code,
                     "stdout": stdout,
                     "stderr": stderr,
                     "truncated": truncated
@@ -232,32 +236,32 @@ mod tests {
 
     #[test]
     fn test_exec_schema() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "exec");
     }
 
     #[test]
     fn test_exec_validate_ok() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         assert!(tool.validate(&json!({"command": "ls -la"})).is_ok());
     }
 
     #[test]
     fn test_exec_validate_missing_command() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         assert!(tool.validate(&json!({})).is_err());
     }
 
     #[test]
     fn test_exec_validate_deny_rm_rf() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         assert!(tool.validate(&json!({"command": "rm -rf /"})).is_err());
     }
 
     #[test]
     fn test_exec_validate_deny_mkfs() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         assert!(tool
             .validate(&json!({"command": "mkfs.ext4 /dev/sda"}))
             .is_err());
@@ -265,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_exec_validate_deny_dd() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         assert!(tool
             .validate(&json!({"command": "dd if=/dev/zero of=/dev/sda"}))
             .is_err());
@@ -273,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_exec_validate_deny_rm_variants() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         // Flag reordering / separate flags / long form / extra whitespace
         for cmd in [
             "rm -fr /",
@@ -297,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_exec_validate_allows_safe_rm() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         // Recursive delete of a specific project path is allowed by the denylist
         // (path policy still governs where it may run).
         for cmd in [
@@ -315,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_exec_validate_deny_destructive_misc() {
-        let tool = ExecTool;
+        let tool = ExecTool::default();
         for cmd in [
             "shutdown -h now",
             "REBOOT",
