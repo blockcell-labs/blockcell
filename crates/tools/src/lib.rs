@@ -52,6 +52,7 @@ pub mod skills;
 pub mod spawn;
 pub(crate) mod ssrf;
 pub mod stream_subscribe;
+pub mod subagent;
 pub mod system_info;
 pub mod tasks;
 pub mod termux_api;
@@ -114,23 +115,10 @@ pub trait SpawnHandle: Send + Sync {
     ) -> Result<Value>;
 }
 
-/// Trait for typed agent execution from the agent tool.
-/// Supports Fork mode (inherits parent context) and typed agent spawning.
-#[async_trait]
+/// Runtime capabilities exposed to tools (subagents, context-window estimates).
 pub trait RuntimeHandle: Send + Sync {
-    /// Execute in Fork mode - inherits parent conversation context.
-    /// Returns the agent's response as a string.
-    async fn execute_fork_mode(&self, prompt: String) -> Result<String>;
-
-    /// Spawn a typed agent with specific capabilities.
-    /// Returns task_id for tracking.
-    async fn spawn_typed_agent(
-        &self,
-        agent_type: &str,
-        prompt: String,
-        description: Option<String>,
-        workspace_scope: Vec<String>,
-    ) -> Result<String>;
+    /// Provider used by the agent tool to spawn fork / typed subagents.
+    fn subagents(&self) -> Arc<dyn subagent::SubagentProvider>;
 
     /// Return the latest assembled context-window estimate for a persisted session.
     fn context_window_snapshot(&self, session_key: &str) -> blockcell_core::ContextWindowSnapshot;

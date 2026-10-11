@@ -3,6 +3,7 @@ use blockcell_core::{Error, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::subagent::{SubagentKind, SubagentPermissions, SubagentRequest};
 use crate::{Tool, ToolContext, ToolSchema};
 
 /// Agent 工具参数
@@ -182,9 +183,19 @@ Specify subagent_type for typed agents (background execution, returns task_id)."
             .as_ref()
             .ok_or_else(|| Error::Tool("Runtime handle 不可用".to_string()))?;
 
-        // 如果省略 subagent_type -> Fork 模式 (同步执行)
+        let subagents = runtime_handle.subagents();
+
+        // 如果省略 subagent_type -> Fork 模式 (同步执行，只读权限)
         if parsed.subagent_type.is_none() {
-            let result = runtime_handle.execute_fork_mode(parsed.prompt).await?;
+            let handle = subagents
+                .spawn(SubagentRequest {
+                    kind: SubagentKind::Fork,
+                    prompt: parsed.prompt,
+                    description: parsed.description,
+                    permissions: SubagentPermissions::read_only(),
+                })
+                .await?;
+            let result = handle.result().await?;
             return Ok(json!({
                 "mode": "fork",
                 "result": result,
@@ -252,18 +263,18 @@ Specify subagent_type for typed agents (background execution, returns task_id)."
             }
         }
 
-        let result = runtime_handle
-            .spawn_typed_agent(
-                &agent_type,
-                parsed.prompt,
-                parsed.description,
-                parsed.workspace_scope,
-            )
+        let handle = subagents
+            .spawn(SubagentRequest {
+                kind: SubagentKind::Typed { agent_type },
+                prompt: parsed.prompt,
+                description: parsed.description,
+                permissions: SubagentPermissions::agent_type(parsed.workspace_scope),
+            })
             .await?;
 
         Ok(json!({
             "mode": "typed",
-            "task_id": result
+            "task_id": handle.id()
         }))
     }
 }

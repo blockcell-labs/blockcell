@@ -52,19 +52,8 @@ mod tests {
 
     struct RuntimeBudget;
 
-    #[async_trait]
     impl crate::RuntimeHandle for RuntimeBudget {
-        async fn execute_fork_mode(&self, _prompt: String) -> blockcell_core::Result<String> {
-            unreachable!()
-        }
-
-        async fn spawn_typed_agent(
-            &self,
-            _agent_type: &str,
-            _prompt: String,
-            _description: Option<String>,
-            _workspace_scope: Vec<String>,
-        ) -> blockcell_core::Result<String> {
+        fn subagents(&self) -> Arc<dyn crate::subagent::SubagentProvider> {
             unreachable!()
         }
 
@@ -131,18 +120,8 @@ mod tests {
     #[tokio::test]
     async fn unlimited_budget_is_reported_without_fake_remaining_count() {
         struct UnlimitedRuntime;
-        #[async_trait]
         impl crate::RuntimeHandle for UnlimitedRuntime {
-            async fn execute_fork_mode(&self, _prompt: String) -> blockcell_core::Result<String> {
-                unreachable!()
-            }
-            async fn spawn_typed_agent(
-                &self,
-                _agent_type: &str,
-                _prompt: String,
-                _description: Option<String>,
-                _workspace_scope: Vec<String>,
-            ) -> blockcell_core::Result<String> {
+            fn subagents(&self) -> Arc<dyn crate::subagent::SubagentProvider> {
                 unreachable!()
             }
             fn context_window_snapshot(&self, _session_key: &str) -> ContextWindowSnapshot {

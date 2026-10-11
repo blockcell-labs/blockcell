@@ -4800,6 +4800,45 @@ async fn test_execute_fork_mode_context_inheritance() {
     assert!(params.disallowed_tools.contains(&"agent".to_string()));
 }
 
+#[tokio::test]
+async fn fork_subagent_runs_through_provider_handle() {
+    use blockcell_tools::subagent::{
+        SubagentKind, SubagentPermissions, SubagentProvider, SubagentRequest, SubagentStatus,
+    };
+
+    let runtime = test_runtime_with_provider(Arc::new(MockInterAgentProvider::new(
+        "fork analysis done",
+    )));
+    let provider = InProcessSubagentProvider::from_runtime(&runtime);
+
+    let handle = provider
+        .spawn(SubagentRequest {
+            kind: SubagentKind::Fork,
+            prompt: "summarize the repo".to_string(),
+            description: None,
+            permissions: SubagentPermissions::read_only(),
+        })
+        .await
+        .expect("spawn fork");
+    assert!(handle.id().starts_with("fork-"));
+    assert_eq!(handle.lineage().parent_session_id, "internal:default");
+
+    let result = handle.result().await.expect("fork result");
+    assert!(result.contains("fork analysis done"), "{result}");
+    assert_eq!(handle.status().await, SubagentStatus::Completed);
+
+    // 只读授权不能附带写入范围
+    let rejected = provider
+        .spawn(SubagentRequest {
+            kind: SubagentKind::Fork,
+            prompt: "write files".to_string(),
+            description: None,
+            permissions: SubagentPermissions::agent_type(vec!["src".to_string()]),
+        })
+        .await;
+    assert!(rejected.is_err());
+}
+
 // ========== 端到端测试: run_forked_agent 执行 ==========
 
 /// 测试 run_forked_agent 的实际执行（使用 mock provider）

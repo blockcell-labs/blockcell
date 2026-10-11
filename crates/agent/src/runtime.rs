@@ -81,6 +81,7 @@ mod process_message_phases;
 mod run_loop;
 mod skill_session;
 mod subagent;
+mod subagent_provider;
 mod tool_exec;
 mod tool_pipeline;
 mod turn_flow;
@@ -91,6 +92,7 @@ pub(crate) use ghost_boundary::*;
 pub use lightweight_handle::*;
 pub(crate) use message_task::*;
 pub(crate) use subagent::*;
+pub use subagent_provider::InProcessSubagentProvider;
 
 const TOOL_ROUND_THROTTLE_MS: u64 = 600;
 const TOOL_ROUND_THROTTLE_AFTER_RATE_LIMIT_MS: u64 = 2_500;
@@ -2576,23 +2578,10 @@ impl AgentRuntime {
 
 /// RuntimeHandle trait implementation for AgentRuntime
 ///
-/// Allows tools to interact with the agent runtime for fork execution
-/// and typed agent spawning.
-#[async_trait::async_trait]
+/// Allows tools to spawn subagents and read context-window estimates.
 impl blockcell_tools::RuntimeHandle for AgentRuntime {
-    async fn execute_fork_mode(&self, prompt: String) -> Result<String> {
-        self.execute_fork_mode(prompt).await
-    }
-
-    async fn spawn_typed_agent(
-        &self,
-        agent_type: &str,
-        prompt: String,
-        description: Option<String>,
-        workspace_scope: Vec<String>,
-    ) -> Result<String> {
-        self.spawn_typed_agent(agent_type, prompt, description, workspace_scope)
-            .await
+    fn subagents(&self) -> Arc<dyn blockcell_tools::subagent::SubagentProvider> {
+        Arc::new(InProcessSubagentProvider::from_runtime(self))
     }
 
     fn context_window_snapshot(&self, session_key: &str) -> blockcell_core::ContextWindowSnapshot {
