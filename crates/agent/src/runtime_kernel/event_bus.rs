@@ -325,6 +325,7 @@ mod tests {
 
         let mut turn_end = AgentEvent::TurnEnd {
             final_response: String::new(),
+            error: None,
         };
         assert_eq!(
             bus.dispatch(&ctx(), &mut turn_end).await,

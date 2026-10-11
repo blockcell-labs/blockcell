@@ -385,6 +385,27 @@ impl AgentRuntime {
         .await;
     }
 
+    /// 关闭当前回合：派发 turn/end 并清除 turn/step 上下文，避免回合外事件沿用旧的 turn_id。
+    pub(crate) async fn end_turn(
+        &mut self,
+        msg: &InboundMessage,
+        session_id: &str,
+        final_response: String,
+        error: Option<String>,
+    ) {
+        self.current_step = None;
+        self.dispatch_event(
+            msg,
+            session_id,
+            &mut AgentEvent::TurnEnd {
+                final_response,
+                error,
+            },
+        )
+        .await;
+        self.current_turn_id = None;
+    }
+
     pub(crate) async fn dispatch_event(
         &self,
         msg: &InboundMessage,

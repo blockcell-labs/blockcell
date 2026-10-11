@@ -119,13 +119,19 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             ));
             events
         }
-        AgentEvent::TurnEnd { final_response } => vec![
+        AgentEvent::TurnEnd {
+            final_response,
+            error: None,
+        } => vec![
             (
                 SessionEventKind::AssistantMessage,
                 json!({ "content": final_response }),
             ),
             (SessionEventKind::TurnEnd, json!({})),
         ],
+        AgentEvent::TurnEnd {
+            error: Some(error), ..
+        } => vec![(SessionEventKind::TurnEnd, json!({ "error": error }))],
         AgentEvent::StepStart { iteration } => vec![(
             SessionEventKind::StepStart,
             json!({ "iteration": iteration }),

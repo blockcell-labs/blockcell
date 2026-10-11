@@ -42,8 +42,10 @@ pub enum AgentEvent {
         user_input: String,
         is_new_session: bool,
     },
+    /// 回合结束。`error` 非空表示回合异常终止（此时没有最终呈现的 assistant 消息）。
     TurnEnd {
         final_response: String,
+        error: Option<String>,
     },
     AgentPreStep {
         iteration: u32,
@@ -176,6 +178,7 @@ mod tests {
 
         let end = AgentEvent::TurnEnd {
             final_response: "ok".into(),
+            error: None,
         };
         assert_eq!(end.class(), EventClass::Durable);
         assert!(!end.can_reject());

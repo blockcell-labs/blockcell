@@ -338,10 +338,14 @@ impl AgentEventListener for HookAdapter {
                     })
                     .await;
             }
-            AgentEvent::TurnEnd { final_response } => {
+            AgentEvent::TurnEnd {
+                final_response,
+                error,
+            } => {
                 self.manager
                     .fire(&HookContext {
-                        result: Some(final_response.clone()),
+                        result: Some(error.clone().unwrap_or_else(|| final_response.clone())),
+                        is_error: error.is_some(),
                         ..self.context(HookEvent::AgentStop, ctx)
                     })
                     .await;
@@ -520,6 +524,7 @@ hooks:
             AgentEvent::StepStart { iteration: 1 },
             AgentEvent::TurnEnd {
                 final_response: "done".into(),
+                error: None,
             },
         ];
         for event in &mut events {

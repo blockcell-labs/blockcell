@@ -874,14 +874,13 @@ impl AgentRuntime {
                     // 技能解析失败同样要关闭当前 step，避免留下只有 step/start 的悬空 step。
                     let resolved_skill: Result<ActiveSkillContext> = (|| {
                         let skill_name =
-                            normalize_selected_skill_name(raw_skill_name, &skill_cards).ok_or_else(
-                                || {
+                            normalize_selected_skill_name(raw_skill_name, &skill_cards)
+                                .ok_or_else(|| {
                                     blockcell_core::Error::Skill(format!(
                                         "Model selected unavailable skill '{}'",
                                         raw_skill_name
                                     ))
-                                },
-                            )?;
+                                })?;
                         let skill_ctx = self
                             .context_builder
                             .resolve_active_skill_by_name(&skill_name, &disabled_skills)

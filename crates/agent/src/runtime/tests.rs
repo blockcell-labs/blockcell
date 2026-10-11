@@ -5479,6 +5479,38 @@ async fn full_turn_produces_ordered_session_event_log() {
     assert_eq!(events[4].step, Some(1));
     assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
     assert_steps_balanced(&events);
+    assert!(runtime.current_turn_id.is_none());
+    assert!(runtime.current_step.is_none());
+}
+
+#[tokio::test]
+async fn failed_turn_is_closed_with_error_turn_end() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(TestProvider));
+    let mut msg = test_main_session_inbound("cli", "event-log-failed-turn");
+    msg.metadata = serde_json::json!({ "forced_skill_name": "missing_skill" });
+    let session_key = msg.session_key();
+
+    let error = runtime.process_message(msg).await.unwrap_err();
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            SessionEventKind::SessionStart,
+            SessionEventKind::TurnStart,
+            SessionEventKind::UserMessage,
+            SessionEventKind::TurnEnd,
+        ]
+    );
+    let turn_end = events.last().unwrap();
+    assert_eq!(turn_end.turn_id, events[1].turn_id);
+    assert_eq!(turn_end.payload["error"], error.to_string());
+    assert!(runtime.current_turn_id.is_none());
 }
 
 struct EchoLoop {

@@ -292,7 +292,23 @@ impl AgentRuntime {
         let identity = AgentIdentity::lead(agent_id, "lead".to_string());
         let agent_loop = Arc::clone(&self.agent_loop);
         scope_agent_context(identity, async move {
-            scope_abort_token(abort_token, agent_loop.run(self, msg)).await
+            let turn_msg = msg.clone();
+            let result = scope_abort_token(abort_token, agent_loop.run(self, msg)).await;
+            // 无论 loop 实现如何退出（含错误提前返回），已开始的回合都必须以 turn/end 关闭。
+            if self.current_turn_id.is_some() {
+                let (final_response, error) = match &result {
+                    Ok(reply) => (reply.clone(), None),
+                    Err(error) => (String::new(), Some(error.to_string())),
+                };
+                self.end_turn(
+                    &turn_msg,
+                    &persist_session_key_for(&turn_msg),
+                    final_response,
+                    error,
+                )
+                .await;
+            }
+            result
         })
         .await
     }
