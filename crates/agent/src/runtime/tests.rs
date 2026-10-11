@@ -5569,6 +5569,44 @@ async fn forced_final_answer_is_logged_as_its_own_step() {
 }
 
 #[tokio::test]
+async fn discarded_stream_output_is_logged_as_assistant_attempt() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(StreamingRetryProvider {
+        attempts: AtomicUsize::new(0),
+    }));
+    let msg = test_main_session_inbound("cli", "event-log-attempt");
+    let session_key = msg.session_key();
+
+    assert_eq!(runtime.process_message(msg).await.unwrap(), "final answer");
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    let attempt = kinds
+        .iter()
+        .position(|kind| *kind == SessionEventKind::AssistantAttempt)
+        .expect("assistant/attempt recorded");
+    assert_eq!(
+        &kinds[attempt - 1..=attempt + 1],
+        &[
+            SessionEventKind::ModelRequest,
+            SessionEventKind::AssistantAttempt,
+            SessionEventKind::ModelResponse,
+        ]
+    );
+    let payload = &events[attempt].payload;
+    assert_eq!(payload["content"], "partial");
+    assert!(payload["error"]
+        .as_str()
+        .unwrap()
+        .contains("temporary stream failure"));
+    assert_eq!(events[attempt].step, Some(1));
+    assert_eq!(events[attempt + 1].payload["content"], "final answer");
+}
+
+#[tokio::test]
 async fn failed_turn_is_closed_with_error_turn_end() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
 

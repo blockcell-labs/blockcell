@@ -36,6 +36,9 @@ pub enum SessionEventKind {
     UserMessage,
     #[serde(rename = "assistant/message")]
     AssistantMessage,
+    /// 模型产生但最终未被采用的输出（例如流式中断后重试被丢弃的部分回答）。
+    #[serde(rename = "assistant/attempt")]
+    AssistantAttempt,
     #[serde(rename = "step/start")]
     StepStart,
     #[serde(rename = "step/end")]

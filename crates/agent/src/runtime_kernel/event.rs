@@ -70,6 +70,12 @@ pub enum AgentEvent {
         tool_calls: Value,
         finish_reason: String,
     },
+    /// 模型产生但被丢弃的输出（流式中断后重试），用于对比"模型想做什么"与"最终做了什么"。
+    AssistantAttempt {
+        content: String,
+        tool_calls: Vec<String>,
+        error: String,
+    },
     ToolPreExecute {
         tool_name: String,
         call_id: String,
@@ -117,6 +123,7 @@ impl AgentEvent {
             Self::AgentRequest { .. } => "agent/request",
             Self::AgentRequestError { .. } => "agent/request-error",
             Self::ModelResponse { .. } => "model/response",
+            Self::AssistantAttempt { .. } => "assistant/attempt",
             Self::ToolPreExecute { .. } => "tool/pre-execute",
             Self::ToolCall { .. } => "tool/call",
             Self::ToolPostExecute { .. } => "tool/post-execute",
@@ -134,6 +141,7 @@ impl AgentEvent {
             | Self::StepEnd { .. }
             | Self::AgentRequest { .. }
             | Self::ModelResponse { .. }
+            | Self::AssistantAttempt { .. }
             | Self::ToolCall { .. }
             | Self::ToolResult { .. }
             | Self::SkillActivated { .. }

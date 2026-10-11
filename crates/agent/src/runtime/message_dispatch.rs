@@ -239,6 +239,21 @@ impl AgentRuntime {
                             )
                         });
                         let err_str = format!("{}", err);
+                        if !accumulated_content.is_empty() || !tool_call_accumulators.is_empty() {
+                            self.dispatch_event(
+                                msg,
+                                &persist_session_key_for(msg),
+                                &mut AgentEvent::AssistantAttempt {
+                                    content: accumulated_content,
+                                    tool_calls: tool_call_accumulators
+                                        .into_values()
+                                        .map(|acc| acc.name)
+                                        .collect(),
+                                    error: err_str.clone(),
+                                },
+                            )
+                            .await;
+                        }
                         let call_result = ProviderPool::classify_error(&err_str);
                         if matches!(&call_result, CallResult::RateLimit) {
                             *saw_rate_limit_this_turn = true;

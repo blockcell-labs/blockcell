@@ -158,6 +158,14 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             SessionEventKind::ModelResponse,
             json!({ "content": content, "tool_calls": tool_calls, "finish_reason": finish_reason }),
         )],
+        AgentEvent::AssistantAttempt {
+            content,
+            tool_calls,
+            error,
+        } => vec![(
+            SessionEventKind::AssistantAttempt,
+            json!({ "content": content, "tool_calls": tool_calls, "error": error }),
+        )],
         AgentEvent::ToolCall {
             tool_name,
             call_id,
