@@ -17,6 +17,10 @@ pub struct SendMessageParams {
 
 #[async_trait]
 impl Tool for SendMessageTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "send_message".to_string(),

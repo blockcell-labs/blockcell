@@ -10,6 +10,10 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_search".to_string(),
@@ -309,6 +313,10 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_fetch".to_string(),

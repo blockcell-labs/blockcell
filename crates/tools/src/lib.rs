@@ -545,6 +545,11 @@ pub trait Tool: Send + Sync {
     fn required_permissions(&self, _params: &Value) -> PermissionSet {
         PermissionSet::new()
     }
+    /// 重复执行同一调用是否安全。Runtime 据此决定失败或结果未知时能否自动重试；
+    /// 未声明的工具按有副作用对待。
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Unknown
+    }
     /// Return an optional system-prompt rule describing how the LLM should use this tool.
     /// Each line should be a markdown list item starting with `- `.
     /// Return `None` (default) if the tool needs no special instructions.

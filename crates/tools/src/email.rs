@@ -9,6 +9,10 @@ pub struct EmailTool;
 
 #[async_trait]
 impl Tool for EmailTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "email".to_string(),

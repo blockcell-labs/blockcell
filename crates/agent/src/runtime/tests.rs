@@ -5606,6 +5606,123 @@ async fn discarded_stream_output_is_logged_as_assistant_attempt() {
     assert_eq!(events[attempt + 1].payload["content"], "final answer");
 }
 
+/// 每次流式调用都直接返回给定错误，并统计调用次数。
+struct FailingStreamProvider {
+    error: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for FailingStreamProvider {
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        Err(blockcell_core::Error::Provider(self.error.to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<mpsc::Receiver<StreamChunk>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(blockcell_core::Error::Provider(self.error.to_string()))
+    }
+}
+
+async fn llm_stream_calls_for(error: &'static str) -> usize {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.llm_max_retries = 2;
+    config.agents.defaults.llm_retry_delay_ms = 1;
+    let base = std::env::temp_dir().join(format!("blockcell-llm-retry-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(FailingStreamProvider {
+            error,
+            calls: calls.clone(),
+        }),
+        config,
+    );
+    let _ = runtime
+        .process_message(test_main_session_inbound("cli", "llm-retry"))
+        .await;
+    calls.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn llm_retry_follows_failure_kind() {
+    assert_eq!(
+        llm_stream_calls_for("This model's maximum context length is 8192 tokens").await,
+        1
+    );
+    assert_eq!(
+        llm_stream_calls_for("http_status=503 server overloaded").await,
+        3
+    );
+}
+
+/// 有副作用且总是超时的工具。
+struct TimingOutSideEffectTool;
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for TimingOutSideEffectTool {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: "place_order".to_string(),
+            description: "Place an order.".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+    fn idempotency(&self, _params: &serde_json::Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(blockcell_core::Error::Timeout(
+            "Request timed out after 30 seconds".to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn side_effecting_tool_timeout_is_recorded_as_unknown_outcome() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(TimingOutSideEffectTool));
+    let msg = test_main_session_inbound("cli", "unknown-outcome");
+
+    let result = runtime
+        .execute_tool_call(&tool_call("place_order", serde_json::json!({})), &msg, None)
+        .await;
+
+    assert!(result.contains("执行结果未知"), "{result}");
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&msg.session_key())
+        .unwrap();
+    let tool_result = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::ToolResult)
+        .expect("tool/result");
+    assert_eq!(tool_result.payload["outcome"], "unknown");
+    assert_eq!(tool_result.payload["idempotency"], "required");
+    assert_eq!(tool_result.payload["retry_safe"], false);
+}
+
 #[tokio::test]
 async fn failed_turn_is_closed_with_error_turn_end() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};

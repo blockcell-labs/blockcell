@@ -36,6 +36,8 @@ pub(crate) struct ToolExecution {
     pub(crate) result_json: serde_json::Value,
     pub(crate) is_error: bool,
     pub(crate) duration_ms: u64,
+    pub(crate) failure: Option<FailureKind>,
+    pub(crate) idempotency: Idempotency,
 }
 
 /// 准入阶段拒绝时直接作为工具结果返回给模型的字符串。
@@ -60,6 +62,14 @@ const ADMISSION_STAGES: [AdmissionStage; 6] = [
     AdmissionStage::PathAccess,
     AdmissionStage::ShellFullAccess,
 ];
+
+/// Unknown ≠ Failed：调用可能已经生效，必须先对账再决定是否重试。
+fn unknown_outcome_hint(tool_name: &str) -> String {
+    format!(
+        "[系统] 工具 `{tool_name}` 的执行结果未知（超时或中断，操作可能已经生效）。\
+        不要直接重试；先查询目标状态确认是否已生效，无法确认时请用户决定是否重试。"
+    )
+}
 
 impl AgentRuntime {
     pub(crate) async fn execute_tool_call(
@@ -106,11 +116,13 @@ impl AgentRuntime {
         let learning_hint = self.classify_tool_outcome(tool_call, &outcome).await;
         self.record_tool_result(&inv, &outcome).await;
 
-        // 在工具结果中追加学习提示，让 LLM 自然地回复用户
-        match learning_hint {
-            Some(hint) => format!("{}\n\n{}", outcome.result_str, hint),
-            None => outcome.result_str,
-        }
+        // 结果未知时提示先对账，避免模型直接重试造成重复副作用；再追加学习提示，让 LLM 自然地回复用户
+        let reconcile_hint = (outcome.failure == Some(FailureKind::Unknown))
+            .then(|| unknown_outcome_hint(&tool_call.name));
+        [reconcile_hint, learning_hint]
+            .into_iter()
+            .flatten()
+            .fold(outcome.result_str, |text, hint| format!("{text}\n\n{hint}"))
     }
 
     async fn admit_tool_call(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
@@ -142,6 +154,8 @@ impl AgentRuntime {
                 result,
                 is_error: true,
                 duration_ms: 0,
+                failure: Some(FailureKind::ToolRejected),
+                idempotency: self.tool_registry.idempotency(&inv.call.name, &inv.args),
             },
         )
         .await;
@@ -449,6 +463,11 @@ impl AgentRuntime {
         }
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        let idempotency = self.tool_registry.idempotency(tool_name, &inv.args);
+        let failure = result
+            .as_ref()
+            .err()
+            .map(|error| FailureKind::classify_tool_error(error, idempotency));
         let is_error = result.is_err();
         let (result_str, result_json) = match result {
             Ok(val) => (val.to_string(), val),
@@ -462,6 +481,8 @@ impl AgentRuntime {
             result_json,
             is_error,
             duration_ms,
+            failure,
+            idempotency,
         }
     }
 
@@ -634,6 +655,8 @@ impl AgentRuntime {
                 result: outcome.result_json.clone(),
                 is_error: outcome.is_error,
                 duration_ms: outcome.duration_ms,
+                failure: outcome.failure,
+                idempotency: outcome.idempotency,
             },
         )
         .await;

@@ -23,6 +23,10 @@ pub struct ReadFileTool;
 
 #[async_trait]
 impl Tool for ReadFileTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".to_string(),
@@ -164,6 +168,10 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".to_string(),
@@ -229,6 +237,10 @@ pub struct EditFileTool;
 
 #[async_trait]
 impl Tool for EditFileTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "edit_file".to_string(),
@@ -384,6 +396,10 @@ pub struct ListDirTool;
 
 #[async_trait]
 impl Tool for ListDirTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "list_dir".to_string(),

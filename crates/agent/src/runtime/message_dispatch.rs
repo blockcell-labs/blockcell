@@ -15,6 +15,7 @@ impl AgentRuntime {
         let max_retries = self.config.agents.defaults.llm_max_retries;
         let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
         let mut last_error = None;
+        let mut last_failure: Option<FailureKind> = None;
         let api_messages = append_ephemeral_context_to_latest_user_message(
             current_messages,
             ghost_recall_context_block,
@@ -259,6 +260,7 @@ impl AgentRuntime {
                             *saw_rate_limit_this_turn = true;
                         }
                         self.provider_pool.report(pool_idx, call_result);
+                        last_failure = Some(FailureKind::classify_provider_message(&err_str));
                         last_error = Some(err);
                         break;
                     }
@@ -270,7 +272,12 @@ impl AgentRuntime {
                             *saw_rate_limit_this_turn = true;
                         }
                         self.provider_pool.report(pool_idx, call_result);
-                        if is_connection_phase_error(&err_str) {
+                        let failure = FailureKind::classify_provider_message(&err_str);
+                        last_failure = Some(failure);
+                        // 认证失败只说明当前 provider 不可用：换下一个 provider，而不是重试同一个。
+                        if failure == FailureKind::AuthenticationFailed
+                            || is_connection_phase_error(&err_str)
+                        {
                             excluded_provider_indices.push(pool_idx);
                             warn!(
                                 attempt,
@@ -287,6 +294,16 @@ impl AgentRuntime {
                         break;
                     }
                 }
+            }
+            // 模型调用本身无副作用（Idempotency::Safe），但上下文超限、认证失败、取消重试也不会成功。
+            if let Some(failure) =
+                last_failure.filter(|kind| !kind.retry_allowed(Idempotency::Safe))
+            {
+                warn!(
+                    failure = failure.as_str(),
+                    attempt, "LLM failure is not retryable; giving up"
+                );
+                break;
             }
         }
 

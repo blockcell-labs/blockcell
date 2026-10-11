@@ -393,6 +393,13 @@ impl ToolRegistry {
         rules.into_iter().map(|(_, rule)| rule).collect()
     }
 
+    /// 工具对本次参数声明的幂等性；未注册的工具视为未知。
+    pub fn idempotency(&self, name: &str, params: &Value) -> blockcell_core::Idempotency {
+        self.get(name)
+            .map(|tool| tool.idempotency(params))
+            .unwrap_or(blockcell_core::Idempotency::Unknown)
+    }
+
     pub async fn execute(&self, name: &str, ctx: ToolContext, params: Value) -> Result<Value> {
         let tool = self
             .get(name)

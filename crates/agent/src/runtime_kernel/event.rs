@@ -1,3 +1,4 @@
+use blockcell_core::{FailureKind, Idempotency};
 use serde_json::Value;
 
 /// 事件一致性语义分类。
@@ -95,12 +96,15 @@ pub enum AgentEvent {
         is_error: bool,
         duration_ms: u64,
     },
+    /// `failure` 为空表示成功；`idempotency` 与 `failure` 一起决定该调用能否安全重试。
     ToolResult {
         tool_name: String,
         call_id: String,
         result: Value,
         is_error: bool,
         duration_ms: u64,
+        failure: Option<FailureKind>,
+        idempotency: Idempotency,
     },
     SkillActivated {
         name: String,

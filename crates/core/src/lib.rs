@@ -8,6 +8,7 @@ pub mod capability;
 pub mod config;
 pub mod error;
 pub mod evolution_boundary;
+pub mod failure;
 pub mod file_store;
 pub mod logging;
 pub mod mcp_config;
@@ -37,6 +38,7 @@ pub use capability::{
 pub use config::Config;
 pub use config::EvolutionConfig;
 pub use error::{Error, Result};
+pub use failure::{FailureKind, Idempotency};
 pub use message::{InboundMessage, OutboundMessage};
 pub use paths::Paths;
 pub use session_key::{

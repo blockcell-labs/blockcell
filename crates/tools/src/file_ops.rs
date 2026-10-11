@@ -66,6 +66,10 @@ pub struct FileOpsTool;
 
 #[async_trait]
 impl Tool for FileOpsTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Required
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "file_ops".to_string(),

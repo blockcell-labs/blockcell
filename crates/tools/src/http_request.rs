@@ -105,6 +105,20 @@ pub struct HttpRequestTool;
 
 #[async_trait]
 impl Tool for HttpRequestTool {
+    /// 只有安全方法（GET / HEAD / OPTIONS）可重放；其余方法可能已在服务端生效。
+    fn idempotency(&self, params: &Value) -> blockcell_core::Idempotency {
+        let method = params
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("GET")
+            .to_ascii_uppercase();
+        if matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+            blockcell_core::Idempotency::Safe
+        } else {
+            blockcell_core::Idempotency::Required
+        }
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "http_request".to_string(),

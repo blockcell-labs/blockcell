@@ -11,6 +11,10 @@ pub struct SystemInfoTool;
 
 #[async_trait]
 impl Tool for SystemInfoTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "system_info".to_string(),

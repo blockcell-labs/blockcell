@@ -190,6 +190,10 @@ fn glob_sync(root: PathBuf, params: Value) -> Result<Value> {
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".to_string(),
@@ -225,6 +229,10 @@ impl Tool for GrepTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "glob".to_string(),

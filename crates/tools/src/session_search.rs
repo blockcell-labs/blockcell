@@ -7,6 +7,10 @@ pub struct SessionSearchTool;
 
 #[async_trait]
 impl Tool for SessionSearchTool {
+    fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "session_search".to_string(),

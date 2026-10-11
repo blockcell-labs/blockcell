@@ -8,7 +8,8 @@ use blockcell_core::types::{
 };
 use blockcell_core::{
     scope_abort_token, scope_agent_context, AbortToken, AgentIdentity, BudgetExhaustedError,
-    BudgetTracker, BudgetTrackerHandle, Config, InboundMessage, OutboundMessage, Paths, Result,
+    BudgetTracker, BudgetTrackerHandle, Config, FailureKind, Idempotency, InboundMessage,
+    OutboundMessage, Paths, Result,
 };
 use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext};
 use blockcell_skills::SkillCard;

@@ -180,6 +180,8 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             result,
             is_error,
             duration_ms,
+            failure,
+            idempotency,
         } => {
             let mut events = vec![(
                 SessionEventKind::ToolResult,
@@ -189,6 +191,9 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
                     "result": result,
                     "is_error": is_error,
                     "duration_ms": duration_ms,
+                    "outcome": failure.map_or("succeeded", |kind| kind.as_str()),
+                    "idempotency": idempotency,
+                    "retry_safe": failure.map(|kind| kind.retry_allowed(*idempotency)),
                 }),
             )];
             if !is_error && MEMORY_WRITE_TOOLS.contains(&tool_name.as_str()) {
