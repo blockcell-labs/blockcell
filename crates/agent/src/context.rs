@@ -63,6 +63,8 @@ pub struct ActiveSkillContext {
     pub fallback_message: Option<String>,
     /// 技能来源，用于运行时区分（如自进化屏蔽）
     pub source: SkillSource,
+    /// 模型学习生成的技能：注入时作为 learned hint，而非系统级指令。
+    pub learned: bool,
 }
 
 /// Skill 系统引导 (参考 Hermes MEMORY_GUIDANCE)
@@ -727,6 +729,7 @@ impl ContextBuilder {
                 .as_ref()
                 .and_then(|fallback| fallback.message.clone()),
             source: skill.meta.source.clone(),
+            learned: skill.meta.learned,
         })
     }
 
@@ -1550,6 +1553,7 @@ description: deploy demo
             tools: vec!["finance_api".to_string()],
             fallback_message: Some("fallback".to_string()),
             source: blockcell_skills::manager::SkillSource::BlockCell,
+            learned: false,
         };
 
         let prompt = builder.build_system_prompt_for_mode_with_channel(
@@ -2043,6 +2047,7 @@ description: deploy demo
             tools: vec![],
             fallback_message: None,
             source: SkillSource::BlockCell,
+            learned: false,
         };
         let tool_rule = format!("{} TOOL_RULE_END", "tool-rule ".repeat(3_000));
 

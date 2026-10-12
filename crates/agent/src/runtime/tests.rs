@@ -1313,6 +1313,7 @@ fn test_active_tool_names_for_skill_include_kernel_and_declared_tools() {
         tools: vec!["finance_api".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
     };
 
     let tool_names = resolve_effective_tool_names(
@@ -1815,6 +1816,7 @@ description: script demo
         tools: vec![],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
     };
 
     let tool_names = runtime.resolved_skill_tool_names(&active_skill);
@@ -2473,6 +2475,7 @@ fn test_continued_skill_suppresses_prompt_reinjection_for_same_skill() {
         tools: vec!["write_file".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
     };
 
     let continued = suppress_prompt_reinjection_for_continued_skill(
@@ -4317,6 +4320,7 @@ fn test_resolve_effective_tool_names_load_all_extends_skill_tools() {
         tools: vec!["skill_tool_1".to_string(), "skill_tool_2".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
     };
     let tools = resolve_effective_tool_names(
         &config,
@@ -4806,9 +4810,8 @@ async fn fork_subagent_runs_through_provider_handle() {
         SubagentKind, SubagentPermissions, SubagentProvider, SubagentRequest, SubagentStatus,
     };
 
-    let runtime = test_runtime_with_provider(Arc::new(MockInterAgentProvider::new(
-        "fork analysis done",
-    )));
+    let runtime =
+        test_runtime_with_provider(Arc::new(MockInterAgentProvider::new("fork analysis done")));
     let provider = InProcessSubagentProvider::from_runtime(&runtime);
 
     let handle = provider

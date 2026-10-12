@@ -917,7 +917,7 @@ fn render_skill_md(name: &str, description: &str, body: &str) -> String {
 
 fn render_meta_yaml(name: &str, description: &str) -> String {
     format!(
-        "name: {}\ndescription: {}\nsource: blockcell\nuser_invocable: true\ndisable_model_invocation: false\ntools: []\n",
+        "name: {}\ndescription: {}\nsource: blockcell\nlearned: true\nuser_invocable: true\ndisable_model_invocation: false\ntools: []\n",
         yaml_scalar(name),
         yaml_scalar(description)
     )

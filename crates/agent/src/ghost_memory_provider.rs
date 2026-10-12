@@ -483,7 +483,7 @@ fn find_memory_context_tag(text: &str, start: usize) -> Option<(usize, usize, bo
             let end = idx + end_rel + 1;
             let inside = text[idx + 1..end - 1].trim();
             let inner = inside.strip_prefix('/').unwrap_or(inside).trim();
-            if inner.eq_ignore_ascii_case("memory-context") {
+            if is_memory_context_tag_name(inner) {
                 return Some((idx, end, inside.starts_with('/')));
             }
             idx = end;
@@ -506,7 +506,15 @@ fn is_memory_context_tag(text: &str) -> bool {
         .strip_prefix('/')
         .unwrap_or(stripped.trim())
         .trim();
-    inner.eq_ignore_ascii_case("memory-context")
+    is_memory_context_tag_name(inner)
+}
+
+/// 标签名为 memory-context，允许携带属性（如 `section="ghost-recall"`）。
+fn is_memory_context_tag_name(inner: &str) -> bool {
+    inner
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("memory-context"))
 }
 
 #[cfg(test)]

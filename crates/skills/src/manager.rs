@@ -49,6 +49,9 @@ pub struct SkillMeta {
     /// Fallback strategy when the skill fails.
     #[serde(default)]
     pub fallback: Option<SkillFallback>,
+    /// 由模型学习生成（Ghost Learning / skill_manage），其指令的信任级别低于系统策略。
+    #[serde(default)]
+    pub learned: bool,
 
     // --- OpenClaw 兼容字段 ---
     /// 技能来源（程序设置，不从 YAML 反序列化）
@@ -86,6 +89,7 @@ impl Default for SkillMeta {
             capabilities: Vec::new(),
             output_format: None,
             fallback: None,
+            learned: false,
             source: SkillSource::BlockCell,
             emoji: None,
             os: None,
@@ -1532,6 +1536,7 @@ fallback:
             "capabilities".to_string(),
             "output_format".to_string(),
             "fallback".to_string(),
+            "learned".to_string(),
             "emoji".to_string(),
             "os".to_string(),
             "user_invocable".to_string(),
