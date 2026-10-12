@@ -234,6 +234,7 @@ pub struct RuntimeSpawnHandle {
     response_cache: crate::response_cache::ResponseCache,
     event_emitter: EventEmitterHandle,
     abort_token: Option<AbortToken>,
+    completion_reporter: subagent::SubagentCompletionReporter,
 }
 
 impl SpawnHandle for RuntimeSpawnHandle {
@@ -302,6 +303,7 @@ impl SpawnHandle for RuntimeSpawnHandle {
             self.event_emitter.clone(),
             agent_type_str,
             child_abort_token,
+            Some(self.completion_reporter.clone()),
         ));
 
         // Guard: if tokio::spawn fails or task panics, mark as Failed to prevent stuck Running

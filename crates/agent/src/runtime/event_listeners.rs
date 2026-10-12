@@ -94,13 +94,6 @@ impl SessionEventRecorder {
     }
 }
 
-const MEMORY_WRITE_TOOLS: [&str; 4] = [
-    "memory_manage",
-    "memory_upsert",
-    "memory_forget",
-    "auto_memory",
-];
-
 fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::Value)> {
     use serde_json::json;
     match event {
@@ -208,31 +201,42 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             duration_ms,
             outcome,
             idempotency,
-        } => {
-            let mut events = vec![(
-                SessionEventKind::ToolResult,
-                json!({
-                    "tool": tool_name,
-                    "call_id": call_id,
-                    "result": result,
-                    "is_error": outcome.is_error(),
-                    "duration_ms": duration_ms,
-                    "outcome": outcome,
-                    "idempotency": idempotency,
-                    "retry_safe": outcome.retry_allowed(*idempotency),
-                }),
-            )];
-            if !outcome.is_error() && MEMORY_WRITE_TOOLS.contains(&tool_name.as_str()) {
-                events.push((
-                    SessionEventKind::MemoryWrite,
-                    json!({ "tool": tool_name, "call_id": call_id }),
-                ));
-            }
-            events
-        }
+        } => vec![(
+            SessionEventKind::ToolResult,
+            json!({
+                "tool": tool_name,
+                "call_id": call_id,
+                "result": result,
+                "is_error": outcome.is_error(),
+                "duration_ms": duration_ms,
+                "outcome": outcome,
+                "idempotency": idempotency,
+                "retry_safe": outcome.retry_allowed(*idempotency),
+            }),
+        )],
         AgentEvent::SkillActivated { name } => {
             vec![(SessionEventKind::SkillLoad, json!({ "name": name }))]
         }
+        AgentEvent::MemoryWrite { tool_name, call_id } => vec![(
+            SessionEventKind::MemoryWrite,
+            json!({ "tool": tool_name, "call_id": call_id }),
+        )],
+        AgentEvent::SubagentSpawn {
+            task_id,
+            tool_name,
+            call_id,
+        } => vec![(
+            SessionEventKind::SubagentSpawn,
+            json!({ "task_id": task_id, "tool": tool_name, "call_id": call_id }),
+        )],
+        AgentEvent::SubagentCompleted {
+            task_id,
+            success,
+            summary,
+        } => vec![(
+            SessionEventKind::SubagentCompleted,
+            json!({ "task_id": task_id, "success": success, "summary": summary }),
+        )],
         AgentEvent::CompactionStart {
             phase,
             compactor,

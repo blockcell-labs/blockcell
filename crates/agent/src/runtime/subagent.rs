@@ -1,5 +1,42 @@
 use super::*;
 
+/// 把后台子代理的结束回报为发起会话上的 `subagent/completed` 事件。
+#[derive(Clone)]
+pub(crate) struct SubagentCompletionReporter {
+    event_bus: EventBus,
+    ctx: AgentEventContext,
+}
+
+impl SubagentCompletionReporter {
+    pub(crate) fn new(
+        event_bus: EventBus,
+        agent_id: Option<String>,
+        session_id: String,
+        channel: &str,
+        chat_id: &str,
+    ) -> Self {
+        Self {
+            event_bus,
+            ctx: AgentEventContext {
+                agent_id: agent_id.unwrap_or_else(|| "default".to_string()),
+                session_id,
+                channel: channel.to_string(),
+                chat_id: chat_id.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(crate) async fn report(&self, task_id: &str, success: bool, summary: &str) {
+        let mut event = AgentEvent::SubagentCompleted {
+            task_id: task_id.to_string(),
+            success,
+            summary: truncate_str(summary, 500),
+        };
+        self.event_bus.dispatch(&self.ctx, &mut event).await;
+    }
+}
+
 /// Free async function that runs a subagent task in the background.
 /// This is separate from `AgentRuntime` methods to break the recursive async type
 /// chain that would otherwise prevent the future from being `Send`.
@@ -23,6 +60,7 @@ pub(crate) async fn run_subagent_task(
     event_emitter: EventEmitterHandle,
     agent_type: Option<String>,
     abort_token: Option<AbortToken>,
+    reporter: Option<SubagentCompletionReporter>,
 ) {
     // Create the task entry and mark it running atomically.
     // This eliminates the race condition where a concurrent cleanup could
@@ -64,6 +102,9 @@ pub(crate) async fn run_subagent_task(
         Ok(r) => r,
         Err(e) => {
             task_manager.set_failed(&task_id, &format!("{}", e)).await;
+            if let Some(reporter) = &reporter {
+                reporter.report(&task_id, false, &e.to_string()).await;
+            }
             return;
         }
     };
@@ -136,6 +177,9 @@ pub(crate) async fn run_subagent_task(
                 {
                     warn!(task_id = %task_id, error = %e, "Failed to finalize cancelled subagent task");
                 }
+                if let Some(reporter) = &reporter {
+                    reporter.report(&task_id, false, "cancelled").await;
+                }
                 return;
             }
             result = sub_runtime.process_message(inbound) => result,
@@ -148,6 +192,9 @@ pub(crate) async fn run_subagent_task(
         Ok(result) => {
             task_manager.set_completed(&task_id, &result).await;
             info!(task_id = %task_id, label = %label, "Subagent completed");
+            if let Some(reporter) = &reporter {
+                reporter.report(&task_id, true, &result).await;
+            }
 
             if let Err(err) = capture_delegation_end_learning_boundary_with_config(
                 &learning_config,
@@ -186,6 +233,9 @@ pub(crate) async fn run_subagent_task(
             let err_msg = format!("{}", e);
             task_manager.set_failed(&task_id, &err_msg).await;
             error!(task_id = %task_id, error = %e, "Subagent failed");
+            if let Some(reporter) = &reporter {
+                reporter.report(&task_id, false, &err_msg).await;
+            }
 
             // 失败的 delegation 也是重要的学习机会
             if let Err(ghost_err) = capture_delegation_end_learning_boundary_with_config(

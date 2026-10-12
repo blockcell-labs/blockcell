@@ -118,6 +118,27 @@ pub enum AgentEvent {
     SkillActivated {
         name: String,
     },
+    /// 记忆写入类工具成功执行。
+    MemoryWrite {
+        tool_name: String,
+        call_id: String,
+    },
+    /// 工具在后台启动了子代理（成功返回 `task_id`）。
+    SubagentSpawn {
+        task_id: String,
+        tool_name: String,
+        call_id: String,
+    },
+    /// 后台子代理结束，回报到发起会话；通常发生在发起回合之外，没有 turn / step。
+    SubagentCompleted {
+        task_id: String,
+        success: bool,
+        summary: String,
+    },
+    /// 技能进化产物已部署；不属于任何会话，只通知 listener。
+    EvolutionDeployed {
+        skill: String,
+    },
     /// 压缩开始。`phase` 标识触发点（pre-loop / in-loop / request-error / post-sampling / manual）。
     CompactionStart {
         phase: String,
@@ -157,6 +178,10 @@ impl AgentEvent {
             Self::ToolPostExecute { .. } => "tool/post-execute",
             Self::ToolResult { .. } => "tool/result",
             Self::SkillActivated { .. } => "skill/load",
+            Self::MemoryWrite { .. } => "memory/write",
+            Self::SubagentSpawn { .. } => "subagent/spawn",
+            Self::SubagentCompleted { .. } => "subagent/completed",
+            Self::EvolutionDeployed { .. } => "evolution/deployed",
             Self::CompactionStart { .. } => "compaction/start",
             Self::CompactionEnd { .. } => "compaction/end",
         }
@@ -175,10 +200,13 @@ impl AgentEvent {
             | Self::ToolCall { .. }
             | Self::ToolResult { .. }
             | Self::SkillActivated { .. }
+            | Self::MemoryWrite { .. }
+            | Self::SubagentSpawn { .. }
+            | Self::SubagentCompleted { .. }
             | Self::CompactionStart { .. }
             | Self::CompactionEnd { .. } => EventClass::Durable,
             Self::ToolPreExecute { .. } | Self::ToolPostExecute { .. } => EventClass::Capability,
-            Self::AgentPreStep { .. } => EventClass::Live,
+            Self::AgentPreStep { .. } | Self::EvolutionDeployed { .. } => EventClass::Live,
         }
     }
 

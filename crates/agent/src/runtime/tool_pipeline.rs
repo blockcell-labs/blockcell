@@ -68,6 +68,31 @@ const ADMISSION_STAGES: [AdmissionStage; 6] = [
     AdmissionStage::ShellFullAccess,
 ];
 
+const MEMORY_WRITE_TOOLS: [&str; 4] = [
+    "memory_manage",
+    "memory_upsert",
+    "memory_forget",
+    "auto_memory",
+];
+
+/// 成功的工具调用对应的领域事件：记忆写入、后台子代理启动。
+fn semantic_tool_event(call: &ToolCallRequest, result: &serde_json::Value) -> Option<AgentEvent> {
+    let tool_name = call.name.clone();
+    let call_id = call.id.clone();
+    if MEMORY_WRITE_TOOLS.contains(&call.name.as_str()) {
+        return Some(AgentEvent::MemoryWrite { tool_name, call_id });
+    }
+    if matches!(call.name.as_str(), "spawn" | "agent") {
+        let task_id = result.get("task_id")?.as_str()?.to_string();
+        return Some(AgentEvent::SubagentSpawn {
+            task_id,
+            tool_name,
+            call_id,
+        });
+    }
+    None
+}
+
 /// Unknown ≠ Failed：调用可能已经生效，必须先对账再决定是否重试。
 fn unknown_outcome_hint(tool_name: &str) -> String {
     format!(
@@ -389,6 +414,13 @@ impl AgentRuntime {
             response_cache: self.response_cache.clone(),
             event_emitter: self.system_event_emitter.clone(),
             abort_token: Some(self.abort_token.clone()),
+            completion_reporter: super::subagent::SubagentCompletionReporter::new(
+                self.event_bus.clone(),
+                self.agent_id.clone(),
+                persist_session_key_for(msg),
+                &msg.channel,
+                &msg.chat_id,
+            ),
         });
 
         blockcell_tools::ToolContext {
@@ -676,6 +708,12 @@ impl AgentRuntime {
             },
         )
         .await;
+        if !outcome.is_error() {
+            if let Some(mut event) = semantic_tool_event(tool_call, &outcome.result_json) {
+                self.dispatch_event(msg, &persist_session_key_for(msg), &mut event)
+                    .await;
+            }
+        }
 
         // Log to audit
         self.audit_logger.set_session_id(&msg.session_key());

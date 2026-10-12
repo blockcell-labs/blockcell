@@ -138,6 +138,21 @@ fn render_event(event: &SessionEvent, full: bool) -> String {
         SessionEventKind::MemoryWrite => {
             format!("    memory write via {}", string_at(payload, "tool"))
         }
+        SessionEventKind::SubagentSpawn => format!(
+            "    subagent spawn {} via {}",
+            string_at(payload, "task_id"),
+            string_at(payload, "tool")
+        ),
+        SessionEventKind::SubagentCompleted => format!(
+            "  subagent {} {}: {}",
+            string_at(payload, "task_id"),
+            if payload.get("success").and_then(Value::as_bool) == Some(true) {
+                "completed"
+            } else {
+                "failed"
+            },
+            text("summary")
+        ),
         SessionEventKind::Compaction => "  compaction".to_string(),
         SessionEventKind::CompactionStart => format!(
             "  compaction start [{}] {} tokens",

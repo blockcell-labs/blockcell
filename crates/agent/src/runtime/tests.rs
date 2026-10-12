@@ -6384,3 +6384,91 @@ async fn scoped_tools_follow_runtime_session_and_candidate_views() {
     runtime.set_candidate_scope(None);
     assert!(runtime.tool_registry.get("scoped_echo").is_none());
 }
+
+struct FixedResultTool(&'static str, serde_json::Value);
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for FixedResultTool {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: self.0.to_string(),
+            description: "fixed result".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(self.1.clone())
+    }
+}
+
+#[tokio::test]
+async fn successful_memory_and_spawn_tools_emit_domain_events() {
+    use crate::runtime_kernel::ScopeTarget;
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime();
+    let msg = test_main_session_inbound("cli", "domain-events");
+    let session = msg.session_key();
+    let _memory = runtime.register_scoped_tool(
+        ScopeTarget::Session(session.clone()),
+        Arc::new(FixedResultTool(
+            "memory_manage",
+            serde_json::json!({"ok": true}),
+        )),
+    );
+    let _spawn = runtime.register_scoped_tool(
+        ScopeTarget::Session(session.clone()),
+        Arc::new(FixedResultTool(
+            "spawn",
+            serde_json::json!({"task_id": "task-7", "status": "running"}),
+        )),
+    );
+    runtime.sync_tool_scope_view(&session);
+    runtime.current_turn_id = Some("turn-1".to_string());
+
+    for name in ["memory_manage", "spawn"] {
+        runtime
+            .execute_tool_call(&tool_call(name, serde_json::json!({})), &msg, None)
+            .await;
+    }
+    SubagentCompletionReporter::new(
+        runtime.event_bus.clone(),
+        None,
+        session.clone(),
+        &msg.channel,
+        &msg.chat_id,
+    )
+    .report("task-7", true, "all done")
+    .await;
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session)
+        .expect("read session events");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            SessionEventKind::ToolCall,
+            SessionEventKind::ToolResult,
+            SessionEventKind::MemoryWrite,
+            SessionEventKind::ToolCall,
+            SessionEventKind::ToolResult,
+            SessionEventKind::SubagentSpawn,
+            SessionEventKind::SubagentCompleted,
+        ]
+    );
+    assert_eq!(events[5].payload["task_id"], "task-7");
+    assert_eq!(events[5].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(events[6].payload["success"], true);
+    assert_eq!(events[6].payload["summary"], "all done");
+    assert!(events[6].turn_id.is_none());
+}

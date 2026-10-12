@@ -58,6 +58,11 @@ pub enum SessionEventKind {
     SkillLoad,
     #[serde(rename = "memory/write")]
     MemoryWrite,
+    #[serde(rename = "subagent/spawn")]
+    SubagentSpawn,
+    /// 后台子代理结束（回合外事件，没有 turn_id）。
+    #[serde(rename = "subagent/completed")]
+    SubagentCompleted,
     /// 旧版单条压缩事件，仅用于读取历史日志；新日志写 `compaction/start` / `compaction/end`。
     #[serde(rename = "compaction")]
     Compaction,

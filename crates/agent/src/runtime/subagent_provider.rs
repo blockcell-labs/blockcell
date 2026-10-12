@@ -26,6 +26,8 @@ pub struct InProcessSubagentProvider {
     memory_file_store: Option<blockcell_tools::MemoryFileStoreHandle>,
     skill_file_store: Option<blockcell_tools::SkillFileStoreHandle>,
     system_prompt_snapshots: crate::context::SystemPromptSnapshotReader,
+    event_bus: EventBus,
+    agent_id: Option<String>,
 }
 
 impl InProcessSubagentProvider {
@@ -44,6 +46,8 @@ impl InProcessSubagentProvider {
             memory_file_store: runtime.memory_file_store.clone(),
             skill_file_store: runtime.skill_file_store.clone(),
             system_prompt_snapshots: runtime.context_builder.system_prompt_snapshot_reader(),
+            event_bus: runtime.event_bus.clone(),
+            agent_id: runtime.agent_id.clone(),
         }
     }
 
@@ -272,6 +276,13 @@ impl InProcessSubagentProvider {
             .map(|t| (t.channel.clone(), t.chat_id.clone()))
             .unwrap_or_else(|| ("internal".to_string(), "default".to_string()));
         let session_key_for_persist = target.as_ref().map(|t| t.session_key.clone());
+        let reporter = SubagentCompletionReporter::new(
+            self.event_bus.clone(),
+            self.agent_id.clone(),
+            session_key_for_persist.clone().unwrap_or_default(),
+            &channel,
+            &chat_id,
+        );
 
         // 原子性地创建并标记为 Running（消除竞态条件）
         self.task_manager
@@ -409,6 +420,7 @@ impl InProcessSubagentProvider {
                 _ if was_cancelled => {
                     info!(task_id = %task_id, "Typed agent stopped after cancellation; suppressing result delivery");
                     task_manager.unregister_abort_token(&task_id);
+                    reporter.report(&task_id, false, "cancelled").await;
                     None
                 }
                 Ok(output) => {
@@ -418,12 +430,14 @@ impl InProcessSubagentProvider {
                     let content = normalize_typed_agent_result(&agent_type, &content);
                     task_manager.set_completed(&task_id, &content).await;
                     info!(task_id = %task_id, "Typed agent completed successfully");
+                    reporter.report(&task_id, true, &content).await;
                     Some(content)
                 }
                 Err(e) => {
                     let err_msg = format!("{}", e);
                     task_manager.set_failed(&task_id, &err_msg).await;
                     warn!(task_id = %task_id, error = %e, "Typed agent failed");
+                    reporter.report(&task_id, false, &err_msg).await;
                     Some(format!(
                         "\n❌ 后台任务失败: **{}** (ID: {})\n错误: {}",
                         agent_type,

@@ -8,6 +8,14 @@ impl AgentRuntime {
         let learning_coordinator = self.learning_coordinator.clone();
         let config = self.config.clone();
         let paths = self.paths.clone();
+        let event_bus = self.event_bus.clone();
+        let event_ctx = AgentEventContext {
+            agent_id: self
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            ..Default::default()
+        };
 
         let callback: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |skill_name: &str| {
             // Invalidate prompt snapshot so next skill prompt generation reads fresh content
@@ -17,6 +25,17 @@ impl AgentRuntime {
                     error = %e,
                     "[evolution] Failed to invalidate prompt snapshot after deploy"
                 );
+            }
+
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let event_bus = event_bus.clone();
+                let ctx = event_ctx.clone();
+                let mut event = AgentEvent::EvolutionDeployed {
+                    skill: skill_name.to_string(),
+                };
+                handle.spawn(async move {
+                    event_bus.dispatch(&ctx, &mut event).await;
+                });
             }
 
             if !config.agents.ghost.learning.capture_enabled() {
