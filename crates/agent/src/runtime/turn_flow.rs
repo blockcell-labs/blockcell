@@ -142,9 +142,7 @@ impl AgentRuntime {
                 tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
                 finish_reason: response.finish_reason.clone(),
             },
-            Err(error) => AgentEvent::AgentRequestError {
-                error: error.to_string(),
-            },
+            Err(error) => request_error_event(error),
         };
         self.dispatch_event(msg, session_id, &mut event).await;
         result

@@ -47,6 +47,9 @@ pub enum SessionEventKind {
     ModelRequest,
     #[serde(rename = "model/response")]
     ModelResponse,
+    /// 模型请求最终失败：失败类型与 Runtime 选择的恢复策略。
+    #[serde(rename = "model/request-error")]
+    ModelRequestError,
     #[serde(rename = "tool/call")]
     ToolCall,
     #[serde(rename = "tool/result")]

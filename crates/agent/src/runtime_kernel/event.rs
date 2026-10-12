@@ -1,4 +1,4 @@
-use blockcell_core::{Idempotency, ToolOutcome};
+use blockcell_core::{FailureKind, Idempotency, RequestRecovery, ToolOutcome};
 use serde_json::Value;
 
 /// 事件一致性语义分类。
@@ -62,8 +62,11 @@ pub enum AgentEvent {
         message_count: usize,
         tool_count: usize,
     },
+    /// 模型请求在 provider 回退与重试后仍然失败；`recovery` 是 Runtime 据 `kind` 决定的后续策略。
     AgentRequestError {
         error: String,
+        kind: FailureKind,
+        recovery: RequestRecovery,
     },
     /// 模型返回（包含模型提议但可能未被执行的 tool calls，用于对比"想做什么"与"做了什么"）。
     ModelResponse {
@@ -145,6 +148,7 @@ impl AgentEvent {
             | Self::StepStart { .. }
             | Self::StepEnd { .. }
             | Self::AgentRequest { .. }
+            | Self::AgentRequestError { .. }
             | Self::ModelResponse { .. }
             | Self::AssistantAttempt { .. }
             | Self::ToolCall { .. }
@@ -152,7 +156,7 @@ impl AgentEvent {
             | Self::SkillActivated { .. }
             | Self::Compaction { .. } => EventClass::Durable,
             Self::ToolPreExecute { .. } | Self::ToolPostExecute { .. } => EventClass::Capability,
-            Self::AgentPreStep { .. } | Self::AgentRequestError { .. } => EventClass::Live,
+            Self::AgentPreStep { .. } => EventClass::Live,
         }
     }
 
@@ -176,6 +180,17 @@ impl AgentEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn request_error_is_durable() {
+        let error = AgentEvent::AgentRequestError {
+            error: "http_status=400".into(),
+            kind: FailureKind::InvalidRequest,
+            recovery: FailureKind::InvalidRequest.request_recovery(),
+        };
+        assert_eq!(error.name(), "agent/request-error");
+        assert_eq!(error.class(), EventClass::Durable);
+    }
 
     #[test]
     fn event_names_and_classes_follow_contract() {

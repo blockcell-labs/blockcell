@@ -630,6 +630,7 @@ impl AgentRuntime {
         let mut resource_missing_hints_sent: HashSet<String> = HashSet::new();
         let mut should_throttle_next_tool_round = false;
         let mut saw_rate_limit_this_turn = false;
+        let mut overflow_compaction_attempted = false;
         // Collect media paths produced by tools (screenshots, generated images, etc.)
         let mut collected_media: Vec<String> = Vec::new();
 
@@ -750,14 +751,32 @@ impl AgentRuntime {
             let response = match llm_result {
                 Ok(r) => r,
                 Err(e) => {
-                    self.dispatch_event(
-                        &msg,
-                        &persist_session_key,
-                        &mut AgentEvent::AgentRequestError {
-                            error: e.to_string(),
-                        },
-                    )
-                    .await;
+                    let mut error_event = request_error_event(&e);
+                    self.dispatch_event(&msg, &persist_session_key, &mut error_event)
+                        .await;
+                    // 上下文超限：原样重试不会成功，压缩后重新发起本步（每回合至多一次，避免循环）。
+                    let compact_first = matches!(
+                        error_event,
+                        AgentEvent::AgentRequestError { recovery, .. }
+                            if recovery.retry == RequestRetry::CompactFirst
+                    );
+                    if compact_first && !overflow_compaction_attempted {
+                        overflow_compaction_attempted = true;
+                        let compacted = self
+                            .apply_layer4_compact_in_loop(
+                                &mut current_messages,
+                                &mut history,
+                                &msg,
+                                &persist_session_key,
+                                "request-error",
+                            )
+                            .await;
+                        if compacted {
+                            metrics.record_compression();
+                            self.end_step(&msg, &persist_session_key, step, 0).await;
+                            continue;
+                        }
+                    }
                     self.end_step(&msg, &persist_session_key, step, 0).await;
                     llm_failed_after_retries = true;
                     let max_retries = self.config.agents.defaults.llm_max_retries;

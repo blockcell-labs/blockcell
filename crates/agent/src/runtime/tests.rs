@@ -5767,6 +5767,83 @@ async fn llm_stream_calls_for(error: &'static str) -> usize {
     calls.load(Ordering::SeqCst)
 }
 
+/// 第一次主请求报上下文超限；压缩请求返回结构化摘要；压缩后的请求正常回答。
+struct OverflowOnceProvider {
+    stream_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for OverflowOnceProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        let is_compact = messages
+            .iter()
+            .any(|m| chat_message_text(m).contains("Generate a structured summary"));
+        let content = if is_compact {
+            "## User Request\nsay hello\n\n## Current State\ngreeting in progress"
+        } else {
+            "answer after compaction"
+        };
+        Ok(LLMResponse {
+            content: Some(content.to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+            usage: serde_json::Value::Null,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<mpsc::Receiver<StreamChunk>> {
+        if self.stream_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(blockcell_core::Error::Provider(
+                "http_status=400 This model's maximum context length is 8192 tokens".to_string(),
+            ));
+        }
+        let response = self.chat(messages, tools).await?;
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(StreamChunk::Done { response }).await.unwrap();
+        Ok(rx)
+    }
+}
+
+#[tokio::test]
+async fn context_overflow_compacts_then_retries_the_step() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(OverflowOnceProvider {
+        stream_calls: AtomicUsize::new(0),
+    }));
+    let msg = test_main_session_inbound("cli", "overflow-recovery");
+    let session_key = msg.session_key();
+
+    let reply = runtime.process_message(msg).await.unwrap();
+    assert_eq!(reply, "answer after compaction");
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let error = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::ModelRequestError)
+        .expect("model/request-error recorded");
+    assert_eq!(error.payload["kind"], "context_overflow");
+    assert_eq!(error.payload["recovery"]["retry"], "compact_first");
+    let kinds: Vec<SessionEventKind> = events.iter().map(|event| event.kind).collect();
+    let error_at = kinds
+        .iter()
+        .position(|kind| *kind == SessionEventKind::ModelRequestError)
+        .unwrap();
+    assert!(kinds[error_at..].contains(&SessionEventKind::Compaction));
+    assert_steps_balanced(&events);
+}
+
 #[tokio::test]
 async fn llm_retry_follows_failure_kind() {
     assert_eq!(
@@ -5776,6 +5853,15 @@ async fn llm_retry_follows_failure_kind() {
     assert_eq!(
         llm_stream_calls_for("http_status=503 server overloaded").await,
         3
+    );
+    assert_eq!(
+        llm_stream_calls_for("http_status=400 invalid_request_error: bad tool schema").await,
+        1
+    );
+    // 原因不明：保守地最多再试一次（llm_max_retries = 2）。
+    assert_eq!(
+        llm_stream_calls_for("model returned malformed payload").await,
+        2
     );
 }
 

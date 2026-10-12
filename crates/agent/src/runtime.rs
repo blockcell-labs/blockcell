@@ -9,7 +9,7 @@ use blockcell_core::types::{
 use blockcell_core::{
     scope_abort_token, scope_agent_context, AbortToken, AgentIdentity, BudgetExhaustedError,
     BudgetTracker, BudgetTrackerHandle, Config, FailureKind, Idempotency, InboundMessage,
-    OutboundMessage, Paths, Result, ToolOutcome,
+    OutboundMessage, Paths, RequestRetry, Result, ToolOutcome,
 };
 use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext};
 use blockcell_skills::SkillCard;
@@ -371,25 +371,23 @@ fn summarize_result(result: &str) -> String {
     }
 }
 
+/// agent/request-error：错误分类与恢复策略由 Runtime 决定，Provider 只提供错误信息。
+fn request_error_event(error: &blockcell_core::Error) -> AgentEvent {
+    let error = error.to_string();
+    let kind = FailureKind::classify_provider_message(&error);
+    AgentEvent::AgentRequestError {
+        error,
+        kind,
+        recovery: kind.request_recovery(),
+    }
+}
+
 fn tool_round_throttle_delay(saw_rate_limit_this_turn: bool) -> std::time::Duration {
     if saw_rate_limit_this_turn {
         std::time::Duration::from_millis(TOOL_ROUND_THROTTLE_AFTER_RATE_LIMIT_MS)
     } else {
         std::time::Duration::from_millis(TOOL_ROUND_THROTTLE_MS)
     }
-}
-
-fn is_connection_phase_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    lower.contains("connection")
-        || lower.contains("connect")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("dns")
-        || lower.contains("refused")
-        || lower.contains("reset")
-        || lower.contains("network")
-        || lower.contains("unreachable")
 }
 
 fn build_activate_skill_tool_schema(skill_cards: &[SkillCard]) -> Option<serde_json::Value> {

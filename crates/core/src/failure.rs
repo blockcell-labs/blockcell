@@ -16,6 +16,8 @@ pub enum FailureKind {
     RateLimited,
     ProviderUnavailable,
     AuthenticationFailed,
+    /// 请求本身不合法（参数、格式），原样重试不会成功。
+    InvalidRequest,
     /// 调用在执行前被拒绝（策略、校验、权限、未注册），确定没有产生副作用。
     ToolRejected,
     /// 工具已执行并明确返回失败。
@@ -104,13 +106,54 @@ impl ToolOutcome {
     }
 }
 
+/// 模型请求失败后的恢复策略。Provider 只报告错误，由 Runtime 依据失败类型决定是否继续。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestRecovery {
+    /// 本轮尝试内换下一个 provider（ModelRouter fallback）。
+    pub switch_provider: bool,
+    pub retry: RequestRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestRetry {
+    /// 原样重试不会成功；压缩上下文后重新发起本步。
+    CompactFirst,
+    /// 指数退避后重试。
+    Backoff,
+    /// 原因不明，保守地最多再试一次。
+    Once,
+    Never,
+}
+
 impl FailureKind {
+    /// 模型请求失败时的恢复策略。
+    pub fn request_recovery(self) -> RequestRecovery {
+        let (switch_provider, retry) = match self {
+            Self::ContextOverflow => (false, RequestRetry::CompactFirst),
+            Self::RateLimited | Self::ProviderUnavailable => (true, RequestRetry::Backoff),
+            // 凭据只对当前 provider 失效：换 provider，但不在退避后重试。
+            Self::AuthenticationFailed => (true, RequestRetry::Never),
+            Self::Unknown => (false, RequestRetry::Once),
+            Self::InvalidRequest
+            | Self::Cancelled
+            | Self::ToolRejected
+            | Self::ToolFailed
+            | Self::ToolTimedOut => (false, RequestRetry::Never),
+        };
+        RequestRecovery {
+            switch_provider,
+            retry,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ContextOverflow => "context_overflow",
             Self::RateLimited => "rate_limited",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::AuthenticationFailed => "authentication_failed",
+            Self::InvalidRequest => "invalid_request",
             Self::ToolRejected => "tool_rejected",
             Self::ToolFailed => "tool_failed",
             Self::ToolTimedOut => "tool_timed_out",
@@ -125,7 +168,10 @@ impl FailureKind {
     /// 重试同一请求不会成功；其余失败只有在调用声明为 [`Idempotency::Safe`] 时才可重试。
     pub fn retry_allowed(self, idempotency: Idempotency) -> bool {
         match self {
-            Self::ContextOverflow | Self::AuthenticationFailed | Self::ToolRejected => false,
+            Self::ContextOverflow
+            | Self::AuthenticationFailed
+            | Self::InvalidRequest
+            | Self::ToolRejected => false,
             Self::Cancelled => false,
             Self::RateLimited | Self::ProviderUnavailable => true,
             Self::ToolFailed | Self::ToolTimedOut | Self::Unknown => {
@@ -167,6 +213,14 @@ impl FailureKind {
             "authentication failed",
         ]) {
             Self::AuthenticationFailed
+        } else if has(&[
+            "http_status=400",
+            "http 400",
+            "invalid_request",
+            "invalid request",
+            "bad request",
+        ]) {
+            Self::InvalidRequest
         } else if has(&[
             "http_status=5",
             "http 5",
@@ -243,6 +297,14 @@ mod tests {
                 FailureKind::Cancelled,
             ),
             ("model returned malformed payload", FailureKind::Unknown),
+            (
+                "http_status=400 invalid_request_error: messages.0.content is required",
+                FailureKind::InvalidRequest,
+            ),
+            (
+                "http_status=400 invalid_request_error: prompt is too long",
+                FailureKind::ContextOverflow,
+            ),
         ];
         for (message, expected) in cases {
             assert_eq!(
@@ -254,11 +316,31 @@ mod tests {
     }
 
     #[test]
+    fn request_recovery_follows_failure_kind() {
+        use FailureKind::*;
+        let recovery = |kind: FailureKind| {
+            let r = kind.request_recovery();
+            (r.switch_provider, r.retry)
+        };
+        assert_eq!(
+            recovery(ContextOverflow),
+            (false, RequestRetry::CompactFirst)
+        );
+        assert_eq!(recovery(RateLimited), (true, RequestRetry::Backoff));
+        assert_eq!(recovery(ProviderUnavailable), (true, RequestRetry::Backoff));
+        assert_eq!(recovery(AuthenticationFailed), (true, RequestRetry::Never));
+        assert_eq!(recovery(InvalidRequest), (false, RequestRetry::Never));
+        assert_eq!(recovery(Cancelled), (false, RequestRetry::Never));
+        assert_eq!(recovery(Unknown), (false, RequestRetry::Once));
+    }
+
+    #[test]
     fn retry_depends_on_kind_and_idempotency() {
         use FailureKind::*;
         for kind in [
             ContextOverflow,
             AuthenticationFailed,
+            InvalidRequest,
             ToolRejected,
             Cancelled,
         ] {

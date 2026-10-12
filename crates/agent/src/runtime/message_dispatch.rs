@@ -260,8 +260,13 @@ impl AgentRuntime {
                             *saw_rate_limit_this_turn = true;
                         }
                         self.provider_pool.report(pool_idx, call_result);
-                        last_failure = Some(FailureKind::classify_provider_message(&err_str));
+                        let failure = FailureKind::classify_provider_message(&err_str);
+                        last_failure = Some(failure);
                         last_error = Some(err);
+                        if failure.request_recovery().switch_provider {
+                            excluded_provider_indices.push(pool_idx);
+                            continue;
+                        }
                         break;
                     }
                     Err(e) => {
@@ -274,36 +279,39 @@ impl AgentRuntime {
                         self.provider_pool.report(pool_idx, call_result);
                         let failure = FailureKind::classify_provider_message(&err_str);
                         last_failure = Some(failure);
-                        // 认证失败只说明当前 provider 不可用：换下一个 provider，而不是重试同一个。
-                        if failure == FailureKind::AuthenticationFailed
-                            || is_connection_phase_error(&err_str)
-                        {
+                        last_error = Some(e);
+                        // 限流、服务不可用、凭据失效都只针对当前 provider：本轮先换下一个 provider。
+                        if failure.request_recovery().switch_provider {
                             excluded_provider_indices.push(pool_idx);
                             warn!(
                                 attempt,
                                 max_retries,
                                 ?iteration,
                                 pool_idx,
-                                error = %err_str,
-                                "Connection-phase LLM failure; trying fallback provider"
+                                failure = failure.as_str(),
+                                "LLM provider failure; trying fallback provider"
                             );
-                            last_error = Some(e);
                             continue;
                         }
-                        last_error = Some(e);
                         break;
                     }
                 }
             }
-            // 模型调用本身无副作用（Idempotency::Safe），但上下文超限、认证失败、取消重试也不会成功。
-            if let Some(failure) =
-                last_failure.filter(|kind| !kind.retry_allowed(Idempotency::Safe))
-            {
-                warn!(
-                    failure = failure.as_str(),
-                    attempt, "LLM failure is not retryable; giving up"
-                );
-                break;
+            // 所有 provider 都失败后，按失败类型决定是否退避重试；Provider 只报告错误。
+            if let Some(failure) = last_failure {
+                match failure.request_recovery().retry {
+                    RequestRetry::Backoff => {}
+                    RequestRetry::Once if attempt == 0 => {}
+                    retry => {
+                        warn!(
+                            failure = failure.as_str(),
+                            ?retry,
+                            attempt,
+                            "LLM failure is not retried; giving up"
+                        );
+                        break;
+                    }
+                }
             }
         }
 
