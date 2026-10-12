@@ -217,33 +217,11 @@ impl AgentRuntime {
 
         let final_response = loop {
             let step = self.begin_step();
-            self.dispatch_event(
-                msg,
-                &session_id,
-                &mut AgentEvent::AgentPreStep { iteration: step },
-            )
-            .await;
-            self.dispatch_event(
-                msg,
-                &session_id,
-                &mut AgentEvent::StepStart { iteration: step },
-            )
-            .await;
-            if let Some(plan) = blockcell_tools::plan::take_changed_plan_context(&msg.session_key())
-            {
-                current_messages.push(ChatMessage::user(&format!(
-                    "<runtime-context>\n{}\n</runtime-context>",
-                    plan
-                )));
-            }
-            if let Some(environment) = self
-                .context_builder
-                .incremental_project_environment(&msg.session_key())
-            {
-                current_messages.push(ChatMessage::user(&format!(
-                    "<runtime-context>\n{}\n</runtime-context>",
-                    environment
-                )));
+            let pre_step = self
+                .run_pre_step(msg, &session_id, step, &mut current_messages, None, None)
+                .await;
+            if let PreStepDecision::Stop { reason } = pre_step.decision {
+                break reason;
             }
             let response = match self
                 .chat_with_provider_observed(msg, &session_id, &current_messages, &tools)

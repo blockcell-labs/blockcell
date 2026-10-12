@@ -550,53 +550,7 @@ impl AgentRuntime {
             }
         }
 
-        // Layer 4: 第一次 LLM 调用前的 Compact 检查
-        // 如果从磁盘恢复的历史已经超过阈值，先压缩再进入主循环
-        {
-            let estimated_tokens = estimate_messages_tokens(&current_messages);
-            // Update Layer 4 token usage metrics
-            let trigger_compact = if let Some(memory_system) = self.memory_system.as_ref() {
-                self.record_context_window_estimate(
-                    &persist_session_key,
-                    estimated_tokens,
-                    memory_system.config().token_budget,
-                    memory_system.config().layer4.compact_threshold_ratio,
-                );
-                crate::memory_event!(
-                    layer4,
-                    token_usage,
-                    estimated_tokens,
-                    memory_system.config().token_budget,
-                    memory_system.config().layer4.compact_threshold_ratio
-                );
-                if memory_system.should_compact(estimated_tokens) {
-                    info!(
-                        estimated_tokens,
-                        token_budget = memory_system.config().token_budget,
-                        threshold = memory_system.config().layer4.compact_threshold_ratio,
-                        "[layer4] Pre-loop compact check triggered"
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if trigger_compact
-                && self
-                    .apply_layer4_compact_in_loop(
-                        &mut current_messages,
-                        &mut history,
-                        &msg,
-                        &persist_session_key,
-                        "pre-loop",
-                    )
-                    .await
-            {
-                metrics.record_compression();
-            }
-        }
+        // Layer 4 压缩阈值检查在每步的 agent/pre-step 中进行（含第一次 LLM 调用前）。
 
         let recall_mode = match decision.mode {
             InteractionMode::Chat => blockcell_core::config::MemoryRecallMode::Chat,
@@ -664,35 +618,26 @@ impl AgentRuntime {
             debug!(iteration = ?tool_call_counts, "LLM call iteration");
             // Learning Coordinator: record iteration (replaces skill_nudge_engine.record_iteration)
             self.learning_coordinator.record_iteration();
-            self.dispatch_event(
-                &msg,
-                &persist_session_key,
-                &mut AgentEvent::AgentPreStep { iteration: step },
-            )
-            .await;
-            self.dispatch_event(
-                &msg,
-                &persist_session_key,
-                &mut AgentEvent::StepStart { iteration: step },
-            )
-            .await;
 
-            if let Some(plan) =
-                blockcell_tools::plan::take_changed_plan_context(&persist_session_key)
-            {
-                current_messages.push(ChatMessage::user(&format!(
-                    "<runtime-context>\n{}\n</runtime-context>",
-                    plan
-                )));
+            let throttle = std::mem::take(&mut should_throttle_next_tool_round)
+                .then(|| tool_round_throttle_delay(saw_rate_limit_this_turn));
+            let pre_step = self
+                .run_pre_step(
+                    &msg,
+                    &persist_session_key,
+                    step,
+                    &mut current_messages,
+                    Some(&mut history),
+                    throttle,
+                )
+                .await;
+            if pre_step.compacted {
+                metrics.record_compression();
             }
-            if let Some(environment) = self
-                .context_builder
-                .incremental_project_environment(&persist_session_key)
-            {
-                current_messages.push(ChatMessage::user(&format!(
-                    "<runtime-context>\n{}\n</runtime-context>",
-                    environment
-                )));
+            if let PreStepDecision::Stop { reason } = pre_step.decision {
+                final_response = reason;
+                history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
+                break;
             }
 
             debug!(
@@ -701,28 +646,6 @@ impl AgentRuntime {
                 tool_schema_count = tools.len(),
                 "LLM loop state"
             );
-
-            if should_throttle_next_tool_round {
-                let delay = tool_round_throttle_delay(saw_rate_limit_this_turn);
-                info!(
-                    iteration = ?tool_call_counts,
-                    delay_ms = delay.as_millis() as u64,
-                    saw_rate_limit_this_turn,
-                    "Throttling next LLM call after tool round"
-                );
-                tokio::time::sleep(delay).await;
-                should_throttle_next_tool_round = false;
-            }
-
-            let injected_steering =
-                self.drain_steering_messages(&mut current_messages, &mut history, &msg);
-            if injected_steering > 0 {
-                debug!(
-                    injected_steering,
-                    current_messages_len = current_messages.len(),
-                    "Steering messages injected before LLM call"
-                );
-            }
 
             self.dispatch_event(
                 &msg,
@@ -1402,53 +1325,7 @@ impl AgentRuntime {
                     current_messages.push(ChatMessage::user(&hint));
                 }
 
-                // Layer 4: Full Compact - 当 token 超过预算阈值时触发 LLM 语义压缩
-                // 预算阈值: token_budget * compact_threshold (默认 100_000 * 0.8 = 80_000)
-                let estimated_tokens = estimate_messages_tokens(&current_messages);
-                // Update Layer 4 token usage metrics
-                let trigger_compact = if let Some(memory_system) = self.memory_system.as_ref() {
-                    self.record_context_window_estimate(
-                        &persist_session_key,
-                        estimated_tokens,
-                        memory_system.config().token_budget,
-                        memory_system.config().layer4.compact_threshold_ratio,
-                    );
-                    crate::memory_event!(
-                        layer4,
-                        token_usage,
-                        estimated_tokens,
-                        memory_system.config().token_budget,
-                        memory_system.config().layer4.compact_threshold_ratio
-                    );
-                    if memory_system.should_compact(estimated_tokens) {
-                        info!(
-                            estimated_tokens,
-                            token_budget = memory_system.config().token_budget,
-                            threshold = memory_system.config().layer4.compact_threshold_ratio,
-                            "[layer4] Full compact threshold reached"
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if trigger_compact
-                    && self
-                        .apply_layer4_compact_in_loop(
-                            &mut current_messages,
-                            &mut history,
-                            &msg,
-                            &persist_session_key,
-                            "mid-loop",
-                        )
-                        .await
-                {
-                    metrics.record_compression();
-                    // 跳过后续处理
-                    continue;
-                }
+                // Layer 4 压缩由下一步的 agent/pre-step 在发起请求前处理。
 
                 // Skill Nudge: check after each iteration (replaces skill_nudge_engine.check_skill_nudge)
                 // If memory nudge already triggered, upgrade to Combined

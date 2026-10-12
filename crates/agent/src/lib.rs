@@ -119,6 +119,7 @@ pub use memory_system::{
 };
 pub use response_cache::{ResponseCache, ResponseCacheConfig};
 pub use runtime::agent_loop::{AgentLoop, DefaultLoop};
+pub use runtime::pre_step::{PreStepDecision, PreStepState};
 pub use runtime::{create_evolution_deploy_callback, AgentRuntime, ConfirmRequest};
 pub use steering::{
     ActiveConversationKey, SteeringChannel, SteeringMessage, SteeringRegistry, SteeringSender,

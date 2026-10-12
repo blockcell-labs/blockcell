@@ -61,6 +61,7 @@ use crate::system_event_orchestrator::{
 use crate::system_event_store::{InMemorySystemEventStore, SystemEventStoreOps};
 use crate::task_manager::{OriginScopedTaskManager, TaskManager, TaskStatus};
 use crate::token::estimate_messages_tokens;
+use pre_step::PreStepDecision;
 
 // 学习与记忆协调方法 — 已移至 runtime/learning.rs
 pub mod learning;
@@ -76,6 +77,7 @@ mod ghost_boundary;
 mod lightweight_handle;
 mod message_dispatch;
 mod message_task;
+pub mod pre_step;
 mod process_message_inner;
 mod process_message_phases;
 mod run_loop;
@@ -2191,6 +2193,8 @@ pub struct AgentRuntime {
     provider_pool: Arc<ProviderPool>,
     /// Layer4 压缩时生成摘要的策略。
     context_compactor: Arc<dyn crate::compact::ContextCompactor>,
+    /// agent/pre-step 中内置策略之后运行的可注册策略链。
+    pre_step_policies: crate::runtime_kernel::WaterfallChain<pre_step::PreStepState>,
     tool_registry: ToolRegistry,
     session_store: SessionStore,
     audit_logger: AuditLogger,
@@ -2388,6 +2392,7 @@ impl AgentRuntime {
             context_builder,
             provider_pool,
             context_compactor: Arc::new(crate::compact::ModelSummaryCompactor),
+            pre_step_policies: crate::runtime_kernel::WaterfallChain::new(),
             tool_registry,
             session_store,
             audit_logger,

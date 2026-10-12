@@ -5680,6 +5680,92 @@ async fn every_proposed_tool_call_ends_with_a_tool_result_outcome() {
     assert_eq!(rejected.payload["retry_safe"], false);
 }
 
+/// 第一步追加一条提示；`stop_at` 指定的步拒绝开始。
+struct NotePolicy {
+    stop_at: Option<u32>,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime_kernel::Waterfall<crate::PreStepState> for NotePolicy {
+    async fn handle(
+        &self,
+        mut state: crate::PreStepState,
+        next: crate::runtime_kernel::Next<'_, crate::PreStepState>,
+    ) -> Result<crate::PreStepState> {
+        if Some(state.iteration) == self.stop_at {
+            state.decision = crate::PreStepDecision::Stop {
+                reason: "stopped by policy".to_string(),
+            };
+            return Ok(state);
+        }
+        state.messages.push(ChatMessage::user("POLICY_NOTE"));
+        next(state).await
+    }
+}
+
+#[tokio::test]
+async fn pre_step_policy_can_rewrite_input_or_stop_the_step() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let provider = Arc::new(RecallCaptureProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.register_pre_step_policy(Arc::new(NotePolicy { stop_at: None }));
+    runtime
+        .process_message(test_main_session_inbound("cli", "pre-step-rewrite"))
+        .await
+        .unwrap();
+    let calls = provider.calls.lock().unwrap().clone();
+    assert!(
+        calls[0]
+            .iter()
+            .any(|m| chat_message_text(m) == "POLICY_NOTE"),
+        "{calls:?}"
+    );
+
+    let provider = Arc::new(RecallCaptureProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.register_pre_step_policy(Arc::new(NotePolicy { stop_at: Some(1) }));
+    let msg = test_main_session_inbound("cli", "pre-step-stop");
+    let session_key = msg.session_key();
+    let reply = runtime.process_message(msg).await.unwrap();
+    assert_eq!(reply, "stopped by policy");
+    assert!(provider.calls.lock().unwrap().is_empty());
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .unwrap();
+    assert!(!events
+        .iter()
+        .any(|event| event.kind == SessionEventKind::ModelRequest));
+    assert_steps_balanced(&events);
+}
+
+#[tokio::test]
+async fn pre_step_stops_when_session_budget_is_exhausted() {
+    let provider = Arc::new(RecallCaptureProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.budget.max_tokens_per_session = 10;
+    let base = std::env::temp_dir().join(format!("blockcell-pre-step-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime =
+        test_runtime_with_provider_and_paths(Paths::with_base(base), provider.clone(), config);
+    let msg = test_main_session_inbound("cli", "pre-step-budget");
+    runtime
+        .budget_tracker_for_session(&persist_session_key_for(&msg))
+        .record_usage(100, 0, 0);
+
+    let reply = runtime.process_message(msg).await.unwrap();
+    assert!(reply.starts_with("⚠️"), "{reply}");
+    assert!(provider.calls.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn discarded_stream_output_is_logged_as_assistant_attempt() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
