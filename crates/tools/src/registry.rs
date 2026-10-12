@@ -1,6 +1,6 @@
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -50,7 +50,7 @@ use crate::toggle_manage::ToggleManageTool;
 use crate::tts::TtsTool;
 use crate::video_process::VideoProcessTool;
 use crate::web::{WebFetchTool, WebSearchTool};
-use crate::{Tool, ToolContext};
+use crate::{Tool, ToolContext, ToolPresentation, ToolPresentationConfig, ToolVisibility};
 
 pub const GLOBAL_CORE_TOOL_NAMES: &[&str] = &[
     "memory_query",
@@ -83,14 +83,18 @@ pub fn global_core_tool_names() -> &'static [&'static str] {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
-    model_hidden_tools: HashSet<String>,
+    /// 注册时确定的展示：工具自身声明，或以 discoverable 方式注册。
+    registered_presentation: HashMap<String, ToolPresentation>,
+    /// agent 配置中的展示覆盖，叠加在注册展示之上。
+    presentation_overrides: HashMap<String, ToolPresentationConfig>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
-            model_hidden_tools: HashSet::new(),
+            registered_presentation: HashMap::new(),
+            presentation_overrides: HashMap::new(),
         }
     }
 
@@ -235,20 +239,82 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        let schema = tool.schema();
-        debug!(name = schema.name, "Registering tool");
-        self.model_hidden_tools.remove(&schema.name);
-        self.tools.insert(schema.name.to_string(), tool);
+        let presentation = tool.presentation();
+        self.insert_tool(tool, presentation);
     }
 
     /// Register a tool that remains executable but is hidden from the initial
     /// model-visible tool list. Progressive MCP discovery uses this so tools
     /// can be revealed after `mcp_search_tools` returns their schema.
     pub fn register_model_hidden(&mut self, tool: Arc<dyn Tool>) {
+        let presentation = ToolPresentation {
+            visibility: ToolVisibility::Discoverable,
+            ..tool.presentation()
+        };
+        self.insert_tool(tool, presentation);
+    }
+
+    fn insert_tool(&mut self, tool: Arc<dyn Tool>, presentation: ToolPresentation) {
+        let name = tool.schema().name;
+        debug!(name = %name, visibility = ?presentation.visibility, "Registering tool");
+        self.registered_presentation
+            .insert(name.clone(), presentation);
+        self.tools.insert(name, tool);
+    }
+
+    /// 设置 agent 配置中的展示覆盖（描述、可见性、分组、排序），不影响能否执行。
+    pub fn set_presentation_overrides(
+        &mut self,
+        overrides: HashMap<String, ToolPresentationConfig>,
+    ) {
+        self.presentation_overrides = overrides;
+    }
+
+    /// 工具最终的展示方式：注册展示叠加 agent 配置覆盖。未注册的工具返回 `None`。
+    pub fn presentation(&self, name: &str) -> Option<ToolPresentation> {
+        let base = self.registered_presentation.get(name)?.clone();
+        Some(match self.presentation_overrides.get(name) {
+            Some(overrides) => base.with_overrides(overrides),
+            None => base,
+        })
+    }
+
+    /// 模型看到的 function schema；描述可被展示层覆盖。`include_parameters` 为假时
+    /// 只保留名称与描述（轻量 schema）。
+    fn model_schema(&self, tool: &Arc<dyn Tool>, include_parameters: bool) -> Value {
         let schema = tool.schema();
-        debug!(name = schema.name, "Registering model-hidden tool");
-        self.model_hidden_tools.insert(schema.name.clone());
-        self.tools.insert(schema.name, tool);
+        let description = self
+            .presentation(&schema.name)
+            .and_then(|presentation| presentation.description)
+            .unwrap_or(schema.description);
+        let parameters = if include_parameters {
+            schema.parameters
+        } else {
+            json!({ "type": "object", "properties": {} })
+        };
+        json!({
+            "type": "function",
+            "function": {
+                "name": schema.name,
+                "description": description,
+                "parameters": parameters
+            }
+        })
+    }
+
+    /// 单个工具的完整 model-facing schema（渐进发现、schema 补全时使用）。
+    pub fn full_model_schema(&self, name: &str) -> Option<Value> {
+        self.get(name).map(|tool| self.model_schema(tool, true))
+    }
+
+    /// 按展示排序（order 小者在前，相同时按名称）。
+    fn sort_schemas(&self, schemas: &mut [Value]) {
+        let key = |schema: &Value| {
+            let name = schema["function"]["name"].as_str().unwrap_or_default();
+            let order = self.presentation(name).map_or(0, |p| p.order);
+            (order, name.to_string())
+        };
+        schemas.sort_by_cached_key(key);
     }
 
     /// Register all tools exposed by an MCP server provider.
@@ -258,9 +324,8 @@ impl ToolRegistry {
     ) {
         let tools = provider.tools().await;
         for tool in tools {
-            let schema = tool.schema();
-            debug!(name = schema.name, server = %provider.server_name, "Registering MCP tool");
-            self.tools.insert(schema.name.to_string(), tool);
+            debug!(name = %tool.schema().name, server = %provider.server_name, "Registering MCP tool");
+            self.register(tool);
         }
     }
 
@@ -272,19 +337,9 @@ impl ToolRegistry {
         let mut schemas: Vec<Value> = self
             .tools
             .values()
-            .map(|tool| {
-                let schema = tool.schema();
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": schema.name,
-                        "description": schema.description,
-                        "parameters": schema.parameters
-                    }
-                })
-            })
+            .map(|tool| self.model_schema(tool, true))
             .collect();
-        sort_schemas_by_name(&mut schemas);
+        self.sort_schemas(&mut schemas);
         schemas
     }
 
@@ -295,19 +350,9 @@ impl ToolRegistry {
             .tools
             .iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
-            .map(|(_, tool)| {
-                let schema = tool.schema();
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": schema.name,
-                        "description": schema.description,
-                        "parameters": schema.parameters
-                    }
-                })
-            })
+            .map(|(_, tool)| self.model_schema(tool, true))
             .collect();
-        sort_schemas_by_name(&mut schemas);
+        self.sort_schemas(&mut schemas);
         schemas
     }
 
@@ -323,37 +368,22 @@ impl ToolRegistry {
             .iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
             .map(|(name, tool)| {
-                let schema = tool.schema();
-                let has_required_params = schema
+                let has_required_params = tool
+                    .schema()
                     .parameters
                     .get("required")
                     .and_then(|required| required.as_array())
                     .is_some_and(|required| !required.is_empty());
-                if core_tools.contains(&name.as_str()) || has_required_params {
-                    // Full schema for core tools and tools that cannot be called safely
-                    // without required parameters present in the model-visible schema.
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": schema.name,
-                            "description": schema.description,
-                            "parameters": schema.parameters
-                        }
-                    })
-                } else {
-                    // Lightweight schema: keep the full description but omit parameters.
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": schema.name,
-                            "description": schema.description,
-                            "parameters": { "type": "object", "properties": {} }
-                        }
-                    })
-                }
+                // Full schema for core tools and tools that cannot be called safely
+                // without required parameters present in the model-visible schema.
+                // Lightweight schema: keep the full description but omit parameters.
+                self.model_schema(
+                    tool,
+                    core_tools.contains(&name.as_str()) || has_required_params,
+                )
             })
             .collect();
-        sort_schemas_by_name(&mut schemas);
+        self.sort_schemas(&mut schemas);
         schemas
     }
 
@@ -369,7 +399,7 @@ impl ToolRegistry {
         let mut names: Vec<String> = self
             .tools
             .keys()
-            .filter(|name| !self.model_hidden_tools.contains(*name))
+            .filter(|name| self.presentation(name).is_some_and(|p| p.is_visible()))
             .cloned()
             .collect();
         names.sort();
@@ -377,7 +407,7 @@ impl ToolRegistry {
     }
 
     pub fn is_model_hidden(&self, name: &str) -> bool {
-        self.model_hidden_tools.contains(name)
+        self.presentation(name).is_some_and(|p| !p.is_visible())
     }
 
     /// Collect prompt rules from loaded tools.
@@ -424,14 +454,6 @@ impl ToolRegistry {
         debug!(tool = name, "Executing tool");
         tool.execute(ctx, params).await
     }
-}
-
-fn sort_schemas_by_name(schemas: &mut [Value]) {
-    schemas.sort_by(|a, b| {
-        let a_name = a["function"]["name"].as_str().unwrap_or_default();
-        let b_name = b["function"]["name"].as_str().unwrap_or_default();
-        a_name.cmp(b_name)
-    });
 }
 
 impl Default for ToolRegistry {
@@ -635,6 +657,66 @@ mod tests {
             .as_object()
             .expect("no_required_tool properties should be an object");
         assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn test_presentation_overrides_change_model_view_but_not_execution() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NoRequiredTool));
+        reg.register(Arc::new(crate::exec::ExecTool::default()));
+        reg.set_presentation_overrides(HashMap::from([
+            (
+                "no_required_tool".to_string(),
+                ToolPresentationConfig {
+                    description: Some("Agent-specific description".to_string()),
+                    order: Some(-1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "exec".to_string(),
+                ToolPresentationConfig {
+                    visibility: Some(ToolVisibility::Discoverable),
+                    group: Some("system".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ]));
+
+        let schemas = reg.get_tool_schemas();
+        assert_eq!(schemas[0]["function"]["name"], "no_required_tool");
+        assert_eq!(
+            schemas[0]["function"]["description"],
+            "Agent-specific description"
+        );
+        assert_eq!(
+            reg.full_model_schema("no_required_tool").unwrap()["function"]["description"],
+            "Agent-specific description"
+        );
+
+        assert!(reg.is_model_hidden("exec"));
+        assert_eq!(reg.model_visible_tool_names(), vec!["no_required_tool"]);
+        assert!(reg.get("exec").is_some());
+        assert_eq!(
+            reg.presentation("exec").unwrap().group.as_deref(),
+            Some("system")
+        );
+    }
+
+    #[test]
+    fn test_presentation_override_can_reveal_discoverable_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register_model_hidden(Arc::new(NoRequiredTool));
+        reg.set_presentation_overrides(HashMap::from([(
+            "no_required_tool".to_string(),
+            ToolPresentationConfig {
+                visibility: Some(ToolVisibility::Visible),
+                ..Default::default()
+            },
+        )]));
+
+        assert!(!reg.is_model_hidden("no_required_tool"));
+        assert!(reg.presentation("missing").is_none());
     }
 
     fn assert_no_array_without_items(value: &Value, path: &str) {

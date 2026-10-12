@@ -523,9 +523,10 @@ impl AgentRuntime {
         &self,
         active_skill: &ActiveSkillContext,
     ) -> Vec<String> {
+        // 技能显式声明的工具即使是 discoverable 也会展示；可见性不影响能否执行。
         let available_tools = self
             .tool_registry
-            .model_visible_tool_names()
+            .tool_names()
             .into_iter()
             .collect::<HashSet<_>>();
         let mut declared_tools = active_skill.tools.clone();

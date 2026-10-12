@@ -19,6 +19,7 @@ pub async fn build_tool_registry_for_agent_config(
             )
             .await?;
     }
+    registry.set_presentation_overrides(config.agents.defaults.tool_presentation.clone());
     Ok(registry)
 }
 

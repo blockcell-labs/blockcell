@@ -38,6 +38,7 @@ pub mod ocr;
 pub mod office;
 pub mod office_write;
 pub mod plan;
+pub mod presentation;
 mod process;
 pub mod registry;
 pub mod registry_builder;
@@ -71,6 +72,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+pub use presentation::{ToolPresentation, ToolPresentationConfig, ToolVisibility};
 pub use registry::ToolRegistry;
 pub use registry_builder::{
     build_tool_registry_for_agent_config, build_tool_registry_with_all_mcp,
@@ -545,6 +547,10 @@ pub trait Tool: Send + Sync {
     /// Return `None` (default) if the tool needs no special instructions.
     fn prompt_rule(&self, _ctx: &PromptContext) -> Option<String> {
         None
+    }
+    /// 工具自身声明的展示方式；agent 配置可在此基础上覆盖。不影响能否执行。
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::default()
     }
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value>;
 }

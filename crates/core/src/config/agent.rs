@@ -66,6 +66,49 @@ pub struct AgentDefaults {
     /// - None: 不发送任何参数，由 provider 自行决定
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// 按工具名覆盖"模型/界面看到什么"（描述、可见性、分组、排序），不影响能否执行。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_presentation: HashMap<String, ToolPresentationConfig>,
+}
+
+/// 工具对模型的可见性，与执行权限无关。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolVisibility {
+    #[default]
+    Visible,
+    /// 初始工具列表中不展示；经渐进发现（如 MCP 搜索）或被技能显式声明后才展示。
+    Discoverable,
+}
+
+/// 单个工具的展示覆盖；未设置的字段沿用工具自身声明。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPresentationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<ToolVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 越小越靠前；相同时按名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+impl ToolPresentationConfig {
+    /// 以 `other` 中已设置的字段覆盖自身。
+    pub fn overlay(&self, other: &Self) -> Self {
+        Self {
+            description: other
+                .description
+                .clone()
+                .or_else(|| self.description.clone()),
+            visibility: other.visibility.or(self.visibility),
+            group: other.group.clone().or_else(|| self.group.clone()),
+            order: other.order.or(self.order),
+        }
+    }
 }
 
 fn default_workspace() -> String {
@@ -120,6 +163,7 @@ impl Default for AgentDefaults {
             allowed_mcp_servers: Vec::new(),
             allowed_mcp_tools: Vec::new(),
             reasoning_effort: None,
+            tool_presentation: HashMap::new(),
         }
     }
 }
@@ -177,6 +221,9 @@ pub struct AgentProfileConfig {
     pub allowed_mcp_servers: Option<Vec<String>>,
     #[serde(default)]
     pub allowed_mcp_tools: Option<Vec<String>>,
+    /// 本 agent 的工具展示覆盖，按字段叠加在 `agents.defaults.toolPresentation` 之上。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_presentation: HashMap<String, ToolPresentationConfig>,
 }
 
 fn default_agent_enabled() -> bool {
@@ -205,6 +252,7 @@ impl Default for AgentProfileConfig {
             evolution_provider: None,
             allowed_mcp_servers: None,
             allowed_mcp_tools: None,
+            tool_presentation: HashMap::new(),
         }
     }
 }

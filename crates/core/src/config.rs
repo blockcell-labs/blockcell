@@ -857,6 +857,15 @@ impl Config {
             if let Some(allowed_mcp_tools) = &agent.allowed_mcp_tools {
                 defaults.allowed_mcp_tools = allowed_mcp_tools.clone();
             }
+            for (tool, overrides) in &agent.tool_presentation {
+                let merged = defaults
+                    .tool_presentation
+                    .get(tool)
+                    .cloned()
+                    .unwrap_or_default()
+                    .overlay(overrides);
+                defaults.tool_presentation.insert(tool.clone(), merged);
+            }
         }
 
         Some(ResolvedAgentConfig {
@@ -952,6 +961,46 @@ mod tests {
             .memory
             .memory_recall
             .allows(MemoryRecallMode::General, "system"));
+    }
+
+    #[test]
+    fn agent_tool_presentation_overlays_defaults_field_by_field() {
+        let cfg: Config = json5::from_str(
+            r#"{
+                agents: {
+                    defaults: {
+                        toolPresentation: {
+                            exec: { description: "Run commands", group: "system", order: 5 },
+                        },
+                    },
+                    list: [
+                        {
+                            id: "ops",
+                            toolPresentation: {
+                                exec: { visibility: "discoverable", order: 1 },
+                                web_search: { description: "Search the web for ops" },
+                            },
+                        },
+                    ],
+                },
+            }"#,
+        )
+        .expect("parse tool presentation config");
+
+        let ops = cfg.config_for_agent("ops").unwrap().agents.defaults;
+        let exec = &ops.tool_presentation["exec"];
+        assert_eq!(exec.description.as_deref(), Some("Run commands"));
+        assert_eq!(exec.group.as_deref(), Some("system"));
+        assert_eq!(exec.visibility, Some(ToolVisibility::Discoverable));
+        assert_eq!(exec.order, Some(1));
+        assert_eq!(
+            ops.tool_presentation["web_search"].description.as_deref(),
+            Some("Search the web for ops")
+        );
+
+        let default_agent = cfg.config_for_agent("default").unwrap().agents.defaults;
+        assert_eq!(default_agent.tool_presentation["exec"].visibility, None);
+        assert!(!default_agent.tool_presentation.contains_key("web_search"));
     }
 
     #[test]

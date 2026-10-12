@@ -994,7 +994,8 @@ impl AgentRuntime {
                             {
                                 continue;
                             }
-                            let Some(tool) = self.tool_registry.get(&revealed_tool) else {
+                            let Some(schema) = self.tool_registry.full_model_schema(&revealed_tool)
+                            else {
                                 continue;
                             };
                             if !tool_names.iter().any(|name| name == &revealed_tool) {
@@ -1009,15 +1010,7 @@ impl AgentRuntime {
                                     .and_then(|name| name.as_str())
                                     == Some(revealed_tool.as_str())
                             }) {
-                                let schema = tool.schema();
-                                tools.push(serde_json::json!({
-                                    "type": "function",
-                                    "function": {
-                                        "name": schema.name,
-                                        "description": schema.description,
-                                        "parameters": schema.parameters
-                                    }
-                                }));
+                                tools.push(schema);
                                 _schema_cache_dirty = true;
                                 info!(tool = %revealed_tool, "Revealed MCP tool from progressive discovery search");
                             }
@@ -1078,7 +1071,9 @@ impl AgentRuntime {
                     // (e.g. lightweight schema had no params), inject full schema and retry.
                     let needs_supplement = should_supplement_tool_schema(&result);
                     if needs_supplement {
-                        if let Some(schema) = self.tool_registry.get(&tool_call.name) {
+                        if let Some(schema_val) =
+                            self.tool_registry.full_model_schema(&tool_call.name)
+                        {
                             // Check if we need to upgrade from lightweight to full schema
                             let already_full = tools.iter().any(|t| {
                                 t.get("function")
@@ -1094,14 +1089,6 @@ impl AgentRuntime {
                                         .unwrap_or(false)
                             });
                             if !already_full {
-                                let schema_val = serde_json::json!({
-                                    "type": "function",
-                                    "function": {
-                                        "name": schema.schema().name,
-                                        "description": schema.schema().description,
-                                        "parameters": schema.schema().parameters
-                                    }
-                                });
                                 // Replace lightweight schema with full schema
                                 tools.retain(|t| {
                                     t.get("function")

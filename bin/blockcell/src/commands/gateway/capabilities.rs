@@ -12,9 +12,13 @@ pub(super) async fn handle_tools(State(state): State<GatewayState>) -> impl Into
         .map(|name| {
             if let Some(tool) = state.tool_registry.get(name) {
                 let schema = tool.schema();
+                let presentation = state.tool_registry.presentation(name).unwrap_or_default();
                 serde_json::json!({
                     "name": schema.name,
-                    "description": schema.description,
+                    "description": presentation.description.as_ref().unwrap_or(&schema.description),
+                    "visibility": presentation.visibility,
+                    "group": presentation.group,
+                    "order": presentation.order,
                 })
             } else {
                 serde_json::json!({ "name": name })
