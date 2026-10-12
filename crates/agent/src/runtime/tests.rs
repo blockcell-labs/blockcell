@@ -5372,9 +5372,9 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
     assert_eq!(names, vec!["tool/pre-execute", "tool/result"]);
     match &recorded[1] {
         AgentEvent::ToolResult {
-            result, is_error, ..
+            result, outcome, ..
         } => {
-            assert!(*is_error);
+            assert_eq!(*outcome, blockcell_core::ToolOutcome::Rejected);
             assert_eq!(result["policy"], "event_listener");
         }
         other => panic!("unexpected event: {other:?}"),
@@ -5608,6 +5608,76 @@ async fn forced_final_answer_is_logged_as_its_own_step() {
             SessionEventKind::StepEnd,
         ]
     );
+}
+
+#[tokio::test]
+async fn every_proposed_tool_call_ends_with_a_tool_result_outcome() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.max_tool_iterations = 1;
+    let base =
+        std::env::temp_dir().join(format!("blockcell-tool-outcome-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(EndlessToolProvider),
+        config,
+    );
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::fs::ReadFileTool::default()));
+    let mut msg = test_main_session_inbound("cli", "event-log-tool-outcome");
+    msg.content = "read the file missing-file.txt and summarize it".to_string();
+    let session_key = msg.session_key();
+    runtime.process_message(msg).await.unwrap();
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let proposed: Vec<String> = events
+        .iter()
+        .filter(|event| event.kind == SessionEventKind::ModelResponse)
+        .flat_map(|event| {
+            event.payload["tool_calls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|call| call["id"].as_str().unwrap().to_string())
+        .collect();
+    let results: Vec<(String, String)> = events
+        .iter()
+        .filter(|event| event.kind == SessionEventKind::ToolResult)
+        .map(|event| {
+            (
+                event.payload["call_id"].as_str().unwrap().to_string(),
+                event.payload["outcome"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        proposed,
+        results.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+    );
+    let outcomes: Vec<&str> = results
+        .iter()
+        .map(|(_, outcome)| outcome.as_str())
+        .collect();
+    assert_eq!(outcomes, vec!["rejected", "rejected"], "{results:?}");
+    let rejected = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == SessionEventKind::ToolResult)
+        .unwrap();
+    assert!(rejected.payload["result"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("max call limit"));
+    assert_eq!(rejected.payload["is_error"], true);
+    assert_eq!(rejected.payload["retry_safe"], false);
 }
 
 #[tokio::test]

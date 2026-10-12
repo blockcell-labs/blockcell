@@ -38,7 +38,7 @@ pub use capability::{
 pub use config::Config;
 pub use config::EvolutionConfig;
 pub use error::{Error, Result};
-pub use failure::{FailureKind, Idempotency};
+pub use failure::{FailureKind, Idempotency, ToolOutcome};
 pub use message::{InboundMessage, OutboundMessage};
 pub use paths::Paths;
 pub use session_key::{

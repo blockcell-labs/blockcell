@@ -299,7 +299,7 @@ impl AgentRuntime {
                         *count += 1;
                         if *count > max_iterations {
                             over_iteration = true;
-                            serde_json::json!({
+                            let denied = serde_json::json!({
                                 "error": format!(
                                     "Tool '{}' execeeded max call limit ({}).",
                                     tool_call.name, max_iterations
@@ -307,13 +307,21 @@ impl AgentRuntime {
                                 "tool": tool_call.name,
                                 "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
                             })
-                            .to_string()
+                            .to_string();
+                            self.record_unexecuted_tool_call(
+                                &tool_call,
+                                msg,
+                                ToolOutcome::Rejected,
+                                &denied,
+                            )
+                            .await;
+                            denied
                         } else {
                             self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
                                 .await
                         }
                     } else {
-                        serde_json::json!({
+                        let denied = serde_json::json!({
                             "error": format!(
                                 "Tool '{}' is not available inside prompt skill scope.",
                                 tool_call.name
@@ -321,7 +329,15 @@ impl AgentRuntime {
                             "tool": tool_call.name,
                             "hint": "Use only the tools declared by the active skill."
                         })
-                        .to_string()
+                        .to_string();
+                        self.record_unexecuted_tool_call(
+                            &tool_call,
+                            msg,
+                            ToolOutcome::Rejected,
+                            &denied,
+                        )
+                        .await;
+                        denied
                     };
                 if consecutive_failure_tracker
                     .record(&tool_call, tool_result_indicates_error(&tool_result))

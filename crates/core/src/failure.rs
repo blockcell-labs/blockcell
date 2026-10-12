@@ -38,6 +38,72 @@ pub enum Idempotency {
     Unknown,
 }
 
+/// Runtime 对一次工具调用执行状态的判断，与返回给模型的内容（ToolResult）是两个概念。
+///
+/// Retry / Audit / Evaluation / Ghost 都依赖这一稳定语义，而不是解析结果文本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    Succeeded,
+    /// 工具已执行并明确返回失败。
+    Failed,
+    /// 执行前被拒绝（作用域、策略、校验、权限、调用上限），确定没有副作用。
+    Rejected,
+    Cancelled,
+    /// 超时且调用可安全重试（只读 / 幂等）。
+    TimedOut,
+    /// 模型提议了该调用，但 Runtime 没有开始执行（同批次中断、被其他调用取代）。
+    NotStarted,
+    /// 无法确定调用是否已生效。
+    Unknown,
+}
+
+impl ToolOutcome {
+    /// `None` 表示执行成功。
+    pub fn from_failure(failure: Option<FailureKind>) -> Self {
+        match failure {
+            None => Self::Succeeded,
+            Some(FailureKind::ToolRejected) => Self::Rejected,
+            Some(FailureKind::ToolTimedOut) => Self::TimedOut,
+            Some(FailureKind::Cancelled) => Self::Cancelled,
+            Some(FailureKind::Unknown) => Self::Unknown,
+            Some(_) => Self::Failed,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::NotStarted => "not_started",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_error(self) -> bool {
+        self != Self::Succeeded
+    }
+
+    /// 失败后能否自动重试同一调用；成功的调用返回 `None`。
+    ///
+    /// 未开始的调用没有任何副作用，总是可以重试；其余按 [`FailureKind::retry_allowed`]。
+    pub fn retry_allowed(self, idempotency: Idempotency) -> Option<bool> {
+        let failure = match self {
+            Self::Succeeded => return None,
+            Self::NotStarted => return Some(true),
+            Self::Failed => FailureKind::ToolFailed,
+            Self::Rejected => FailureKind::ToolRejected,
+            Self::Cancelled => FailureKind::Cancelled,
+            Self::TimedOut => FailureKind::ToolTimedOut,
+            Self::Unknown => FailureKind::Unknown,
+        };
+        Some(failure.retry_allowed(idempotency))
+    }
+}
+
 impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -206,6 +272,44 @@ mod tests {
             assert!(!kind.retry_allowed(Idempotency::Required), "{kind:?}");
             assert!(!kind.retry_allowed(Idempotency::Unknown), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn tool_outcome_maps_failures_and_retry_semantics() {
+        use FailureKind as F;
+        let cases = [
+            (None, ToolOutcome::Succeeded),
+            (Some(F::ToolRejected), ToolOutcome::Rejected),
+            (Some(F::ToolFailed), ToolOutcome::Failed),
+            (Some(F::ToolTimedOut), ToolOutcome::TimedOut),
+            (Some(F::Cancelled), ToolOutcome::Cancelled),
+            (Some(F::Unknown), ToolOutcome::Unknown),
+            (Some(F::ProviderUnavailable), ToolOutcome::Failed),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(ToolOutcome::from_failure(failure), expected, "{failure:?}");
+        }
+        assert!(!ToolOutcome::Succeeded.is_error());
+        assert_eq!(
+            ToolOutcome::Succeeded.retry_allowed(Idempotency::Safe),
+            None
+        );
+        assert_eq!(
+            ToolOutcome::NotStarted.retry_allowed(Idempotency::Required),
+            Some(true)
+        );
+        assert_eq!(
+            ToolOutcome::Unknown.retry_allowed(Idempotency::Required),
+            Some(false)
+        );
+        assert_eq!(
+            ToolOutcome::Rejected.retry_allowed(Idempotency::Safe),
+            Some(false)
+        );
+        assert_eq!(
+            serde_json::to_value(ToolOutcome::NotStarted).unwrap(),
+            "not_started"
+        );
     }
 
     #[test]

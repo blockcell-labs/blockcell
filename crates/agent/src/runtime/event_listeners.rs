@@ -178,9 +178,8 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             tool_name,
             call_id,
             result,
-            is_error,
             duration_ms,
-            failure,
+            outcome,
             idempotency,
         } => {
             let mut events = vec![(
@@ -189,14 +188,14 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
                     "tool": tool_name,
                     "call_id": call_id,
                     "result": result,
-                    "is_error": is_error,
+                    "is_error": outcome.is_error(),
                     "duration_ms": duration_ms,
-                    "outcome": failure.map_or("succeeded", |kind| kind.as_str()),
+                    "outcome": outcome,
                     "idempotency": idempotency,
-                    "retry_safe": failure.map(|kind| kind.retry_allowed(*idempotency)),
+                    "retry_safe": outcome.retry_allowed(*idempotency),
                 }),
             )];
-            if !is_error && MEMORY_WRITE_TOOLS.contains(&tool_name.as_str()) {
+            if !outcome.is_error() && MEMORY_WRITE_TOOLS.contains(&tool_name.as_str()) {
                 events.push((
                     SessionEventKind::MemoryWrite,
                     json!({ "tool": tool_name, "call_id": call_id }),

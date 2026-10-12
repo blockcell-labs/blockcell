@@ -4,7 +4,7 @@
 //! ToolCall
 //!  → admission: Toggle → tool/pre-execute（listener 可改写参数或拒绝）
 //!               → Policy → DangerousOperation → PathAccess → ShellFullAccess
-//!  → tool/call（任一阶段拒绝则直接记录 is_error 的 tool/result）
+//!  → tool/call（任一阶段拒绝则直接记录 outcome=rejected 的 tool/result）
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
 //!  → classify outcome（自进化上报 / 学习提示）
@@ -34,10 +34,15 @@ pub(crate) struct ToolInvocation<'a> {
 pub(crate) struct ToolExecution {
     pub(crate) result_str: String,
     pub(crate) result_json: serde_json::Value,
-    pub(crate) is_error: bool,
     pub(crate) duration_ms: u64,
-    pub(crate) failure: Option<FailureKind>,
+    pub(crate) outcome: ToolOutcome,
     pub(crate) idempotency: Idempotency,
+}
+
+impl ToolExecution {
+    pub(crate) fn is_error(&self) -> bool {
+        self.outcome.is_error()
+    }
 }
 
 /// 准入阶段拒绝时直接作为工具结果返回给模型的字符串。
@@ -117,7 +122,7 @@ impl AgentRuntime {
         self.record_tool_result(&inv, &outcome).await;
 
         // 结果未知时提示先对账，避免模型直接重试造成重复副作用；再追加学习提示，让 LLM 自然地回复用户
-        let reconcile_hint = (outcome.failure == Some(FailureKind::Unknown))
+        let reconcile_hint = (outcome.outcome == ToolOutcome::Unknown)
             .then(|| unknown_outcome_hint(&tool_call.name));
         [reconcile_hint, learning_hint]
             .into_iter()
@@ -141,21 +146,33 @@ impl AgentRuntime {
 
     /// 被拒绝的调用同样产生 durable 的 tool/result，保证拦截行为可审计、可回放。
     async fn record_rejected_tool_call(&mut self, inv: &ToolInvocation<'_>, denied: &str) {
-        let result = serde_json::from_str::<serde_json::Value>(denied)
+        self.record_unexecuted_tool_call(inv.call, inv.msg, ToolOutcome::Rejected, denied)
+            .await;
+    }
+
+    /// 没有执行的调用（被拒绝、未开始）以 tool/result 收尾，保证模型提议的每个调用都有结论。
+    /// `result_text` 是返回给模型的内容，JSON 对象原样记录，其余包装为 `{"error": ...}`。
+    pub(crate) async fn record_unexecuted_tool_call(
+        &mut self,
+        call: &ToolCallRequest,
+        msg: &InboundMessage,
+        outcome: ToolOutcome,
+        result_text: &str,
+    ) {
+        let result = serde_json::from_str::<serde_json::Value>(result_text)
             .ok()
             .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({ "error": denied }));
+            .unwrap_or_else(|| serde_json::json!({ "error": result_text }));
         self.dispatch_event(
-            inv.msg,
-            &persist_session_key_for(inv.msg),
+            msg,
+            &persist_session_key_for(msg),
             &mut AgentEvent::ToolResult {
-                tool_name: inv.call.name.clone(),
-                call_id: inv.call.id.clone(),
+                tool_name: call.name.clone(),
+                call_id: call.id.clone(),
                 result,
-                is_error: true,
                 duration_ms: 0,
-                failure: Some(FailureKind::ToolRejected),
-                idempotency: self.tool_registry.idempotency(&inv.call.name, &inv.args),
+                outcome,
+                idempotency: self.tool_registry.idempotency(&call.name, &call.arguments),
             },
         )
         .await;
@@ -464,11 +481,12 @@ impl AgentRuntime {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         let idempotency = self.tool_registry.idempotency(tool_name, &inv.args);
-        let failure = result
-            .as_ref()
-            .err()
-            .map(|error| FailureKind::classify_tool_error(error, idempotency));
-        let is_error = result.is_err();
+        let outcome = ToolOutcome::from_failure(
+            result
+                .as_ref()
+                .err()
+                .map(|error| FailureKind::classify_tool_error(error, idempotency)),
+        );
         let (result_str, result_json) = match result {
             Ok(val) => (val.to_string(), val),
             Err(e) => {
@@ -479,9 +497,8 @@ impl AgentRuntime {
         ToolExecution {
             result_str,
             result_json,
-            is_error,
             duration_ms,
-            failure,
+            outcome,
             idempotency,
         }
     }
@@ -497,13 +514,13 @@ impl AgentRuntime {
                 call_id: tool_call.id.clone(),
                 arguments: inv.args.clone(),
                 result: outcome.result_json.clone(),
-                is_error: outcome.is_error,
+                is_error: outcome.is_error(),
                 duration_ms: outcome.duration_ms,
             },
         )
         .await;
 
-        if outcome.is_error {
+        if outcome.is_error() {
             return;
         }
 
@@ -569,7 +586,7 @@ impl AgentRuntime {
         outcome: &ToolExecution,
     ) -> Option<String> {
         let mut learning_hint: Option<String> = None;
-        if outcome.is_error {
+        if outcome.is_error() {
             let is_unknown_tool = outcome.result_str.contains("Unknown tool:");
 
             if is_unknown_tool {
@@ -635,7 +652,7 @@ impl AgentRuntime {
             if !is_openclaw {
                 let reported_name = tool_call.name.clone();
                 evo_service
-                    .report_skill_call(&reported_name, outcome.is_error)
+                    .report_skill_call(&reported_name, outcome.is_error())
                     .await;
             }
         }
@@ -653,9 +670,8 @@ impl AgentRuntime {
                 tool_name: tool_call.name.clone(),
                 call_id: tool_call.id.clone(),
                 result: outcome.result_json.clone(),
-                is_error: outcome.is_error,
                 duration_ms: outcome.duration_ms,
-                failure: outcome.failure,
+                outcome: outcome.outcome,
                 idempotency: outcome.idempotency,
             },
         )
@@ -699,7 +715,7 @@ impl AgentRuntime {
 
         // Layer 4: Track file reads for Post-Compact recovery
         // 追踪多种文件访问工具的结果，用于 Compact 后恢复
-        if !outcome.is_error {
+        if !outcome.is_error() {
             let result_str = &outcome.result_str;
             let file_content_to_track: Option<(std::path::PathBuf, &str)> =
                 match tool_call.name.as_str() {

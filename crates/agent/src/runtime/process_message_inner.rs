@@ -856,6 +856,19 @@ impl AgentRuntime {
                             tool_calls = response.tool_calls.len(),
                             "activate_skill was returned with additional tool calls; only the skill activation will be executed"
                         );
+                        for other in response
+                            .tool_calls
+                            .iter()
+                            .filter(|call| call.id != skill_call.id)
+                        {
+                            self.record_unexecuted_tool_call(
+                                other,
+                                &msg,
+                                ToolOutcome::NotStarted,
+                                "Not executed: activate_skill was called in the same batch; only the skill activation runs.",
+                            )
+                            .await;
+                        }
                     }
 
                     let raw_skill_name = skill_call
@@ -970,7 +983,7 @@ impl AgentRuntime {
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
-                for tool_call in &response.tool_calls {
+                for (call_index, tool_call) in response.tool_calls.iter().enumerate() {
                     if tool_call.name == "web_search" || tool_call.name == "web_fetch" {
                         wants_forced_answer = true;
                     }
@@ -997,7 +1010,7 @@ impl AgentRuntime {
                         *count += 1;
                         if *count > max_iterations {
                             over_iteration = true;
-                            serde_json::json!({
+                            let denied = serde_json::json!({
                                 "error": format!(
                                     "Tool '{}' execeeded max call limit ({}).",
                                     tool_call.name, max_iterations
@@ -1005,12 +1018,28 @@ impl AgentRuntime {
                                 "tool": tool_call.name,
                                 "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
                             })
-                            .to_string()
+                            .to_string();
+                            self.record_unexecuted_tool_call(
+                                tool_call,
+                                &msg,
+                                ToolOutcome::Rejected,
+                                &denied,
+                            )
+                            .await;
+                            denied
                         } else {
                             self.execute_tool_call(tool_call, &msg, None).await
                         }
                     } else {
-                        scoped_tool_denied_result(&tool_call.name)
+                        let denied = scoped_tool_denied_result(&tool_call.name);
+                        self.record_unexecuted_tool_call(
+                            tool_call,
+                            &msg,
+                            ToolOutcome::Rejected,
+                            &denied,
+                        )
+                        .await;
+                        denied
                     };
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
@@ -1142,6 +1171,15 @@ impl AgentRuntime {
                                 supplemented_tools = true;
                                 _schema_cache_dirty = true;
                                 info!(tool = %tool_call.name, "Dynamically supplemented tool with full schema");
+                                for skipped in &response.tool_calls[call_index + 1..] {
+                                    self.record_unexecuted_tool_call(
+                                        skipped,
+                                        &msg,
+                                        ToolOutcome::NotStarted,
+                                        "Not executed: the batch was restarted after supplementing a tool schema.",
+                                    )
+                                    .await;
+                                }
                                 break;
                             }
                         }

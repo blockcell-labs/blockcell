@@ -1,4 +1,4 @@
-use blockcell_core::{FailureKind, Idempotency};
+use blockcell_core::{Idempotency, ToolOutcome};
 use serde_json::Value;
 
 /// 事件一致性语义分类。
@@ -96,14 +96,15 @@ pub enum AgentEvent {
         is_error: bool,
         duration_ms: u64,
     },
-    /// `failure` 为空表示成功；`idempotency` 与 `failure` 一起决定该调用能否安全重试。
+    /// 每个模型提议的调用都以一条 tool/result 结束（包括被拒绝、未开始的调用）。
+    /// `outcome` 是 Runtime 对执行状态的判断，`result` 是返回给模型的内容；
+    /// `idempotency` 与 `outcome` 一起决定该调用能否安全重试。
     ToolResult {
         tool_name: String,
         call_id: String,
         result: Value,
-        is_error: bool,
         duration_ms: u64,
-        failure: Option<FailureKind>,
+        outcome: ToolOutcome,
         idempotency: Idempotency,
     },
     SkillActivated {
