@@ -2431,6 +2431,7 @@ mod tests {
                 evolution_provider: None,
                 allowed_mcp_servers: None,
                 allowed_mcp_tools: None,
+                tool_presentation: HashMap::new(),
             });
 
         let msg = InboundMessage {
