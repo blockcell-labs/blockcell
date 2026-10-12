@@ -918,10 +918,10 @@ impl super::AgentRuntime {
         use blockcell_tools::web::*;
 
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(ReadFileTool));
-        registry.register(Arc::new(WriteFileTool));
-        registry.register(Arc::new(EditFileTool));
-        registry.register(Arc::new(ListDirTool));
+        registry.register(Arc::new(ReadFileTool::default()));
+        registry.register(Arc::new(WriteFileTool::default()));
+        registry.register(Arc::new(EditFileTool::default()));
+        registry.register(Arc::new(ListDirTool::default()));
         registry.register(Arc::new(ExecTool::default()));
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(WebFetchTool));

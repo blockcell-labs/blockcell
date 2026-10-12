@@ -2,8 +2,36 @@ use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::fs_backend::{FilesystemBackend, FsEntryKind, LocalFilesystem};
 use crate::{Tool, ToolContext, ToolSchema};
+
+/// 文件工具通过注入的 [`FilesystemBackend`] 访问文件，工具本身只负责路径解析与参数语义。
+macro_rules! filesystem_tool {
+    ($name:ident) => {
+        pub struct $name {
+            fs: Arc<dyn FilesystemBackend>,
+        }
+
+        impl $name {
+            pub fn new(fs: Arc<dyn FilesystemBackend>) -> Self {
+                Self { fs }
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new(Arc::new(LocalFilesystem))
+            }
+        }
+    };
+}
+
+filesystem_tool!(ReadFileTool);
+filesystem_tool!(WriteFileTool);
+filesystem_tool!(EditFileTool);
+filesystem_tool!(ListDirTool);
 
 fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
     if path.starts_with("~/") {
@@ -18,8 +46,6 @@ fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
 }
 
 // ============ read_file ============
-
-pub struct ReadFileTool;
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -87,45 +113,30 @@ impl Tool for ReadFileTool {
         let path_str = params["path"].as_str().unwrap();
         let path = expand_path(path_str, &ctx.workspace);
 
-        if !path.exists() {
-            return Err(Error::NotFound(format!(
-                "File not found: {}",
-                path.display()
-            )));
+        match self.fs.kind(&path).await? {
+            None => {
+                return Err(Error::NotFound(format!(
+                    "File not found: {}",
+                    path.display()
+                )));
+            }
+            Some(FsEntryKind::File) => {}
+            Some(_) => return Err(Error::Tool(format!("Not a file: {}", path.display()))),
         }
 
-        if !path.is_file() {
-            return Err(Error::Tool(format!("Not a file: {}", path.display())));
-        }
-
-        // Handle office files (xlsx, xls, docx, pptx)
-        if crate::office::is_office_file(&path) {
-            let path_clone = path.clone();
-            let content =
-                tokio::task::spawn_blocking(move || crate::office::read_office_file(&path_clone))
-                    .await
-                    .map_err(|e| Error::Tool(format!("Failed to read office file: {}", e)))??;
-
-            return Ok(read_result(
-                &path,
-                content,
-                params.get("offset").and_then(Value::as_u64),
-                params.get("limit").and_then(Value::as_u64),
-                Some(
-                    path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("unknown"),
-                ),
-            ));
-        }
-
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = self.fs.read_document(&path).await?;
+        // Office 文件（xlsx, xls, docx, pptx）由 backend 转为文本，结果中标注原始格式。
+        let format = crate::office::is_office_file(&path).then(|| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("unknown")
+        });
         Ok(read_result(
             &path,
             content,
             params.get("offset").and_then(Value::as_u64),
             params.get("limit").and_then(Value::as_u64),
-            None,
+            format,
         ))
     }
 }
@@ -163,8 +174,6 @@ fn read_result(
 }
 
 // ============ write_file ============
-
-pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
@@ -216,13 +225,8 @@ impl Tool for WriteFileTool {
         let content = params["content"].as_str().unwrap();
         let path = expand_path(path_str, &ctx.workspace);
 
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
         let bytes_written = content.len();
-        tokio::fs::write(&path, content).await?;
+        self.fs.write(&path, content).await?;
 
         Ok(json!({
             "path": path.display().to_string(),
@@ -232,8 +236,6 @@ impl Tool for WriteFileTool {
 }
 
 // ============ edit_file ============
-
-pub struct EditFileTool;
 
 #[async_trait]
 impl Tool for EditFileTool {
@@ -310,14 +312,14 @@ impl Tool for EditFileTool {
         let edits = parse_edits(&params)?;
         let path = expand_path(path_str, &ctx.workspace);
 
-        if !path.exists() {
+        if self.fs.kind(&path).await?.is_none() {
             return Err(Error::NotFound(format!(
                 "File not found: {}",
                 path.display()
             )));
         }
 
-        let original = tokio::fs::read_to_string(&path).await?;
+        let original = self.fs.read_to_string(&path).await?;
         let mut new_content = original.clone();
 
         for (index, edit) in edits.iter().enumerate() {
@@ -342,7 +344,7 @@ impl Tool for EditFileTool {
             }
             new_content = new_content.replacen(edit.old_text, edit.new_text, 1);
         }
-        tokio::fs::write(&path, &new_content).await?;
+        self.fs.write(&path, &new_content).await?;
 
         Ok(json!({
             "path": path.display().to_string(),
@@ -392,8 +394,6 @@ fn parse_edit(params: &Value, index: Option<usize>) -> Result<Edit<'_>> {
     Ok(Edit { old_text, new_text })
 }
 
-pub struct ListDirTool;
-
 #[async_trait]
 impl Tool for ListDirTool {
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
@@ -434,35 +434,31 @@ impl Tool for ListDirTool {
         let path_str = params["path"].as_str().unwrap();
         let path = expand_path(path_str, &ctx.workspace);
 
-        if !path.exists() {
-            return Err(Error::NotFound(format!(
-                "Directory not found: {}",
-                path.display()
-            )));
+        match self.fs.kind(&path).await? {
+            None => {
+                return Err(Error::NotFound(format!(
+                    "Directory not found: {}",
+                    path.display()
+                )));
+            }
+            Some(FsEntryKind::Directory) => {}
+            Some(_) => {
+                return Err(Error::Tool(format!("Not a directory: {}", path.display())));
+            }
         }
 
-        if !path.is_dir() {
-            return Err(Error::Tool(format!("Not a directory: {}", path.display())));
-        }
-
-        let mut entries = Vec::new();
-        let mut read_dir = tokio::fs::read_dir(&path).await?;
-
-        while let Some(entry) = read_dir.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let file_type = entry.file_type().await?;
-            let kind = if file_type.is_dir() {
-                "directory"
-            } else if file_type.is_file() {
-                "file"
-            } else {
-                "other"
-            };
-            entries.push(json!({
-                "name": name,
-                "type": kind
-            }));
-        }
+        let entries: Vec<Value> = self
+            .fs
+            .list_dir(&path)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "name": entry.name,
+                    "type": entry.kind.as_str()
+                })
+            })
+            .collect();
 
         Ok(json!({
             "path": path.display().to_string(),
@@ -517,7 +513,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("sample.txt"), "one\ntwo\nthree\nfour\n").unwrap();
 
-        let result = ReadFileTool
+        let result = ReadFileTool::default()
             .execute(
                 tool_context(dir.path()),
                 json!({"path": "sample.txt", "offset": 2, "limit": 2}),
@@ -537,7 +533,7 @@ mod tests {
         let path = dir.path().join("sample.txt");
         std::fs::write(&path, "before\n").unwrap();
 
-        EditFileTool
+        EditFileTool::default()
             .execute(
                 tool_context(dir.path()),
                 json!({"path": "sample.txt", "old_string": "before", "new_string": "after"}),
@@ -554,7 +550,7 @@ mod tests {
         let path = dir.path().join("sample.txt");
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
 
-        let result = EditFileTool
+        let result = EditFileTool::default()
             .execute(
                 tool_context(dir.path()),
                 json!({
@@ -579,7 +575,7 @@ mod tests {
         let original = "header\nalpha value\nbeta value\ngamma value\nfooter\n";
         std::fs::write(&path, original).unwrap();
 
-        let error = EditFileTool
+        let error = EditFileTool::default()
             .execute(
                 tool_context(dir.path()),
                 json!({
@@ -600,10 +596,102 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
+    /// 只存在于内存中的文件系统，用于验证文件工具完全经由 backend 访问文件。
+    #[derive(Default)]
+    struct MemoryFs(std::sync::Mutex<std::collections::BTreeMap<PathBuf, String>>);
+
+    #[async_trait]
+    impl FilesystemBackend for MemoryFs {
+        async fn kind(&self, path: &std::path::Path) -> Result<Option<FsEntryKind>> {
+            let files = self.0.lock().unwrap();
+            Ok(if files.contains_key(path) {
+                Some(FsEntryKind::File)
+            } else if files.keys().any(|file| file.parent() == Some(path)) {
+                Some(FsEntryKind::Directory)
+            } else {
+                None
+            })
+        }
+        async fn read_to_string(&self, path: &std::path::Path) -> Result<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| Error::NotFound(path.display().to_string()))
+        }
+        async fn read_document(&self, path: &std::path::Path) -> Result<String> {
+            self.read_to_string(path).await
+        }
+        async fn write(&self, path: &std::path::Path, content: &str) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), content.to_string());
+            Ok(())
+        }
+        async fn list_dir(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<Vec<crate::fs_backend::FsEntry>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|file| file.parent() == Some(path))
+                .map(|file| crate::fs_backend::FsEntry {
+                    name: file.file_name().unwrap().to_string_lossy().to_string(),
+                    kind: FsEntryKind::File,
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn file_tools_route_through_injected_backend() {
+        let workspace = std::path::Path::new("/virtual-workspace");
+        let fs: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::default());
+        let ctx = || tool_context(workspace);
+
+        WriteFileTool::new(fs.clone())
+            .execute(ctx(), json!({"path": "notes/a.txt", "content": "alpha"}))
+            .await
+            .unwrap();
+        EditFileTool::new(fs.clone())
+            .execute(
+                ctx(),
+                json!({"path": "notes/a.txt", "old_text": "alpha", "new_text": "beta"}),
+            )
+            .await
+            .unwrap();
+        let read = ReadFileTool::new(fs.clone())
+            .execute(ctx(), json!({"path": "notes/a.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "beta");
+
+        let listed = ListDirTool::new(fs.clone())
+            .execute(ctx(), json!({"path": "notes"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["entries"],
+            json!([{"name": "a.txt", "type": "file"}])
+        );
+
+        let error = ReadFileTool::new(fs)
+            .execute(ctx(), json!({"path": "notes"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Not a file"), "{error}");
+        assert!(!workspace.exists());
+    }
+
     #[test]
     fn enhanced_file_schemas_expose_ranges_aliases_and_edits() {
-        let read = ReadFileTool.schema();
-        let edit = EditFileTool.schema();
+        let read = ReadFileTool::default().schema();
+        let edit = EditFileTool::default().schema();
         assert!(read.parameters["properties"].get("offset").is_some());
         assert!(read.parameters["properties"].get("limit").is_some());
         assert!(edit.parameters["properties"].get("old_string").is_some());
@@ -613,28 +701,28 @@ mod tests {
 
     #[test]
     fn test_read_file_schema() {
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "read_file");
     }
 
     #[test]
     fn test_read_file_validate() {
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::default();
         assert!(tool.validate(&json!({"path": "/tmp/test.txt"})).is_ok());
         assert!(tool.validate(&json!({})).is_err());
     }
 
     #[test]
     fn test_write_file_schema() {
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "write_file");
     }
 
     #[test]
     fn test_write_file_validate() {
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::default();
         assert!(tool
             .validate(&json!({"path": "/tmp/t.txt", "content": "hi"}))
             .is_ok());
@@ -644,14 +732,14 @@ mod tests {
 
     #[test]
     fn test_edit_file_schema() {
-        let tool = EditFileTool;
+        let tool = EditFileTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "edit_file");
     }
 
     #[test]
     fn test_edit_file_validate() {
-        let tool = EditFileTool;
+        let tool = EditFileTool::default();
         assert!(tool
             .validate(&json!({"path": "f", "old_text": "a", "new_text": "b"}))
             .is_ok());
@@ -662,21 +750,21 @@ mod tests {
 
     #[test]
     fn test_list_dir_schema() {
-        let tool = ListDirTool;
+        let tool = ListDirTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "list_dir");
     }
 
     #[test]
     fn test_list_dir_validate() {
-        let tool = ListDirTool;
+        let tool = ListDirTool::default();
         assert!(tool.validate(&json!({"path": "/tmp"})).is_ok());
         assert!(tool.validate(&json!({})).is_err());
     }
 
     #[test]
     fn test_list_dir_prompt_rule_requires_explicit_path_and_current_dir_example() {
-        let tool = ListDirTool;
+        let tool = ListDirTool::default();
         let rule = tool
             .prompt_rule(&PromptContext {
                 channel: "webui",
@@ -691,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_write_file_prompt_rule_requires_path_and_content() {
-        let tool = WriteFileTool;
+        let tool = WriteFileTool::default();
         let rule = tool
             .prompt_rule(&PromptContext {
                 channel: "webui",
@@ -707,8 +795,8 @@ mod tests {
 
     #[test]
     fn test_read_and_edit_file_schemas_warn_against_empty_args() {
-        let read_schema = ReadFileTool.schema();
-        let edit_schema = EditFileTool.schema();
+        let read_schema = ReadFileTool::default().schema();
+        let edit_schema = EditFileTool::default().schema();
         assert!(read_schema
             .description
             .contains("do not call this tool with `{}`"));

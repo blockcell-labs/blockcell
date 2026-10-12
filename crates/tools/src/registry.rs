@@ -98,10 +98,10 @@ impl ToolRegistry {
         let mut registry = Self::new();
 
         // File system tools
-        registry.register(Arc::new(ReadFileTool));
-        registry.register(Arc::new(WriteFileTool));
-        registry.register(Arc::new(EditFileTool));
-        registry.register(Arc::new(ListDirTool));
+        registry.register(Arc::new(ReadFileTool::default()));
+        registry.register(Arc::new(WriteFileTool::default()));
+        registry.register(Arc::new(EditFileTool::default()));
+        registry.register(Arc::new(ListDirTool::default()));
         registry.register(Arc::new(GrepTool));
         registry.register(Arc::new(GlobTool));
         registry.register(Arc::new(UpdatePlanTool));

@@ -20,6 +20,7 @@ pub mod exec_local;
 pub mod exec_skill_script;
 pub mod file_ops;
 pub mod fs;
+pub mod fs_backend;
 pub mod fuzzy_match;
 pub mod html_to_md;
 pub mod http_request;
