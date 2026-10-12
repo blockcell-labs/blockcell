@@ -11,7 +11,7 @@ use blockcell_core::{
     BudgetTracker, BudgetTrackerHandle, Config, FailureKind, Idempotency, InboundMessage,
     OutboundMessage, Paths, RequestRetry, Result, ToolOutcome,
 };
-use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext};
+use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext, ServedBy};
 use blockcell_skills::SkillCard;
 use blockcell_storage::ghost_ledger::{GhostEpisodeSource, NewGhostEpisode};
 use blockcell_storage::{AuditLogger, GhostLedger, SessionStore};
@@ -381,6 +381,17 @@ fn request_error_event(error: &blockcell_core::Error) -> AgentEvent {
         error,
         kind,
         recovery: kind.request_recovery(),
+    }
+}
+
+fn model_response_event(response: &LLMResponse, served_by: &ServedBy) -> AgentEvent {
+    AgentEvent::ModelResponse {
+        content: response.content.clone().unwrap_or_default(),
+        tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
+        finish_reason: response.finish_reason.clone(),
+        model: served_by.model.clone(),
+        provider: served_by.provider.clone(),
+        usage: response.usage.clone(),
     }
 }
 

@@ -73,6 +73,11 @@ pub enum AgentEvent {
         content: String,
         tool_calls: Value,
         finish_reason: String,
+        /// 实际服务本次调用的模型与 provider（provider 池回退后可能不是默认模型）。
+        model: String,
+        provider: String,
+        /// provider 返回的原始 usage。
+        usage: Value,
     },
     /// 模型产生但被丢弃的输出（流式中断后重试），用于对比"模型想做什么"与"最终做了什么"。
     AssistantAttempt {

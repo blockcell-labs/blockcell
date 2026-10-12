@@ -5,7 +5,7 @@ impl AgentRuntime {
         &self,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
-    ) -> Result<LLMResponse> {
+    ) -> Result<(LLMResponse, ServedBy)> {
         if let Some((pidx, provider)) = self.provider_pool.acquire() {
             let result = provider.chat(messages, tools).await;
             match &result {
@@ -14,12 +14,16 @@ impl AgentRuntime {
                     .provider_pool
                     .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
             }
-            result
+            result.map(|response| (response, self.served_by(pidx)))
         } else {
             Err(blockcell_core::Error::Config(
                 "ProviderPool: no healthy providers".to_string(),
             ))
         }
+    }
+
+    pub(crate) fn served_by(&self, pool_idx: usize) -> ServedBy {
+        self.provider_pool.served_by(pool_idx).unwrap_or_default()
     }
 
     pub(crate) fn budget_tracker_for_session(&self, session_key: &str) -> BudgetTrackerHandle {
@@ -137,15 +141,11 @@ impl AgentRuntime {
         .await;
         let result = self.chat_with_provider(messages, tools).await;
         let mut event = match &result {
-            Ok(response) => AgentEvent::ModelResponse {
-                content: response.content.clone().unwrap_or_default(),
-                tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
-                finish_reason: response.finish_reason.clone(),
-            },
+            Ok((response, served_by)) => model_response_event(response, served_by),
             Err(error) => request_error_event(error),
         };
         self.dispatch_event(msg, session_id, &mut event).await;
-        result
+        result.map(|(response, _)| response)
     }
 
     /// 不带工具的收尾模型调用（强制最终回答、子代理结果汇总）作为独立 step 记录，

@@ -110,6 +110,7 @@ impl AgentRuntime {
                 let summary_response = self
                     .chat_with_provider(&summary_messages, &[])
                     .await?
+                    .0
                     .content
                     .unwrap_or_default();
                 if !summary_response.trim().is_empty() {

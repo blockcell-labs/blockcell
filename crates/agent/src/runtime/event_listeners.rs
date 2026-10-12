@@ -162,10 +162,29 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             content,
             tool_calls,
             finish_reason,
-        } => vec![(
-            SessionEventKind::ModelResponse,
-            json!({ "content": content, "tool_calls": tool_calls, "finish_reason": finish_reason }),
-        )],
+            model,
+            provider,
+            usage,
+        } => {
+            let (input_tokens, output_tokens) = super::extract_llm_usage_tokens(usage);
+            let (cache_read_tokens, cache_creation_tokens) = super::extract_llm_cache_tokens(usage);
+            vec![(
+                SessionEventKind::ModelResponse,
+                json!({
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "finish_reason": finish_reason,
+                    "model": model,
+                    "provider": provider,
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_tokens": cache_read_tokens,
+                        "cache_creation_tokens": cache_creation_tokens,
+                    },
+                }),
+            )]
+        }
         AgentEvent::AssistantAttempt {
             content,
             tool_calls,

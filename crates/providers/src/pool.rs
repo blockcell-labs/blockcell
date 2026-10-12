@@ -554,6 +554,14 @@ impl ProviderPool {
     }
 
     /// 返回池状态摘要（用于日志/status 命令）
+    /// `acquire*` 返回的条目对应的模型与 provider 名称。
+    pub fn served_by(&self, idx: usize) -> Option<ServedBy> {
+        self.entries.get(idx).map(|entry| ServedBy {
+            model: entry.model.clone(),
+            provider: entry.provider_name.clone(),
+        })
+    }
+
     pub fn status_summary(&self) -> Vec<PoolEntryStatus> {
         let state = self.state.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("ProviderPool 状态 Mutex 被污染，正在恢复");
@@ -586,6 +594,13 @@ impl ProviderPool {
             })
             .collect()
     }
+}
+
+/// 实际服务一次模型调用的池条目，用于事件记录与评估。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServedBy {
+    pub model: String,
+    pub provider: String,
 }
 
 /// 池中单条目的状态摘要（用于外部展示）

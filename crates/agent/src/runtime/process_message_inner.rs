@@ -671,8 +671,8 @@ impl AgentRuntime {
                 .await;
             metrics.record_llm_call(llm_timer.elapsed_ms());
 
-            let response = match llm_result {
-                Ok(r) => r,
+            let (response, served_by) = match llm_result {
+                Ok(served) => served,
                 Err(e) => {
                     let mut error_event = request_error_event(&e);
                     self.dispatch_event(&msg, &persist_session_key, &mut error_event)
@@ -735,11 +735,7 @@ impl AgentRuntime {
             self.dispatch_event(
                 &msg,
                 &persist_session_key,
-                &mut AgentEvent::ModelResponse {
-                    content: response.content.clone().unwrap_or_default(),
-                    tool_calls: serde_json::to_value(&response.tool_calls).unwrap_or_default(),
-                    finish_reason: response.finish_reason.clone(),
-                },
+                &mut model_response_event(&response, &served_by),
             )
             .await;
 

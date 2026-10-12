@@ -68,4 +68,6 @@ pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openai_responses::OpenAIResponsesProvider;
-pub use pool::{CallResult, PoolEntryStatus, ProviderPool, ProviderPoolEntry, RoutingContext};
+pub use pool::{
+    CallResult, PoolEntryStatus, ProviderPool, ProviderPoolEntry, RoutingContext, ServedBy,
+};

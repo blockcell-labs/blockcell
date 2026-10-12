@@ -11,7 +11,7 @@ impl AgentRuntime {
         ghost_recall_context_block: Option<&str>,
         iteration: &HashMap<String, u32>,
         saw_rate_limit_this_turn: &mut bool,
-    ) -> std::result::Result<LLMResponse, blockcell_core::Error> {
+    ) -> std::result::Result<(LLMResponse, ServedBy), blockcell_core::Error> {
         let max_retries = self.config.agents.defaults.llm_max_retries;
         let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
         let mut last_error = None;
@@ -160,13 +160,16 @@ impl AgentRuntime {
                                         };
 
                                         self.provider_pool.report(pool_idx, CallResult::Success);
-                                        return Ok(LLMResponse {
-                                            content: final_content,
-                                            reasoning_content: final_reasoning,
-                                            tool_calls: final_tool_calls,
-                                            finish_reason: response.finish_reason.clone(),
-                                            usage: response.usage.clone(),
-                                        });
+                                        return Ok((
+                                            LLMResponse {
+                                                content: final_content,
+                                                reasoning_content: final_reasoning,
+                                                tool_calls: final_tool_calls,
+                                                finish_reason: response.finish_reason.clone(),
+                                                usage: response.usage.clone(),
+                                            },
+                                            self.served_by(pool_idx),
+                                        ));
                                     }
                                     StreamChunk::Error { message } => {
                                         warn!(error = %message, "Stream error");
@@ -205,21 +208,25 @@ impl AgentRuntime {
                                 .map(|acc| acc.to_tool_call_request())
                                 .collect();
 
-                            return Ok(LLMResponse {
-                                content: if accumulated_content.is_empty() {
-                                    None
-                                } else {
-                                    Some(accumulated_content)
+                            let served_by = self.served_by(pool_idx);
+                            return Ok((
+                                LLMResponse {
+                                    content: if accumulated_content.is_empty() {
+                                        None
+                                    } else {
+                                        Some(accumulated_content)
+                                    },
+                                    reasoning_content: if accumulated_reasoning.is_empty() {
+                                        None
+                                    } else {
+                                        Some(accumulated_reasoning)
+                                    },
+                                    tool_calls: final_tool_calls,
+                                    finish_reason: "stop".to_string(),
+                                    usage: serde_json::Value::Null,
                                 },
-                                reasoning_content: if accumulated_reasoning.is_empty() {
-                                    None
-                                } else {
-                                    Some(accumulated_reasoning)
-                                },
-                                tool_calls: final_tool_calls,
-                                finish_reason: "stop".to_string(),
-                                usage: serde_json::Value::Null,
-                            });
+                                served_by,
+                            ));
                         }
 
                         if emitted_text_delta {

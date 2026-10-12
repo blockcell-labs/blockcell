@@ -2710,7 +2710,7 @@ async fn connection_phase_failure_falls_back_to_next_provider_without_retry_budg
     let msg = test_main_session_inbound("ws", "fallback-chat");
     let mut saw_rate_limit = false;
 
-    let response = runtime
+    let (response, served_by) = runtime
         .call_llm_with_retry(
             &[ChatMessage::user("hello")],
             &[],
@@ -2723,6 +2723,8 @@ async fn connection_phase_failure_falls_back_to_next_provider_without_retry_budg
         .expect("fallback provider should answer");
 
     assert_eq!(response.content.as_deref(), Some("fallback answer"));
+    assert_eq!(served_by.model, "fallback");
+    assert_eq!(served_by.provider, "test");
 }
 
 #[tokio::test]
@@ -5541,7 +5543,7 @@ impl blockcell_providers::Provider for EndlessToolProvider {
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
-                usage: serde_json::Value::Null,
+                usage: serde_json::json!({"prompt_tokens": 12, "completion_tokens": 3}),
             });
         }
         Ok(LLMResponse {
@@ -5591,6 +5593,11 @@ async fn forced_final_answer_is_logged_as_its_own_step() {
         .find(|event| event.kind == SessionEventKind::ModelResponse)
         .expect("forced final model/response");
     assert_eq!(final_response.payload["content"], "forced final answer");
+    let served_by = runtime.served_by(0);
+    assert_eq!(final_response.payload["model"], served_by.model.as_str());
+    assert_eq!(final_response.payload["provider"], served_by.provider.as_str());
+    assert_eq!(final_response.payload["usage"]["input_tokens"], 12);
+    assert_eq!(final_response.payload["usage"]["output_tokens"], 3);
     let final_step = final_response
         .step
         .expect("forced final call belongs to a step");
