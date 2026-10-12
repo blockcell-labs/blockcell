@@ -5,6 +5,48 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
 并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+本批次为 Agent Runtime 架构演进：吸收新一代 Agent Runtime 的可组合、可观察、可拦截、可回放设计，同时保留 Self-Evolution / Ghost Learning 能力。
+
+### 新增
+
+- **Runtime Kernel**：新增事件总线（`EventBus`）、串行拦截链（`Waterfall`）与统一作用域原语（`ScopedRegistry` / `ScopeGuard`），事件按优先级、作用域过滤派发，listener 支持超时与故障隔离（fail-open / fail-closed）。
+- **Agent 生命周期事件**：新增 `agent/pre-step`、`agent/request`、`agent/request-error`、`turn/start`、`turn/end`、`step/start`、`step/end`、`tool/pre-execute`、`tool/post-execute`、`tool/result`、`model/response`、`assistant/attempt`、`memory/write`、`subagent/spawn`、`subagent/completed`、`evolution/deployed`、`compaction/start`、`compaction/end`，并按 Durable / Live / Capability 分类一致性语义。
+- **Guarded Tool Pipeline**：把工具开关、Policy、危险操作、路径访问、Shell 提权等安全检查集中到统一管线，具体工具不再自行处理权限、审批与审计。
+- **失败语义**：新增 `FailureKind`、`Idempotency` 与 `ToolOutcome`，区分失败 / 被拒绝 / 取消 / 超时 / 未开始 / 未知；结果未知时不自动重试而是先对账；模型请求错误按类型决定恢复策略（上下文超限先压缩再重试、限流退避、认证失败换 provider）。
+- **Session Event Log**：新增追加式会话事件日志（JSONL 侧车、`schema_version`、单调 `seq`、保留期清理），transcript 仍为主存储、事件日志渐进并行。
+- **会话回放与评估**：新增 `blockcell session list / replay / verify`，从事件日志重放回合、步骤、模型请求与工具调用；新增 `SessionMetrics` 计算回合 / 步骤 / 工具结论 / 重试 / token / 时长等评估指标。
+- **PromptRegistry**：系统提示词改为可插拔 `PromptSection` 注册表拼装，支持作用域覆盖、模板变量解析与完整性校验；新增 `PromptContribution` 与信任级别，学习技能与候选行为以低信任边界注入。
+- **Agent Loop 契约**：`AgentLoop` 与默认 Loop 实现分离，一次 turn 的驱动方式可替换。
+- **能力 seam**：新增 `SandboxPolicy` / `SandboxProvider`（本机 macOS Seatbelt / Linux Landlock+seccomp，不可用时要求审批）、`ShellExecutor`、`FilesystemBackend`（`LocalFilesystem`）、`BrowserBackend`（`CdpBrowserBackend`）、`SubagentProvider`（fork 与 typed agent 统一契约，句柄提供状态 / 取消 / 结果）。
+- **Tool 三层定义**：`ToolDefinition` = `ToolSchema`（模型可见）+ `ToolExecutionSpec`（权限与幂等声明）+ `ToolPresentation`（展示），展示层与执行权限解耦。
+- **压缩抽象**：压缩摘要抽象为 `ContextCompactor` 策略（`ModelSummaryCompactor` / `ExtractiveCompactor`）。
+- **`agent/pre-step` 决策门**：收拢预算、压缩与上下文注入，并支持可注册策略链改写或终止本步。
+- **进化隔离**：新增 Evolution Candidate Scope 与进化信任边界，候选技能 / 提示 / 策略只对显式进入候选评估的视图可见。
+
+### 调整
+
+- Hook 与 WebSocket 工具事件统一接入 EventBus，保留原 `hooks.yaml` 配置兼容。
+- ToolRegistry 接入统一 Scope，工具可按 agent / session / 进化候选作用域注册，同名时更具体作用域覆盖。
+- Ghost 回合复盘改为消费 Session Event Log，工具结论 / 记忆写入 / 模型错误不再从 transcript 推断。
+- 事件日志写入移出 async 线程（`spawn_blocking`），listener 默认 30s 超时。
+- 锁文件改为长期同步锚点，避免 unlink 破坏互斥。
+- `create_docx` 改用 `docx-rs` 原生生成，不再依赖 python-docx。
+
+### 修复
+
+- 工具安全检查作用于 listener 改写后的最终参数，关闭参数改写绕过 Policy / 危险操作 / 路径检查的漏洞。
+- release 构建保留 panic unwind，恢复 listener 与任务监管的 panic 隔离。
+- 清空会话时持锁删除事件日志并清理锁文件。
+- step 编号在回合内唯一且每个 step 都有 `step/end`；回合异常退出时补发 `turn/end`。
+- 工具事件统一归属到持久化会话；强制技能路由回合补发 `turn/end`。
+- 能力注册表仅兼容跳过已移除的 `dynamic_library` 条目，其余反序列化失败仍报错。
+
+### 移除
+
+- 移除原生动态库能力进化路径。
+
 ## [0.1.7] - 2026-06-28
 
 ### 新增

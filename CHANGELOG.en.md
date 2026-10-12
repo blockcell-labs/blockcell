@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This batch is the Agent Runtime architecture evolution: it absorbs the composable / observable / interceptable / replayable design of a next-generation Agent Runtime while preserving BlockCell's Self-Evolution and Ghost Learning capabilities.
+
+### Added
+
+- **Runtime Kernel**: added an event bus (`EventBus`), a serial interception chain (`Waterfall`), and unified scope primitives (`ScopedRegistry` / `ScopeGuard`). Events are dispatched by priority and scope filtering, and listeners support timeout and failure isolation (fail-open / fail-closed).
+- **Agent lifecycle events**: added `agent/pre-step`, `agent/request`, `agent/request-error`, `turn/start`, `turn/end`, `step/start`, `step/end`, `tool/pre-execute`, `tool/post-execute`, `tool/result`, `model/response`, `assistant/attempt`, `memory/write`, `subagent/spawn`, `subagent/completed`, `evolution/deployed`, `compaction/start`, and `compaction/end`, classified by Durable / Live / Capability consistency semantics.
+- **Guarded Tool Pipeline**: centralized tool toggles, policy, dangerous-operation, path-access, and shell-escalation checks into one pipeline; individual tools no longer handle permissions, approvals, or auditing themselves.
+- **Failure semantics**: added `FailureKind`, `Idempotency`, and `ToolOutcome` to distinguish failed / rejected / cancelled / timed-out / not-started / unknown; unknown outcomes are reconciled before retry instead of being retried automatically. Model request errors now pick a recovery strategy by type (compact-then-retry on context overflow, backoff on rate limit, provider switch on auth failure).
+- **Session Event Log**: added an append-only session event log (JSONL sidecar, `schema_version`, monotonic `seq`, retention cleanup), with the transcript kept as the primary store and the event log running alongside it incrementally.
+- **Session replay and evaluation**: added `blockcell session list / replay / verify` to replay turns, steps, model requests, and tool calls from the event log; added `SessionMetrics` for turn / step / tool-outcome / retry / token / duration metrics.
+- **PromptRegistry**: the system prompt is now assembled from pluggable `PromptSection` registrations with scope override, template-variable resolution, and integrity checks; added `PromptContribution` and trust levels so learned skills and candidate behavior are injected behind a low-trust boundary.
+- **Agent Loop contract**: separated the `AgentLoop` contract from the default loop implementation so the way a turn is driven can be replaced.
+- **Capability seams**: added `SandboxPolicy` / `SandboxProvider` (native macOS Seatbelt / Linux Landlock+seccomp, falling back to approval when unavailable), `ShellExecutor`, `FilesystemBackend` (`LocalFilesystem`), `BrowserBackend` (`CdpBrowserBackend`), and `SubagentProvider` (a unified contract for fork and typed agents, with handles exposing status / cancel / result).
+- **Three-layer tool definition**: `ToolDefinition` = `ToolSchema` (model-facing) + `ToolExecutionSpec` (permissions and idempotency) + `ToolPresentation` (presentation), decoupling presentation from execution permissions.
+- **Compaction abstraction**: compaction is abstracted into a `ContextCompactor` strategy (`ModelSummaryCompactor` / `ExtractiveCompactor`).
+- **`agent/pre-step` decision gate**: consolidates budget, compaction, and context injection, and supports a registrable policy chain that can rewrite or stop the step.
+- **Evolution isolation**: added the Evolution Candidate Scope and an evolution trust boundary; candidate skills / prompts / policies are visible only inside a view that explicitly enters candidate evaluation.
+
+### Changed
+
+- Hooks and WebSocket tool events now feed into the EventBus, keeping the existing `hooks.yaml` configuration compatible.
+- The ToolRegistry is now backed by the unified scope, so tools can be registered per agent / session / evolution candidate, with the more specific scope overriding on name conflicts.
+- Ghost turn review now consumes the Session Event Log instead of inferring tool outcomes, memory writes, and model errors from the transcript.
+- Session event-log writes moved off the async runtime (`spawn_blocking`), and listeners now default to a 30s timeout.
+- Lock files are now long-lived synchronization anchors, avoiding the mutex being broken by `unlink`.
+- `create_docx` now generates DOCX natively via `docx-rs` instead of relying on python-docx.
+
+### Fixed
+
+- Tool safety checks now apply to the final arguments after a listener rewrites them, closing the hole where argument rewriting bypassed policy, dangerous-operation, and path checks.
+- Release builds keep panic unwinding, restoring panic isolation for listeners and task supervision.
+- Clearing a session now deletes the event log under lock and cleans up the lock file.
+- Step numbering is unique within a turn and every step now has a `step/end`; an abnormally exiting turn now emits `turn/end`.
+- Tool events are consistently attributed to the persisted session, and forced skill-routing turns re-emit `turn/end`.
+- The capability registry now only tolerates skipping the removed `dynamic_library` entries; other deserialization failures still error out.
+
+### Removed
+
+- Removed the native dynamic-library capability evolution path.
+
 ## [0.1.7] - 2026-06-28
 
 ### Added
