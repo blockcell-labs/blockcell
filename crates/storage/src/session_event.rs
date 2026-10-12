@@ -147,6 +147,46 @@ impl JsonlSessionEventLog {
     }
 }
 
+/// 一个会话事件日志的概要，用于列出可回放的会话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEventLogInfo {
+    pub session_id: String,
+    pub modified: DateTime<Utc>,
+}
+
+impl JsonlSessionEventLog {
+    /// 列出所有会话事件日志，最近写入的在前。会话 id 取自日志首条事件。
+    pub fn list_sessions(&self) -> Result<Vec<SessionEventLogInfo>> {
+        let Ok(entries) = std::fs::read_dir(self.paths.session_events_dir()) else {
+            return Ok(Vec::new());
+        };
+        let mut sessions = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let first_line = BufReader::new(File::open(&path)?)
+                .lines()
+                .map_while(std::result::Result::ok)
+                .find(|line| !line.trim().is_empty());
+            let Some(session_id) = first_line
+                .and_then(|line| serde_json::from_str::<SessionEvent>(&line).ok())
+                .map(|event| event.session_id)
+            else {
+                continue;
+            };
+            let modified = entry.metadata()?.modified()?.into();
+            sessions.push(SessionEventLogInfo {
+                session_id,
+                modified,
+            });
+        }
+        sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+        Ok(sessions)
+    }
+}
+
 impl SessionEventWriter for JsonlSessionEventLog {
     fn append(&self, session_id: &str, event: NewSessionEvent) -> Result<SessionEvent> {
         let path = self.paths.session_events_file(session_id);
@@ -269,6 +309,25 @@ mod tests {
             kind,
             payload,
         }
+    }
+
+    #[test]
+    fn list_sessions_reports_original_session_ids_newest_first() {
+        let (_dir, log) = log();
+        assert!(log.list_sessions().unwrap().is_empty());
+        log.append("ws:chat/1", event(SessionEventKind::TurnStart, json!({})))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        log.append("cli:default", event(SessionEventKind::TurnStart, json!({})))
+            .unwrap();
+
+        let ids: Vec<String> = log
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|info| info.session_id)
+            .collect();
+        assert_eq!(ids, vec!["cli:default", "ws:chat/1"]);
     }
 
     #[test]

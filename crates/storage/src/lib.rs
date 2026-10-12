@@ -12,6 +12,7 @@ pub mod rabitq_index;
 pub mod retriever;
 pub mod session;
 pub mod session_event;
+pub mod session_metrics;
 pub mod vector;
 
 pub use audit::{AuditEvent, AuditLogger, AuditRecord, ChainVerifyResult};
@@ -22,6 +23,7 @@ pub use knowledge_index::{KnowledgeIndex, KnowledgeIndexEntry, KnowledgeIndexReb
 pub use memory::{MemoryStore, MemoryStoreOptions};
 pub use session::SessionStore;
 pub use session_event::{
-    JsonlSessionEventLog, NewSessionEvent, SessionEvent, SessionEventKind, SessionEventReader,
-    SessionEventWriter, SESSION_EVENT_RETENTION_DAYS,
+    JsonlSessionEventLog, NewSessionEvent, SessionEvent, SessionEventKind, SessionEventLogInfo,
+    SessionEventReader, SessionEventWriter, SESSION_EVENT_RETENTION_DAYS,
 };
+pub use session_metrics::SessionMetrics;
