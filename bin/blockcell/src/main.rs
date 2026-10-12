@@ -202,6 +202,12 @@ enum Commands {
         #[command(subcommand)]
         command: AuditCommands,
     },
+
+    /// Inspect and replay session event logs
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
 }
 
 // ── P0: Config ──────────────────────────────────────────────────────────────
@@ -520,6 +526,30 @@ enum LogsCommands {
         /// Skip confirmation prompt
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List sessions that have an event log, most recent first
+    List {
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
+    },
+    /// Replay a session's turns, steps, model requests and tool calls from its event log
+    Replay {
+        /// Session ID (e.g. cli:default, ws:<chat-id>)
+        session_id: String,
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
+        /// Print raw events and metrics as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show full content instead of truncated previews
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -1240,6 +1270,20 @@ async fn main() -> anyhow::Result<()> {
                 commands::audit::verify(&paths, date, all).await?;
             }
         },
+
+        Commands::Session { command } => match command {
+            SessionCommands::List { agent } => {
+                commands::session_cmd::list(&paths, agent.as_deref())?;
+            }
+            SessionCommands::Replay {
+                session_id,
+                agent,
+                json,
+                full,
+            } => {
+                commands::session_cmd::replay(&paths, agent.as_deref(), &session_id, json, full)?;
+            }
+        },
     }
 
     Ok(())
@@ -1479,6 +1523,38 @@ mod tests {
                     assert!(!all);
                 }
             },
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_session_replay_parses_agent_and_flags() {
+        let cli = Cli::try_parse_from([
+            "blockcell",
+            "session",
+            "replay",
+            "ws:abc",
+            "--agent",
+            "ops",
+            "--json",
+        ])
+        .expect("session replay should parse");
+
+        match cli.command {
+            Commands::Session {
+                command:
+                    SessionCommands::Replay {
+                        session_id,
+                        agent,
+                        json,
+                        full,
+                    },
+            } => {
+                assert_eq!(session_id, "ws:abc");
+                assert_eq!(agent.as_deref(), Some("ops"));
+                assert!(json);
+                assert!(!full);
+            }
             other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
         }
     }
