@@ -1,6 +1,7 @@
 # 项目排除路径
 /target/
 /docs0/
+/docs1/
 /.worktrees/
 CLAUDE.md
 .claude/
@@ -100,3 +101,7 @@ AGENTS.md
 .codex/
 .omc/
 .relaycat/
+docs/plans/
+docs/superpowers/plans/
+.DS_Store
+.workbuddy-ai
