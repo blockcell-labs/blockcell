@@ -13,6 +13,7 @@ pub mod retriever;
 pub mod session;
 pub mod session_event;
 pub mod session_metrics;
+pub mod session_projection;
 pub mod vector;
 
 pub use audit::{AuditEvent, AuditLogger, AuditRecord, ChainVerifyResult};
@@ -27,3 +28,7 @@ pub use session_event::{
     SessionEventReader, SessionEventWriter, SESSION_EVENT_RETENTION_DAYS,
 };
 pub use session_metrics::{SessionMetrics, ToolCallFact, TurnFacts};
+pub use session_projection::{
+    project_history, project_turns, verify_history, ProjectedTurn, ProjectionCheck,
+    ProjectionMismatch, ProjectionMismatchKind,
+};

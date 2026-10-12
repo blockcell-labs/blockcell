@@ -6472,3 +6472,37 @@ async fn successful_memory_and_spawn_tools_emit_domain_events() {
     assert_eq!(events[6].payload["summary"], "all done");
     assert!(events[6].turn_id.is_none());
 }
+
+#[tokio::test]
+async fn event_log_projection_matches_stored_transcript_after_tool_turn() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventReader};
+
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.max_tool_iterations = 1;
+    let base = std::env::temp_dir().join(format!("blockcell-projection-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(EndlessToolProvider),
+        config,
+    );
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::fs::ReadFileTool::default()));
+    let mut msg = test_main_session_inbound("cli", "projection-check");
+    msg.content = "read the file missing-file.txt and summarize it".to_string();
+    let session_key = msg.session_key();
+    runtime.process_message(msg).await.unwrap();
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .expect("read session events");
+    let history = runtime.session_store.load(&session_key).unwrap();
+    let check = blockcell_storage::verify_history(&events, &history);
+    assert!(check.is_consistent(), "{check:?}");
+    assert_eq!(check.matched_turns, 1);
+    let turns = blockcell_storage::project_turns(&events);
+    assert!(!turns[0].tool_call_ids.is_empty());
+}

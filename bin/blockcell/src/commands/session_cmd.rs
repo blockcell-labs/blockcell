@@ -1,6 +1,7 @@
 use blockcell_core::Paths;
 use blockcell_storage::{
-    JsonlSessionEventLog, SessionEvent, SessionEventKind, SessionEventReader, SessionMetrics,
+    verify_history, JsonlSessionEventLog, ProjectionMismatchKind, SessionEvent, SessionEventKind,
+    SessionEventReader, SessionMetrics, SessionStore,
 };
 use serde_json::Value;
 
@@ -68,6 +69,52 @@ pub fn replay(
         );
     }
     println!("\n{}", render_metrics(&metrics));
+    Ok(())
+}
+
+/// `blockcell session verify <id>`：比对事件日志投影出的回合与 transcript 主存储。
+pub fn verify(
+    paths: &Paths,
+    agent: Option<&str>,
+    session_id: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let events = event_log(paths, agent).read(session_id)?;
+    if events.is_empty() {
+        anyhow::bail!(
+            "No session events found for '{session_id}'. Use `blockcell session list` to see available sessions."
+        );
+    }
+    let history =
+        SessionStore::new(paths.for_agent(agent.unwrap_or("default"))).load(session_id)?;
+    let check = verify_history(&events, &history);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&check)?);
+        return Ok(());
+    }
+    println!(
+        "Session {session_id}: {} projected turns, {} matched, {} mismatched",
+        check.projected_turns,
+        check.matched_turns,
+        check.mismatches.len()
+    );
+    for mismatch in &check.mismatches {
+        let kind = match mismatch.kind {
+            ProjectionMismatchKind::MissingInHistory => "missing in transcript",
+            ProjectionMismatchKind::ToolCallsDiffer => "tool calls differ",
+        };
+        println!("  turn {}: {kind} — {}", mismatch.turn_id, mismatch.detail);
+    }
+    if check
+        .mismatches
+        .iter()
+        .any(|mismatch| mismatch.kind == ProjectionMismatchKind::MissingInHistory)
+        && events
+            .iter()
+            .any(|event| event.kind == SessionEventKind::CompactionEnd)
+    {
+        println!("  note: compaction rewrites the transcript, so compacted turns are expected to be missing.");
+    }
     Ok(())
 }
 

@@ -551,6 +551,17 @@ enum SessionCommands {
         #[arg(long)]
         full: bool,
     },
+    /// Check that the history projected from a session's event log matches its stored transcript
+    Verify {
+        /// Session ID (e.g. cli:default, ws:<chat-id>)
+        session_id: String,
+        /// Target agent id (defaults to "default")
+        #[arg(short = 'a', long)]
+        agent: Option<String>,
+        /// Print the check result as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1283,6 +1294,13 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 commands::session_cmd::replay(&paths, agent.as_deref(), &session_id, json, full)?;
             }
+            SessionCommands::Verify {
+                session_id,
+                agent,
+                json,
+            } => {
+                commands::session_cmd::verify(&paths, agent.as_deref(), &session_id, json)?;
+            }
         },
     }
 
@@ -1554,6 +1572,36 @@ mod tests {
                 assert_eq!(agent.as_deref(), Some("ops"));
                 assert!(json);
                 assert!(!full);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_session_verify_parses_agent_and_json() {
+        let cli = Cli::try_parse_from([
+            "blockcell",
+            "session",
+            "verify",
+            "cli:x",
+            "-a",
+            "ops",
+            "--json",
+        ])
+        .expect("session verify should parse");
+
+        match cli.command {
+            Commands::Session {
+                command:
+                    SessionCommands::Verify {
+                        session_id,
+                        agent,
+                        json,
+                    },
+            } => {
+                assert_eq!(session_id, "cli:x");
+                assert_eq!(agent.as_deref(), Some("ops"));
+                assert!(json);
             }
             other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
         }
