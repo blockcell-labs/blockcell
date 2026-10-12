@@ -7,8 +7,8 @@ use crate::{Tool, ToolContext, ToolSchema};
 
 /// Tool for generating Office documents (PPTX, DOCX, XLSX).
 ///
-/// Uses Python libraries (python-pptx, python-docx, openpyxl) to create
-/// properly formatted Office files from structured data.
+/// DOCX is generated natively via docx-rs; PPTX / XLSX use Python libraries
+/// (python-pptx, openpyxl) to create properly formatted Office files from structured data.
 pub struct OfficeWriteTool;
 
 #[async_trait]
@@ -141,11 +141,7 @@ async fn action_info() -> Result<Value> {
     let mut libs = json!({});
 
     if has_python {
-        for (pkg, import) in &[
-            ("python-pptx", "pptx"),
-            ("python-docx", "docx"),
-            ("openpyxl", "openpyxl"),
-        ] {
+        for (pkg, import) in &[("python-pptx", "pptx"), ("openpyxl", "openpyxl")] {
             let check = tokio::process::Command::new(python_bin)
                 .args([
                     "-c",
@@ -163,16 +159,12 @@ async fn action_info() -> Result<Value> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
         && libs
-            .get("python-docx")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        && libs
             .get("openpyxl")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
     let install_hint = if !all_installed {
-        "Install: pip install python-pptx python-docx openpyxl"
+        "Install: pip install python-pptx openpyxl"
     } else {
         ""
     };
@@ -182,6 +174,7 @@ async fn action_info() -> Result<Value> {
         "libraries": libs,
         "all_installed": all_installed,
         "supported_formats": ["pptx", "docx", "xlsx"],
+        "native_formats": ["docx"],
         "install_hint": install_hint,
     }))
 }
@@ -337,117 +330,272 @@ print('OK')
     run_python_script(&script, &output_path, "pptx", slides.len(), ctx).await
 }
 
-/// Create a DOCX document.
+/// Create a DOCX document natively via docx-rs (no Python required).
 async fn action_create_docx(ctx: &ToolContext, params: &Value) -> Result<Value> {
     let sections = params
         .get("sections")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| Error::Tool("'sections' is required".into()))?;
-    let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        .ok_or_else(|| Error::Tool("'sections' is required".into()))?
+        .clone();
+    let title = params
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let style = normalize_style(params.get("style"));
-
     let output_path = resolve_output_path(params, ctx, "docx", "document");
+    let workspace = ctx.workspace.clone();
+    let item_count = sections.len();
 
-    let sections_json = serde_json::to_string(sections)
-        .map_err(|e| Error::Tool(format!("Failed to serialize sections: {}", e)))?;
-    let style_json = serde_json::to_string(&style)
-        .map_err(|e| Error::Tool(format!("Failed to serialize style: {}", e)))?;
+    info!(format = "docx", output = %output_path, items = item_count, "📄 Generating Office document");
 
-    let script = format!(
-        r#"
-import json
-from docx import Document
-from docx.shared import Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+    let path = output_path.clone();
+    let file_size = tokio::task::spawn_blocking(move || -> Result<u64> {
+        let bytes = build_docx(&title, &sections, &style, &workspace)?;
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &bytes)?;
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .map_err(|e| Error::Tool(format!("DOCX generation task failed: {}", e)))??;
 
-sections_data = json.loads('''{sections_json}''')
-style = json.loads('''{style_json}''')
-title_text = {title}
-output_path = {output_path}
+    info!(path = %output_path, size = file_size, "📄 Office document generated");
 
-doc = Document()
+    Ok(json!({
+        "success": true,
+        "format": "docx",
+        "output_path": output_path,
+        "file_size_bytes": file_size,
+        "item_count": item_count,
+    }))
+}
 
-font_name = style.get('font', 'Calibri')
-font_size = style.get('font_size', 11)
-author = style.get('author', '')
+const BULLET_NUMBERING_ID: usize = 1;
+/// 表格总宽（twip），约等于 A4 减去默认页边距。
+const TABLE_WIDTH_DXA: usize = 9000;
+/// 图片宽度 5 英寸（EMU）。
+const IMAGE_WIDTH_EMU: u32 = 5 * 914_400;
+const HEADING_COLOR: &str = "2F5496";
 
-# Set default font
-doc_style = doc.styles['Normal']
-doc_style.font.name = font_name
-doc_style.font.size = Pt(font_size)
+fn build_docx(
+    title: &str,
+    sections: &[Value],
+    style: &Value,
+    workspace: &std::path::Path,
+) -> Result<Vec<u8>> {
+    use docx_rs::{BreakType, Docx, IndentLevel, Numbering, NumberingId, Paragraph, Run, RunFonts};
 
-# Set author
-if author:
-    doc.core_properties.author = author
+    let font = style
+        .get("font")
+        .and_then(Value::as_str)
+        .unwrap_or("Calibri");
+    let font_size = style
+        .get("font_size")
+        .and_then(Value::as_f64)
+        .unwrap_or(11.0);
+    let author = style.get("author").and_then(Value::as_str).unwrap_or("");
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-# Add title if provided
-if title_text:
-    doc.add_heading(title_text, level=0)
+    let mut docx = Docx::new()
+        .default_fonts(
+            RunFonts::new()
+                .ascii(font)
+                .hi_ansi(font)
+                .east_asia(font)
+                .cs(font),
+        )
+        .default_size((font_size * 2.0).round() as usize)
+        .created_at(&now)
+        .updated_at(&now)
+        .add_style(paragraph_style("Title", "Title", 56, None))
+        .add_abstract_numbering(bullet_numbering())
+        .add_numbering(Numbering::new(BULLET_NUMBERING_ID, BULLET_NUMBERING_ID));
+    for level in 1..=9usize {
+        let size = match level {
+            1 => 32,
+            2 => 26,
+            3 => 24,
+            _ => 22,
+        };
+        docx = docx.add_style(paragraph_style(
+            &format!("Heading{level}"),
+            &format!("heading {level}"),
+            size,
+            Some(level - 1),
+        ));
+    }
 
-for section in sections_data:
-    heading = section.get('heading', '')
-    level = section.get('level', 1)
-    content = section.get('content', '')
-    bullets = section.get('bullets', [])
-    table_data = section.get('table', None)
-    image_path = section.get('image_path', '')
-    page_break = section.get('page_break', False)
+    if !title.is_empty() {
+        docx = docx.add_paragraph(text_paragraph(title).style("Title"));
+    }
 
-    if page_break:
-        doc.add_page_break()
+    for section in sections {
+        if section["page_break"].as_bool().unwrap_or(false) {
+            docx =
+                docx.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
+        }
+        if let Some(heading) = non_empty_str(&section["heading"]) {
+            let level = section["level"].as_u64().unwrap_or(1).clamp(1, 9);
+            docx = docx.add_paragraph(text_paragraph(heading).style(&format!("Heading{level}")));
+        }
+        if let Some(content) = non_empty_str(&section["content"]) {
+            docx = docx.add_paragraph(text_paragraph(content));
+        }
+        for bullet in section["bullets"].as_array().into_iter().flatten() {
+            let (text, level) = match bullet {
+                Value::Object(map) => (
+                    map.get("text")
+                        .map(value_text)
+                        .unwrap_or_else(|| bullet.to_string()),
+                    bullet["level"].as_u64().unwrap_or(0).min(8) as usize,
+                ),
+                _ => (value_text(bullet), 0),
+            };
+            docx = docx.add_paragraph(text_paragraph(&text).numbering(
+                NumberingId::new(BULLET_NUMBERING_ID),
+                IndentLevel::new(level),
+            ));
+        }
+        if let Some(table) = build_docx_table(&section["table"]) {
+            docx = docx.add_table(table);
+        }
+        if let Some(image_path) = non_empty_str(&section["image_path"]) {
+            if let Some(pic) = load_docx_picture(&expand_path(image_path, workspace)) {
+                docx = docx.add_paragraph(Paragraph::new().add_run(Run::new().add_image(pic)));
+            }
+        }
+    }
 
-    if heading:
-        doc.add_heading(heading, level=min(level, 9))
+    let mut xml = docx.build();
+    if !author.is_empty() {
+        // docx-rs 不提供设置作者的公开 API，直接改写 core.xml 中的默认值。
+        let core = String::from_utf8_lossy(&xml.doc_props.core).replace(
+            "<dc:creator>unknown</dc:creator>",
+            &format!(
+                "<dc:creator>{}</dc:creator>",
+                quick_xml::escape::escape(author)
+            ),
+        );
+        xml.doc_props.core = core.into_bytes();
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    xml.pack(&mut out)
+        .map_err(|e| Error::Tool(format!("Failed to pack docx: {}", e)))?;
+    Ok(out.into_inner())
+}
 
-    if content:
-        para = doc.add_paragraph(content)
-        para.style.font.name = font_name
-        para.style.font.size = Pt(font_size)
+fn paragraph_style(id: &str, name: &str, size: usize, outline: Option<usize>) -> docx_rs::Style {
+    let style = docx_rs::Style::new(id, docx_rs::StyleType::Paragraph)
+        .name(name)
+        .size(size);
+    match outline {
+        Some(level) => style.bold().color(HEADING_COLOR).outline_lvl(level),
+        None => style,
+    }
+}
 
-    for bullet in bullets:
-        if isinstance(bullet, dict):
-            text = bullet.get('text', str(bullet))
-            level_b = bullet.get('level', 0)
-        else:
-            text = str(bullet)
-            level_b = 0
-        para = doc.add_paragraph(text, style='List Bullet')
+fn bullet_numbering() -> docx_rs::AbstractNumbering {
+    use docx_rs::{Level, LevelJc, LevelText, NumberFormat, SpecialIndentType, Start};
+    (0..9).fold(
+        docx_rs::AbstractNumbering::new(BULLET_NUMBERING_ID),
+        |numbering, level| {
+            let symbol = ["•", "◦", "▪"][level % 3];
+            numbering.add_level(
+                Level::new(
+                    level,
+                    Start::new(1),
+                    NumberFormat::new("bullet"),
+                    LevelText::new(symbol),
+                    LevelJc::new("left"),
+                )
+                .indent(
+                    Some(720 * (level as i32 + 1)),
+                    Some(SpecialIndentType::Hanging(360)),
+                    None,
+                    None,
+                ),
+            )
+        },
+    )
+}
 
-    if table_data:
-        headers = table_data.get('headers', [])
-        rows = table_data.get('rows', [])
-        if headers:
-            table = doc.add_table(rows=1, cols=len(headers), style='Table Grid')
-            hdr_cells = table.rows[0].cells
-            for i, h in enumerate(headers):
-                hdr_cells[i].text = str(h)
-                for para in hdr_cells[i].paragraphs:
-                    for run in para.runs:
-                        run.bold = True
-            for row_data in rows:
-                row_cells = table.add_row().cells
-                for i, val in enumerate(row_data):
-                    if i < len(row_cells):
-                        row_cells[i].text = str(val)
+/// 文本中的换行转为段内换行。
+fn text_paragraph(text: &str) -> docx_rs::Paragraph {
+    let mut run = docx_rs::Run::new();
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            run = run.add_break(docx_rs::BreakType::TextWrapping);
+        }
+        run = run.add_text(line);
+    }
+    docx_rs::Paragraph::new().add_run(run)
+}
 
-    if image_path:
-        try:
-            import os
-            if os.path.exists(image_path):
-                doc.add_picture(image_path, width=Inches(5))
-        except Exception:
-            pass
+fn build_docx_table(data: &Value) -> Option<docx_rs::Table> {
+    use docx_rs::{Paragraph, Run, Table, TableCell, TableRow, WidthType};
+    let headers = data
+        .get("headers")?
+        .as_array()
+        .filter(|headers| !headers.is_empty())?;
+    let cell = |text: String, bold: bool| {
+        let run = Run::new().add_text(text);
+        TableCell::new().add_paragraph(Paragraph::new().add_run(if bold {
+            run.bold()
+        } else {
+            run
+        }))
+    };
+    let mut rows = vec![TableRow::new(
+        headers.iter().map(|h| cell(value_text(h), true)).collect(),
+    )];
+    for values in data
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+    {
+        rows.push(TableRow::new(
+            (0..headers.len())
+                .map(|i| cell(values.get(i).map(value_text).unwrap_or_default(), false))
+                .collect(),
+        ));
+    }
+    Some(
+        Table::new(rows)
+            .set_grid(vec![TABLE_WIDTH_DXA / headers.len(); headers.len()])
+            .width(TABLE_WIDTH_DXA, WidthType::Dxa),
+    )
+}
 
-doc.save(output_path)
-print('OK')
-"#,
-        sections_json = sections_json.replace('\\', "\\\\").replace('\'', "\\'"),
-        style_json = style_json.replace('\\', "\\\\").replace('\'', "\\'"),
-        title = quote_python_str(title),
-        output_path = quote_python_str(&output_path),
-    );
+/// 读取并校验图片；缺失或无法解码时跳过（docx-rs 的 `Pic::new` 遇到坏图会 panic）。
+fn load_docx_picture(path: &str) -> Option<docx_rs::Pic> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| tracing::warn!(path, error = %e, "Skipping docx image: unreadable"))
+        .ok()?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|e| tracing::warn!(path, error = %e, "Skipping docx image: undecodable"))
+        .ok()?;
+    if image.width() == 0 {
+        return None;
+    }
+    let height =
+        (u64::from(IMAGE_WIDTH_EMU) * u64::from(image.height()) / u64::from(image.width())) as u32;
+    Some(docx_rs::Pic::new(&bytes).size(IMAGE_WIDTH_EMU, height))
+}
 
-    run_python_script(&script, &output_path, "docx", sections.len(), ctx).await
+fn non_empty_str(value: &Value) -> Option<&str> {
+    value.as_str().filter(|s| !s.is_empty())
+}
+
+/// 字符串原样输出，其他 JSON 值按其 JSON 文本输出。
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Create an XLSX spreadsheet.
@@ -560,7 +708,7 @@ print('OK')
 fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &str) -> String {
     if let Some(op) = params.get("output_path").and_then(|v| v.as_str()) {
         if !op.is_empty() {
-            return expand_path(op, ctx);
+            return expand_path(op, &ctx.workspace);
         }
     }
     let dir = ctx.workspace.join("documents");
@@ -571,7 +719,7 @@ fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &st
         .to_string()
 }
 
-fn expand_path(path: &str, ctx: &ToolContext) -> String {
+fn expand_path(path: &str, workspace: &std::path::Path) -> String {
     if path.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
             return path.replacen('~', &home.to_string_lossy(), 1);
@@ -580,7 +728,7 @@ fn expand_path(path: &str, ctx: &ToolContext) -> String {
     if std::path::Path::new(path).is_absolute() {
         return path.to_string();
     }
-    ctx.workspace.join(path).to_string_lossy().to_string()
+    workspace.join(path).to_string_lossy().to_string()
 }
 
 /// Run a Python script and return the result.
@@ -777,6 +925,71 @@ mod tests {
         let style = normalize_style(Some(&json!("professional")));
         assert_eq!(style["font"], "Calibri");
         assert_eq!(style["theme_color"], "2F5597");
+    }
+
+    fn docx_part(bytes: &[u8], name: &str) -> String {
+        use std::io::Read;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut part = String::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_string(&mut part)
+            .unwrap();
+        part
+    }
+
+    #[test]
+    fn build_docx_renders_sections_natively() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(dir.path().join("chart.png"), png.into_inner()).unwrap();
+        std::fs::write(dir.path().join("broken.png"), b"not an image").unwrap();
+
+        let sections = json!([
+            {"heading": "Intro", "level": 2, "content": "line one\nline two", "page_break": true},
+            {"bullets": ["first", {"text": "nested", "level": 1}, 42]},
+            {"table": {"headers": ["Name", "Score"], "rows": [["a", 1], ["b"]]}},
+            {"image_path": "chart.png"},
+            {"image_path": "broken.png"},
+            {"image_path": "missing.png"}
+        ]);
+        let bytes = build_docx(
+            "Report <Q1>",
+            sections.as_array().unwrap(),
+            &json!({"font": "Arial", "font_size": 12, "author": "Ann & Bob"}),
+            dir.path(),
+        )
+        .unwrap();
+
+        let document = docx_part(&bytes, "word/document.xml");
+        assert!(
+            document.contains(r#"<w:pStyle w:val="Title" />"#),
+            "{document}"
+        );
+        assert!(document.contains(r#"<w:pStyle w:val="Heading2" />"#));
+        assert!(document.contains(r#"<w:br w:type="page" />"#));
+        assert!(document.contains(r#"<w:br w:type="textWrapping" />"#));
+        assert!(document.contains(r#"<w:ilvl w:val="1" />"#));
+        assert!(document.contains(">42<"));
+        assert!(document.contains("<w:b />"));
+        assert_eq!(document.matches("<w:tr>").count(), 3);
+        assert_eq!(document.matches("<w:drawing>").count(), 1);
+        assert!(docx_part(&bytes, "word/styles.xml").contains(r#"w:ascii="Arial""#));
+        assert!(docx_part(&bytes, "word/styles.xml").contains(r#"<w:sz w:val="24" />"#));
+        assert!(docx_part(&bytes, "word/numbering.xml").contains("•"));
+        assert!(docx_part(&bytes, "docProps/core.xml")
+            .contains("<dc:creator>Ann &amp; Bob</dc:creator>"));
+
+        let path = dir.path().join("out.docx");
+        std::fs::write(&path, &bytes).unwrap();
+        let text = crate::office::read_docx(&path).unwrap();
+        for expected in ["Report <Q1>", "Intro", "line one", "nested", "Score"] {
+            assert!(text.contains(expected), "{expected} missing in {text}");
+        }
     }
 
     #[test]

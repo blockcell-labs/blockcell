@@ -392,7 +392,7 @@ Notes:
 For full functionality, install these tools:
 
 - **Charts**: Python 3 + `matplotlib` / `plotly`
-- **Office**: Python 3 + `python-pptx` / `python-docx` / `openpyxl`
+- **Office**: Python 3 + `python-pptx` / `openpyxl` (DOCX is generated natively, no Python needed)
 - **Audio**: `ffmpeg` + `whisper` (or use API backend)
 - **Browser**: Chrome/Chromium (for CDP automation)
 - **macOS only**: `chrome_control`, `app_control`

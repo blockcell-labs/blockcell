@@ -414,7 +414,7 @@ blockcell gateway
 要使用完整功能，请安装这些工具：
 
 - **图表**：Python 3 + `matplotlib` / `plotly`
-- **Office**：Python 3 + `python-pptx` / `python-docx` / `openpyxl`
+- **Office**：Python 3 + `python-pptx` / `openpyxl`（DOCX 为原生生成，无需 Python）
 - **音频**：`ffmpeg` + `whisper`（或使用 API 后端）
 - **浏览器**：Chrome/Chromium（用于 CDP 自动化）
 - **仅 macOS**：`chrome_control`、`app_control`
