@@ -3,7 +3,8 @@
 //! - 每个 [`PromptSection`] 只负责自己的内容与出现条件；
 //! - [`PromptRegistry`] 基于 [`ScopedRegistry`] 存放 section，同 id 时更具体的作用域
 //!   （Candidate > Session > Agent > Global）覆盖默认值，同作用域后注册者覆盖先注册者；
-//! - 最终按 priority 排序拼装，再交给 `PromptBudgetAllocator` 做预算裁剪。
+//! - 最终按 priority 排序拼装，解析模板 section 的 `{{var}}` 变量并做完整性校验，
+//!   再交给 `PromptBudgetAllocator` 做预算裁剪。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,12 +157,52 @@ pub trait PromptSection: Send + Sync {
 
     /// 返回 `None` 表示本次不出现。
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String>;
+
+    /// 为 true 时 render 输出视为模板，由 registry 解析 `{{var}}` 变量。
+    /// 默认关闭：内置 section 嵌入的技能/文件内容可能本身含有 `{{...}}` 字面量。
+    fn templated(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RenderedPrompt {
     pub rules: String,
     pub active_skill: String,
+    /// 完整性校验发现的问题；不阻断渲染，由调用方记录。
+    pub issues: Vec<String>,
+}
+
+/// 模板 section 中 `{{name}}` 替换为对应值；未定义变量原样保留并记录问题。
+fn resolve_variables(
+    section: &str,
+    text: &str,
+    vars: &[(&str, String)],
+    issues: &mut Vec<String>,
+) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            rest = &rest[start..];
+            break;
+        };
+        let name = after[..end].trim();
+        match vars.iter().find(|(key, _)| *key == name) {
+            Some((_, value)) => output.push_str(value),
+            None => {
+                issues.push(format!(
+                    "section `{section}` references undefined variable `{name}`"
+                ));
+                output.push_str(&rest[start..start + end + 4]);
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    output.push_str(rest);
+    output
 }
 
 const CANDIDATE_SPECIFICITY: u8 = 3;
@@ -229,8 +270,14 @@ impl PromptRegistry {
         self.sections.fingerprint()
     }
 
-    /// 解析可见 section（处理同 id 覆盖）并按 priority 拼装。
+    /// 解析可见 section（处理同 id 覆盖），按 priority 拼装，解析模板变量并做完整性校验。
     pub fn render(&self, view: ScopeView<'_>, ctx: &SystemPromptContext<'_>) -> RenderedPrompt {
+        let vars = [
+            ("workspace", ctx.paths.workspace().display().to_string()),
+            ("agent_id", view.agent_id.to_string()),
+            ("session_id", view.session_id.to_string()),
+            ("mode", format!("{:?}", ctx.mode).to_lowercase()),
+        ];
         let mut chosen: HashMap<&'static str, (u8, usize, Arc<dyn PromptSection>)> = HashMap::new();
         for (order, (target, section)) in self
             .sections
@@ -255,8 +302,20 @@ impl PromptRegistry {
         sections.sort_by_key(|(_, order, section)| (section.priority(), *order));
 
         let mut rendered = RenderedPrompt::default();
+        let mut has_identity = false;
         for (specificity, _, section) in sections {
             if let Some(mut text) = section.render(ctx) {
+                if section.templated() {
+                    text = resolve_variables(section.id(), &text, &vars, &mut rendered.issues);
+                }
+                if text.trim().is_empty() {
+                    rendered.issues.push(format!(
+                        "section `{}` rendered empty content; return None instead",
+                        section.id()
+                    ));
+                    continue;
+                }
+                has_identity |= section.id() == IDENTITY_SECTION_ID;
                 // 候选作用域注册的 section 是正在评估的行为，不能拥有系统指令的权威。
                 if specificity == CANDIDATE_SPECIFICITY {
                     text = PromptContribution::new(
@@ -273,15 +332,22 @@ impl PromptRegistry {
                 }
             }
         }
+        if !has_identity {
+            rendered.issues.push(format!(
+                "required section `{IDENTITY_SECTION_ID}` is missing"
+            ));
+        }
         rendered
     }
 }
+
+const IDENTITY_SECTION_ID: &str = "identity";
 
 struct IdentitySection;
 
 impl PromptSection for IdentitySection {
     fn id(&self) -> &'static str {
-        "identity"
+        IDENTITY_SECTION_ID
     }
     fn priority(&self) -> i32 {
         10
@@ -720,6 +786,75 @@ mod tests {
         let installed = render(&skill(false));
         assert!(!installed.contains("learned-hint"));
         assert!(installed.contains("Follow the skill's instructions below."));
+    }
+
+    struct Template(&'static str);
+
+    impl PromptSection for Template {
+        fn id(&self) -> &'static str {
+            "template"
+        }
+        fn priority(&self) -> i32 {
+            50
+        }
+        fn render(&self, _ctx: &SystemPromptContext<'_>) -> Option<String> {
+            Some(self.0.to_string())
+        }
+        fn templated(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn templated_sections_resolve_variables_and_report_unknown() {
+        let registry = PromptRegistry::new();
+        registry.register(
+            ScopeTarget::Global,
+            fixed("identity", 10, "ID {{agent_id}}\n"),
+        );
+        registry.register(
+            ScopeTarget::Global,
+            Arc::new(Template(
+                "agent={{ agent_id }} mode={{mode}} x={{nope}} tail {{",
+            )),
+        );
+
+        let rendered = render(&registry, "ops", InteractionMode::Coding);
+        assert_eq!(
+            rendered.rules,
+            "ID {{agent_id}}\nagent=ops mode=coding x={{nope}} tail {{"
+        );
+        assert_eq!(
+            rendered.issues,
+            vec!["section `template` references undefined variable `nope`".to_string()]
+        );
+    }
+
+    #[test]
+    fn integrity_check_reports_missing_identity_and_empty_sections() {
+        let registry = PromptRegistry::new();
+        registry.register(ScopeTarget::Global, fixed("blank", 10, "  \n"));
+        registry.register(ScopeTarget::Global, fixed("body", 20, "BODY"));
+
+        let rendered = render(&registry, "default", InteractionMode::General);
+        assert_eq!(rendered.rules, "BODY");
+        assert_eq!(
+            rendered.issues,
+            vec![
+                "section `blank` rendered empty content; return None instead".to_string(),
+                "required section `identity` is missing".to_string(),
+            ]
+        );
+
+        let builtin = PromptRegistry::with_builtin_sections();
+        for mode in [
+            InteractionMode::Chat,
+            InteractionMode::General,
+            InteractionMode::Coding,
+            InteractionMode::Skill,
+        ] {
+            assert!(render(&builtin, "default", mode).issues.is_empty());
+        }
     }
 
     #[test]

@@ -810,6 +810,9 @@ impl ContextBuilder {
             },
             &ctx,
         );
+        for issue in &rendered.issues {
+            tracing::warn!(issue = %issue, "System prompt integrity issue");
+        }
         PromptBudgetAllocator::new(self.prompt_budget.clone()).assemble(PromptSections {
             rules: rendered.rules,
             user_profile: String::new(),
