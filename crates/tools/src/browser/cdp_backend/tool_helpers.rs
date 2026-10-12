@@ -1,6 +1,6 @@
-//! BrowseTool 的纯辅助函数：元素目标解析、坐标换算、按键解析、CDP 错误转换。
+//! CDP backend 的纯辅助函数：元素目标解析、坐标换算、按键解析、CDP 错误转换。
 //!
-//! 从 `browser/tool.rs` 抽出的无状态辅助，供 `BrowseTool` 的各 action 调用。
+//! 从 `browser/cdp_backend.rs` 抽出的无状态辅助，供 CDP backend 的各 action 调用。
 
 use blockcell_core::Result;
 use serde_json::{json, Value};

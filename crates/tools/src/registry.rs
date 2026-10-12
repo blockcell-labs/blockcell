@@ -129,7 +129,7 @@ impl ToolRegistry {
         registry.register(Arc::new(SendMessageTool));
 
         // Browser tools
-        registry.register(Arc::new(BrowseTool));
+        registry.register(Arc::new(BrowseTool::default()));
 
         // Scheduler tools
         registry.register(Arc::new(CronTool));

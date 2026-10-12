@@ -926,7 +926,7 @@ impl super::AgentRuntime {
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(WebFetchTool));
         registry.register(Arc::new(ListTasksTool));
-        registry.register(Arc::new(BrowseTool));
+        registry.register(Arc::new(BrowseTool::default()));
         registry.register(Arc::new(MemoryManageTool));
         registry.register(Arc::new(MemoryQueryTool));
         registry.register(Arc::new(MemoryUpsertTool));
