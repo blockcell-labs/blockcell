@@ -97,6 +97,7 @@ pub(crate) fn capture_delegation_end_learning_boundary_with_config(
         success,
         complexity_score: estimate_turn_complexity_score(task_goal),
         reusable_lesson: Some(truncate_str(child_summary, 240)),
+        turn_facts: None,
     };
 
     persist_ghost_learning_boundary_with_config(config, paths, boundary, sources)

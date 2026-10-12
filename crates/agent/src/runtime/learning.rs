@@ -631,19 +631,51 @@ impl super::AgentRuntime {
             return Ok(None);
         }
 
+        // 优先使用事件日志中本回合的事实；日志不可用时退回运行时计数。
+        let turn_facts = self.current_turn_facts(msg);
+        let (tool_call_count, memory_write_count) = match &turn_facts {
+            Some(facts) => (facts.tool_calls.len() as u32, facts.memory_writes as u32),
+            None => (tool_call_counts.values().copied().sum(), 0),
+        };
+        let mut sources = vec![
+            GhostEpisodeSource {
+                source_type: "session".to_string(),
+                source_key: msg.session_key(),
+                role: "primary".to_string(),
+            },
+            GhostEpisodeSource {
+                source_type: "chat".to_string(),
+                source_key: msg.chat_id.clone(),
+                role: "context".to_string(),
+            },
+            GhostEpisodeSource {
+                source_type: "history".to_string(),
+                source_key: history.len().to_string(),
+                role: "summary".to_string(),
+            },
+        ];
+        if let Some(facts) = &turn_facts {
+            sources.push(GhostEpisodeSource {
+                source_type: "session_events".to_string(),
+                source_key: facts.turn_id.clone(),
+                role: "facts".to_string(),
+            });
+        }
+
         let boundary = GhostLearningBoundary {
             kind: GhostLearningBoundaryKind::TurnEnd,
             session_key: Some(msg.session_key()),
             subject_key: Some(format!("chat:{}:sender:{}", msg.chat_id, msg.sender_id)),
             user_intent_summary: msg.content.clone(),
             assistant_outcome_summary: final_text.to_string(),
-            tool_call_count: tool_call_counts.values().copied().sum(),
-            memory_write_count: 0,
+            tool_call_count,
+            memory_write_count,
             correction_count: Self::detect_correction_signal_count(&msg.content),
             preference_correction_count: Self::detect_preference_correction_count(&msg.content),
             success,
             complexity_score: estimate_turn_complexity_score(&msg.content),
             reusable_lesson: None,
+            turn_facts,
         };
 
         let turn_count = history
@@ -661,25 +693,20 @@ impl super::AgentRuntime {
             &self.config,
             &self.paths,
             boundary,
-            vec![
-                GhostEpisodeSource {
-                    source_type: "session".to_string(),
-                    source_key: msg.session_key(),
-                    role: "primary".to_string(),
-                },
-                GhostEpisodeSource {
-                    source_type: "chat".to_string(),
-                    source_key: msg.chat_id.clone(),
-                    role: "context".to_string(),
-                },
-                GhostEpisodeSource {
-                    source_type: "history".to_string(),
-                    source_key: history.len().to_string(),
-                    role: "summary".to_string(),
-                },
-            ],
+            sources,
             decision,
         )
+    }
+
+    /// 读取当前回合在 Session Event Log 中已记录的事实（turn/end 尚未写入）。
+    fn current_turn_facts(&self, msg: &InboundMessage) -> Option<blockcell_storage::TurnFacts> {
+        use blockcell_storage::SessionEventReader;
+        let turn_id = self.current_turn_id.as_deref()?;
+        let events = blockcell_storage::JsonlSessionEventLog::new(self.paths.clone())
+            .read(&super::persist_session_key_for(msg))
+            .map_err(|error| debug!(error = %error, "Failed to read session events for Ghost"))
+            .ok()?;
+        blockcell_storage::TurnFacts::from_events(&events, turn_id)
     }
 
     pub(super) async fn capture_pre_compress_learning_boundary(
@@ -724,6 +751,7 @@ impl super::AgentRuntime {
             success: true,
             complexity_score: 0,
             reusable_lesson: provider_pre_compress_context,
+            turn_facts: None,
         };
 
         let episode_id = self.persist_ghost_learning_boundary(
@@ -786,6 +814,7 @@ impl super::AgentRuntime {
             success: true,
             complexity_score: 0,
             reusable_lesson: provider_session_end_context,
+            turn_facts: None,
         };
 
         let episode_id = self.persist_ghost_learning_boundary(
@@ -856,6 +885,7 @@ impl super::AgentRuntime {
                     previous.chat_id, next_msg.chat_id
                 ),
             }),
+            turn_facts: None,
         };
 
         let episode_id = self.persist_ghost_learning_boundary(

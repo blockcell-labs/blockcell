@@ -1,4 +1,5 @@
 use blockcell_core::config::GhostLearningConfig;
+use blockcell_storage::TurnFacts;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +59,8 @@ pub struct GhostLearningBoundary {
     pub success: bool,
     pub complexity_score: u32,
     pub reusable_lesson: Option<String>,
+    /// 回合在 Session Event Log 中记录的事实（工具结论、记忆写入、模型错误等）。
+    pub turn_facts: Option<TurnFacts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,6 +78,8 @@ pub struct GhostEpisodeSnapshot {
     pub complexity_score: u32,
     pub reusable_lesson: Option<String>,
     pub decision: LearningDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_facts: Option<TurnFacts>,
 }
 
 impl GhostEpisodeSnapshot {
@@ -105,6 +110,7 @@ impl From<(GhostLearningBoundary, LearningDecision)> for GhostEpisodeSnapshot {
             complexity_score: boundary.complexity_score,
             reusable_lesson: boundary.reusable_lesson,
             decision,
+            turn_facts: boundary.turn_facts,
         }
     }
 }
@@ -259,6 +265,7 @@ mod tests {
             success: true,
             complexity_score: 0,
             reusable_lesson: None,
+            turn_facts: None,
         }
     }
 
@@ -276,6 +283,7 @@ mod tests {
             success: true,
             complexity_score: 4,
             reusable_lesson: Some("Prefer canary-first deploys for this user".to_string()),
+            turn_facts: None,
         }
     }
 
@@ -294,6 +302,7 @@ mod tests {
             success: true,
             complexity_score: 6,
             reusable_lesson: Some("Validate rollout ordering before deploy".to_string()),
+            turn_facts: None,
         }
     }
 
@@ -311,6 +320,7 @@ mod tests {
             success: true,
             complexity_score: 0,
             reusable_lesson: None,
+            turn_facts: None,
         }
     }
 
@@ -415,6 +425,7 @@ mod tests {
             success: true,
             complexity_score: 0,
             reusable_lesson: None,
+            turn_facts: None,
         };
         // tool_call_count=5 >= method_tool_threshold(1..=8 中任意值 ≤ 5 时触发 Review)
         let decision = final_policy.decide(&boundary);

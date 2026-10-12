@@ -3,7 +3,7 @@
 //! 只依赖事件日志，不读取 transcript 或业务数据库；旧日志缺失的字段按 0 / `unknown` 计。
 
 use crate::session_event::{SessionEvent, SessionEventKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -84,6 +84,88 @@ impl SessionMetrics {
             .filter(|(outcome, _)| outcome.as_str() != "succeeded")
             .map(|(_, count)| count)
             .sum()
+    }
+}
+
+/// 单个回合在事件日志中记录的事实，供 Ghost 复盘直接消费，而不是从 transcript 推断。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFacts {
+    pub turn_id: String,
+    pub steps: usize,
+    /// 按发生顺序的工具调用结论（每个模型提议的调用一条）。
+    pub tool_calls: Vec<ToolCallFact>,
+    pub memory_writes: usize,
+    pub model_request_errors: usize,
+    pub compactions: usize,
+    pub skills: Vec<String>,
+    /// `turn/end` 记录的异常终止原因；回合尚未结束时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallFact {
+    pub tool: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_safe: Option<bool>,
+}
+
+impl TurnFacts {
+    /// 从会话事件中提取指定回合的事实；该回合没有任何事件时返回 `None`。
+    pub fn from_events(events: &[SessionEvent], turn_id: &str) -> Option<Self> {
+        let mut facts = Self {
+            turn_id: turn_id.to_string(),
+            ..Self::default()
+        };
+        let mut seen = false;
+        for event in events
+            .iter()
+            .filter(|event| event.turn_id.as_deref() == Some(turn_id))
+        {
+            seen = true;
+            let payload = &event.payload;
+            match event.kind {
+                SessionEventKind::StepStart => facts.steps += 1,
+                SessionEventKind::ToolResult => facts.tool_calls.push(ToolCallFact {
+                    tool: payload
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    outcome: tool_outcome(payload).to_string(),
+                    retry_safe: payload.get("retry_safe").and_then(Value::as_bool),
+                }),
+                SessionEventKind::MemoryWrite => facts.memory_writes += 1,
+                SessionEventKind::ModelRequestError => facts.model_request_errors += 1,
+                SessionEventKind::Compaction | SessionEventKind::CompactionEnd => {
+                    facts.compactions += 1
+                }
+                SessionEventKind::SkillLoad => {
+                    if let Some(name) = payload.get("name").and_then(Value::as_str) {
+                        facts.skills.push(name.to_string());
+                    }
+                }
+                SessionEventKind::TurnEnd => {
+                    facts.error = payload.get("error").map(|error| match error {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        seen.then_some(facts)
+    }
+
+    /// 结论不是 `succeeded` 的工具调用数。
+    pub fn unsuccessful_tool_calls(&self) -> usize {
+        self.tool_calls
+            .iter()
+            .filter(|call| call.outcome != "succeeded")
+            .count()
     }
 }
 
@@ -189,6 +271,65 @@ mod tests {
         assert_eq!(metrics.compactions, 1);
         assert_eq!(metrics.memory_writes, 1);
         assert_eq!(metrics.wall_duration_ms, 1_900);
+    }
+
+    #[test]
+    fn turn_facts_only_include_events_of_that_turn() {
+        use SessionEventKind::*;
+        let mut log = events(vec![
+            (TurnStart, json!({})),
+            (StepStart, json!({})),
+            (SkillLoad, json!({ "name": "deploy" })),
+            (
+                ToolResult,
+                json!({ "tool": "exec", "outcome": "unknown", "retry_safe": false }),
+            ),
+            (
+                ToolResult,
+                json!({ "tool": "memory_manage", "is_error": false }),
+            ),
+            (MemoryWrite, json!({})),
+            (ModelRequestError, json!({})),
+            (CompactionEnd, json!({})),
+            (TurnEnd, json!({ "error": "cancelled" })),
+            (TurnStart, json!({})),
+            (
+                ToolResult,
+                json!({ "tool": "read_file", "outcome": "succeeded" }),
+            ),
+        ]);
+        for event in log.iter_mut().skip(9) {
+            event.turn_id = Some("t2".into());
+        }
+
+        let facts = TurnFacts::from_events(&log, "t1").unwrap();
+        assert_eq!(facts.steps, 1);
+        assert_eq!(
+            facts.tool_calls,
+            vec![
+                ToolCallFact {
+                    tool: "exec".into(),
+                    outcome: "unknown".into(),
+                    retry_safe: Some(false),
+                },
+                ToolCallFact {
+                    tool: "memory_manage".into(),
+                    outcome: "succeeded".into(),
+                    retry_safe: None,
+                },
+            ]
+        );
+        assert_eq!(facts.unsuccessful_tool_calls(), 1);
+        assert_eq!(facts.memory_writes, 1);
+        assert_eq!(facts.model_request_errors, 1);
+        assert_eq!(facts.compactions, 1);
+        assert_eq!(facts.skills, vec!["deploy"]);
+        assert_eq!(facts.error.as_deref(), Some("cancelled"));
+
+        let second = TurnFacts::from_events(&log, "t2").unwrap();
+        assert_eq!(second.tool_calls.len(), 1);
+        assert!(second.error.is_none());
+        assert!(TurnFacts::from_events(&log, "missing").is_none());
     }
 
     #[test]

@@ -3167,6 +3167,24 @@ async fn non_trivial_turn_creates_learning_episode() {
         episode.subject_key.as_deref(),
         Some("chat:ghost-turn:sender:user")
     );
+
+    // 回合事实来自 Session Event Log，并以 session_events 来源关联到该回合
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventReader};
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read("cli:ghost-turn")
+        .expect("read session events");
+    let turn_id = events[0].turn_id.clone().expect("turn id");
+    let facts = &episode.metadata["turnFacts"];
+    assert_eq!(facts["turnId"], turn_id.as_str());
+    assert_eq!(facts["steps"], 1);
+    assert_eq!(facts["toolCalls"], serde_json::json!([]));
+    let sources = runtime
+        .test_ghost_ledger()
+        .list_episode_sources(&episode.id)
+        .unwrap();
+    assert!(sources
+        .iter()
+        .any(|source| source.source_type == "session_events" && source.source_key == turn_id));
 }
 
 #[tokio::test]
@@ -5595,7 +5613,10 @@ async fn forced_final_answer_is_logged_as_its_own_step() {
     assert_eq!(final_response.payload["content"], "forced final answer");
     let served_by = runtime.served_by(0);
     assert_eq!(final_response.payload["model"], served_by.model.as_str());
-    assert_eq!(final_response.payload["provider"], served_by.provider.as_str());
+    assert_eq!(
+        final_response.payload["provider"],
+        served_by.provider.as_str()
+    );
     assert_eq!(final_response.payload["usage"]["input_tokens"], 12);
     assert_eq!(final_response.payload["usage"]["output_tokens"], 3);
     let final_step = final_response

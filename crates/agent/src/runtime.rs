@@ -2527,6 +2527,7 @@ pub fn create_evolution_deploy_callback(
             success: true,
             complexity_score: 0,
             reusable_lesson: None,
+            turn_facts: None,
         };
 
         let policy = GhostLearningPolicy::from_config(&config.agents.ghost.learning);

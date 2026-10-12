@@ -38,6 +38,7 @@ impl AgentRuntime {
                 success: true,
                 complexity_score: 0,
                 reusable_lesson: None,
+                turn_facts: None,
             };
             learning_coordinator.update_ghost_policy(&config.agents.ghost.learning);
             let decision = learning_coordinator.ghost_decide(&boundary);

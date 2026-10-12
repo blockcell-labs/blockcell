@@ -1176,6 +1176,7 @@ mod tests {
             complexity_score: 1,
             reusable_lesson: None,
             decision: crate::ghost_learning::LearningDecision::ReviewAfterResponse,
+            turn_facts: None,
         };
 
         let messages = build_restricted_review_messages(&snapshot);
@@ -1207,6 +1208,7 @@ mod tests {
             complexity_score: 5,
             reusable_lesson: Some("Prefer canary-first rollout".to_string()),
             decision: crate::ghost_learning::LearningDecision::ReviewAfterResponse,
+            turn_facts: None,
         };
         let provider = ToolLoopReviewProvider::new(ToolLoopMode::WriteFiles);
         let lease_abort = blockcell_core::AbortToken::new();
