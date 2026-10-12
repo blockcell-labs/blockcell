@@ -205,6 +205,7 @@ fn resolve_variables(
     output
 }
 
+/// 与 [`ScopeTarget::specificity`] 中 Candidate 的值一致。
 const CANDIDATE_SPECIFICITY: u8 = 3;
 
 #[derive(Clone, Default)]
@@ -285,12 +286,7 @@ impl PromptRegistry {
             .into_iter()
             .enumerate()
         {
-            let specificity = match target {
-                ScopeTarget::Global => 0,
-                ScopeTarget::Agent(_) => 1,
-                ScopeTarget::Session(_) => 2,
-                ScopeTarget::Candidate(_) => CANDIDATE_SPECIFICITY,
-            };
+            let specificity = target.specificity();
             match chosen.get(section.id()) {
                 Some((existing, _, _)) if *existing > specificity => {}
                 _ => {

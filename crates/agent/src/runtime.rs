@@ -2397,7 +2397,7 @@ impl AgentRuntime {
         let budget_trackers = Arc::new(Mutex::new(HashMap::new()));
         let (steering, steering_sender) = SteeringChannel::new(16);
 
-        Ok(Self {
+        let mut runtime = Self {
             config,
             paths,
             context_builder,
@@ -2469,7 +2469,9 @@ impl AgentRuntime {
             steering,
             steering_sender,
             active_steering_registry: None,
-        })
+        };
+        runtime.sync_tool_scope_view("");
+        Ok(runtime)
     }
 
     /// Set the self-referential runtime handle for the agent tool.

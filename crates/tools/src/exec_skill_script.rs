@@ -330,7 +330,6 @@ mod tests {
         let registry = ToolRegistry::with_defaults();
         let tool = registry
             .get("exec_skill_script")
-            .cloned()
             .expect("exec_skill_script should be registered");
         tool.validate(&params).expect("params should validate");
         tool.execute(tool_context(skill_dir), params)
@@ -471,7 +470,6 @@ mod tests {
         let registry = ToolRegistry::with_defaults();
         let tool = registry
             .get("exec_skill_script")
-            .cloned()
             .expect("exec_skill_script should be registered");
 
         let err = tool

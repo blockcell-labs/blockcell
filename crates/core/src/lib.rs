@@ -16,6 +16,7 @@ pub mod message;
 pub mod message_receipt;
 pub mod path_policy;
 pub mod paths;
+pub mod scope;
 pub mod session_key;
 pub mod system_event;
 pub mod tool_policy;

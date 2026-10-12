@@ -187,6 +187,31 @@ impl AgentRuntime {
         self.context_builder.set_agent_id(agent_id.as_deref());
         self.agent_id = agent_id;
         self.sync_task_manager_event_emitter();
+        let session_id = self.tool_registry.scope_view().session_id.clone();
+        self.sync_tool_scope_view(&session_id);
+    }
+
+    /// 让工具 registry 的作用域视图与当前 agent / 会话 / 进化候选保持一致，
+    /// 使 agent、session、candidate 作用域注册的工具只在对应视图中可见、可执行。
+    pub(crate) fn sync_tool_scope_view(&mut self, session_id: &str) {
+        let view = blockcell_tools::ToolScopeView {
+            agent_id: self
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            session_id: session_id.to_string(),
+            candidate_id: self.candidate_scope.clone(),
+        };
+        self.tool_registry.set_scope_view(view);
+    }
+
+    /// 在指定作用域注册工具（例如进化候选工具、仅对某会话开放的 MCP 工具）；guard 销毁时注销。
+    pub fn register_scoped_tool(
+        &self,
+        target: crate::runtime_kernel::ScopeTarget,
+        tool: Arc<dyn blockcell_tools::Tool>,
+    ) -> crate::runtime_kernel::ScopeGuard<blockcell_tools::ScopedTool> {
+        self.tool_registry.register_scoped(target, tool)
     }
 
     /// Set the broadcast sender for streaming events to WebSocket clients.
@@ -209,6 +234,8 @@ impl AgentRuntime {
         self.context_builder
             .set_candidate_scope(candidate_id.clone());
         self.candidate_scope = candidate_id;
+        let session_id = self.tool_registry.scope_view().session_id.clone();
+        self.sync_tool_scope_view(&session_id);
     }
 
     /// Replace the loop driver used by `process_message`.

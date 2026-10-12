@@ -6317,3 +6317,70 @@ fn assert_steps_balanced(events: &[blockcell_storage::SessionEvent]) {
     }
     assert!(open.is_empty(), "unclosed steps {open:?}");
 }
+
+struct ScopedEchoTool(&'static str);
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for ScopedEchoTool {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: "scoped_echo".to_string(),
+            description: format!("echo from {}", self.0),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    fn idempotency(&self, _params: &serde_json::Value) -> blockcell_core::Idempotency {
+        blockcell_core::Idempotency::Safe
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({ "scope": self.0 }))
+    }
+}
+
+#[tokio::test]
+async fn scoped_tools_follow_runtime_session_and_candidate_views() {
+    use crate::runtime_kernel::ScopeTarget;
+
+    let mut runtime = test_runtime();
+    let _session_tool = runtime.register_scoped_tool(
+        ScopeTarget::Session("cli:scoped-a".into()),
+        Arc::new(ScopedEchoTool("session")),
+    );
+    let _candidate_tool = runtime.register_scoped_tool(
+        ScopeTarget::Candidate("evo-1".into()),
+        Arc::new(ScopedEchoTool("candidate")),
+    );
+    let call = tool_call("scoped_echo", serde_json::json!({}));
+
+    let in_session = test_main_session_inbound("cli", "scoped-a");
+    runtime.sync_tool_scope_view(&in_session.session_key());
+    let result = runtime.execute_tool_call(&call, &in_session, None).await;
+    assert!(result.contains("\"session\""), "{result}");
+
+    // 其他会话看不到、也无法执行该会话作用域工具
+    let other = test_main_session_inbound("cli", "scoped-b");
+    runtime.sync_tool_scope_view(&other.session_key());
+    assert!(!runtime
+        .tool_registry
+        .tool_names()
+        .contains(&"scoped_echo".to_string()));
+    let result = runtime.execute_tool_call(&call, &other, None).await;
+    assert!(result.contains("Unknown tool"), "{result}");
+
+    // 进入候选评估后，候选工具可见并覆盖同名工具
+    runtime.set_candidate_scope(Some("evo-1".into()));
+    let result = runtime.execute_tool_call(&call, &other, None).await;
+    assert!(result.contains("\"candidate\""), "{result}");
+    runtime.set_candidate_scope(None);
+    assert!(runtime.tool_registry.get("scoped_echo").is_none());
+}

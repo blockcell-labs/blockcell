@@ -51,6 +51,7 @@ use crate::tts::TtsTool;
 use crate::video_process::VideoProcessTool;
 use crate::web::{WebFetchTool, WebSearchTool};
 use crate::{Tool, ToolContext, ToolPresentation, ToolPresentationConfig, ToolVisibility};
+use blockcell_core::scope::{ScopeGuard, ScopeId, ScopeTarget, ScopeView, ScopedRegistry};
 
 pub const GLOBAL_CORE_TOOL_NAMES: &[&str] = &[
     "memory_query",
@@ -80,13 +81,44 @@ pub fn global_core_tool_names() -> &'static [&'static str] {
     GLOBAL_CORE_TOOL_NAMES
 }
 
+/// 查询作用域工具时的视图（拥有所有权的 [`ScopeView`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolScopeView {
+    pub agent_id: String,
+    pub session_id: String,
+    /// 正在评估的进化候选；生产视图为 `None`。
+    pub candidate_id: Option<String>,
+}
+
+impl ToolScopeView {
+    fn as_view(&self) -> ScopeView<'_> {
+        ScopeView {
+            agent_id: &self.agent_id,
+            session_id: &self.session_id,
+            candidate_id: self.candidate_id.as_deref(),
+        }
+    }
+}
+
+/// 注册在非全局作用域中的工具及其注册时的展示。
+#[derive(Clone)]
+pub struct ScopedTool {
+    tool: Arc<dyn Tool>,
+    presentation: ToolPresentation,
+}
+
 #[derive(Clone)]
 pub struct ToolRegistry {
+    /// 全局工具（构建 registry 时注册，对所有视图可见）。
     tools: HashMap<String, Arc<dyn Tool>>,
     /// 注册时确定的展示：工具自身声明，或以 discoverable 方式注册。
     registered_presentation: HashMap<String, ToolPresentation>,
     /// agent 配置中的展示覆盖，叠加在注册展示之上。
     presentation_overrides: HashMap<String, ToolPresentationConfig>,
+    /// 按作用域（agent / session / 进化候选）注册的工具，克隆共享；同名时更具体的作用域覆盖全局工具。
+    scoped: ScopedRegistry<ScopedTool>,
+    /// 当前查询视图，决定哪些作用域工具可见、可执行。
+    view: ToolScopeView,
 }
 
 impl ToolRegistry {
@@ -95,6 +127,8 @@ impl ToolRegistry {
             tools: HashMap::new(),
             registered_presentation: HashMap::new(),
             presentation_overrides: HashMap::new(),
+            scoped: ScopedRegistry::new(),
+            view: ToolScopeView::default(),
         }
     }
 
@@ -262,6 +296,74 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// 在指定作用域注册工具，返回的 guard 销毁时自动注销（例如只在某次候选评估或会话期间生效）。
+    ///
+    /// 作用域工具只对可见的视图出现在工具列表中、也只有这些视图能执行它；
+    /// 克隆出的 registry 共享作用域工具，但各自持有自己的视图。
+    pub fn register_scoped(
+        &self,
+        target: ScopeTarget,
+        tool: Arc<dyn Tool>,
+    ) -> ScopeGuard<ScopedTool> {
+        let presentation = tool.presentation();
+        debug!(name = %tool.schema().name, scope = ?target, "Registering scoped tool");
+        self.scoped
+            .register(target, ScopedTool { tool, presentation })
+    }
+
+    /// 与 [`Self::register_scoped`] 相同，但长期存在，需用 [`Self::unregister_scoped`] 显式注销。
+    pub fn insert_scoped(&self, target: ScopeTarget, tool: Arc<dyn Tool>) -> ScopeId {
+        let presentation = tool.presentation();
+        self.scoped
+            .insert(target, ScopedTool { tool, presentation })
+    }
+
+    pub fn unregister_scoped(&self, id: ScopeId) -> bool {
+        self.scoped.remove(id).is_some()
+    }
+
+    /// 设置查询视图（agent / session / 进化候选）。
+    pub fn set_scope_view(&mut self, view: ToolScopeView) {
+        self.view = view;
+    }
+
+    pub fn scope_view(&self) -> &ToolScopeView {
+        &self.view
+    }
+
+    /// 当前视图可见的作用域工具；同名时取最具体的作用域，同作用域取后注册者。
+    fn visible_scoped(&self) -> HashMap<String, ScopedTool> {
+        if self.scoped.is_empty() {
+            return HashMap::new();
+        }
+        let mut chosen: HashMap<String, (u8, ScopedTool)> = HashMap::new();
+        for (target, entry) in self.scoped.visible_with_target(self.view.as_view()) {
+            let specificity = target.specificity();
+            let name = entry.tool.schema().name;
+            match chosen.get(&name) {
+                Some((existing, _)) if *existing > specificity => {}
+                _ => {
+                    chosen.insert(name, (specificity, entry));
+                }
+            }
+        }
+        chosen
+            .into_iter()
+            .map(|(name, (_, entry))| (name, entry))
+            .collect()
+    }
+
+    /// 当前视图下的有效工具集合：全局工具叠加可见的作用域工具。
+    fn effective_tools(&self) -> HashMap<String, Arc<dyn Tool>> {
+        let mut tools = self.tools.clone();
+        tools.extend(
+            self.visible_scoped()
+                .into_iter()
+                .map(|(name, entry)| (name, entry.tool)),
+        );
+        tools
+    }
+
     /// 设置 agent 配置中的展示覆盖（描述、可见性、分组、排序），不影响能否执行。
     pub fn set_presentation_overrides(
         &mut self,
@@ -272,7 +374,10 @@ impl ToolRegistry {
 
     /// 工具最终的展示方式：注册展示叠加 agent 配置覆盖。未注册的工具返回 `None`。
     pub fn presentation(&self, name: &str) -> Option<ToolPresentation> {
-        let base = self.registered_presentation.get(name)?.clone();
+        let base = match self.visible_scoped().remove(name) {
+            Some(entry) => entry.presentation,
+            None => self.registered_presentation.get(name)?.clone(),
+        };
         Some(match self.presentation_overrides.get(name) {
             Some(overrides) => base.with_overrides(overrides),
             None => base,
@@ -304,7 +409,7 @@ impl ToolRegistry {
 
     /// 单个工具的完整 model-facing schema（渐进发现、schema 补全时使用）。
     pub fn full_model_schema(&self, name: &str) -> Option<Value> {
-        self.get(name).map(|tool| self.model_schema(tool, true))
+        self.get(name).map(|tool| self.model_schema(&tool, true))
     }
 
     /// 按展示排序（order 小者在前，相同时按名称）。
@@ -329,13 +434,17 @@ impl ToolRegistry {
         }
     }
 
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+    /// 当前视图下名为 `name` 的工具：可见的作用域工具优先于全局工具。
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        match self.visible_scoped().remove(name) {
+            Some(entry) => Some(entry.tool),
+            None => self.tools.get(name).cloned(),
+        }
     }
 
     pub fn get_tool_schemas(&self) -> Vec<Value> {
         let mut schemas: Vec<Value> = self
-            .tools
+            .effective_tools()
             .values()
             .map(|tool| self.model_schema(tool, true))
             .collect();
@@ -347,7 +456,7 @@ impl ToolRegistry {
     /// Only returns schemas for tools whose names are in the provided list.
     pub fn get_filtered_schemas(&self, names: &[&str]) -> Vec<Value> {
         let mut schemas: Vec<Value> = self
-            .tools
+            .effective_tools()
             .iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
             .map(|(_, tool)| self.model_schema(tool, true))
@@ -364,7 +473,7 @@ impl ToolRegistry {
     /// the full schema and retries.
     pub fn get_tiered_schemas(&self, names: &[&str], core_tools: &[&str]) -> Vec<Value> {
         let mut schemas: Vec<Value> = self
-            .tools
+            .effective_tools()
             .iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
             .map(|(name, tool)| {
@@ -389,7 +498,7 @@ impl ToolRegistry {
 
     /// Get all registered tool names.
     pub fn tool_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        let mut names: Vec<String> = self.effective_tools().into_keys().collect();
         names.sort();
         names
     }
@@ -397,10 +506,9 @@ impl ToolRegistry {
     /// Get names of tools that should be visible in the initial model prompt.
     pub fn model_visible_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .tools
-            .keys()
+            .effective_tools()
+            .into_keys()
             .filter(|name| self.presentation(name).is_some_and(|p| p.is_visible()))
-            .cloned()
             .collect();
         names.sort();
         names
@@ -414,10 +522,10 @@ impl ToolRegistry {
     /// Returns a sorted list of markdown rule strings for tools that provide them.
     pub fn get_prompt_rules(&self, names: &[&str], ctx: &crate::PromptContext) -> Vec<String> {
         let mut rules: Vec<(String, String)> = self
-            .tools
-            .iter()
+            .effective_tools()
+            .into_iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
-            .filter_map(|(name, tool)| tool.prompt_rule(ctx).map(|rule| (name.clone(), rule)))
+            .filter_map(|(name, tool)| tool.prompt_rule(ctx).map(|rule| (name, rule)))
             .collect();
         rules.sort_by(|a, b| a.0.cmp(&b.0));
         rules.into_iter().map(|(_, rule)| rule).collect()
@@ -717,6 +825,114 @@ mod tests {
 
         assert!(!reg.is_model_hidden("no_required_tool"));
         assert!(reg.presentation("missing").is_none());
+    }
+
+    struct NamedTool(&'static str, &'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn schema(&self) -> crate::ToolSchema {
+            crate::ToolSchema {
+                name: self.0.to_string(),
+                description: self.1.to_string(),
+                parameters: json!({ "type": "object", "properties": {} }),
+            }
+        }
+
+        fn validate(&self, _params: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        async fn execute(&self, _ctx: ToolContext, _params: Value) -> Result<Value> {
+            Ok(json!({ "by": self.1 }))
+        }
+    }
+
+    fn scope_view(agent: &str, session: &str, candidate: Option<&str>) -> ToolScopeView {
+        ToolScopeView {
+            agent_id: agent.into(),
+            session_id: session.into(),
+            candidate_id: candidate.map(str::to_string),
+        }
+    }
+
+    fn description(reg: &ToolRegistry, name: &str) -> Option<String> {
+        reg.full_model_schema(name)
+            .map(|schema| schema["function"]["description"].as_str().unwrap().into())
+    }
+
+    #[test]
+    fn scoped_tools_are_visible_only_to_matching_views() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("shared", "global")));
+        let _agent = reg.register_scoped(
+            ScopeTarget::Agent("ops".into()),
+            Arc::new(NamedTool("deploy", "agent")),
+        );
+        let _session = reg.register_scoped(
+            ScopeTarget::Session("cli:1".into()),
+            Arc::new(NamedTool("session_only", "session")),
+        );
+
+        assert_eq!(reg.tool_names(), vec!["shared"]);
+        assert!(reg.get("deploy").is_none());
+
+        reg.set_scope_view(scope_view("ops", "cli:1", None));
+        assert_eq!(reg.tool_names(), vec!["deploy", "session_only", "shared"]);
+        assert_eq!(
+            reg.model_visible_tool_names(),
+            vec!["deploy", "session_only", "shared"]
+        );
+        assert_eq!(reg.get_filtered_schemas(&["deploy"]).len(), 1);
+
+        // 克隆共享作用域工具，但视图独立：子 agent 不继承父 agent 作用域
+        let mut child = reg.clone();
+        child.set_scope_view(scope_view("ops/child", "cli:2", None));
+        assert_eq!(child.tool_names(), vec!["shared"]);
+    }
+
+    #[test]
+    fn more_specific_scope_overrides_global_tool_and_guard_restores_it() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NamedTool("deploy", "global")));
+        reg.set_scope_view(scope_view("ops", "cli:1", Some("evo-1")));
+        {
+            let _agent = reg.register_scoped(
+                ScopeTarget::Agent("ops".into()),
+                Arc::new(NamedTool("deploy", "agent")),
+            );
+            let _candidate = reg.register_scoped(
+                ScopeTarget::Candidate("evo-1".into()),
+                Arc::new(NamedTool("deploy", "candidate")),
+            );
+            assert_eq!(description(&reg, "deploy").as_deref(), Some("candidate"));
+            assert_eq!(reg.tool_names(), vec!["deploy"]);
+
+            reg.set_scope_view(scope_view("ops", "cli:1", None));
+            assert_eq!(description(&reg, "deploy").as_deref(), Some("agent"));
+        }
+        assert_eq!(description(&reg, "deploy").as_deref(), Some("global"));
+
+        let id = reg.insert_scoped(
+            ScopeTarget::Session("cli:1".into()),
+            Arc::new(NamedTool("deploy", "session")),
+        );
+        assert_eq!(description(&reg, "deploy").as_deref(), Some("session"));
+        assert!(reg.unregister_scoped(id));
+        assert_eq!(description(&reg, "deploy").as_deref(), Some("global"));
+    }
+
+    #[test]
+    fn scoped_tool_keeps_its_presentation() {
+        let mut reg = ToolRegistry::new();
+        let _guard =
+            reg.register_scoped(ScopeTarget::Agent("ops".into()), Arc::new(NoRequiredTool));
+        reg.set_scope_view(scope_view("ops", "s", None));
+        assert!(reg.presentation("no_required_tool").is_some());
+        assert!(!reg.is_model_hidden("no_required_tool"));
+        assert!(
+            reg.idempotency("no_required_tool", &json!({})) == blockcell_core::Idempotency::Unknown
+        );
     }
 
     fn assert_no_array_without_items(value: &Value, path: &str) {

@@ -109,6 +109,7 @@ impl AgentRuntime {
         self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
         self.current_step = None;
         self.turn_step_counter = 0;
+        self.sync_tool_scope_view(&persist_session_key);
         self.dispatch_event(
             &msg,
             &persist_session_key,
