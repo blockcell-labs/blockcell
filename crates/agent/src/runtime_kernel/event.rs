@@ -113,10 +113,25 @@ pub enum AgentEvent {
     SkillActivated {
         name: String,
     },
-    Compaction {
+    /// 压缩开始。`phase` 标识触发点（pre-loop / in-loop / request-error / post-sampling / manual）。
+    CompactionStart {
         phase: String,
+        compactor: String,
+        tokens_before: usize,
         messages_before: usize,
-        messages_after: usize,
+    },
+    /// 压缩结束（成功或失败）。失败时 `error` 非空且上下文保持不变。
+    CompactionEnd {
+        phase: String,
+        compactor: String,
+        /// 生成摘要所用模型；不调用模型的策略为空。
+        model: Option<String>,
+        tokens_before: usize,
+        tokens_after: usize,
+        messages_before: usize,
+        retained_messages: usize,
+        summarized_messages: usize,
+        error: Option<String>,
     },
 }
 
@@ -137,7 +152,8 @@ impl AgentEvent {
             Self::ToolPostExecute { .. } => "tool/post-execute",
             Self::ToolResult { .. } => "tool/result",
             Self::SkillActivated { .. } => "skill/load",
-            Self::Compaction { .. } => "compaction",
+            Self::CompactionStart { .. } => "compaction/start",
+            Self::CompactionEnd { .. } => "compaction/end",
         }
     }
 
@@ -154,7 +170,8 @@ impl AgentEvent {
             | Self::ToolCall { .. }
             | Self::ToolResult { .. }
             | Self::SkillActivated { .. }
-            | Self::Compaction { .. } => EventClass::Durable,
+            | Self::CompactionStart { .. }
+            | Self::CompactionEnd { .. } => EventClass::Durable,
             Self::ToolPreExecute { .. } | Self::ToolPostExecute { .. } => EventClass::Capability,
             Self::AgentPreStep { .. } => EventClass::Live,
         }

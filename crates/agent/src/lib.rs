@@ -77,8 +77,9 @@ pub use capability_adapter::{
     SkillEvolutionLLMBridge,
 };
 pub use compact::{
-    generate_compact_summary, CompactHookRegistry, CompactSummary, CompactSummarySection,
-    PostCompactHook, PreCompactHook, RecoveryBudget,
+    generate_compact_summary, CompactError, CompactHookRegistry, CompactSummary,
+    CompactSummarySection, CompactionRequest, CompactionSummary, ContextCompactor,
+    ExtractiveCompactor, ModelSummaryCompactor, PostCompactHook, PreCompactHook, RecoveryBudget,
 };
 pub use context::ContextBuilder;
 pub use forked::{

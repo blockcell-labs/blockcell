@@ -13,11 +13,16 @@
 //! - 技能: 25,000 tokens
 //! - Session Memory: 12,000 tokens
 
+mod compactor;
 mod file_tracker;
 mod hooks;
 mod skill_tracker;
 mod summary;
 
+pub use compactor::{
+    CompactionRequest, CompactionSummary, ContextCompactor, ExtractiveCompactor,
+    ModelSummaryCompactor,
+};
 pub use file_tracker::{FileRecord, FileTracker};
 pub use hooks::{
     CompactHookRegistry, PostCompactContext, PostCompactHook, PostCompactResult, PreCompactContext,
@@ -25,7 +30,8 @@ pub use hooks::{
 };
 pub use skill_tracker::{SkillRecord, SkillTracker};
 pub use summary::{
-    generate_compact_summary, CompactSummary, CompactSummaryResult, CompactSummarySection,
+    generate_compact_summary, CompactError, CompactSummary, CompactSummaryResult,
+    CompactSummarySection,
 };
 
 use crate::token::estimate_tokens;

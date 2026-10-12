@@ -5840,7 +5840,77 @@ async fn context_overflow_compacts_then_retries_the_step() {
         .iter()
         .position(|kind| *kind == SessionEventKind::ModelRequestError)
         .unwrap();
-    assert!(kinds[error_at..].contains(&SessionEventKind::Compaction));
+    assert!(kinds[error_at..].contains(&SessionEventKind::CompactionEnd));
+    assert_steps_balanced(&events);
+
+    let start = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::CompactionStart)
+        .expect("compaction/start");
+    assert_eq!(start.payload["phase"], "request-error");
+    assert_eq!(start.payload["compactor"], "model_summary");
+    let end = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::CompactionEnd)
+        .unwrap();
+    assert!(end.payload["error"].is_null(), "{}", end.payload);
+    assert!(end.payload["model"].is_string());
+    assert_eq!(
+        end.payload["messages_before"].as_u64().unwrap(),
+        end.payload["retained_messages"].as_u64().unwrap()
+            + end.payload["summarized_messages"].as_u64().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn extractive_compactor_recovers_overflow_without_model_summary() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(OverflowOnceProvider {
+        stream_calls: AtomicUsize::new(0),
+    }));
+    runtime.set_context_compactor(Arc::new(crate::compact::ExtractiveCompactor));
+    let msg = test_main_session_inbound("cli", "overflow-extractive");
+    let session_key = msg.session_key();
+
+    assert_eq!(
+        runtime.process_message(msg).await.unwrap(),
+        "answer after compaction"
+    );
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .unwrap();
+    let end = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::CompactionEnd)
+        .expect("compaction/end");
+    assert_eq!(end.payload["compactor"], "extractive");
+    assert!(end.payload["model"].is_null());
+    assert!(end.payload["error"].is_null(), "{}", end.payload);
+}
+
+#[tokio::test]
+async fn failed_compaction_is_recorded_in_compaction_end() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_provider(Arc::new(FailingStreamProvider {
+        error: "This model's maximum context length is 8192 tokens",
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let msg = test_main_session_inbound("cli", "overflow-compaction-failed");
+    let session_key = msg.session_key();
+    let _ = runtime.process_message(msg).await;
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session_key)
+        .unwrap();
+    let end = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::CompactionEnd)
+        .expect("compaction/end");
+    assert!(end.payload["error"].is_string(), "{}", end.payload);
+    assert_eq!(end.payload["tokens_after"], end.payload["tokens_before"]);
+    assert_eq!(end.payload["summarized_messages"], 0);
     assert_steps_balanced(&events);
 }
 

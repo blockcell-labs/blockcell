@@ -2152,11 +2152,6 @@ impl AgentRuntime {
                     "[post-sampling] Executing synchronous compact before response delivery"
                 );
 
-                let compact_ctx = CompactContext {
-                    channel: &msg.channel,
-                    chat_id: &msg.chat_id,
-                    account_id: msg.account_id.as_deref(),
-                };
                 if let Err(e) = self
                     .capture_pre_compress_learning_boundary(&persist_session_key, &history)
                     .await
@@ -2166,8 +2161,9 @@ impl AgentRuntime {
                 let compact_result = self
                     .execute_layer4_compact(
                         &history,
+                        &msg,
                         &persist_session_key,
-                        Some(compact_ctx),
+                        "post-sampling",
                         true, // is_auto for automatic compact
                     )
                     .await;

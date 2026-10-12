@@ -214,16 +214,42 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
         AgentEvent::SkillActivated { name } => {
             vec![(SessionEventKind::SkillLoad, json!({ "name": name }))]
         }
-        AgentEvent::Compaction {
+        AgentEvent::CompactionStart {
             phase,
+            compactor,
+            tokens_before,
             messages_before,
-            messages_after,
         } => vec![(
-            SessionEventKind::Compaction,
+            SessionEventKind::CompactionStart,
             json!({
                 "phase": phase,
+                "compactor": compactor,
+                "tokens_before": tokens_before,
                 "messages_before": messages_before,
-                "messages_after": messages_after,
+            }),
+        )],
+        AgentEvent::CompactionEnd {
+            phase,
+            compactor,
+            model,
+            tokens_before,
+            tokens_after,
+            messages_before,
+            retained_messages,
+            summarized_messages,
+            error,
+        } => vec![(
+            SessionEventKind::CompactionEnd,
+            json!({
+                "phase": phase,
+                "compactor": compactor,
+                "model": model,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+                "messages_before": messages_before,
+                "retained_messages": retained_messages,
+                "summarized_messages": summarized_messages,
+                "error": error,
             }),
         )],
         _ => Vec::new(),

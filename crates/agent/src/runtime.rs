@@ -2189,6 +2189,8 @@ pub struct AgentRuntime {
     paths: Paths,
     context_builder: ContextBuilder,
     provider_pool: Arc<ProviderPool>,
+    /// Layer4 压缩时生成摘要的策略。
+    context_compactor: Arc<dyn crate::compact::ContextCompactor>,
     tool_registry: ToolRegistry,
     session_store: SessionStore,
     audit_logger: AuditLogger,
@@ -2385,6 +2387,7 @@ impl AgentRuntime {
             paths,
             context_builder,
             provider_pool,
+            context_compactor: Arc::new(crate::compact::ModelSummaryCompactor),
             tool_registry,
             session_store,
             audit_logger,

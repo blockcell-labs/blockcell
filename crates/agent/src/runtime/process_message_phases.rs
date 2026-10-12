@@ -91,12 +91,6 @@ impl AgentRuntime {
             "[compact] Manual compact request received"
         );
 
-        let compact_ctx = CompactContext {
-            channel: &msg.channel,
-            chat_id: &msg.chat_id,
-            account_id: msg.account_id.as_deref(),
-        };
-
         // 使用 persist_session_key 加载和保存历史：cron 转发场景下
         // persist_session_key 是目标会话，session_key 是来源会话
         let history = self.session_store.load(persist_session_key)?;
@@ -109,7 +103,7 @@ impl AgentRuntime {
 
         // Execute compact directly (is_auto=false for manual trigger)
         let result = self
-            .execute_layer4_compact(&history, persist_session_key, Some(compact_ctx), false)
+            .execute_layer4_compact(&history, msg, persist_session_key, "manual", false)
             .await;
 
         if result.success {

@@ -58,8 +58,13 @@ pub enum SessionEventKind {
     SkillLoad,
     #[serde(rename = "memory/write")]
     MemoryWrite,
+    /// 旧版单条压缩事件，仅用于读取历史日志；新日志写 `compaction/start` / `compaction/end`。
     #[serde(rename = "compaction")]
     Compaction,
+    #[serde(rename = "compaction/start")]
+    CompactionStart,
+    #[serde(rename = "compaction/end")]
+    CompactionEnd,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

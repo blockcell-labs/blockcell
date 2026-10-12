@@ -133,7 +133,7 @@ impl AgentRuntime {
     /// Run a Layer-4 compact and, on success, replace both the in-flight LLM
     /// message list and the persisted history with the compacted form, saving
     /// the new history to the session store. Returns whether the compact
-    /// succeeded. `phase` is used only for log context (e.g. "pre-loop").
+    /// succeeded. `phase` identifies the trigger (e.g. "pre-loop") in logs and compaction events.
     pub(crate) async fn apply_layer4_compact_in_loop(
         &mut self,
         current_messages: &mut Vec<ChatMessage>,
@@ -142,11 +142,6 @@ impl AgentRuntime {
         persist_session_key: &str,
         phase: &str,
     ) -> bool {
-        let compact_ctx = CompactContext {
-            channel: &msg.channel,
-            chat_id: &msg.chat_id,
-            account_id: msg.account_id.as_deref(),
-        };
         if let Err(e) = self
             .capture_pre_compress_learning_boundary(persist_session_key, current_messages)
             .await
@@ -154,29 +149,13 @@ impl AgentRuntime {
             warn!(error = %e, session_key = %persist_session_key, "Ghost learning pre-compress capture failed");
         }
         let compact_result = self
-            .execute_layer4_compact(
-                current_messages,
-                persist_session_key,
-                Some(compact_ctx),
-                true,
-            )
+            .execute_layer4_compact(current_messages, msg, persist_session_key, phase, true)
             .await;
         if !compact_result.success {
             warn!(error = ?compact_result.error, phase, "[layer4] Compact failed, continuing without compression");
             return false;
         }
-        let messages_before = current_messages.len();
         Self::rebuild_messages_after_compact(current_messages, &compact_result);
-        self.dispatch_event(
-            msg,
-            persist_session_key,
-            &mut AgentEvent::Compaction {
-                phase: phase.to_string(),
-                messages_before,
-                messages_after: current_messages.len(),
-            },
-        )
-        .await;
         info!(
             phase,
             post_compact_tokens = estimate_messages_tokens(current_messages),
@@ -206,14 +185,79 @@ impl AgentRuntime {
     /// - `CompactResult` - 压缩结果（通过 `success` 字段判断是否成功）
     ///   - 成功：`success: true`，包含摘要和恢复消息
     ///   - 失败：`success: false`，`error` 字段包含错误信息
+    ///
+    /// 压缩前后各记录一条 durable 事件（compaction/start、compaction/end），
+    /// 包含前后 token、保留与被摘要的消息数、所用策略与模型、失败原因。
     pub(crate) async fn execute_layer4_compact(
+        &self,
+        messages: &[ChatMessage],
+        msg: &InboundMessage,
+        session_key: &str,
+        phase: &str,
+        is_auto: bool,
+    ) -> crate::compact::CompactResult {
+        let compactor = self.context_compactor.name().to_string();
+        let tokens_before = estimate_messages_tokens(messages);
+        self.dispatch_event(
+            msg,
+            session_key,
+            &mut AgentEvent::CompactionStart {
+                phase: phase.to_string(),
+                compactor: compactor.clone(),
+                tokens_before,
+                messages_before: messages.len(),
+            },
+        )
+        .await;
+
+        let compact_ctx = CompactContext {
+            channel: &msg.channel,
+            chat_id: &msg.chat_id,
+            account_id: msg.account_id.as_deref(),
+        };
+        let result = self
+            .run_layer4_compact(messages, session_key, Some(compact_ctx), is_auto)
+            .await;
+
+        let retained_messages = if result.success {
+            result.recent_messages.len()
+        } else {
+            messages.len()
+        };
+        self.dispatch_event(
+            msg,
+            session_key,
+            &mut AgentEvent::CompactionEnd {
+                phase: phase.to_string(),
+                compactor,
+                model: self
+                    .context_compactor
+                    .uses_model()
+                    .then(|| self.config.agents.defaults.model.clone()),
+                tokens_before,
+                tokens_after: if result.success {
+                    result.post_compact_tokens
+                } else {
+                    tokens_before
+                },
+                messages_before: messages.len(),
+                retained_messages,
+                summarized_messages: messages.len() - retained_messages,
+                error: result.error.clone(),
+            },
+        )
+        .await;
+        result
+    }
+
+    async fn run_layer4_compact(
         &self,
         messages: &[ChatMessage],
         _session_key: &str,
         compact_ctx: Option<CompactContext<'_>>,
         is_auto: bool,
     ) -> crate::compact::CompactResult {
-        use crate::compact::{generate_compact_summary, CompactResult};
+        use crate::compact::{CompactResult, CompactionRequest};
         use crate::session_memory::get_session_memory_path;
         use crate::session_metrics::get_compact_circuit_breaker;
 
@@ -292,33 +336,25 @@ impl AgentRuntime {
 
         info!(pre_compact_tokens, "[layer4] Starting full compact");
 
-        // ========== 4. 生成系统提示 ==========
-        let system_prompt = Arc::new(
-            "你是一个对话摘要助手。请根据对话历史生成结构化摘要，保留关键信息用于后续继续工作。"
-                .to_string(),
-        );
-
-        // ========== 5. 获取模型配置 ==========
-        let model = self.config.agents.defaults.model.clone();
-
-        // ========== 6. 执行 LLM 语义压缩 ==========
+        // ========== 4-6. 由压缩策略生成摘要 ==========
         let max_output_tokens = self
             .memory_system
             .as_ref()
             .map(|m| m.config().layer4.max_output_tokens as u32)
             .unwrap_or(12_000);
-        let summary_result = generate_compact_summary(
-            Arc::clone(&self.provider_pool),
-            system_prompt,
-            &model,
-            messages.to_vec(),
-            max_output_tokens,
-        )
-        .await;
+        let summary_result = self
+            .context_compactor
+            .summarize(CompactionRequest {
+                messages,
+                provider_pool: &self.provider_pool,
+                model: &self.config.agents.defaults.model,
+                max_output_tokens,
+            })
+            .await;
 
         let (summary_message, cache_read_tokens, cache_creation_tokens) = match summary_result {
             Ok(result) => (
-                result.summary.to_markdown(),
+                result.summary_markdown,
                 result.cache_read_tokens,
                 result.cache_creation_tokens,
             ),

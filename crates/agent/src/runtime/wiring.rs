@@ -215,6 +215,11 @@ impl AgentRuntime {
         self.agent_loop = agent_loop;
     }
 
+    /// Replace the strategy used to summarize history during Layer4 compaction.
+    pub fn set_context_compactor(&mut self, compactor: Arc<dyn crate::compact::ContextCompactor>) {
+        self.context_compactor = compactor;
+    }
+
     pub fn agent_loop_name(&self) -> &'static str {
         self.agent_loop.name()
     }
