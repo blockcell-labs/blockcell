@@ -50,7 +50,9 @@ use crate::toggle_manage::ToggleManageTool;
 use crate::tts::TtsTool;
 use crate::video_process::VideoProcessTool;
 use crate::web::{WebFetchTool, WebSearchTool};
-use crate::{Tool, ToolContext, ToolPresentation, ToolPresentationConfig, ToolVisibility};
+use crate::{
+    Tool, ToolContext, ToolDefinition, ToolPresentation, ToolPresentationConfig, ToolVisibility,
+};
 use blockcell_core::scope::{ScopeGuard, ScopeId, ScopeTarget, ScopeView, ScopedRegistry};
 
 pub const GLOBAL_CORE_TOOL_NAMES: &[&str] = &[
@@ -531,10 +533,20 @@ impl ToolRegistry {
         rules.into_iter().map(|(_, rule)| rule).collect()
     }
 
+    /// 当前视图下工具对本次参数的三层定义；未注册的工具返回 `None`。
+    pub fn definition(&self, name: &str, params: &Value) -> Option<ToolDefinition> {
+        let tool = self.get(name)?;
+        Some(ToolDefinition {
+            schema: tool.schema(),
+            execution: tool.execution_spec(params),
+            presentation: self.presentation(name)?,
+        })
+    }
+
     /// 工具对本次参数声明的幂等性；未注册的工具视为未知。
     pub fn idempotency(&self, name: &str, params: &Value) -> blockcell_core::Idempotency {
         self.get(name)
-            .map(|tool| tool.idempotency(params))
+            .map(|tool| tool.execution_spec(params).idempotency)
             .unwrap_or(blockcell_core::Idempotency::Unknown)
     }
 
@@ -550,7 +562,7 @@ impl ToolRegistry {
         }
 
         // Check permissions
-        let required = tool.required_permissions(&params);
+        let required = tool.execution_spec(&params).permissions;
         if !required.is_subset_of(&ctx.permissions) {
             warn!(tool = name, "Permission denied: insufficient permissions");
             return Err(Error::Tool(format!(
@@ -920,6 +932,35 @@ mod tests {
         assert_eq!(description(&reg, "deploy").as_deref(), Some("session"));
         assert!(reg.unregister_scoped(id));
         assert_eq!(description(&reg, "deploy").as_deref(), Some("global"));
+    }
+
+    #[test]
+    fn definition_combines_schema_execution_spec_and_presentation() {
+        let mut reg = ToolRegistry::with_defaults();
+        reg.set_presentation_overrides(HashMap::from([(
+            "http_request".to_string(),
+            ToolPresentationConfig {
+                group: Some("network".to_string()),
+                ..Default::default()
+            },
+        )]));
+
+        let get = reg
+            .definition(
+                "http_request",
+                &json!({"url": "https://example.com", "method": "GET"}),
+            )
+            .unwrap();
+        assert_eq!(get.schema.name, "http_request");
+        assert_eq!(get.presentation.group.as_deref(), Some("network"));
+        assert_eq!(
+            get.execution.idempotency,
+            reg.idempotency(
+                "http_request",
+                &json!({"url": "https://example.com", "method": "GET"})
+            )
+        );
+        assert!(reg.definition("missing", &json!({})).is_none());
     }
 
     #[test]

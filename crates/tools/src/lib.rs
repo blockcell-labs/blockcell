@@ -498,6 +498,20 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
+/// Runtime 看到的执行规格：本次调用需要的权限与幂等性声明（可随参数变化）。
+#[derive(Debug, Clone)]
+pub struct ToolExecutionSpec {
+    pub permissions: PermissionSet,
+    pub idempotency: blockcell_core::Idempotency,
+}
+
+/// 工具的三层定义：模型看到的 schema、Runtime 看到的执行规格、UI / channel 看到的展示。
+pub struct ToolDefinition {
+    pub schema: ToolSchema,
+    pub execution: ToolExecutionSpec,
+    pub presentation: ToolPresentation,
+}
+
 /// Context passed to `Tool::prompt_rule()` so each tool can emit channel-aware / intent-aware rules.
 pub struct PromptContext<'a> {
     pub channel: &'a str,
@@ -541,6 +555,13 @@ pub trait Tool: Send + Sync {
     /// 未声明的工具按有副作用对待。
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Unknown
+    }
+    /// 本次调用的执行规格，由 `required_permissions` 与 `idempotency` 组成。
+    fn execution_spec(&self, params: &Value) -> ToolExecutionSpec {
+        ToolExecutionSpec {
+            permissions: self.required_permissions(params),
+            idempotency: self.idempotency(params),
+        }
     }
     /// Return an optional system-prompt rule describing how the LLM should use this tool.
     /// Each line should be a markdown list item starting with `- `.
