@@ -15,6 +15,7 @@ use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext, Se
 use blockcell_skills::SkillCard;
 use blockcell_storage::ghost_ledger::{GhostEpisodeSource, NewGhostEpisode};
 use blockcell_storage::{AuditLogger, GhostLedger, SessionStore};
+use blockcell_tools::tool_guard::{dangerous_operation_items, is_dangerous_exec_command};
 use blockcell_tools::{
     CapabilityRegistryHandle, CoreEvolutionHandle, EventEmitterHandle, MemoryStoreHandle,
     SessionSearchOps, SpawnHandle, SystemEventEmitter, TaskManagerHandle, ToolRegistry,
@@ -2076,92 +2077,6 @@ fn extract_urls_from_search_result(raw: &str) -> Vec<String> {
         .filter(|u| !u.is_empty())
         .take(3)
         .collect()
-}
-
-static DANGEROUS_EXEC_DIRECT_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r"(^|[;&|]\s*|\b(?:sudo|env)\s+)(?:rm|trash|unlink)\b",
-        r"(^|[;&|]\s*|\b(?:sudo|env)\s+)rmdir\b",
-        r"\bfind\b[\s\S]*\s-delete\b",
-        r"\bfind\b[\s\S]*\s-exec\s+rm\b",
-        r#"\bsh\s+-c\s+['"][^'"]*\brm\b"#,
-        r#"\bbash\s+-c\s+['"][^'"]*\brm\b"#,
-        r#"\bzsh\s+-c\s+['"][^'"]*\brm\b"#,
-        r"\bpython(?:3)?\b[\s\S]*\b(?:shutil\.rmtree|os\.remove|os\.unlink|os\.rmdir)\b",
-        r"\bperl\b[\s\S]*\bunlink\b",
-    ]
-    .iter()
-    .map(|p| Regex::new(p).expect("dangerous exec direct regex is valid"))
-    .collect()
-});
-
-static DANGEROUS_EXEC_RM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(^|[;&|]\s*|\b(?:sudo|env)\s+)rm\b([^;&|]*)")
-        .expect("dangerous exec rm regex is valid")
-});
-
-fn is_dangerous_exec_command(command: &str) -> bool {
-    let c = command.to_lowercase();
-    let c = c.trim();
-    if c.is_empty() {
-        return false;
-    }
-
-    for re in DANGEROUS_EXEC_DIRECT_RES.iter() {
-        if re.is_match(c) {
-            return true;
-        }
-    }
-
-    {
-        let rm_re = &*DANGEROUS_EXEC_RM_RE;
-        for caps in rm_re.captures_iter(c) {
-            let suffix = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let has_recursive = suffix.contains(" -r")
-                || suffix.contains(" -rf")
-                || suffix.contains(" -fr")
-                || suffix.starts_with("-r")
-                || suffix.starts_with("-rf")
-                || suffix.starts_with("-fr");
-            let has_force = suffix.contains(" -f")
-                || suffix.contains(" -rf")
-                || suffix.contains(" -fr")
-                || suffix.starts_with("-f")
-                || suffix.starts_with("-rf")
-                || suffix.starts_with("-fr");
-            let has_target = suffix
-                .split_whitespace()
-                .any(|token| !token.starts_with('-') && !token.is_empty());
-            if has_target && (has_recursive || has_force) {
-                return true;
-            }
-            if has_target && suffix.contains("../") {
-                return true;
-            }
-        }
-    }
-
-    let dangerous = [
-        "kill ",
-        "pkill",
-        "killall",
-        "taskkill",
-        "systemctl stop",
-        "service stop",
-        "launchctl bootout",
-        "launchctl kill",
-    ];
-
-    dangerous.iter().any(|p| c.contains(p))
-}
-
-fn is_sensitive_filename(path: &str) -> bool {
-    let p = path.replace('\\', "/");
-    let name = p.rsplit('/').next().unwrap_or("").to_lowercase();
-    matches!(
-        name.as_str(),
-        "config.json5" | "config.json" | "config.toml" | "config.yaml" | "config.yml"
-    )
 }
 
 fn user_explicitly_confirms_dangerous_op(user_text: &str) -> bool {

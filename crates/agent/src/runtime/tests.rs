@@ -4202,12 +4202,6 @@ fn test_prepare_skill_result_for_presentation_keeps_full_result_payload() {
     assert!(llm_payload.contains("xsec_token"));
 }
 
-#[test]
-fn test_is_sensitive_filename_matches_json5_config() {
-    assert!(is_sensitive_filename("config.json5"));
-    assert!(is_sensitive_filename("/tmp/.blockcell/config.json5"));
-}
-
 #[tokio::test]
 async fn test_deliver_subagent_result_to_ws_origin_emits_message_done_event() {
     let (event_tx, mut event_rx) = broadcast::channel::<String>(8);

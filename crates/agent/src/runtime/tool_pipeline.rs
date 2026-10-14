@@ -276,57 +276,21 @@ impl AgentRuntime {
         if inv.policy_confirmed {
             return Ok(());
         }
-        let args = &inv.args;
-        match inv.call.name.as_str() {
-            "exec" => {
-                let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
-                    return Ok(());
-                };
-                if is_dangerous_exec_command(cmd) {
-                    let interactive = self.confirm_tx.is_some();
-                    let items = vec![format!("command: {}", cmd)];
-                    if !self
-                        .approve_dangerous_operation("exec", items, inv.msg)
-                        .await
-                    {
-                        return Err(dangerous_exec_denied(interactive));
-                    }
-                }
-                Ok(())
-            }
-            "file_ops" => {
-                let field = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("");
-                let action = field("action");
-                let path = field("path");
-                let destination = field("destination");
-                let recursive = args
-                    .get("recursive")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                let mut items = Vec::new();
-                if action == "delete" && recursive {
-                    items.push(format!("file_ops delete recursive=true path={}", path));
-                }
-                if (action == "delete" || action == "rename" || action == "move")
-                    && (is_sensitive_filename(path) || is_sensitive_filename(destination))
-                {
-                    items.push(format!(
-                        "file_ops {} sensitive file (config*) path={} destination={}",
-                        action, path, destination
-                    ));
-                }
-
-                if !items.is_empty()
-                    && !self
-                        .approve_dangerous_operation("file_ops", items, inv.msg)
-                        .await
-                {
-                    return Err(dangerous_file_ops_denied());
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+        let tool_name = inv.call.name.as_str();
+        let items = dangerous_operation_items(tool_name, &inv.args);
+        if items.is_empty() {
+            return Ok(());
+        }
+        let interactive = self.confirm_tx.is_some();
+        if self
+            .approve_dangerous_operation(tool_name, items, inv.msg)
+            .await
+        {
+            Ok(())
+        } else if tool_name == "exec" {
+            Err(dangerous_exec_denied(interactive))
+        } else {
+            Err(dangerous_file_ops_denied())
         }
     }
 

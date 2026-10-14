@@ -59,6 +59,7 @@ pub mod system_info;
 pub mod tasks;
 pub mod termux_api;
 pub mod toggle_manage;
+pub mod tool_guard;
 pub mod tts;
 pub mod video_process;
 pub mod web;

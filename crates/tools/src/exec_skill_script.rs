@@ -10,6 +10,7 @@ use crate::exec_local::{
     resolve_script_path, validate_relative_skill_path, validate_runner, ExecLocalTool,
 };
 use crate::registry::ToolRegistry;
+use crate::tool_guard::NestedToolGuard;
 use crate::{Tool, ToolContext, ToolSchema};
 
 /// 默认的 ToolRegistry 单例，避免每次 exec_skill_script 调用都重新创建
@@ -230,6 +231,8 @@ impl Tool for ExecSkillScriptTool {
                 let declared_tools = load_declared_skill_tools(&skill_dir)?;
                 let dispatcher = SkillDispatcher::new();
                 let result = tokio::task::spawn_blocking(move || {
+                    // 嵌套调用不经过 Runtime 的 Guarded Tool Pipeline，由守卫执行同一套准入检查与审计
+                    let guard = NestedToolGuard::new(&rhai_ctx);
                     dispatcher.execute_sync(
                         &script,
                         &user_input,
@@ -246,14 +249,16 @@ impl Tool for ExecSkillScriptTool {
                                     tool_name
                                 )));
                             }
+                            guard.admit(tool_name, &tool_params)?;
                             let registry = registry.clone();
                             let ctx = rhai_ctx.clone();
-                            let tool_name = tool_name.to_string();
-                            std::thread::scope(|scope| {
+                            let audited_params = tool_params.clone();
+                            let start = std::time::Instant::now();
+                            let result = std::thread::scope(|scope| {
                                 scope
                                     .spawn(|| {
                                         handle.block_on(async {
-                                            registry.execute(&tool_name, ctx, tool_params).await
+                                            registry.execute(tool_name, ctx, tool_params).await
                                         })
                                     })
                                     .join()
@@ -262,7 +267,17 @@ impl Tool for ExecSkillScriptTool {
                                             "Nested tool execution panicked".to_string(),
                                         ))
                                     })
-                            })
+                            });
+                            guard.audit(
+                                tool_name,
+                                &audited_params,
+                                match &result {
+                                    Ok(value) => value.clone(),
+                                    Err(error) => json!({ "error": error.to_string() }),
+                                },
+                                start.elapsed().as_millis() as u64,
+                            );
+                            result
                         },
                     )
                 })
@@ -385,6 +400,46 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("not declared"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_call_respects_tool_policy() {
+        let skill_dir = temp_skill_dir("blockcell-exec-skill-script-rhai-policy");
+        fs::write(
+            skill_dir.join("meta.yaml"),
+            "name: policy-tool\ndescription: test\ntools:\n  - list_dir\n",
+        )
+        .expect("write metadata");
+        fs::write(
+            skill_dir.join("SKILL.rhai"),
+            r#"let result = call_tool("list_dir", #{ path: "." }); set_output(result);"#,
+        )
+        .expect("write rhai script");
+        let base = temp_skill_dir("blockcell-exec-skill-script-policy-base");
+        fs::write(
+            base.join("tool_policy.yaml"),
+            "rules:\n  - name: deny-list\n    tool: list_dir\n    decision: deny\n    description: list_dir is disabled\n",
+        )
+        .expect("write tool policy");
+
+        let mut ctx = tool_context(skill_dir);
+        ctx.base = base.clone();
+        let result = ExecSkillScriptTool
+            .execute(ctx, json!({"path": "SKILL.rhai"}))
+            .await
+            .expect("exec_skill_script should succeed");
+
+        assert_eq!(result["tool_calls"][0]["success"], false);
+        assert!(result["tool_calls"][0]["result"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("list_dir is disabled"));
+        let audit = fs::read_dir(base.join("audit"))
+            .expect("audit dir")
+            .flatten()
+            .map(|entry| fs::read_to_string(entry.path()).unwrap_or_default())
+            .collect::<String>();
+        assert!(audit.contains("list_dir"), "{audit}");
     }
 
     #[tokio::test]
