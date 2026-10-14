@@ -557,6 +557,13 @@ impl ToolRegistry {
             .unwrap_or(crate::ExecutionEnvironment::InProcess)
     }
 
+    /// 本次调用是否需要用户显式确认；未注册的工具按无需确认对待。
+    pub fn requires_confirmation(&self, name: &str, params: &Value) -> bool {
+        self.get(name)
+            .map(|tool| tool.execution_spec(params).requires_confirmation)
+            .unwrap_or(false)
+    }
+
     pub async fn execute(&self, name: &str, ctx: ToolContext, params: Value) -> Result<Value> {
         let tool = self
             .get(name)
@@ -1036,9 +1043,10 @@ mod tests {
             ("write_file", json!({"path": "a", "content": "x"}), WorkspaceWrite),
             ("edit_file", json!({"path": "a"}), WorkspaceWrite),
             ("file_ops", json!({"action": "delete", "path": "a"}), WorkspaceWrite),
-            ("exec", json!({"command": "ls"}), Shell),
-            ("exec_local", json!({"path": "scripts/run.py"}), Shell),
-            ("exec_skill_script", json!({"path": "scripts/run.py"}), Shell),
+            // 直接 exec 子进程，不受沙箱限制 → full-access（危险命令由命令级策略把关）
+            ("exec", json!({"command": "ls"}), FullAccess),
+            ("exec_local", json!({"path": "scripts/run.py"}), FullAccess),
+            ("exec_skill_script", json!({"path": "scripts/run.py"}), FullAccess),
             ("shell", json!({"command": "ls"}), Shell),
             (
                 "shell",
@@ -1061,5 +1069,21 @@ mod tests {
                 "unexpected environment for {name} with {params}"
             );
         }
+    }
+
+    #[test]
+    fn test_requires_confirmation_is_declared_per_call_not_by_environment() {
+        let reg = ToolRegistry::with_defaults();
+        // 只有 full-access 的 shell 需要逐次确认……
+        assert!(reg.requires_confirmation(
+            "shell",
+            &json!({"command": "ls", "sandbox_policy": "full-access"})
+        ));
+        // ……受限 shell 不需要……
+        assert!(!reg.requires_confirmation("shell", &json!({"command": "ls"})));
+        // ……而同样以 full-access 运行的 exec 也不需要（危险命令走命令级策略）。
+        assert!(!reg.requires_confirmation("exec", &json!({"command": "ls"})));
+        assert!(!reg.requires_confirmation("read_file", &json!({"path": "a"})));
+        assert!(!reg.requires_confirmation("definitely_not_a_tool", &json!({})));
     }
 }

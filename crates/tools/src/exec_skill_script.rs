@@ -108,8 +108,10 @@ fn normalize_rhai_result(
 
 #[async_trait]
 impl Tool for ExecSkillScriptTool {
+    /// Rhai 脚本在进程内运行、原生脚本直接拉起进程，均不经沙箱 → 如实声明 `FullAccess`。
+    /// 脚本路径已限制在技能目录内，故不需要逐次确认。
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
-        crate::ExecutionEnvironment::Shell
+        crate::ExecutionEnvironment::FullAccess
     }
 
     fn schema(&self) -> ToolSchema {

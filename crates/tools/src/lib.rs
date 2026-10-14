@@ -501,14 +501,17 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
-/// Runtime 看到的执行规格：本次调用需要的权限、幂等性与执行环境声明（可随参数变化）。
+/// Runtime 看到的执行规格：本次调用需要的权限、幂等性、执行环境与确认要求（可随参数变化）。
 #[derive(Debug, Clone)]
 pub struct ToolExecutionSpec {
     pub permissions: PermissionSet,
     pub idempotency: blockcell_core::Idempotency,
-    /// 本次调用声明的执行环境（P2-3）。默认 `InProcess`；高风险工具据此声明其在何种
-    /// 环境运行，供准入（如 `FullAccess` 需确认）与审计（`tool/call` 事件）使用。
+    /// 本次调用声明的执行环境（P2-3）。**描述性**：默认 `InProcess`，高风险工具据此声明
+    /// 其在何种环境运行，供审计（`tool/call` 事件与工具调用审计记录）使用，不触发准入。
     pub environment: ExecutionEnvironment,
+    /// 本次调用是否必须在执行前获得用户显式确认（P2-3）。**准入性**：Runtime 的
+    /// ExplicitConfirmation 阶段据此拦截；与 [`Self::environment`] 正交，默认 `false`。
+    pub requires_confirmation: bool,
 }
 
 /// 工具的三层定义：模型看到的 schema、Runtime 看到的执行规格、UI / channel 看到的展示。
@@ -562,16 +565,23 @@ pub trait Tool: Send + Sync {
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Unknown
     }
-    /// 本次调用声明的执行环境；未声明的工具按进程内纯计算对待。
+    /// 本次调用声明的执行环境；未声明的工具按进程内纯计算对待。仅用于审计，不触发准入。
     fn execution_environment(&self, _params: &Value) -> ExecutionEnvironment {
         ExecutionEnvironment::InProcess
     }
-    /// 本次调用的执行规格，由 `required_permissions`、`idempotency` 与 `execution_environment` 组成。
+    /// 本次调用是否必须在执行前获得用户显式确认。与 [`Self::execution_environment`] 正交：
+    /// 环境描述"在哪里运行"，本方法决定"是否需要用户点头"。未声明的工具按无需确认对待。
+    fn requires_confirmation(&self, _params: &Value) -> bool {
+        false
+    }
+    /// 本次调用的执行规格，由 `required_permissions`、`idempotency`、`execution_environment`
+    /// 与 `requires_confirmation` 组成。
     fn execution_spec(&self, params: &Value) -> ToolExecutionSpec {
         ToolExecutionSpec {
             permissions: self.required_permissions(params),
             idempotency: self.idempotency(params),
             environment: self.execution_environment(params),
+            requires_confirmation: self.requires_confirmation(params),
         }
     }
     /// Return an optional system-prompt rule describing how the LLM should use this tool.

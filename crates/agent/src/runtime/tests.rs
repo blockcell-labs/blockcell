@@ -5177,8 +5177,9 @@ async fn prefetch_respects_tool_policy_deny() {
         .is_empty());
 }
 
-/// 仅声明执行环境、不做实际工作的工具，用于验证 FullAccess 准入由声明驱动。
-struct DeclaredEnvTool(&'static str, blockcell_tools::ExecutionEnvironment);
+/// 仅声明执行环境 / 确认要求、不做实际工作的工具，用于验证 ExplicitConfirmation 准入由
+/// 声明驱动，而非硬编码工具名、也非执行环境本身。
+struct DeclaredEnvTool(&'static str, blockcell_tools::ExecutionEnvironment, bool);
 
 #[async_trait::async_trait]
 impl blockcell_tools::Tool for DeclaredEnvTool {
@@ -5187,6 +5188,10 @@ impl blockcell_tools::Tool for DeclaredEnvTool {
         _params: &serde_json::Value,
     ) -> blockcell_tools::ExecutionEnvironment {
         self.1
+    }
+
+    fn requires_confirmation(&self, _params: &serde_json::Value) -> bool {
+        self.2
     }
 
     fn schema(&self) -> blockcell_tools::ToolSchema {
@@ -5246,13 +5251,14 @@ async fn tool_call_event_records_declared_execution_environment() {
 }
 
 #[tokio::test]
-async fn full_access_gate_is_driven_by_declaration_not_tool_name() {
+async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
     let mut runtime = test_runtime();
     runtime
         .tool_registry
         .register(Arc::new(DeclaredEnvTool(
             "custom_full_access",
             blockcell_tools::ExecutionEnvironment::FullAccess,
+            true,
         )));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
@@ -5270,7 +5276,7 @@ async fn full_access_gate_is_driven_by_declaration_not_tool_name() {
 
     let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
         .await
-        .expect("a tool declaring FullAccess must request approval")
+        .expect("a tool declaring explicit confirmation must request approval")
         .expect("confirmation channel should stay open");
     assert_eq!(request.tool_name, "custom_full_access");
     assert!(
@@ -5285,14 +5291,56 @@ async fn full_access_gate_is_driven_by_declaration_not_tool_name() {
 }
 
 #[tokio::test]
-async fn non_full_access_declaration_skips_full_access_gate() {
-    // 同一个工具名与参数，仅执行环境声明不同：声明 Shell 时不触发 full-access 确认。
+async fn confirmation_gate_follows_the_flag_not_the_environment() {
+    // 同一个执行环境声明（Shell）下，只有 requires_confirmation=true 才触发确认。
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(DeclaredEnvTool(
+            "custom_shell_confirm",
+            blockcell_tools::ExecutionEnvironment::Shell,
+            true,
+        )));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
+    runtime.confirm_tx = Some(confirm_tx);
+    let msg = test_main_session_inbound("cli", "shell-confirm-gate");
+    let handle = tokio::spawn(async move {
+        runtime
+            .execute_tool_call(
+                &tool_call("custom_shell_confirm", serde_json::json!({})),
+                &msg,
+                None,
+            )
+            .await
+            .text
+    });
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
+        .await
+        .expect("a tool requiring confirmation must request approval")
+        .expect("confirmation channel should stay open");
+    assert_eq!(request.tool_name, "custom_shell_confirm");
+    assert!(
+        request.paths.iter().any(|item| item.contains("shell")),
+        "confirmation should mention the declared environment: {:?}",
+        request.paths
+    );
+    request.response_tx.send(false).expect("deny");
+
+    let result = handle.await.expect("tool task should finish");
+    assert!(result.contains("not approved"), "result: {result}");
+}
+
+#[tokio::test]
+async fn declaration_without_confirmation_skips_gate() {
+    // 同一个工具名与参数，仅声明不同：无需确认时直接执行，不触发任何审批。
     let mut runtime = test_runtime();
     runtime
         .tool_registry
         .register(Arc::new(DeclaredEnvTool(
             "custom_shell",
             blockcell_tools::ExecutionEnvironment::Shell,
+            false,
         )));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
@@ -5310,7 +5358,7 @@ async fn non_full_access_declaration_skips_full_access_gate() {
         tokio::time::timeout(std::time::Duration::from_millis(50), confirm_rx.recv())
             .await
             .is_err(),
-        "no confirmation should be requested for a non-full-access declaration"
+        "no confirmation should be requested when the tool does not declare it"
     );
 }
 

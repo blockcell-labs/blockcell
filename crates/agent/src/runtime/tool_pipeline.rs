@@ -3,7 +3,7 @@
 //! ```text
 //! ToolCall
 //!  → admission: Toggle → tool/pre-execute（listener 可改写参数或拒绝）
-//!               → Policy → DangerousOperation → PathAccess → FullAccess
+//!               → Policy → DangerousOperation → PathAccess → ExplicitConfirmation
 //!  → tool/call（任一阶段拒绝则直接记录 outcome=rejected 的 tool/result）
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
@@ -18,7 +18,6 @@ use super::tool_exec::{
     full_access_retry_args, shell_action_is_run, shell_sandbox_escalation_reason,
 };
 use super::*;
-use blockcell_tools::ExecutionEnvironment;
 
 /// 单次工具调用在管线中流动的状态。
 pub(crate) struct ToolInvocation<'a> {
@@ -55,8 +54,9 @@ enum AdmissionStage {
     Policy,
     DangerousOperation,
     PathAccess,
-    /// 工具声明 `ExecutionEnvironment::FullAccess` 时要求用户显式确认（P2-3）。
-    FullAccess,
+    /// 工具声明 [`blockcell_tools::Tool::requires_confirmation`] 时要求用户显式确认（P2-3）。
+    /// 判定依据是"是否需要确认"这一声明，而非执行环境，也不是硬编码的工具名。
+    ExplicitConfirmation,
 }
 
 /// pre-execute 必须先于所有安全检查，确保检查的是 listener 改写后的最终参数。
@@ -66,7 +66,7 @@ const ADMISSION_STAGES: [AdmissionStage; 6] = [
     AdmissionStage::Policy,
     AdmissionStage::DangerousOperation,
     AdmissionStage::PathAccess,
-    AdmissionStage::FullAccess,
+    AdmissionStage::ExplicitConfirmation,
 ];
 
 const MEMORY_WRITE_TOOLS: [&str; 4] = [
@@ -201,7 +201,9 @@ impl AgentRuntime {
                 AdmissionStage::Policy => self.guard_tool_policy(inv).await,
                 AdmissionStage::DangerousOperation => self.guard_dangerous_operation(inv).await,
                 AdmissionStage::PathAccess => self.guard_path_access(inv).await,
-                AdmissionStage::FullAccess => self.guard_full_access_environment(inv).await,
+                AdmissionStage::ExplicitConfirmation => {
+                    self.guard_explicit_confirmation(inv).await
+                }
             }?;
         }
         Ok(())
@@ -372,20 +374,25 @@ impl AgentRuntime {
         }
     }
 
-    /// 工具声明 `ExecutionEnvironment::FullAccess`（如 `sandbox_policy=full-access` 的 shell）
-    /// 时，要求用户显式确认后再执行。判定依据来自工具自身的执行环境声明，而非硬编码工具名。
-    async fn guard_full_access_environment(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
+    /// 工具声明"本次调用需要用户显式确认"（如 `sandbox_policy=full-access` 的 shell）时，
+    /// 先确认再执行。判定依据来自工具自身的 [`blockcell_tools::Tool::requires_confirmation`]
+    /// 声明，而非执行环境，也不是硬编码工具名——环境是描述性的，只有需要确认才拦截。
+    async fn guard_explicit_confirmation(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
         if inv.policy_confirmed {
             return Ok(());
         }
-        let declared = self
+        if !self
             .tool_registry
-            .execution_environment(&inv.call.name, &inv.args);
-        if declared != ExecutionEnvironment::FullAccess {
+            .requires_confirmation(&inv.call.name, &inv.args)
+        {
             return Ok(());
         }
+        let environment = self
+            .tool_registry
+            .execution_environment(&inv.call.name, &inv.args);
         let items = vec![format!(
-            "full-access {}: {}",
+            "{} {}: {}",
+            environment.as_str(),
             inv.call.name,
             inv.args
                 .get("command")
@@ -399,9 +406,13 @@ impl AgentRuntime {
             Ok(())
         } else {
             Err(serde_json::json!({
-                "error": format!("full-access {} execution was not approved", inv.call.name),
+                "error": format!(
+                    "{} {} execution was not approved",
+                    environment.as_str(),
+                    inv.call.name
+                ),
                 "tool": inv.call.name,
-                "sandbox_policy": "full-access"
+                "environment": environment.as_str()
             })
             .to_string())
         }

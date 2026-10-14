@@ -368,6 +368,11 @@ impl Tool for ShellTool {
         }
     }
 
+    /// full-access 的 shell 没有命令级兜底，必须逐次确认。
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        crate::execution_env::requests_full_access("shell", params)
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }

@@ -114,8 +114,10 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
+    /// `exec` 不受沙箱限制（见下方 `execute` 的说明），因此如实声明 `FullAccess`。
+    /// 它不需要逐次确认：危险命令由 DangerousOperation 阶段按命令内容把关。
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
-        crate::ExecutionEnvironment::Shell
+        crate::ExecutionEnvironment::FullAccess
     }
 
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
@@ -180,7 +182,9 @@ impl Tool for ExecTool {
         let max_output_chars = 10000;
 
         // exec 历史上不受沙箱限制（安全由 Guarded Tool Pipeline 的 policy / 路径检查保证），
-        // 这里显式声明 FullAccess；受限执行请使用 shell 工具的 sandbox_policy。
+        // 故以 FullAccess 运行，且 `execution_environment` 如实声明为 FullAccess；受限执行
+        // 请使用 shell 工具的 sandbox_policy。需要逐次确认的是 full-access 的 shell，
+        // exec 的危险命令由 DangerousOperation 阶段按命令内容把关。
         let result = self
             .executor
             .execute(ShellRequest {
