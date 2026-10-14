@@ -868,14 +868,9 @@ impl AgentRuntime {
                         memory_system.record_skill_load(&skill_ctx.name, &skill_ctx.prompt_md);
                         debug!(skill_name = %skill_ctx.name, "[layer4] Tracked skill activation for recovery");
                     }
-                    self.dispatch_event(
-                        &msg,
-                        &persist_session_key,
-                        &mut AgentEvent::SkillActivated {
-                            name: skill_ctx.name.clone(),
-                        },
-                    )
-                    .await;
+                    let mut skill_event = self.skill_activated_event(&skill_ctx.name);
+                    self.dispatch_event(&msg, &persist_session_key, &mut skill_event)
+                        .await;
 
                     let skill_history_seed = history[..history.len().saturating_sub(1)].to_vec();
                     let skill_outcome = self

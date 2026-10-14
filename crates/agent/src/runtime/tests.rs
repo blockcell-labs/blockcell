@@ -1732,6 +1732,23 @@ description: prompt demo
         .iter()
         .position(|kind| *kind == SessionEventKind::SkillLoad)
         .expect("skill/load recorded");
+    // skill/load 记录技能版本管理中的当前版本，指标按 `技能@版本` 统计回合
+    let payload = &events[skill_load].payload;
+    assert_eq!(payload["name"], "prompt_demo");
+    let version = runtime
+        .context_builder
+        .skill_manager()
+        .and_then(|manager| manager.get("prompt_demo"))
+        .and_then(|skill| skill.current_version.clone());
+    assert_eq!(payload["version"], serde_json::json!(version));
+    let key = blockcell_storage::session_metrics::skill_key(payload).expect("skill key");
+    assert_eq!(
+        blockcell_storage::SessionMetrics::from_events(&events).skill_turns[&key],
+        blockcell_storage::SkillTurnStats {
+            turns: 1,
+            failed_turns: 0
+        }
+    );
     assert_eq!(
         &kinds[skill_load + 1..skill_load + 5],
         &[

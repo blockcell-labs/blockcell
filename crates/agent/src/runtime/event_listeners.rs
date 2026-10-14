@@ -214,9 +214,10 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
                 "retry_safe": outcome.retry_allowed(*idempotency),
             }),
         )],
-        AgentEvent::SkillActivated { name } => {
-            vec![(SessionEventKind::SkillLoad, json!({ "name": name }))]
-        }
+        AgentEvent::SkillActivated { name, version } => vec![(
+            SessionEventKind::SkillLoad,
+            json!({ "name": name, "version": version }),
+        )],
         AgentEvent::MemoryWrite { tool_name, call_id } => vec![(
             SessionEventKind::MemoryWrite,
             json!({ "tool": tool_name, "call_id": call_id }),

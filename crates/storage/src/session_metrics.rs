@@ -5,7 +5,7 @@
 use crate::session_event::{SessionEvent, SessionEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SessionMetrics {
@@ -30,17 +30,56 @@ pub struct SessionMetrics {
     pub memory_writes: usize,
     /// 第一条与最后一条事件之间的时长。
     pub wall_duration_ms: u64,
+    /// 按 `技能@版本`（无版本时为技能名）统计加载了该技能的已结束回合，用于比较技能版本效果。
+    pub skill_turns: BTreeMap<String, SkillTurnStats>,
+}
+
+/// 加载了某个技能版本的已结束回合数与其中异常终止的回合数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SkillTurnStats {
+    pub turns: usize,
+    pub failed_turns: usize,
+}
+
+/// `skill/load` 事件对应的统计键：`name@version`，无版本时为 `name`。
+pub fn skill_key(payload: &Value) -> Option<String> {
+    let name = payload.get("name").and_then(Value::as_str)?;
+    Some(match payload.get("version").and_then(Value::as_str) {
+        Some(version) if !version.is_empty() => format!("{name}@{version}"),
+        _ => name.to_string(),
+    })
 }
 
 impl SessionMetrics {
     pub fn from_events(events: &[SessionEvent]) -> Self {
         let mut metrics = Self::default();
+        let mut turn_skills: HashMap<&str, BTreeSet<String>> = HashMap::new();
         for event in events {
             let payload = &event.payload;
             match event.kind {
                 SessionEventKind::TurnStart => metrics.turns += 1,
-                SessionEventKind::TurnEnd if payload.get("error").is_some() => {
-                    metrics.failed_turns += 1
+                SessionEventKind::TurnEnd => {
+                    let failed = payload.get("error").is_some();
+                    if failed {
+                        metrics.failed_turns += 1;
+                    }
+                    let skills = event
+                        .turn_id
+                        .as_deref()
+                        .and_then(|turn_id| turn_skills.remove(turn_id))
+                        .unwrap_or_default();
+                    for skill in skills {
+                        let stats = metrics.skill_turns.entry(skill).or_default();
+                        stats.turns += 1;
+                        stats.failed_turns += usize::from(failed);
+                    }
+                }
+                SessionEventKind::SkillLoad => {
+                    if let (Some(turn_id), Some(skill)) =
+                        (event.turn_id.as_deref(), skill_key(payload))
+                    {
+                        turn_skills.entry(turn_id).or_default().insert(skill);
+                    }
                 }
                 SessionEventKind::StepStart => metrics.steps += 1,
                 SessionEventKind::ModelRequest => metrics.model_requests += 1,
@@ -330,6 +369,40 @@ mod tests {
         assert_eq!(second.tool_calls.len(), 1);
         assert!(second.error.is_none());
         assert!(TurnFacts::from_events(&log, "missing").is_none());
+    }
+
+    #[test]
+    fn metrics_group_finished_turns_by_skill_version() {
+        use SessionEventKind::*;
+        let mut log = events(vec![
+            (TurnStart, json!({})),
+            (SkillLoad, json!({ "name": "deploy", "version": "v2" })),
+            (SkillLoad, json!({ "name": "deploy", "version": "v2" })),
+            (TurnEnd, json!({})),
+            (TurnStart, json!({})),
+            (SkillLoad, json!({ "name": "deploy", "version": "v2" })),
+            (SkillLoad, json!({ "name": "notes" })),
+            (TurnEnd, json!({ "error": "boom" })),
+            (TurnStart, json!({})),
+            (SkillLoad, json!({ "name": "deploy", "version": "v3" })),
+        ]);
+        for (event, turn) in log.iter_mut().zip([1, 1, 1, 1, 2, 2, 2, 2, 3, 3]) {
+            event.turn_id = Some(format!("t{turn}"));
+        }
+
+        let metrics = SessionMetrics::from_events(&log);
+
+        let stats = |turns, failed_turns| SkillTurnStats {
+            turns,
+            failed_turns,
+        };
+        assert_eq!(
+            metrics.skill_turns,
+            BTreeMap::from([
+                ("deploy@v2".to_string(), stats(2, 1)),
+                ("notes".to_string(), stats(1, 1)),
+            ])
+        );
     }
 
     #[test]

@@ -450,6 +450,18 @@ impl AgentRuntime {
         )
     }
 
+    /// `skill/load` 事件，携带技能版本管理中的当前版本，便于按版本比较技能效果。
+    pub(super) fn skill_activated_event(&self, name: &str) -> AgentEvent {
+        AgentEvent::SkillActivated {
+            name: name.to_string(),
+            version: self
+                .context_builder
+                .skill_manager()
+                .and_then(|manager| manager.get(name))
+                .and_then(|skill| skill.current_version.clone()),
+        }
+    }
+
     pub(crate) async fn execute_skill_for_user(
         &mut self,
         active_skill: &ActiveSkillContext,
@@ -462,14 +474,9 @@ impl AgentRuntime {
             memory_system.record_skill_load(&active_skill.name, &active_skill.prompt_md);
             debug!(skill_name = %active_skill.name, "[layer4] Tracked skill activation for recovery (auto-routed or manual)");
         }
-        self.dispatch_event(
-            msg,
-            persist_session_key,
-            &mut AgentEvent::SkillActivated {
-                name: active_skill.name.clone(),
-            },
-        )
-        .await;
+        let mut skill_event = self.skill_activated_event(&active_skill.name);
+        self.dispatch_event(msg, persist_session_key, &mut skill_event)
+            .await;
 
         let history = self.session_store.load(persist_session_key)?;
         let (result, mut session_metadata, allowed_tools) = self

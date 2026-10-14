@@ -181,7 +181,10 @@ fn render_event(event: &SessionEvent, full: bool) -> String {
             u64_at(payload, &["duration_ms"]),
             preview(&value_text(&payload["result"]), full)
         ),
-        SessionEventKind::SkillLoad => format!("  skill load {}", string_at(payload, "name")),
+        SessionEventKind::SkillLoad => format!(
+            "  skill load {}",
+            blockcell_storage::session_metrics::skill_key(payload).unwrap_or_default()
+        ),
         SessionEventKind::MemoryWrite => {
             format!("    memory write via {}", string_at(payload, "tool"))
         }
@@ -224,7 +227,7 @@ fn render_metrics(metrics: &SessionMetrics) -> String {
         .map(|(outcome, count)| format!("{outcome}={count}"))
         .collect::<Vec<_>>()
         .join(" ");
-    [
+    let mut lines = vec![
         "Summary".to_string(),
         format!(
             "  turns: {} ({} failed)   steps: {}",
@@ -252,8 +255,17 @@ fn render_metrics(metrics: &SessionMetrics) -> String {
             "  compactions: {}   memory writes: {}   duration: {}ms",
             metrics.compactions, metrics.memory_writes, metrics.wall_duration_ms
         ),
-    ]
-    .join("\n")
+    ];
+    if !metrics.skill_turns.is_empty() {
+        let skills = metrics
+            .skill_turns
+            .iter()
+            .map(|(skill, stats)| format!("{skill}={}/{} failed", stats.turns, stats.failed_turns))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("  skill turns: {skills}"));
+    }
+    lines.join("\n")
 }
 
 fn tool_call_names(payload: &Value) -> Vec<String> {
@@ -348,6 +360,15 @@ mod tests {
 
         let step = render_event(&event(SessionEventKind::StepStart, json!({})), false);
         assert_eq!(step, "  -- step 2");
+
+        let skill = render_event(
+            &event(
+                SessionEventKind::SkillLoad,
+                json!({ "name": "deploy", "version": "v2" }),
+            ),
+            false,
+        );
+        assert_eq!(skill, "  skill load deploy@v2");
     }
 
     #[test]

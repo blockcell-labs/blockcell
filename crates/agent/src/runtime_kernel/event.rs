@@ -117,6 +117,8 @@ pub enum AgentEvent {
     },
     SkillActivated {
         name: String,
+        /// 技能版本管理中的当前版本；未纳入版本管理的技能为空。
+        version: Option<String>,
     },
     /// 记忆写入类工具成功执行。
     MemoryWrite {

@@ -27,7 +27,7 @@ pub use session_event::{
     JsonlSessionEventLog, NewSessionEvent, SessionEvent, SessionEventKind, SessionEventLogInfo,
     SessionEventReader, SessionEventWriter, SESSION_EVENT_RETENTION_DAYS,
 };
-pub use session_metrics::{SessionMetrics, ToolCallFact, TurnFacts};
+pub use session_metrics::{SessionMetrics, SkillTurnStats, ToolCallFact, TurnFacts};
 pub use session_projection::{
     project_history, project_turns, verify_history, ProjectedTurn, ProjectionCheck,
     ProjectionMismatch, ProjectionMismatchKind,
