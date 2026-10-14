@@ -3006,6 +3006,37 @@ fn test_runtime_with_provider_and_paths(
     runtime
 }
 
+/// 带默认工具注册表的测试运行时（预取等需要真实工具声明的用例使用）。
+fn test_runtime_with_default_tools() -> AgentRuntime {
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    // 注意：`std::env::temp_dir()` 在 macOS 上位于 `/var/folders/...`，canonicalize 后
+    // 落到 `/private/var/...`，而 `/private/var` 命中路径策略的内置敏感目录，会让工作区
+    // 文件被判为 Deny。这里改用 `/tmp`（canonicalize 为 `/private/tmp`，不在敏感列表内），
+    // 使工作区路径能正常通过路径策略。
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "blockcell-default-tools-runtime-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&base).expect("create temp default-tools runtime dir");
+    let paths = Paths::with_base(base);
+    let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
+        "test/mock",
+        "test",
+        Arc::new(TestProvider),
+    );
+    let mut runtime = AgentRuntime::new(
+        config,
+        paths,
+        provider_pool,
+        blockcell_tools::ToolRegistry::with_defaults(),
+    )
+    .expect("create runtime");
+    runtime.set_agent_id(Some("default".to_string()));
+    runtime
+}
+
 #[test]
 fn steering_drain_injects_user_messages_into_current_and_history() {
     let mut runtime = test_runtime();
@@ -5070,6 +5101,80 @@ fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCallRequest {
         arguments,
         thought_signature: None,
     }
+}
+
+fn tool_call_with_id(id: &str, name: &str, arguments: serde_json::Value) -> ToolCallRequest {
+    ToolCallRequest {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+        thought_signature: None,
+    }
+}
+
+#[tokio::test]
+async fn prefetch_runs_read_only_calls_and_skips_write_and_exec() {
+    let runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("alpha.txt"), "alpha-content").unwrap();
+    std::fs::write(workspace.join("beta.txt"), "beta-content").unwrap();
+
+    let msg = test_main_session_inbound("cli", "prefetch");
+    let calls = vec![
+        tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+        tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
+        tool_call_with_id(
+            "c3",
+            "write_file",
+            serde_json::json!({"path": "gamma.txt", "content": "x"}),
+        ),
+        tool_call_with_id("c4", "exec", serde_json::json!({"command": "ls"})),
+    ];
+
+    let prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    assert_eq!(prefetched.len(), 2, "only read-only calls should be prefetched");
+    assert!(!prefetched.contains_key("c3"), "write_file must not be prefetched");
+    assert!(!prefetched.contains_key("c4"), "exec must not be prefetched");
+
+    let alpha = prefetched["c1"].result.as_ref().expect("alpha read ok");
+    assert!(alpha.to_string().contains("alpha-content"));
+    assert_eq!(prefetched["c1"].args, serde_json::json!({"path": "alpha.txt"}));
+}
+
+#[tokio::test]
+async fn prefetch_skips_when_fewer_than_two_eligible_calls() {
+    let runtime = test_runtime_with_default_tools();
+    let msg = test_main_session_inbound("cli", "prefetch-one");
+    let calls = vec![tool_call("read_file", serde_json::json!({"path": "a.txt"}))];
+    assert!(runtime
+        .prefetch_read_only_tools(&calls, &msg)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn prefetch_respects_tool_policy_deny() {
+    use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
+
+    let mut runtime = test_runtime_with_default_tools();
+    runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![tool_policy_rule(
+            "deny-read",
+            "read_file",
+            ToolPolicyDecision::Deny,
+        )],
+        ..Default::default()
+    });
+    let msg = test_main_session_inbound("cli", "prefetch-deny");
+    let calls = vec![
+        tool_call_with_id("c1", "read_file", serde_json::json!({"path": "a.txt"})),
+        tool_call_with_id("c2", "read_file", serde_json::json!({"path": "b.txt"})),
+    ];
+    assert!(runtime
+        .prefetch_read_only_tools(&calls, &msg)
+        .await
+        .is_empty());
 }
 
 #[tokio::test]

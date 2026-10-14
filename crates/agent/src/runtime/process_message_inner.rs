@@ -916,6 +916,10 @@ impl AgentRuntime {
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
+                // 只读预取：彼此独立的只读调用并发执行，主循环按原顺序消费结果（P2-2）。
+                let mut prefetched = self
+                    .prefetch_read_only_tools(&response.tool_calls, &msg)
+                    .await;
                 for (call_index, tool_call) in response.tool_calls.iter().enumerate() {
                     if tool_call.name == "web_search" || tool_call.name == "web_fetch" {
                         wants_forced_answer = true;
@@ -936,7 +940,11 @@ impl AgentRuntime {
                     let tool_output = if tool_names.iter().any(|allowed| allowed == &tool_call.name)
                     {
                         match loop_guard.admit(&tool_call.name) {
-                            Ok(()) => self.execute_tool_call(tool_call, &msg, None).await,
+                            Ok(()) => {
+                                let pre = prefetched.remove(&tool_call.id);
+                                self.execute_tool_call_prefetched(tool_call, &msg, None, pre)
+                                    .await
+                            }
                             Err(denied) => {
                                 over_iteration = true;
                                 self.record_unexecuted_tool_call(

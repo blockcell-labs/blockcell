@@ -124,8 +124,21 @@ impl AgentRuntime {
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
     ) -> ToolCallOutput {
+        self.execute_tool_call_prefetched(tool_call, msg, active_skill_dir, None)
+            .await
+    }
+
+    /// 与 [`Self::execute_tool_call`] 相同，但可携带只读预取结果；命中时跳过工具体执行，
+    /// 仍完整走准入 / 事件 / 审计 / 归类流程。
+    pub(crate) async fn execute_tool_call_prefetched(
+        &mut self,
+        tool_call: &ToolCallRequest,
+        msg: &InboundMessage,
+        active_skill_dir: Option<PathBuf>,
+        prefetched: Option<super::prefetch::PrefetchedToolResult>,
+    ) -> ToolCallOutput {
         // 管线 future 较大，放到堆上避免把调用方（主循环）的 future 撑大导致栈溢出。
-        Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir)).await
+        Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir, prefetched)).await
     }
 
     async fn run_tool_pipeline(
@@ -133,6 +146,7 @@ impl AgentRuntime {
         tool_call: &ToolCallRequest,
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
+        prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolCallOutput {
         let mut inv = ToolInvocation {
             call: tool_call,
@@ -156,7 +170,7 @@ impl AgentRuntime {
         .await;
 
         let ctx = self.build_tool_context(msg, active_skill_dir);
-        let outcome = self.execute_guarded_tool(&mut inv, ctx).await;
+        let outcome = self.execute_guarded_tool(&mut inv, ctx, prefetched).await;
 
         self.after_tool_execute(&inv, &outcome).await;
         let learning_hint = self.classify_tool_outcome(tool_call, &outcome).await;
@@ -412,7 +426,7 @@ impl AgentRuntime {
         }
     }
 
-    fn build_tool_context(
+    pub(crate) fn build_tool_context(
         &self,
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
@@ -497,12 +511,26 @@ impl AgentRuntime {
     }
 
     /// 执行工具；shell 在沙箱内失败且需要提权时，审批通过后以 full-access 重试。
+    ///
+    /// 若携带了只读预取结果且准入阶段未改写参数，则直接复用预取结果，跳过工具体的实际
+    /// 执行（准入、事件、审计、归类流程保持不变）。
     async fn execute_guarded_tool(
         &mut self,
         inv: &mut ToolInvocation<'_>,
         ctx: blockcell_tools::ToolContext,
+        prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolExecution {
         let tool_name = &inv.call.name;
+        if let Some(prefetched) = prefetched {
+            if prefetched.args == inv.args {
+                return self.finish_tool_execution(
+                    tool_name,
+                    &inv.args,
+                    prefetched.result,
+                    prefetched.duration_ms,
+                );
+            }
+        }
         let start = std::time::Instant::now();
         let mut result = self
             .execute_runtime_tool_call(tool_name, ctx.clone(), inv.args.clone())
@@ -536,8 +564,18 @@ impl AgentRuntime {
             }
         }
         let duration_ms = start.elapsed().as_millis() as u64;
+        self.finish_tool_execution(tool_name, &inv.args, result, duration_ms)
+    }
 
-        let idempotency = self.tool_registry.idempotency(tool_name, &inv.args);
+    /// 由工具执行结果构造 [`ToolExecution`]（结论、幂等性、结果字符串）。
+    fn finish_tool_execution(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        result: blockcell_core::Result<serde_json::Value>,
+        duration_ms: u64,
+    ) -> ToolExecution {
+        let idempotency = self.tool_registry.idempotency(tool_name, args);
         let outcome = ToolOutcome::from_failure(
             result
                 .as_ref()

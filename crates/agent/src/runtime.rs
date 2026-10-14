@@ -78,6 +78,7 @@ mod ghost_boundary;
 mod lightweight_handle;
 mod message_dispatch;
 mod message_task;
+mod prefetch;
 pub mod pre_step;
 mod process_message_inner;
 mod process_message_phases;
