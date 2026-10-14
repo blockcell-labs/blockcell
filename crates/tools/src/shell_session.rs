@@ -231,10 +231,22 @@ impl ShellSessionManager {
         timeout: Duration,
     ) -> Result<ShellCommandOutput> {
         let deadline = tokio::time::Instant::now() + timeout;
+        // 一次 poll 会跨多个轮询周期，而命令输出是分批到达的：`poll_once` 每次只返回自上一轮
+        // 以来新到的字节，并推进"已交付"游标。因此必须把每一轮都累积起来——只返回最后一轮会
+        // 静默丢掉先到的输出（`echo a; sleep 1; echo b` 会只剩 b）。
+        let mut output = String::new();
+        let mut truncated = false;
         loop {
-            let output = self.poll_once(session_id).await?;
-            if !output.running || tokio::time::Instant::now() >= deadline {
-                return Ok(output);
+            let polled = self.poll_once(session_id).await?;
+            let capped = append_capped(&mut output, &polled.output);
+            truncated = truncated || capped || polled.truncated;
+            if !polled.running || tokio::time::Instant::now() >= deadline {
+                return Ok(ShellCommandOutput {
+                    output,
+                    exit_code: polled.exit_code,
+                    running: polled.running,
+                    truncated,
+                });
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -582,6 +594,25 @@ fn require_session_id(params: &Value, action: &str) -> Result<()> {
         .ok_or_else(|| Error::Validation(format!("action={action} requires session_id")))
 }
 
+/// 把一轮轮询的输出追加到累积结果，并把长度限制在 `MAX_SESSION_OUTPUT_BYTES` 内。
+///
+/// 累积多个轮询周期后，单次调用的结果可能超过环形缓冲的容量（例如持续输出的命令）；
+/// 这里保留尾部并置位截断标记，与 [`SharedOutput`] 丢弃最旧字节的行为保持一致。
+/// 返回是否因超长而截断。
+fn append_capped(accumulated: &mut String, chunk: &str) -> bool {
+    accumulated.push_str(chunk);
+    if accumulated.len() <= MAX_SESSION_OUTPUT_BYTES {
+        return false;
+    }
+    // 按字符边界截断，避免切开 UTF-8 序列。
+    let mut cut = accumulated.len() - MAX_SESSION_OUTPUT_BYTES;
+    while cut < accumulated.len() && !accumulated.is_char_boundary(cut) {
+        cut += 1;
+    }
+    accumulated.drain(..cut);
+    true
+}
+
 fn shell_output_json(session_id: &str, policy: SandboxPolicy, output: ShellCommandOutput) -> Value {
     json!({
         "session_id": session_id,
@@ -767,6 +798,64 @@ mod tests {
         assert!(!first.running);
         assert!(second.output.contains("nested"));
         manager.close(&session_id).await.expect("close session");
+    }
+
+    /// 命令输出会分批到达。轮询等待期间每一批都必须累积到最终结果里——只保留最后一批
+    /// 会丢掉先到的输出（`poll_once` 每轮都会推进"已交付"游标，于是先到的字节不再被计入）。
+    #[tokio::test]
+    async fn shell_command_keeps_output_from_earlier_poll_iterations() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create shell session");
+
+        let output = manager
+            .run_command(
+                &session_id,
+                "echo first; sleep 0.3; echo second",
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("run command");
+
+        assert!(!output.running);
+        assert_eq!(output.exit_code, Some(0));
+        assert!(
+            output.output.contains("first"),
+            "output delivered before the last poll iteration was dropped: {:?}",
+            output.output
+        );
+        assert!(
+            output.output.contains("second"),
+            "final output missing: {:?}",
+            output.output
+        );
+        manager.close(&session_id).await.expect("close session");
+    }
+
+    /// 累积结果必须保持有界（与环形缓冲同量级），且截断不能切开 UTF-8 序列。
+    #[test]
+    fn accumulated_output_is_capped_without_splitting_utf8() {
+        let mut accumulated = String::from("head");
+        let chunk = "é".repeat(MAX_SESSION_OUTPUT_BYTES);
+
+        assert!(append_capped(&mut accumulated, &chunk));
+        assert!(
+            accumulated.len() <= MAX_SESSION_OUTPUT_BYTES,
+            "capped length was {}",
+            accumulated.len()
+        );
+        assert!(accumulated.chars().all(|ch| ch == 'é'));
+
+        let mut small = String::new();
+        assert!(!append_capped(&mut small, "ok"));
+        assert_eq!(small, "ok");
     }
 
     #[tokio::test]
