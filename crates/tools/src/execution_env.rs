@@ -14,7 +14,8 @@
 //! 谎报成 `Shell`），审计也随之失准。
 //!
 //! 单一来源：[`requests_full_access`] 是"`shell` 本次调用是否会以 full-access 运行"的
-//! 唯一判定规则，`ShellTool` 的环境 / 确认声明与技能脚本嵌套守卫共用它，避免规则漂移。
+//! 唯一判定规则——新建会话看显式 `sandbox_policy`，复用会话看创建时固定的策略。`ShellTool`
+//! 的环境 / 确认声明与技能脚本嵌套守卫共用它，避免规则漂移。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,12 +62,31 @@ impl Default for ExecutionEnvironment {
 
 /// `shell` 本次调用是否会以 full-access 运行（因而需要用户显式确认）。
 ///
-/// 目前只有 `shell` 在 `action=run` 且 `sandbox_policy=full-access` 时命中。这是 `ShellTool`
-/// 的环境 / 确认声明与技能脚本嵌套守卫共用的唯一判定规则。
+/// 这是 `ShellTool` 的环境 / 确认声明与技能脚本嵌套守卫共用的唯一判定规则。
 pub fn requests_full_access(tool_name: &str, args: &Value) -> bool {
-    tool_name == "shell"
-        && args.get("action").and_then(Value::as_str).unwrap_or("run") == "run"
-        && args.get("sandbox_policy").and_then(Value::as_str) == Some("full-access")
+    if tool_name != "shell" {
+        return false;
+    }
+    if args.get("action").and_then(Value::as_str).unwrap_or("run") != "run" {
+        return false;
+    }
+    effective_sandbox_is_full_access(args)
+}
+
+/// 本次 `shell` 调用生效的沙箱策略是否为 full-access。
+///
+/// 新建会话看显式 `sandbox_policy`；复用会话（带 `session_id`）看**创建时固定**的策略——
+/// 会话策略创建后不可更改（`execute` 会拒绝不一致的 `sandbox_policy`），所以复用时即便不
+/// 重复声明，命令实际仍以会话策略运行。漏掉这一路会让"先建 full-access 会话、后续复用"
+/// 绕过确认。
+fn effective_sandbox_is_full_access(args: &Value) -> bool {
+    if let Some(policy) = args.get("sandbox_policy").and_then(Value::as_str) {
+        return policy == "full-access";
+    }
+    args.get("session_id")
+        .and_then(Value::as_str)
+        .and_then(crate::shell_session::session_sandbox_policy)
+        .is_some_and(|policy| policy == crate::shell_session::SandboxPolicy::FullAccess)
 }
 
 #[cfg(test)]
@@ -108,6 +128,43 @@ mod tests {
         assert!(!requests_full_access(
             "exec",
             &json!({"command": "ls", "sandbox_policy": "full-access"})
+        ));
+    }
+
+    #[test]
+    fn full_access_via_reused_session_is_detected() {
+        use crate::shell_session::{insert_session_policy_for_test, SandboxPolicy};
+
+        insert_session_policy_for_test("env-test-full", SandboxPolicy::FullAccess);
+        insert_session_policy_for_test("env-test-write", SandboxPolicy::WorkspaceWrite);
+
+        // 复用 full-access 会话：即使不重复声明 sandbox_policy，也必须按 full-access 处理
+        assert!(requests_full_access(
+            "shell",
+            &json!({"command": "ls", "session_id": "env-test-full"})
+        ));
+        // 复用受限会话 / 未知会话 → 不请求
+        assert!(!requests_full_access(
+            "shell",
+            &json!({"command": "ls", "session_id": "env-test-write"})
+        ));
+        assert!(!requests_full_access(
+            "shell",
+            &json!({"command": "ls", "session_id": "env-test-missing"})
+        ));
+        // 显式策略优先于会话查询
+        assert!(!requests_full_access(
+            "shell",
+            &json!({
+                "command": "ls",
+                "session_id": "env-test-full",
+                "sandbox_policy": "workspace-write"
+            })
+        ));
+        // 非 run 动作不请求
+        assert!(!requests_full_access(
+            "shell",
+            &json!({"action": "poll", "session_id": "env-test-full"})
         ));
     }
 }

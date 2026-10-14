@@ -83,6 +83,11 @@ struct ShellSession {
 #[derive(Clone)]
 pub(crate) struct ShellSessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ShellSession>>>>>,
+    /// 会话创建时固定的沙箱策略的**同步**快照。会话策略创建后不可更改，复用会话
+    /// （`action=run` + `session_id` 且不带 `sandbox_policy`）时无法从参数看出其真实
+    /// 环境，这里保存一份同步索引，供 [`crate::execution_env::requests_full_access`] 在
+    /// 同步的工具声明上下文中判定。
+    policies: Arc<std::sync::RwLock<HashMap<String, SandboxPolicy>>>,
     sandbox: Arc<dyn SandboxProvider>,
 }
 
@@ -94,8 +99,14 @@ impl ShellSessionManager {
     pub(crate) fn with_sandbox(sandbox: Arc<dyn SandboxProvider>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            policies: Arc::new(std::sync::RwLock::new(HashMap::new())),
             sandbox,
         }
+    }
+
+    /// 会话创建时固定的沙箱策略；会话不存在返回 `None`。同步读取，供执行环境声明使用。
+    pub(crate) fn policy_snapshot(&self, session_id: &str) -> Option<SandboxPolicy> {
+        self.policies.read().ok()?.get(session_id).copied()
     }
 
     pub(crate) async fn create(
@@ -162,6 +173,9 @@ impl ShellSessionManager {
                 pid,
             })),
         );
+        if let Ok(mut policies) = self.policies.write() {
+            policies.insert(session_id.clone(), sandbox_policy);
+        }
         Ok(session_id)
     }
 
@@ -333,6 +347,9 @@ impl ShellSessionManager {
             .await
             .remove(session_id)
             .ok_or_else(|| Error::NotFound(format!("Shell session not found: {session_id}")))?;
+        if let Ok(mut policies) = self.policies.write() {
+            policies.remove(session_id);
+        }
         let mut session = session.lock().await;
         terminate_process_group(session.pid);
         let _ = session.child.start_kill();
@@ -355,6 +372,22 @@ impl ShellSessionManager {
             session.pid = None;
         }
         Ok((session.pid, session.sandbox_policy))
+    }
+}
+
+/// 会话创建时固定的沙箱策略（同步查询）；会话不存在返回 `None`。
+///
+/// 供执行环境 / 确认声明使用：复用会话（`action=run` + `session_id` 且不带 `sandbox_policy`）
+/// 时，参数本身看不出会话是否以 full-access 运行，只能查这份创建时的快照。
+pub fn session_sandbox_policy(session_id: &str) -> Option<SandboxPolicy> {
+    SHELL_SESSIONS.policy_snapshot(session_id)
+}
+
+/// 仅测试用：直接写入会话策略快照，避免为声明测试拉起真实 shell。
+#[cfg(test)]
+pub(crate) fn insert_session_policy_for_test(session_id: &str, policy: SandboxPolicy) {
+    if let Ok(mut policies) = SHELL_SESSIONS.policies.write() {
+        policies.insert(session_id.to_string(), policy);
     }
 }
 
