@@ -123,7 +123,7 @@ impl AgentRuntime {
         tool_call: &ToolCallRequest,
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
-    ) -> String {
+    ) -> ToolCallOutput {
         // 管线 future 较大，放到堆上避免把调用方（主循环）的 future 撑大导致栈溢出。
         Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir)).await
     }
@@ -133,7 +133,7 @@ impl AgentRuntime {
         tool_call: &ToolCallRequest,
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
-    ) -> String {
+    ) -> ToolCallOutput {
         let mut inv = ToolInvocation {
             call: tool_call,
             msg,
@@ -142,7 +142,7 @@ impl AgentRuntime {
         };
         if let Err(denied) = self.admit_tool_call(&mut inv).await {
             self.record_rejected_tool_call(&inv, &denied).await;
-            return denied;
+            return ToolCallOutput::rejected(denied);
         }
         self.dispatch_event(
             msg,
@@ -165,10 +165,14 @@ impl AgentRuntime {
         // 结果未知时提示先对账，避免模型直接重试造成重复副作用；再追加学习提示，让 LLM 自然地回复用户
         let reconcile_hint = (outcome.outcome == ToolOutcome::Unknown)
             .then(|| unknown_outcome_hint(&tool_call.name));
-        [reconcile_hint, learning_hint]
+        let text = [reconcile_hint, learning_hint]
             .into_iter()
             .flatten()
-            .fold(outcome.result_str, |text, hint| format!("{text}\n\n{hint}"))
+            .fold(outcome.result_str, |text, hint| format!("{text}\n\n{hint}"));
+        ToolCallOutput {
+            text,
+            outcome: outcome.outcome,
+        }
     }
 
     async fn admit_tool_call(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {

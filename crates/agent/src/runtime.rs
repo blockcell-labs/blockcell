@@ -100,13 +100,69 @@ const TOOL_ROUND_THROTTLE_MS: u64 = 600;
 const TOOL_ROUND_THROTTLE_AFTER_RATE_LIMIT_MS: u64 = 2_500;
 const MAX_IDENTICAL_TOOL_FAILURES: u32 = 3;
 
-#[derive(Default)]
-struct ConsecutiveToolFailureTracker {
+/// 一次工具调用交还给主循环的结果：返回给模型的内容与 Runtime 判定的执行结论。
+pub(crate) struct ToolCallOutput {
+    pub(crate) text: String,
+    pub(crate) outcome: ToolOutcome,
+}
+
+impl ToolCallOutput {
+    /// 未执行（被拒绝、超出上限、不在作用域内）的调用。
+    fn rejected(text: String) -> Self {
+        Self {
+            text,
+            outcome: ToolOutcome::Rejected,
+        }
+    }
+}
+
+/// 回合内的工具调用守卫，主循环与技能循环共用：
+/// - 单工具调用上限（`maxToolIterations` / `maxToolIterationsByTool`）；
+/// - 同一调用（工具名 + 参数）连续未成功达到阈值即停止。
+struct ToolLoopGuard {
+    default_limit: u32,
+    limits_by_tool: HashMap<String, u32>,
+    call_counts: HashMap<String, u32>,
     last_signature: Option<String>,
     consecutive_failures: u32,
 }
 
-impl ConsecutiveToolFailureTracker {
+impl ToolLoopGuard {
+    fn new(default_limit: u32, limits_by_tool: HashMap<String, u32>) -> Self {
+        Self {
+            default_limit,
+            limits_by_tool,
+            call_counts: HashMap::new(),
+            last_signature: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn call_counts(&self) -> &HashMap<String, u32> {
+        &self.call_counts
+    }
+
+    /// 计入一次调用；超过该工具的调用上限时返回作为工具结果的拒绝内容。
+    fn admit(&mut self, tool_name: &str) -> std::result::Result<(), String> {
+        let limit = self
+            .limits_by_tool
+            .get(tool_name)
+            .copied()
+            .unwrap_or(self.default_limit);
+        let count = self.call_counts.entry(tool_name.to_string()).or_insert(0);
+        *count += 1;
+        if *count <= limit {
+            return Ok(());
+        }
+        Err(serde_json::json!({
+            "error": format!("Tool '{}' execeeded max call limit ({}).", tool_name, limit),
+            "tool": tool_name,
+            "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
+        })
+        .to_string())
+    }
+
+    /// 记录调用结论；同一调用连续未成功达到阈值时返回 `true`。
     fn record(&mut self, call: &ToolCallRequest, failed: bool) -> bool {
         if !failed {
             self.last_signature = None;
@@ -1603,6 +1659,12 @@ pub(super) fn is_path_within_base(base: &Path, candidate: &Path) -> bool {
     candidate_norm.starts_with(&base_norm)
 }
 
+/// 工具调用是否未成功：以 Runtime 判定的 [`ToolOutcome`] 为准；工具以 `Ok` 返回
+/// `{"error": ...}` / `{"status": "error"}` 的软失败同样计为未成功。
+fn tool_call_failed(output: &ToolCallOutput) -> bool {
+    output.outcome.is_error() || tool_result_indicates_error(&output.text)
+}
+
 fn tool_result_indicates_error(result: &str) -> bool {
     if result.starts_with("Tool error:")
         || result.starts_with("Error:")
@@ -1614,7 +1676,10 @@ fn tool_result_indicates_error(result: &str) -> bool {
     }
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
-        if value.get("error").is_some() {
+        if value
+            .get("error")
+            .is_some_and(|error| !error.is_null() && error != &serde_json::Value::Bool(false))
+        {
             return true;
         }
         if value.get("status").and_then(|v| v.as_str()) == Some("error") {

@@ -87,11 +87,50 @@ fn identical_tool_call_failures_trip_after_three_attempts() {
         arguments: serde_json::json!({"path": "missing.rs"}),
         thought_signature: None,
     };
-    let mut tracker = ConsecutiveToolFailureTracker::default();
+    let mut tracker = ToolLoopGuard::new(10, HashMap::new());
 
     assert!(!tracker.record(&call, true));
     assert!(!tracker.record(&call, true));
     assert!(tracker.record(&call, true));
+}
+
+#[test]
+fn loop_guard_enforces_default_and_per_tool_call_limits() {
+    let mut guard = ToolLoopGuard::new(2, HashMap::from([("exec".to_string(), 1)]));
+
+    assert!(guard.admit("read_file").is_ok());
+    assert!(guard.admit("read_file").is_ok());
+    let denied = guard.admit("read_file").unwrap_err();
+    assert!(denied.contains("max call limit (2)"), "{denied}");
+
+    assert!(guard.admit("exec").is_ok());
+    assert!(guard.admit("exec").unwrap_err().contains("(1)"));
+    assert_eq!(guard.call_counts().get("read_file"), Some(&3));
+}
+
+#[test]
+fn tool_call_failure_follows_outcome_and_soft_errors() {
+    let output = |text: &str, outcome| ToolCallOutput {
+        text: text.to_string(),
+        outcome,
+    };
+    // 执行结论为准
+    assert!(tool_call_failed(&output("{}", ToolOutcome::Rejected)));
+    assert!(tool_call_failed(&output("ok", ToolOutcome::Unknown)));
+    // 工具以 Ok 返回的软失败
+    assert!(tool_call_failed(&output(
+        r#"{"error":"not found"}"#,
+        ToolOutcome::Succeeded
+    )));
+    // 成功结果中值为空的 error 字段不是失败
+    assert!(!tool_call_failed(&output(
+        r#"{"error":null,"data":1}"#,
+        ToolOutcome::Succeeded
+    )));
+    assert!(!tool_call_failed(&output(
+        r#"{"error":false}"#,
+        ToolOutcome::Succeeded
+    )));
 }
 
 #[test]
@@ -108,7 +147,7 @@ fn changed_arguments_or_success_reset_consecutive_tool_failures() {
         arguments: serde_json::json!({"path": "second.rs"}),
         thought_signature: None,
     };
-    let mut tracker = ConsecutiveToolFailureTracker::default();
+    let mut tracker = ToolLoopGuard::new(10, HashMap::new());
 
     assert!(!tracker.record(&first, true));
     assert!(!tracker.record(&first, true));
@@ -5040,7 +5079,8 @@ async fn tool_policy_deny_blocks_tool_before_execution() {
             &test_main_session_inbound("cli", "policy-deny"),
             None,
         )
-        .await;
+        .await
+        .text;
 
     assert!(result.contains("exec is disabled by policy"));
     assert!(!result.contains("Unknown tool"));
@@ -5061,7 +5101,8 @@ async fn tool_policy_ask_uses_existing_confirmation_flow() {
 
     let msg = test_main_session_inbound("cli", "policy-ask");
     let call = tool_call("exec", serde_json::json!({"command": "echo hello"}));
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = confirm_rx
         .recv()
@@ -5092,7 +5133,8 @@ async fn shell_full_access_requires_confirmation_before_execution() {
             "sandbox_policy": "full-access"
         }),
     );
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
         .await
@@ -5128,7 +5170,8 @@ async fn unavailable_native_sandbox_can_be_approved_and_retried_full_access() {
         "shell",
         serde_json::json!({"command": "echo fallback-approved"}),
     );
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
         .await
@@ -5159,7 +5202,8 @@ async fn rejected_shell_full_access_does_not_execute_command() {
             "sandbox_policy": "full-access"
         }),
     );
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = confirm_rx.recv().await.expect("approval request");
     request.response_tx.send(false).expect("reject shell");
@@ -5212,7 +5256,8 @@ async fn tool_policy_ask_confirmation_skips_duplicate_path_confirmation() {
         "write_file",
         serde_json::json!({"path": outside_path.to_string_lossy(), "content": "secret"}),
     );
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = confirm_rx
         .recv()
@@ -5255,7 +5300,8 @@ async fn tool_policy_ask_cannot_override_builtin_path_deny() {
             "content": "ssh-ed25519 test"
         }),
     );
-    let handle = tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await });
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
     let request = confirm_rx
         .recv()
@@ -5293,7 +5339,8 @@ async fn tool_policy_channel_condition_only_applies_to_matching_channel() {
             &test_main_session_inbound("cli", "policy-channel"),
             None,
         )
-        .await;
+        .await
+        .text;
 
     assert!(!result.contains("Policy denied"));
     assert!(result.contains("Unknown tool"));
@@ -5398,7 +5445,8 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
             &test_main_session_inbound("cli", "event-reject"),
             None,
         )
-        .await;
+        .await
+        .text;
 
     assert!(result.contains("blocked by recording listener"), "{result}");
     assert!(result.contains("event_listener"), "{result}");
@@ -5435,7 +5483,8 @@ async fn guards_check_arguments_rewritten_by_pre_execute_listener() {
             &test_main_session_inbound("cli", "rewrite-bypass"),
             None,
         )
-        .await;
+        .await
+        .text;
 
     assert!(
         result.contains("dangerous exec command requires explicit user confirmation"),
@@ -6106,7 +6155,8 @@ async fn side_effecting_tool_timeout_is_recorded_as_unknown_outcome() {
 
     let result = runtime
         .execute_tool_call(&tool_call("place_order", serde_json::json!({})), &msg, None)
-        .await;
+        .await
+        .text;
 
     assert!(result.contains("执行结果未知"), "{result}");
     let events = JsonlSessionEventLog::new(runtime.paths.clone())
@@ -6380,7 +6430,10 @@ async fn scoped_tools_follow_runtime_session_and_candidate_views() {
 
     let in_session = test_main_session_inbound("cli", "scoped-a");
     runtime.sync_tool_scope_view(&in_session.session_key());
-    let result = runtime.execute_tool_call(&call, &in_session, None).await;
+    let result = runtime
+        .execute_tool_call(&call, &in_session, None)
+        .await
+        .text;
     assert!(result.contains("\"session\""), "{result}");
 
     // 其他会话看不到、也无法执行该会话作用域工具
@@ -6390,12 +6443,12 @@ async fn scoped_tools_follow_runtime_session_and_candidate_views() {
         .tool_registry
         .tool_names()
         .contains(&"scoped_echo".to_string()));
-    let result = runtime.execute_tool_call(&call, &other, None).await;
+    let result = runtime.execute_tool_call(&call, &other, None).await.text;
     assert!(result.contains("Unknown tool"), "{result}");
 
     // 进入候选评估后，候选工具可见并覆盖同名工具
     runtime.set_candidate_scope(Some("evo-1".into()));
-    let result = runtime.execute_tool_call(&call, &other, None).await;
+    let result = runtime.execute_tool_call(&call, &other, None).await.text;
     assert!(result.contains("\"candidate\""), "{result}");
     runtime.set_candidate_scope(None);
     assert!(runtime.tool_registry.get("scoped_echo").is_none());

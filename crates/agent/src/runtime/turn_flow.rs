@@ -202,15 +202,14 @@ impl AgentRuntime {
     ) -> Result<PromptSkillLoopOutput> {
         let session_id = persist_session_key_for(msg);
         let allowed_tool_names = tool_names.iter().cloned().collect::<HashSet<_>>();
-        let max_iterations = self.config.agents.defaults.max_tool_iterations.max(1);
-        let tools_max_iterations = self
-            .config
-            .agents
-            .defaults
-            .max_tool_iterations_by_tool
-            .clone();
-        let mut tool_call_counts: HashMap<String, u32> = HashMap::new();
-        let mut consecutive_failure_tracker = ConsecutiveToolFailureTracker::default();
+        let mut loop_guard = ToolLoopGuard::new(
+            self.config.agents.defaults.max_tool_iterations.max(1),
+            self.config
+                .agents
+                .defaults
+                .max_tool_iterations_by_tool
+                .clone(),
+        );
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
         let mut trace_messages = Vec::new();
@@ -261,40 +260,27 @@ impl AgentRuntime {
             trace_messages.push(assistant_tool_call);
 
             for tool_call in response.tool_calls {
-                let tool_result =
+                let tool_output =
                     if crate::prompt_skill_executor::PromptSkillExecutor::is_tool_allowed(
                         &tool_call.name,
                         &allowed_tool_names,
                     ) {
-                        let max_iterations = tools_max_iterations
-                            .get(&tool_call.name)
-                            .copied()
-                            .unwrap_or(max_iterations);
-                        let count = tool_call_counts.entry(tool_call.name.clone()).or_insert(0);
-
-                        *count += 1;
-                        if *count > max_iterations {
-                            over_iteration = true;
-                            let denied = serde_json::json!({
-                                "error": format!(
-                                    "Tool '{}' execeeded max call limit ({}).",
-                                    tool_call.name, max_iterations
-                                ),
-                                "tool": tool_call.name,
-                                "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
-                            })
-                            .to_string();
-                            self.record_unexecuted_tool_call(
-                                &tool_call,
-                                msg,
-                                ToolOutcome::Rejected,
-                                &denied,
-                            )
-                            .await;
-                            denied
-                        } else {
-                            self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
-                                .await
+                        match loop_guard.admit(&tool_call.name) {
+                            Ok(()) => {
+                                self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
+                                    .await
+                            }
+                            Err(denied) => {
+                                over_iteration = true;
+                                self.record_unexecuted_tool_call(
+                                    &tool_call,
+                                    msg,
+                                    ToolOutcome::Rejected,
+                                    &denied,
+                                )
+                                .await;
+                                ToolCallOutput::rejected(denied)
+                            }
                         }
                     } else {
                         let denied = serde_json::json!({
@@ -313,18 +299,16 @@ impl AgentRuntime {
                             &denied,
                         )
                         .await;
-                        denied
+                        ToolCallOutput::rejected(denied)
                     };
-                if consecutive_failure_tracker
-                    .record(&tool_call, tool_result_indicates_error(&tool_result))
-                {
+                if loop_guard.record(&tool_call, tool_call_failed(&tool_output)) {
                     over_iteration = true;
                     warn!(
                         tool = %tool_call.name,
                         "Stopping prompt skill loop after three identical tool-call failures"
                     );
                 }
-                let mut tool_message = ChatMessage::tool_result(&tool_call.id, &tool_result);
+                let mut tool_message = ChatMessage::tool_result(&tool_call.id, &tool_output.text);
                 tool_message.name = Some(tool_call.name.clone());
                 current_messages.push(tool_message.clone());
                 trace_messages.push(tool_message);

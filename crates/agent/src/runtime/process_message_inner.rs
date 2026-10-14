@@ -494,7 +494,7 @@ impl AgentRuntime {
             .defaults
             .max_tool_iterations_by_tool
             .clone();
-        let mut tool_call_counts: HashMap<String, u32> = HashMap::new();
+        let mut loop_guard = ToolLoopGuard::new(max_iterations, tools_max_iterations.clone());
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
 
@@ -581,7 +581,6 @@ impl AgentRuntime {
         let mut llm_failed_after_retries = false;
         let mut message_tool_sent_media = false;
         let mut tool_fail_counts: HashMap<String, u32> = HashMap::new();
-        let mut consecutive_failure_tracker = ConsecutiveToolFailureTracker::default();
         let mut resource_missing_hints_sent: HashSet<String> = HashSet::new();
         let mut should_throttle_next_tool_round = false;
         let mut saw_rate_limit_this_turn = false;
@@ -616,7 +615,7 @@ impl AgentRuntime {
 
         loop {
             let step = self.begin_step();
-            debug!(iteration = ?tool_call_counts, "LLM call iteration");
+            debug!(iteration = ?loop_guard.call_counts(), "LLM call iteration");
             // Learning Coordinator: record iteration (replaces skill_nudge_engine.record_iteration)
             self.learning_coordinator.record_iteration();
 
@@ -642,7 +641,7 @@ impl AgentRuntime {
             }
 
             debug!(
-                iteration = ?tool_call_counts,
+                iteration = ?loop_guard.call_counts(),
                 current_messages_len = current_messages.len(),
                 tool_schema_count = tools.len(),
                 "LLM loop state"
@@ -666,7 +665,7 @@ impl AgentRuntime {
                     &tools,
                     &msg,
                     ghost_recall_context_block.as_deref(),
-                    &tool_call_counts,
+                    loop_guard.call_counts(),
                     &mut saw_rate_limit_this_turn,
                 )
                 .await;
@@ -704,7 +703,7 @@ impl AgentRuntime {
                     self.end_step(&msg, &persist_session_key, step, 0).await;
                     llm_failed_after_retries = true;
                     let max_retries = self.config.agents.defaults.llm_max_retries;
-                    warn!(error = %e, iteration = ?tool_call_counts, retries = max_retries, "LLM call failed after all retries");
+                    warn!(error = %e, iteration = ?loop_guard.call_counts(), retries = max_retries, "LLM call failed after all retries");
                     final_response = llm_exhausted_error(max_retries, &e);
                     if let Some(evo_service) = self.context_builder.evolution_service() {
                         if let Ok(report) = evo_service
@@ -939,35 +938,21 @@ impl AgentRuntime {
                         }
                     }
                     let tool_timer = ScopedTimer::new();
-                    let result = if tool_names.iter().any(|allowed| allowed == &tool_call.name) {
-                        let max_iterations = tools_max_iterations
-                            .get(&tool_call.name)
-                            .copied()
-                            .unwrap_or(max_iterations);
-                        let count = tool_call_counts.entry(tool_call.name.clone()).or_insert(0);
-
-                        *count += 1;
-                        if *count > max_iterations {
-                            over_iteration = true;
-                            let denied = serde_json::json!({
-                                "error": format!(
-                                    "Tool '{}' execeeded max call limit ({}).",
-                                    tool_call.name, max_iterations
-                                ),
-                                "tool": tool_call.name,
-                                "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
-                            })
-                            .to_string();
-                            self.record_unexecuted_tool_call(
-                                tool_call,
-                                &msg,
-                                ToolOutcome::Rejected,
-                                &denied,
-                            )
-                            .await;
-                            denied
-                        } else {
-                            self.execute_tool_call(tool_call, &msg, None).await
+                    let tool_output = if tool_names.iter().any(|allowed| allowed == &tool_call.name)
+                    {
+                        match loop_guard.admit(&tool_call.name) {
+                            Ok(()) => self.execute_tool_call(tool_call, &msg, None).await,
+                            Err(denied) => {
+                                over_iteration = true;
+                                self.record_unexecuted_tool_call(
+                                    tool_call,
+                                    &msg,
+                                    ToolOutcome::Rejected,
+                                    &denied,
+                                )
+                                .await;
+                                ToolCallOutput::rejected(denied)
+                            }
                         }
                     } else {
                         let denied = scoped_tool_denied_result(&tool_call.name);
@@ -978,8 +963,10 @@ impl AgentRuntime {
                             &denied,
                         )
                         .await;
-                        denied
+                        ToolCallOutput::rejected(denied)
                     };
+                    let is_error = tool_call_failed(&tool_output);
+                    let result = tool_output.text;
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
@@ -1112,8 +1099,7 @@ impl AgentRuntime {
                     }
 
                     // Track tool failures with transient/permanent classification (#6)
-                    let is_error = tool_result_indicates_error(&result);
-                    if consecutive_failure_tracker.record(tool_call, is_error) {
+                    if loop_guard.record(tool_call, is_error) {
                         over_iteration = true;
                         warn!(
                             tool = %tool_call.name,
@@ -1343,7 +1329,7 @@ impl AgentRuntime {
 
                 if over_iteration {
                     warn!(
-                        iteration = ?tool_call_counts,
+                        iteration = ?loop_guard.call_counts(),
                         max_iterations,
                         ?tools_max_iterations,
                         "Reached max iterations; forcing a final no-tools answer"
@@ -1631,7 +1617,7 @@ impl AgentRuntime {
             &msg,
             &history,
             &final_response,
-            &tool_call_counts,
+            loop_guard.call_counts(),
             !llm_failed_after_retries,
         ) {
             Ok(episode_id) => episode_id,
