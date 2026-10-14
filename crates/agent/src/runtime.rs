@@ -292,6 +292,8 @@ pub struct RuntimeSpawnHandle {
     event_emitter: EventEmitterHandle,
     abort_token: Option<AbortToken>,
     completion_reporter: subagent::SubagentCompletionReporter,
+    /// 发起会话的预算 tracker；子 Agent 的消耗归并到它。
+    parent_budget: Option<BudgetTrackerHandle>,
 }
 
 impl SpawnHandle for RuntimeSpawnHandle {
@@ -361,6 +363,7 @@ impl SpawnHandle for RuntimeSpawnHandle {
             agent_type_str,
             child_abort_token,
             Some(self.completion_reporter.clone()),
+            self.parent_budget.clone(),
         ));
 
         // Guard: if tokio::spawn fails or task panics, mark as Failed to prevent stuck Running
@@ -2275,6 +2278,8 @@ pub struct AgentRuntime {
     write_guard: Arc<crate::write_guard::WriteGuard>,
     /// Token and cost budget trackers keyed by persisted session key.
     budget_trackers: Arc<Mutex<HashMap<String, BudgetTrackerHandle>>>,
+    /// 子 Agent 运行时挂载的父会话预算；`None` 表示顶层会话。挂载后子消耗归并到父。
+    parent_budget: Option<BudgetTrackerHandle>,
     /// Receives real-time user interjections for the currently running message task.
     steering: SteeringChannel,
     /// Cloneable send handle exposed to gateway/WS routing.
@@ -2448,6 +2453,7 @@ impl AgentRuntime {
             skill_mutex: write_guard.clone() as blockcell_tools::SkillMutexHandle,
             write_guard,
             budget_trackers,
+            parent_budget: None,
             steering,
             steering_sender,
             active_steering_registry: None,

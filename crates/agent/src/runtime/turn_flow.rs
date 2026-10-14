@@ -33,7 +33,12 @@ impl AgentRuntime {
         });
         trackers
             .entry(session_key.to_string())
-            .or_insert_with(|| Arc::new(BudgetTracker::new(&self.config.budget)))
+            .or_insert_with(|| {
+                Arc::new(BudgetTracker::with_parent(
+                    &self.config.budget,
+                    self.parent_budget.clone(),
+                ))
+            })
             .clone()
     }
 

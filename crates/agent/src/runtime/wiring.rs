@@ -98,6 +98,11 @@ impl AgentRuntime {
         self.abort_token = token;
     }
 
+    /// 把父会话的预算 tracker 挂到本运行时（子 Agent 归并），子消耗计入父预算。
+    pub fn set_parent_budget(&mut self, parent: Option<BudgetTrackerHandle>) {
+        self.parent_budget = parent;
+    }
+
     /// Build permissions for tool execution based on channel, sender, and chat context.
     ///
     /// This method grants appropriate permissions based on:

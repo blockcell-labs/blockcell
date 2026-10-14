@@ -61,6 +61,8 @@ pub(crate) async fn run_subagent_task(
     agent_type: Option<String>,
     abort_token: Option<AbortToken>,
     reporter: Option<SubagentCompletionReporter>,
+    // 发起会话的预算 tracker；挂到子运行时后，子消耗归并到父预算。
+    parent_budget: Option<BudgetTrackerHandle>,
 ) {
     // Create the task entry and mark it running atomically.
     // This eliminates the race condition where a concurrent cleanup could
@@ -110,6 +112,8 @@ pub(crate) async fn run_subagent_task(
     };
     sub_runtime.set_task_manager(task_manager.clone());
     sub_runtime.set_agent_id(agent_id.clone());
+    // 子 Agent 的 LLM 消耗归并到发起会话的总预算，避免父预算看不到子消耗。
+    sub_runtime.set_parent_budget(parent_budget);
     sub_runtime.set_event_emitter(event_emitter);
     if let Some(tx) = event_tx.clone() {
         sub_runtime.event_tx = Some(tx);

@@ -1,4 +1,5 @@
 use blockcell_core::{BudgetConfig, BudgetTracker};
+use std::sync::Arc;
 
 #[test]
 fn record_usage_returns_snapshot_with_remaining_budget() {
@@ -140,4 +141,71 @@ fn current_context_window_is_separate_from_cumulative_usage() {
     assert_eq!(context.tokens_remaining, 250);
     assert_eq!(context.compact_threshold_tokens, 800);
     assert_eq!(tracker.snapshot().total_tokens_used, 1_200);
+}
+
+#[test]
+fn child_usage_merges_into_parent_budget() {
+    let config = BudgetConfig {
+        max_tokens_per_session: 1_000,
+        max_cost_cents_per_session: 0,
+        warning_threshold: 0.8,
+    };
+    let parent = Arc::new(BudgetTracker::new(&config));
+    let child = BudgetTracker::with_parent(&config, Some(parent.clone()));
+
+    assert!(child.has_parent());
+    assert!(!parent.has_parent());
+
+    // 子消耗同时记到自身与父，父的归因可见总量。
+    let child_snapshot = child.record_usage(300, 100, 0);
+    assert_eq!(child_snapshot.total_tokens_used, 400);
+    assert_eq!(parent.snapshot().total_tokens_used, 400);
+
+    // 子自身的归因仍然是自己的用量。
+    child.record_usage(100, 0, 0);
+    assert_eq!(child.snapshot().total_tokens_used, 500);
+    assert_eq!(parent.snapshot().total_tokens_used, 500);
+}
+
+#[test]
+fn child_stops_when_parent_budget_is_exhausted() {
+    let config = BudgetConfig {
+        max_tokens_per_session: 100,
+        max_cost_cents_per_session: 0,
+        warning_threshold: 0.8,
+    };
+    let parent = Arc::new(BudgetTracker::new(&config));
+    let child = BudgetTracker::with_parent(&config, Some(parent.clone()));
+
+    // 父自身先耗尽，子即便没有自己的用量也应被拦住。
+    parent.record_usage(100, 0, 0);
+    assert!(child.is_exhausted());
+    let error = child
+        .check_budget()
+        .expect_err("parent exhaustion should stop the child");
+    assert!(
+        error.message.contains("Shared session budget"),
+        "{}",
+        error.message
+    );
+    // 子的归因快照仍显示自己没有消耗。
+    assert_eq!(error.snapshot.total_tokens_used, 0);
+}
+
+#[test]
+fn child_reports_its_own_exhaustion_separately_from_parent() {
+    let config = BudgetConfig {
+        max_tokens_per_session: 100,
+        max_cost_cents_per_session: 0,
+        warning_threshold: 0.8,
+    };
+    let parent = Arc::new(BudgetTracker::new(&config));
+    let child = BudgetTracker::with_parent(&config, Some(parent.clone()));
+
+    child.record_usage(100, 0, 0);
+    let error = child
+        .check_budget()
+        .expect_err("child budget should be exhausted");
+    assert!(error.message.contains("tokens: 100/100"), "{}", error.message);
+    assert!(parent.is_exhausted());
 }

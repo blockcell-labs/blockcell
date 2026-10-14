@@ -8,6 +8,8 @@ pub struct LightweightRuntimeHandle {
     subagents: Arc<InProcessSubagentProvider>,
     config: Config,
     budget_trackers: Arc<Mutex<HashMap<String, BudgetTrackerHandle>>>,
+    /// 父会话预算，用于新建的 session tracker 归并（与 AgentRuntime 保持一致）。
+    parent_budget: Option<BudgetTrackerHandle>,
 }
 
 impl LightweightRuntimeHandle {
@@ -16,6 +18,7 @@ impl LightweightRuntimeHandle {
             subagents: Arc::new(InProcessSubagentProvider::from_runtime(runtime)),
             config: runtime.config.clone(),
             budget_trackers: runtime.budget_trackers.clone(),
+            parent_budget: runtime.parent_budget.clone(),
         }
     }
 }
@@ -32,7 +35,12 @@ impl blockcell_tools::RuntimeHandle for LightweightRuntimeHandle {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         trackers
             .entry(session_key.to_string())
-            .or_insert_with(|| Arc::new(BudgetTracker::new(&self.config.budget)))
+            .or_insert_with(|| {
+                Arc::new(BudgetTracker::with_parent(
+                    &self.config.budget,
+                    self.parent_budget.clone(),
+                ))
+            })
             .context_window_snapshot()
     }
 }

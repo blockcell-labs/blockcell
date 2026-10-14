@@ -445,6 +445,7 @@ impl AgentRuntime {
                 &msg.channel,
                 &msg.chat_id,
             ),
+            parent_budget: Some(self.budget_tracker_for_session(&persist_session_key_for(msg))),
         });
 
         blockcell_tools::ToolContext {
