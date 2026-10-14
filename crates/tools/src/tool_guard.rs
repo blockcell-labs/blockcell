@@ -285,6 +285,8 @@ impl NestedToolGuard {
                 duration_ms: Some(duration_ms),
                 call_id: None,
                 outcome: Some(outcome),
+                // 嵌套守卫没有工具注册表，拿不到声明；环境留空（与事件日志的已知缺口一致）。
+                environment: None,
             });
     }
 }

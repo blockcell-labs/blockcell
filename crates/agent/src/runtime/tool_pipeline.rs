@@ -268,6 +268,8 @@ impl AgentRuntime {
         duration_ms: u64,
     ) {
         let session_key = msg.session_key();
+        // 与 `tool/call` 事件同名对齐：审计同样记录本次调用声明的执行环境。
+        let environment = self.tool_registry.execution_environment(&call.name, args);
         self.audit_logger.set_session_id(&session_key);
         let _ = self
             .audit_logger
@@ -280,6 +282,7 @@ impl AgentRuntime {
                 duration_ms: Some(duration_ms),
                 call_id: Some(call.id.clone()),
                 outcome: Some(outcome.as_str()),
+                environment: Some(environment.as_str()),
             });
     }
 

@@ -5251,6 +5251,41 @@ async fn tool_call_event_records_declared_execution_environment() {
 }
 
 #[tokio::test]
+async fn tool_call_audit_records_declared_execution_environment() {
+    use blockcell_storage::{AuditEvent, AuditLogger};
+
+    let mut runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("alpha.txt"), "alpha-content").unwrap();
+    runtime.current_turn_id = Some("turn-env-audit".to_string());
+
+    let msg = test_main_session_inbound("cli", "env-audit");
+    runtime
+        .execute_tool_call(
+            &tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let environment = AuditLogger::new(runtime.paths.clone())
+        .read_today()
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event {
+            AuditEvent::ToolCall {
+                tool_name,
+                environment,
+                ..
+            } if tool_name == "read_file" => environment,
+            _ => None,
+        })
+        .expect("tool call audit should carry the declared environment");
+    assert_eq!(environment, "local");
+}
+
+#[tokio::test]
 async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
     let mut runtime = test_runtime();
     runtime

@@ -46,6 +46,9 @@ pub enum AuditEvent {
         /// Runtime 判定的执行结论（`ToolOutcome`），被拒绝 / 未开始的调用同样记录。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<String>,
+        /// 工具对本次调用声明的执行环境（与 `tool/call` 事件同名对齐）；旧记录没有该字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
     },
     PermissionDecision {
         tool_name: String,
@@ -92,7 +95,8 @@ pub enum AuditEvent {
     },
 }
 
-/// 一次工具调用的审计内容。`trace_id`（回合 id）与 `call_id` 用于和 Session Event Log 对齐。
+/// 一次工具调用的审计内容。`trace_id`（回合 id）、`call_id` 与 `environment` 用于和
+/// Session Event Log 对齐。
 pub struct ToolCallAudit<'a> {
     pub tool_name: &'a str,
     pub params: serde_json::Value,
@@ -102,6 +106,8 @@ pub struct ToolCallAudit<'a> {
     pub duration_ms: Option<u64>,
     pub call_id: Option<String>,
     pub outcome: Option<&'a str>,
+    /// 工具声明的执行环境；嵌套调用等拿不到注册表的场景为 `None`。
+    pub environment: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +205,7 @@ impl AuditLogger {
             duration_ms,
             call_id: None,
             outcome: None,
+            environment: None,
         })
     }
 
@@ -213,6 +220,7 @@ impl AuditLogger {
             duration_ms: call.duration_ms,
             call_id: call.call_id,
             outcome: call.outcome.map(str::to_string),
+            environment: call.environment.map(str::to_string),
         };
         self.write_event(event)
     }
@@ -813,6 +821,7 @@ mod tests {
             duration_ms: Some(5),
             call_id: None,
             outcome: None,
+            environment: None,
         };
         let event_b = AuditEvent::ToolCall {
             tool_name: "echo".to_string(),
@@ -824,6 +833,7 @@ mod tests {
             duration_ms: Some(5),
             call_id: None,
             outcome: None,
+            environment: None,
         };
 
         let hash_a = compute_record_hash("event-id", 2000, "session", &event_a, GENESIS_HASH);
@@ -859,6 +869,7 @@ mod tests {
                 duration_ms: Some(0),
                 call_id: Some("call-1".to_string()),
                 outcome: Some("rejected"),
+                environment: Some("full-access"),
             })
             .unwrap();
 
@@ -868,16 +879,20 @@ mod tests {
                 call_id,
                 outcome,
                 trace_id,
+                environment,
                 ..
             } => {
                 assert_eq!(call_id.as_deref(), Some("call-1"));
                 assert_eq!(outcome.as_deref(), Some("rejected"));
                 assert_eq!(trace_id.as_deref(), Some("turn-1"));
+                assert_eq!(environment.as_deref(), Some("full-access"));
             }
             other => panic!("Expected ToolCall event, got {other:?}"),
         }
         let raw = std::fs::read_to_string(logger.current_log_file_path()).unwrap();
         assert!(!raw.lines().next().unwrap().contains("call_id"));
+        // 旧格式记录（无 call_id / environment）保持原样，序列化时字段被跳过
+        assert!(!raw.lines().next().unwrap().contains("environment"));
 
         let result = AuditLogger::verify_chain(&logger.current_log_file_path());
         assert!(result.valid, "{:?}", result.errors);
