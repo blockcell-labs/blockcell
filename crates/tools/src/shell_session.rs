@@ -954,25 +954,38 @@ mod tests {
         assert_eq!(pid, None);
     }
 
+    /// 无论宿主原生沙箱是否可用，以 `workspace-write` 建会话都必须"要么真的隔离、要么明确要求
+    /// 审批"，绝不能静默地不受限运行。
+    ///
+    /// 原用例在原生沙箱可用的宿主上直接 `return`（静默跳过、什么都没断言），只有不支持的宿主才
+    /// 真正执行；这里对两种宿主都断言，消除这条宿主相关的分支。
     #[tokio::test]
-    async fn unavailable_native_sandbox_requests_approval_instead_of_silent_bypass() {
-        if crate::sandbox::native_backend(SandboxPolicy::WorkspaceWrite)
-            != crate::sandbox::SandboxBackend::ApprovalRequired
-        {
-            return;
-        }
+    async fn workspace_write_session_is_either_enforced_or_requires_approval() {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let manager = ShellSessionManager::new();
 
-        let error = manager
+        match manager
             .create(
                 workspace.path(),
                 SandboxPolicy::WorkspaceWrite,
                 SessionOwner::default(),
             )
             .await
-            .expect_err("unavailable sandbox must not silently run unrestricted");
-
-        assert!(error.to_string().contains("approval required"));
+        {
+            // 原生沙箱不可用：必须明确要求审批，而不是静默降级为不受限执行
+            Err(error) => assert!(
+                error.to_string().contains("approval required"),
+                "unavailable sandbox must request approval, got: {error}"
+            ),
+            // 原生沙箱可用：会话必须真的以 workspace-write 建立
+            Ok(session_id) => {
+                let (_, policy) = manager
+                    .session_metadata(&session_id)
+                    .await
+                    .expect("session metadata");
+                assert_eq!(policy, SandboxPolicy::WorkspaceWrite);
+                manager.close(&session_id).await.expect("close session");
+            }
+        }
     }
 }

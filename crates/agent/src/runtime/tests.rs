@@ -5579,38 +5579,99 @@ async fn shell_full_access_requires_confirmation_before_execution() {
     assert!(result.contains("approved-shell"), "result: {result}");
 }
 
+/// 只模拟沙箱行为、不启动真实进程的 `shell` 替身：以默认策略运行时报"原生沙箱不可用"，
+/// 以 full-access 重试时返回成功结果，并记录每次调用的参数。
+///
+/// 用它替代真实 `ShellTool`：真实路径要求宿主原生沙箱**不可用**（否则用例静默跳过、什么也没断言），
+/// 且 PATH 中必须有 `bash`（否则必然失败）。两者都会让同一个用例在不同机器上得出不同结论，
+/// 因此这里只驱动管线本身。真实 provider 的拒绝行为由 blockcell-tools 侧覆盖。
+struct SandboxEscalationShell {
+    calls: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for SandboxEscalationShell {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: "shell".to_string(),
+            description: "sandbox escalation shell double".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.calls
+            .lock()
+            .expect("record shell call")
+            .push(params.clone());
+        if params
+            .get("sandbox_policy")
+            .and_then(serde_json::Value::as_str)
+            == Some("full-access")
+        {
+            return Ok(serde_json::json!({
+                "sandbox_policy": "full-access",
+                "output": "fallback-approved",
+                "exit_code": 0,
+                "running": false,
+            }));
+        }
+        Err(blockcell_core::Error::PermissionDenied(
+            "native sandbox unavailable; approval required".to_string(),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn unavailable_native_sandbox_can_be_approved_and_retried_full_access() {
-    if blockcell_tools::sandbox::native_backend(
-        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
-    ) != blockcell_tools::sandbox::SandboxBackend::ApprovalRequired
-    {
-        return;
-    }
     let mut runtime = test_runtime();
+    let calls = Arc::new(Mutex::new(Vec::new()));
     runtime
         .tool_registry
-        .register(Arc::new(blockcell_tools::shell_session::ShellTool));
+        .register(Arc::new(SandboxEscalationShell {
+            calls: Arc::clone(&calls),
+        }));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
     let msg = test_main_session_inbound("cli", "sandbox-fallback");
     let call = tool_call(
         "shell",
-        serde_json::json!({"command": "echo fallback-approved"}),
+        serde_json::json!({"command": "echo fallback-approved", "session_id": "sandbox-session"}),
     );
     let handle =
         tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
 
-    let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), confirm_rx.recv())
         .await
         .expect("sandbox fallback should request approval")
         .expect("confirmation channel should stay open");
+    assert_eq!(request.tool_name, "shell");
     assert!(request.paths.iter().any(|item| item.contains("sandbox")));
     request.response_tx.send(true).expect("approve fallback");
 
     let result = handle.await.expect("shell task should finish");
     assert!(result.contains("fallback-approved"), "result: {result}");
     assert!(result.contains("full-access"), "result: {result}");
+
+    // 升级语义：先按原参数失败一次，再以 full-access 重试一次，且重试必须丢掉旧 session_id
+    // （否则会落到仍按旧策略建立的会话上，等于没升级）。
+    let calls = calls.lock().expect("shell calls");
+    assert_eq!(calls.len(), 2, "escalation must retry exactly once: {calls:?}");
+    assert_eq!(calls[0].get("sandbox_policy"), None, "{calls:?}");
+    assert_eq!(calls[0]["session_id"], "sandbox-session", "{calls:?}");
+    assert_eq!(calls[1]["sandbox_policy"], "full-access", "{calls:?}");
+    assert!(
+        calls[1].get("session_id").is_none(),
+        "the escalated retry must drop session_id and start a full-access session: {calls:?}"
+    );
 }
 
 #[tokio::test]
