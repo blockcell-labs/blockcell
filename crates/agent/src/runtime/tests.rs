@@ -5081,6 +5081,98 @@ async fn tool_policy_deny_blocks_tool_before_execution() {
 }
 
 #[tokio::test]
+async fn audit_records_rejected_and_executed_calls_with_event_log_ids() {
+    use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
+    use blockcell_storage::{
+        AuditEvent, AuditLogger, JsonlSessionEventLog, SessionEventKind, SessionEventReader,
+    };
+
+    let mut runtime = test_runtime();
+    runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![tool_policy_rule(
+            "deny-exec",
+            "exec",
+            ToolPolicyDecision::Deny,
+        )],
+        ..Default::default()
+    });
+    runtime.current_turn_id = Some("turn-audit".to_string());
+    let msg = test_main_session_inbound("cli", "audit-link");
+    let denied = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "echo hi"})),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(denied.outcome, ToolOutcome::Rejected);
+    let executed = runtime
+        .execute_tool_call(
+            &tool_call("list_dir", serde_json::json!({"path": "."})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let audited: Vec<(String, String, String)> = AuditLogger::new(runtime.paths.clone())
+        .read_today()
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event {
+            AuditEvent::ToolCall {
+                call_id: Some(call_id),
+                outcome: Some(outcome),
+                trace_id: Some(trace_id),
+                ..
+            } => Some((call_id, outcome, trace_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        audited,
+        vec![
+            (
+                "call-exec".to_string(),
+                "rejected".to_string(),
+                "turn-audit".to_string()
+            ),
+            (
+                "call-list_dir".to_string(),
+                executed.outcome.as_str().to_string(),
+                "turn-audit".to_string()
+            ),
+        ]
+    );
+
+    // 审计中的 call_id / outcome 与 Session Event Log 中同一调用一致
+    let logged: Vec<(String, String)> = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&msg.session_key())
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == SessionEventKind::ToolResult)
+        .map(|event| {
+            (
+                event.payload["call_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                event.payload["outcome"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        audited
+            .into_iter()
+            .map(|(call_id, outcome, _)| (call_id, outcome))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn tool_policy_ask_uses_existing_confirmation_flow() {
     use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
 

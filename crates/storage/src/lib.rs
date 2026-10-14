@@ -16,7 +16,7 @@ pub mod session_metrics;
 pub mod session_projection;
 pub mod vector;
 
-pub use audit::{AuditEvent, AuditLogger, AuditRecord, ChainVerifyResult};
+pub use audit::{AuditEvent, AuditLogger, AuditRecord, ChainVerifyResult, ToolCallAudit};
 pub use contacts::{ChannelContact, ChannelContacts};
 pub use evolution_workflow::EvolutionWorkflowStore;
 pub use ghost_ledger::GhostLedger;

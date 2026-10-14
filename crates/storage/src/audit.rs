@@ -40,6 +40,12 @@ pub enum AuditEvent {
         session_key: String,
         trace_id: Option<String>,
         duration_ms: Option<u64>,
+        /// 与 Session Event Log 中同一调用的 `call_id` 对齐；旧记录没有该字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// Runtime 判定的执行结论（`ToolOutcome`），被拒绝 / 未开始的调用同样记录。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
     },
     PermissionDecision {
         tool_name: String,
@@ -84,6 +90,18 @@ pub enum AuditEvent {
         timestamp_ms: i64,
         error: Option<String>,
     },
+}
+
+/// 一次工具调用的审计内容。`trace_id`（回合 id）与 `call_id` 用于和 Session Event Log 对齐。
+pub struct ToolCallAudit<'a> {
+    pub tool_name: &'a str,
+    pub params: serde_json::Value,
+    pub result: serde_json::Value,
+    pub session_key: &'a str,
+    pub trace_id: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub call_id: Option<String>,
+    pub outcome: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,14 +190,29 @@ impl AuditLogger {
         trace_id: Option<String>,
         duration_ms: Option<u64>,
     ) -> Result<()> {
-        let event = AuditEvent::ToolCall {
-            tool_name: tool_name.to_string(),
+        self.log_tool_call_audit(ToolCallAudit {
+            tool_name,
             params,
             result,
-            timestamp_ms: Utc::now().timestamp_millis(),
-            session_key: session_key.to_string(),
+            session_key,
             trace_id,
             duration_ms,
+            call_id: None,
+            outcome: None,
+        })
+    }
+
+    pub fn log_tool_call_audit(&mut self, call: ToolCallAudit<'_>) -> Result<()> {
+        let event = AuditEvent::ToolCall {
+            tool_name: call.tool_name.to_string(),
+            params: call.params,
+            result: call.result,
+            timestamp_ms: Utc::now().timestamp_millis(),
+            session_key: call.session_key.to_string(),
+            trace_id: call.trace_id,
+            duration_ms: call.duration_ms,
+            call_id: call.call_id,
+            outcome: call.outcome.map(str::to_string),
         };
         self.write_event(event)
     }
@@ -778,6 +811,8 @@ mod tests {
             session_key: "cli:test".to_string(),
             trace_id: None,
             duration_ms: Some(5),
+            call_id: None,
+            outcome: None,
         };
         let event_b = AuditEvent::ToolCall {
             tool_name: "echo".to_string(),
@@ -787,12 +822,65 @@ mod tests {
             session_key: "cli:test".to_string(),
             trace_id: None,
             duration_ms: Some(5),
+            call_id: None,
+            outcome: None,
         };
 
         let hash_a = compute_record_hash("event-id", 2000, "session", &event_a, GENESIS_HASH);
         let hash_b = compute_record_hash("event-id", 2000, "session", &event_b, GENESIS_HASH);
 
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn tool_call_audit_links_call_id_and_outcome_and_keeps_chain_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = Paths::with_base(temp_dir.path().to_path_buf());
+        let mut logger = AuditLogger::new(paths.clone());
+
+        // 旧格式记录（没有 call_id / outcome）与新格式记录混合时链仍然有效
+        logger
+            .log_tool_call(
+                "read_file",
+                serde_json::json!({}),
+                serde_json::json!({}),
+                "cli:a",
+                None,
+                None,
+            )
+            .unwrap();
+        logger
+            .log_tool_call_audit(ToolCallAudit {
+                tool_name: "exec",
+                params: serde_json::json!({"command": "ls"}),
+                result: serde_json::json!({"error": "denied"}),
+                session_key: "cli:a",
+                trace_id: Some("turn-1".to_string()),
+                duration_ms: Some(0),
+                call_id: Some("call-1".to_string()),
+                outcome: Some("rejected"),
+            })
+            .unwrap();
+
+        let events = logger.read_today().unwrap();
+        match &events[1] {
+            AuditEvent::ToolCall {
+                call_id,
+                outcome,
+                trace_id,
+                ..
+            } => {
+                assert_eq!(call_id.as_deref(), Some("call-1"));
+                assert_eq!(outcome.as_deref(), Some("rejected"));
+                assert_eq!(trace_id.as_deref(), Some("turn-1"));
+            }
+            other => panic!("Expected ToolCall event, got {other:?}"),
+        }
+        let raw = std::fs::read_to_string(logger.current_log_file_path()).unwrap();
+        assert!(!raw.lines().next().unwrap().contains("call_id"));
+
+        let result = AuditLogger::verify_chain(&logger.current_log_file_path());
+        assert!(result.valid, "{:?}", result.errors);
     }
 
     #[test]

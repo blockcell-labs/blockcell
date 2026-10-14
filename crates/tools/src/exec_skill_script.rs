@@ -268,13 +268,15 @@ impl Tool for ExecSkillScriptTool {
                                         ))
                                     })
                             });
+                            let (audited_result, outcome) = match &result {
+                                Ok(value) => (value.clone(), "succeeded"),
+                                Err(error) => (json!({ "error": error.to_string() }), "failed"),
+                            };
                             guard.audit(
                                 tool_name,
                                 &audited_params,
-                                match &result {
-                                    Ok(value) => value.clone(),
-                                    Err(error) => json!({ "error": error.to_string() }),
-                                },
+                                audited_result,
+                                outcome,
                                 start.elapsed().as_millis() as u64,
                             );
                             result

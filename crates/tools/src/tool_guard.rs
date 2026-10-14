@@ -11,7 +11,7 @@ use std::sync::{LazyLock, Mutex};
 
 use blockcell_core::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision};
 use blockcell_core::{Error, Paths, Result};
-use blockcell_storage::AuditLogger;
+use blockcell_storage::{AuditLogger, ToolCallAudit};
 use regex::Regex;
 use serde_json::Value;
 
@@ -211,7 +211,8 @@ impl NestedToolGuard {
             self.audit(
                 tool_name,
                 args,
-                serde_json::json!({ "error": reason, "outcome": "rejected" }),
+                serde_json::json!({ "error": reason }),
+                "rejected",
                 0,
             );
         }
@@ -264,20 +265,29 @@ impl NestedToolGuard {
         None
     }
 
-    /// 记录一次嵌套调用的审计日志；审计失败不影响调用本身。
-    pub fn audit(&self, tool_name: &str, args: &Value, result: Value, duration_ms: u64) {
+    /// 记录一次嵌套调用的审计日志（`outcome` 为 `ToolOutcome` 名称）；审计失败不影响调用本身。
+    pub fn audit(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        result: Value,
+        outcome: &str,
+        duration_ms: u64,
+    ) {
         let _ = self
             .audit
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .log_tool_call(
+            .log_tool_call_audit(ToolCallAudit {
                 tool_name,
-                args.clone(),
+                params: args.clone(),
                 result,
-                &self.session_key,
-                None,
-                Some(duration_ms),
-            );
+                session_key: &self.session_key,
+                trace_id: None,
+                duration_ms: Some(duration_ms),
+                call_id: None,
+                outcome: Some(outcome),
+            });
     }
 }
 

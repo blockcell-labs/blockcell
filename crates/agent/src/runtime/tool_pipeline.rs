@@ -190,8 +190,9 @@ impl AgentRuntime {
     }
 
     /// 被拒绝的调用同样产生 durable 的 tool/result，保证拦截行为可审计、可回放。
+    /// 审计记录使用经 listener 改写、实际被 guard 检查的参数。
     async fn record_rejected_tool_call(&mut self, inv: &ToolInvocation<'_>, denied: &str) {
-        self.record_unexecuted_tool_call(inv.call, inv.msg, ToolOutcome::Rejected, denied)
+        self.record_unexecuted(inv.call, &inv.args, inv.msg, ToolOutcome::Rejected, denied)
             .await;
     }
 
@@ -204,10 +205,23 @@ impl AgentRuntime {
         outcome: ToolOutcome,
         result_text: &str,
     ) {
+        self.record_unexecuted(call, &call.arguments, msg, outcome, result_text)
+            .await;
+    }
+
+    async fn record_unexecuted(
+        &mut self,
+        call: &ToolCallRequest,
+        args: &serde_json::Value,
+        msg: &InboundMessage,
+        outcome: ToolOutcome,
+        result_text: &str,
+    ) {
         let result = serde_json::from_str::<serde_json::Value>(result_text)
             .ok()
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::json!({ "error": result_text }));
+        self.audit_tool_call(call, args, result.clone(), msg, outcome, 0);
         self.dispatch_event(
             msg,
             &persist_session_key_for(msg),
@@ -217,10 +231,36 @@ impl AgentRuntime {
                 result,
                 duration_ms: 0,
                 outcome,
-                idempotency: self.tool_registry.idempotency(&call.name, &call.arguments),
+                idempotency: self.tool_registry.idempotency(&call.name, args),
             },
         )
         .await;
+    }
+
+    /// 审计记录以回合 id 作为 trace_id，并携带 call_id 与执行结论，与 Session Event Log 对齐。
+    fn audit_tool_call(
+        &mut self,
+        call: &ToolCallRequest,
+        args: &serde_json::Value,
+        result: serde_json::Value,
+        msg: &InboundMessage,
+        outcome: ToolOutcome,
+        duration_ms: u64,
+    ) {
+        let session_key = msg.session_key();
+        self.audit_logger.set_session_id(&session_key);
+        let _ = self
+            .audit_logger
+            .log_tool_call_audit(blockcell_storage::ToolCallAudit {
+                tool_name: &call.name,
+                params: args.clone(),
+                result,
+                session_key: &session_key,
+                trace_id: self.current_turn_id.clone(),
+                duration_ms: Some(duration_ms),
+                call_id: Some(call.id.clone()),
+                outcome: Some(outcome.as_str()),
+            });
     }
 
     /// 非交互通道依据用户原文中的显式确认，交互通道走确认请求。
@@ -699,15 +739,13 @@ impl AgentRuntime {
             }
         }
 
-        // Log to audit
-        self.audit_logger.set_session_id(&msg.session_key());
-        let _ = self.audit_logger.log_tool_call(
-            &tool_call.name,
-            inv.args.clone(),
+        self.audit_tool_call(
+            tool_call,
+            &inv.args,
             outcome.result_json.clone(),
-            &msg.session_key(),
-            None, // trace_id can be added later
-            Some(outcome.duration_ms),
+            msg,
+            outcome.outcome,
+            outcome.duration_ms,
         );
 
         // Skill Nudge: 两个独立计数器 (Skill + Memory)
