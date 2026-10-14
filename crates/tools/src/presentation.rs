@@ -1,7 +1,8 @@
 //! 工具的三层定义（汇总为 [`ToolDefinition`](crate::ToolDefinition)）：
 //!
 //! - [`ToolSchema`](crate::ToolSchema)：model-facing，名称与参数；
-//! - [`ToolExecutionSpec`](crate::ToolExecutionSpec)：权限与幂等性声明，Runtime 使用；
+//! - [`ToolExecutionSpec`](crate::ToolExecutionSpec)：权限、幂等性、执行环境与确认要求声明，
+//!   Runtime 使用（执行环境仅用于审计，确认要求驱动准入）；
 //! - [`ToolPresentation`]：模型 / WebUI / channel 看到什么（描述、可见性、分组、排序）。
 //!
 //! Presentation 不影响能否执行：可见性只决定是否出现在初始工具列表，权限仍由执行规格与

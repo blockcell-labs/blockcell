@@ -553,14 +553,14 @@ impl ToolRegistry {
     /// 工具对本次参数声明的执行环境；未注册的工具按进程内纯计算对待。
     pub fn execution_environment(&self, name: &str, params: &Value) -> crate::ExecutionEnvironment {
         self.get(name)
-            .map(|tool| tool.execution_spec(params).environment)
+            .map(|tool| tool.execution_environment(params))
             .unwrap_or(crate::ExecutionEnvironment::InProcess)
     }
 
     /// 本次调用是否需要用户显式确认；未注册的工具按无需确认对待。
     pub fn requires_confirmation(&self, name: &str, params: &Value) -> bool {
         self.get(name)
-            .map(|tool| tool.execution_spec(params).requires_confirmation)
+            .map(|tool| tool.requires_confirmation(params))
             .unwrap_or(false)
     }
 

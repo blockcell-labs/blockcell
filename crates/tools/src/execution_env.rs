@@ -24,10 +24,13 @@ use serde_json::Value;
 ///
 /// 纯描述性声明，用于审计（`tool/call` 事件、工具调用审计记录），本身不改变工具的执行
 /// 方式，也不决定是否需要用户确认（那是 [`crate::Tool::requires_confirmation`] 的职责）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+///
+/// 字符串表示以 [`ExecutionEnvironment::as_str`] 为唯一来源：`Display`、`Serialize` 与
+/// `Deserialize` 都走它，避免 `as_str` 与 serde 各写一份而漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ExecutionEnvironment {
     /// 进程内纯计算：不访问文件 / 网络 / 子进程（如时间、上下文查询）。
+    #[default]
     InProcess,
     /// 读取本地文件（工作区或已授权目录内）。
     Local,
@@ -52,11 +55,62 @@ impl ExecutionEnvironment {
             Self::FullAccess => "full-access",
         }
     }
+
+    /// 解析 [`as_str`](Self::as_str) 产出的字符串；未知取值返回 `None`。
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "in-process" => Self::InProcess,
+            "local" => Self::Local,
+            "workspace-write" => Self::WorkspaceWrite,
+            "network" => Self::Network,
+            "shell" => Self::Shell,
+            "full-access" => Self::FullAccess,
+            _ => return None,
+        })
+    }
 }
 
-impl Default for ExecutionEnvironment {
-    fn default() -> Self {
-        Self::InProcess
+impl std::fmt::Display for ExecutionEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ExecutionEnvironment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutionEnvironment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EnvironmentVisitor;
+
+        impl serde::de::Visitor<'_> for EnvironmentVisitor {
+            type Value = ExecutionEnvironment;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a tool execution environment string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                ExecutionEnvironment::parse(value).ok_or_else(|| {
+                    E::unknown_variant(
+                        value,
+                        &[
+                            "in-process",
+                            "local",
+                            "workspace-write",
+                            "network",
+                            "shell",
+                            "full-access",
+                        ],
+                    )
+                })
+            }
+        }
+
+        deserializer.deserialize_str(EnvironmentVisitor)
     }
 }
 
@@ -96,13 +150,39 @@ mod tests {
 
     #[test]
     fn environment_names_are_stable() {
+        // 固定对外字符串（审计与事件依赖它们，改动即破坏兼容）
         assert_eq!(ExecutionEnvironment::InProcess.as_str(), "in-process");
+        assert_eq!(ExecutionEnvironment::Local.as_str(), "local");
         assert_eq!(ExecutionEnvironment::WorkspaceWrite.as_str(), "workspace-write");
+        assert_eq!(ExecutionEnvironment::Network.as_str(), "network");
+        assert_eq!(ExecutionEnvironment::Shell.as_str(), "shell");
         assert_eq!(ExecutionEnvironment::FullAccess.as_str(), "full-access");
-        assert_eq!(
-            serde_json::to_string(&ExecutionEnvironment::Network).unwrap(),
-            "\"network\""
-        );
+        assert_eq!(ExecutionEnvironment::default(), ExecutionEnvironment::InProcess);
+
+        // as_str / Display / 序列化 / 反序列化 共用同一份字符串，不会漂移
+        for environment in [
+            ExecutionEnvironment::InProcess,
+            ExecutionEnvironment::Local,
+            ExecutionEnvironment::WorkspaceWrite,
+            ExecutionEnvironment::Network,
+            ExecutionEnvironment::Shell,
+            ExecutionEnvironment::FullAccess,
+        ] {
+            let encoded = serde_json::to_string(&environment).unwrap();
+            assert_eq!(encoded, format!("\"{}\"", environment.as_str()));
+            assert_eq!(environment.to_string(), environment.as_str());
+            assert_eq!(
+                serde_json::from_str::<ExecutionEnvironment>(&encoded).unwrap(),
+                environment
+            );
+            assert_eq!(
+                ExecutionEnvironment::parse(environment.as_str()),
+                Some(environment)
+            );
+        }
+
+        assert_eq!(ExecutionEnvironment::parse("nope"), None);
+        assert!(serde_json::from_str::<ExecutionEnvironment>("\"nope\"").is_err());
     }
 
     #[test]
