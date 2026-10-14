@@ -117,6 +117,22 @@ fn changed_arguments_or_success_reset_consecutive_tool_failures() {
     assert!(!tracker.record(&changed, true));
 }
 
+#[test]
+fn only_executed_failures_count_as_skill_evolution_signal() {
+    use super::tool_pipeline::evolution_signal;
+    assert_eq!(evolution_signal(ToolOutcome::Succeeded), Some(false));
+    assert_eq!(evolution_signal(ToolOutcome::Failed), Some(true));
+    for outcome in [
+        ToolOutcome::Rejected,
+        ToolOutcome::Cancelled,
+        ToolOutcome::TimedOut,
+        ToolOutcome::NotStarted,
+        ToolOutcome::Unknown,
+    ] {
+        assert_eq!(evolution_signal(outcome), None, "{outcome:?}");
+    }
+}
+
 fn contains_event_subsequence(events: &[String], expected: &[&str]) -> bool {
     let mut cursor = 0usize;
     for event in events {

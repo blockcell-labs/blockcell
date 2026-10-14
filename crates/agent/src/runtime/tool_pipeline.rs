@@ -93,6 +93,22 @@ fn semantic_tool_event(call: &ToolCallRequest, result: &serde_json::Value) -> Op
     None
 }
 
+/// 工具结论对技能进化的意义：`Some(is_error)` 表示计入观察窗口，`None` 表示不计入。
+///
+/// 只有"工具已执行并明确失败"才算技能缺陷；取消、超时、结果未知、执行前被拒绝或未开始
+/// 都不是技能本身的问题，既不触发进化，也不污染观察窗口的错误率。
+pub(super) fn evolution_signal(outcome: ToolOutcome) -> Option<bool> {
+    match outcome {
+        ToolOutcome::Succeeded => Some(false),
+        ToolOutcome::Failed => Some(true),
+        ToolOutcome::Rejected
+        | ToolOutcome::Cancelled
+        | ToolOutcome::TimedOut
+        | ToolOutcome::NotStarted
+        | ToolOutcome::Unknown => None,
+    }
+}
+
 /// Unknown ≠ Failed：调用可能已经生效，必须先对账再决定是否重试。
 fn unknown_outcome_hint(tool_name: &str) -> String {
     format!(
@@ -618,16 +634,15 @@ impl AgentRuntime {
         outcome: &ToolExecution,
     ) -> Option<String> {
         let mut learning_hint: Option<String> = None;
-        if outcome.is_error() {
-            let is_unknown_tool = outcome.result_str.contains("Unknown tool:");
-
-            if is_unknown_tool {
-                learning_hint = Some(format!(
-                    "[系统] 工具 `{}` 未注册/不可用（Unknown tool）。这不是可通过技能自进化修复的问题。\
-                    请改用已存在的工具完成任务，或提示用户安装/启用对应工具。",
-                    tool_call.name
-                ));
-            } else if let Some(evo_service) = self.context_builder.evolution_service() {
+        let signal = evolution_signal(outcome.outcome);
+        if outcome.is_error() && outcome.result_str.contains("Unknown tool:") {
+            learning_hint = Some(format!(
+                "[系统] 工具 `{}` 未注册/不可用（Unknown tool）。这不是可通过技能自进化修复的问题。\
+                请改用已存在的工具完成任务，或提示用户安装/启用对应工具。",
+                tool_call.name
+            ));
+        } else if signal == Some(true) {
+            if let Some(evo_service) = self.context_builder.evolution_service() {
                 // OpenClaw skill 不触发自进化
                 let is_openclaw = self
                     .context_builder
@@ -675,16 +690,17 @@ impl AgentRuntime {
                 }
             }
         }
-        // 报告调用结果给灰度统计（OpenClaw skill 跳过）
-        if let Some(evo_service) = self.context_builder.evolution_service() {
+        // 报告调用结果给灰度统计（OpenClaw skill 跳过；非技能缺陷类结论不计入）
+        if let (Some(is_error), Some(evo_service)) =
+            (signal, self.context_builder.evolution_service())
+        {
             let is_openclaw = self
                 .context_builder
                 .skill_manager()
                 .is_some_and(|sm| sm.is_tool_from_openclaw(&tool_call.name));
             if !is_openclaw {
-                let reported_name = tool_call.name.clone();
                 evo_service
-                    .report_skill_call(&reported_name, outcome.is_error())
+                    .report_skill_call(&tool_call.name, is_error)
                     .await;
             }
         }
