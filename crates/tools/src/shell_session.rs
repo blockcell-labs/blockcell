@@ -360,6 +360,14 @@ impl ShellSessionManager {
 
 #[async_trait]
 impl Tool for ShellTool {
+    fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
+        if crate::execution_env::requests_full_access("shell", params) {
+            crate::ExecutionEnvironment::FullAccess
+        } else {
+            crate::ExecutionEnvironment::Shell
+        }
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }

@@ -190,6 +190,10 @@ fn glob_sync(root: PathBuf, params: Value) -> Result<Value> {
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Local
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }
@@ -229,6 +233,10 @@ impl Tool for GrepTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Local
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }

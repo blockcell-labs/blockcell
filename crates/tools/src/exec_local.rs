@@ -200,6 +200,10 @@ fn build_python_command(runner: &str, script_path: &Path, args: &[String]) -> Co
 
 #[async_trait]
 impl Tool for ExecLocalTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Shell
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "exec_local".to_string(),

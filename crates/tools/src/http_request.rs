@@ -105,6 +105,10 @@ pub struct HttpRequestTool;
 
 #[async_trait]
 impl Tool for HttpRequestTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Network
+    }
+
     /// 只有安全方法（GET / HEAD / OPTIONS）可重放；其余方法可能已在服务端生效。
     fn idempotency(&self, params: &Value) -> blockcell_core::Idempotency {
         let method = params

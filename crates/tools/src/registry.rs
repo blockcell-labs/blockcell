@@ -550,6 +550,13 @@ impl ToolRegistry {
             .unwrap_or(blockcell_core::Idempotency::Unknown)
     }
 
+    /// 工具对本次参数声明的执行环境；未注册的工具按进程内纯计算对待。
+    pub fn execution_environment(&self, name: &str, params: &Value) -> crate::ExecutionEnvironment {
+        self.get(name)
+            .map(|tool| tool.execution_spec(params).environment)
+            .unwrap_or(crate::ExecutionEnvironment::InProcess)
+    }
+
     pub async fn execute(&self, name: &str, ctx: ToolContext, params: Value) -> Result<Value> {
         let tool = self
             .get(name)
@@ -1013,6 +1020,46 @@ mod tests {
             let tool_name = schema["function"]["name"].as_str().unwrap_or("unknown");
             let parameters = &schema["function"]["parameters"];
             assert_no_array_without_items(parameters, tool_name);
+        }
+    }
+
+    #[test]
+    fn test_execution_environment_declared_per_tool() {
+        use crate::ExecutionEnvironment::{self, *};
+        let reg = ToolRegistry::with_defaults();
+        let cases: &[(&str, Value, ExecutionEnvironment)] = &[
+            ("read_file", json!({"path": "a"}), Local),
+            ("list_dir", json!({"path": "."}), Local),
+            ("grep", json!({"pattern": "x"}), Local),
+            ("glob", json!({"pattern": "*"}), Local),
+            ("session_search", json!({"query": "x"}), Local),
+            ("write_file", json!({"path": "a", "content": "x"}), WorkspaceWrite),
+            ("edit_file", json!({"path": "a"}), WorkspaceWrite),
+            ("file_ops", json!({"action": "delete", "path": "a"}), WorkspaceWrite),
+            ("exec", json!({"command": "ls"}), Shell),
+            ("exec_local", json!({"path": "scripts/run.py"}), Shell),
+            ("exec_skill_script", json!({"path": "scripts/run.py"}), Shell),
+            ("shell", json!({"command": "ls"}), Shell),
+            (
+                "shell",
+                json!({"command": "ls", "sandbox_policy": "full-access"}),
+                FullAccess,
+            ),
+            ("web_fetch", json!({"url": "https://example.com"}), Network),
+            ("web_search", json!({"query": "x"}), Network),
+            ("http_request", json!({"url": "https://example.com"}), Network),
+            ("email", json!({"action": "list"}), Network),
+            ("message", json!({"text": "hi"}), Network),
+            // 未注册 / 未声明的工具 → 进程内纯计算
+            ("update_plan", json!({}), InProcess),
+            ("definitely_not_a_tool", json!({}), InProcess),
+        ];
+        for (name, params, expected) in cases {
+            assert_eq!(
+                reg.execution_environment(name, params),
+                *expected,
+                "unexpected environment for {name} with {params}"
+            );
         }
     }
 }

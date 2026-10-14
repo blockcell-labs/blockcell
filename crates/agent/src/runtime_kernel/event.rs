@@ -1,4 +1,5 @@
 use blockcell_core::{FailureKind, Idempotency, RequestRecovery, ToolOutcome};
+use blockcell_tools::ExecutionEnvironment;
 use serde_json::Value;
 
 /// 事件一致性语义分类。
@@ -95,6 +96,8 @@ pub enum AgentEvent {
         tool_name: String,
         call_id: String,
         arguments: Value,
+        /// 工具声明的执行环境（P2-3），用于审计与可观测性。
+        environment: ExecutionEnvironment,
     },
     ToolPostExecute {
         tool_name: String,

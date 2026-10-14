@@ -49,6 +49,10 @@ fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
 
 #[async_trait]
 impl Tool for ReadFileTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Local
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }
@@ -177,6 +181,10 @@ fn read_result(
 
 #[async_trait]
 impl Tool for WriteFileTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::WorkspaceWrite
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }
@@ -239,6 +247,10 @@ impl Tool for WriteFileTool {
 
 #[async_trait]
 impl Tool for EditFileTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::WorkspaceWrite
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }
@@ -396,6 +408,10 @@ fn parse_edit(params: &Value, index: Option<usize>) -> Result<Edit<'_>> {
 
 #[async_trait]
 impl Tool for ListDirTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Local
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }

@@ -114,6 +114,10 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Shell
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }

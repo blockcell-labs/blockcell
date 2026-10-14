@@ -10,6 +10,10 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Network
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }
@@ -313,6 +317,10 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Network
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Safe
     }

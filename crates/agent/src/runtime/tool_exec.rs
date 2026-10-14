@@ -203,13 +203,6 @@ pub(super) fn shell_action_is_run(arguments: &serde_json::Value) -> bool {
         == "run"
 }
 
-pub(super) fn shell_requests_full_access(arguments: &serde_json::Value) -> bool {
-    arguments
-        .get("sandbox_policy")
-        .and_then(|value| value.as_str())
-        == Some("full-access")
-}
-
 pub(super) fn shell_sandbox_escalation_reason(
     result: &blockcell_core::Result<serde_json::Value>,
 ) -> Option<String> {

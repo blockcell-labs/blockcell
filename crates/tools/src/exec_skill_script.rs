@@ -108,6 +108,10 @@ fn normalize_rhai_result(
 
 #[async_trait]
 impl Tool for ExecSkillScriptTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::Shell
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "exec_skill_script".to_string(),

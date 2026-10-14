@@ -144,9 +144,7 @@ pub fn dangerous_operation_items(tool_name: &str, args: &Value) -> Vec<String> {
 
 /// shell 以 full-access 沙箱策略运行命令，需要用户显式确认。
 fn shell_requests_full_access(tool_name: &str, args: &Value) -> bool {
-    tool_name == "shell"
-        && args.get("action").and_then(Value::as_str).unwrap_or("run") == "run"
-        && args.get("sandbox_policy").and_then(Value::as_str) == Some("full-access")
+    crate::execution_env::requests_full_access(tool_name, args)
 }
 
 fn disabled_toggles(paths: &Paths) -> (HashSet<String>, HashSet<String>) {

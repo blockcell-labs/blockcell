@@ -18,6 +18,7 @@ pub mod evolution_workflow;
 pub mod exec;
 pub mod exec_local;
 pub mod exec_skill_script;
+pub mod execution_env;
 pub mod file_ops;
 pub mod fs;
 pub mod fs_backend;
@@ -73,6 +74,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+pub use execution_env::ExecutionEnvironment;
 pub use presentation::{ToolPresentation, ToolPresentationConfig, ToolVisibility};
 pub use registry::{ScopedTool, ToolRegistry, ToolScopeView};
 pub use registry_builder::{
@@ -499,11 +501,14 @@ pub struct ToolSchema {
     pub parameters: Value,
 }
 
-/// Runtime 看到的执行规格：本次调用需要的权限与幂等性声明（可随参数变化）。
+/// Runtime 看到的执行规格：本次调用需要的权限、幂等性与执行环境声明（可随参数变化）。
 #[derive(Debug, Clone)]
 pub struct ToolExecutionSpec {
     pub permissions: PermissionSet,
     pub idempotency: blockcell_core::Idempotency,
+    /// 本次调用声明的执行环境（P2-3）。默认 `InProcess`；高风险工具据此声明其在何种
+    /// 环境运行，供准入（如 `FullAccess` 需确认）与审计（`tool/call` 事件）使用。
+    pub environment: ExecutionEnvironment,
 }
 
 /// 工具的三层定义：模型看到的 schema、Runtime 看到的执行规格、UI / channel 看到的展示。
@@ -557,11 +562,16 @@ pub trait Tool: Send + Sync {
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Unknown
     }
-    /// 本次调用的执行规格，由 `required_permissions` 与 `idempotency` 组成。
+    /// 本次调用声明的执行环境；未声明的工具按进程内纯计算对待。
+    fn execution_environment(&self, _params: &Value) -> ExecutionEnvironment {
+        ExecutionEnvironment::InProcess
+    }
+    /// 本次调用的执行规格，由 `required_permissions`、`idempotency` 与 `execution_environment` 组成。
     fn execution_spec(&self, params: &Value) -> ToolExecutionSpec {
         ToolExecutionSpec {
             permissions: self.required_permissions(params),
             idempotency: self.idempotency(params),
+            environment: self.execution_environment(params),
         }
     }
     /// Return an optional system-prompt rule describing how the LLM should use this tool.

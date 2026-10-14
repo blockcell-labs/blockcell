@@ -66,6 +66,10 @@ pub struct FileOpsTool;
 
 #[async_trait]
 impl Tool for FileOpsTool {
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        crate::ExecutionEnvironment::WorkspaceWrite
+    }
+
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
         blockcell_core::Idempotency::Required
     }

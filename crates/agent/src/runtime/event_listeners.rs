@@ -190,9 +190,15 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             tool_name,
             call_id,
             arguments,
+            environment,
         } => vec![(
             SessionEventKind::ToolCall,
-            json!({ "tool": tool_name, "call_id": call_id, "arguments": arguments }),
+            json!({
+                "tool": tool_name,
+                "call_id": call_id,
+                "arguments": arguments,
+                "environment": environment.as_str(),
+            }),
         )],
         AgentEvent::ToolResult {
             tool_name,

@@ -5177,6 +5177,143 @@ async fn prefetch_respects_tool_policy_deny() {
         .is_empty());
 }
 
+/// 仅声明执行环境、不做实际工作的工具，用于验证 FullAccess 准入由声明驱动。
+struct DeclaredEnvTool(&'static str, blockcell_tools::ExecutionEnvironment);
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for DeclaredEnvTool {
+    fn execution_environment(
+        &self,
+        _params: &serde_json::Value,
+    ) -> blockcell_tools::ExecutionEnvironment {
+        self.1
+    }
+
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: self.0.to_string(),
+            description: "declared environment tool".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({ "ok": true }))
+    }
+}
+
+#[tokio::test]
+async fn tool_call_event_records_declared_execution_environment() {
+    use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
+
+    let mut runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("alpha.txt"), "alpha-content").unwrap();
+    runtime.current_turn_id = Some("turn-env".to_string());
+
+    let msg = test_main_session_inbound("cli", "env-event");
+    let session = msg.session_key();
+    runtime
+        .execute_tool_call(
+            &tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+            &msg,
+            None,
+        )
+        .await;
+
+    let events = JsonlSessionEventLog::new(runtime.paths.clone())
+        .read(&session)
+        .expect("read session events");
+    let tool_call = events
+        .iter()
+        .find(|event| event.kind == SessionEventKind::ToolCall)
+        .expect("tool/call event recorded");
+    assert_eq!(tool_call.payload["tool"], "read_file");
+    assert_eq!(
+        tool_call.payload["environment"], "local",
+        "tool/call should carry the declared environment: {}",
+        tool_call.payload
+    );
+}
+
+#[tokio::test]
+async fn full_access_gate_is_driven_by_declaration_not_tool_name() {
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(DeclaredEnvTool(
+            "custom_full_access",
+            blockcell_tools::ExecutionEnvironment::FullAccess,
+        )));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
+    runtime.confirm_tx = Some(confirm_tx);
+    let msg = test_main_session_inbound("cli", "full-gate-declared");
+    let handle = tokio::spawn(async move {
+        runtime
+            .execute_tool_call(
+                &tool_call("custom_full_access", serde_json::json!({})),
+                &msg,
+                None,
+            )
+            .await
+            .text
+    });
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), confirm_rx.recv())
+        .await
+        .expect("a tool declaring FullAccess must request approval")
+        .expect("confirmation channel should stay open");
+    assert_eq!(request.tool_name, "custom_full_access");
+    assert!(
+        request.paths.iter().any(|item| item.contains("full-access")),
+        "confirmation should mention full-access: {:?}",
+        request.paths
+    );
+    request.response_tx.send(false).expect("deny full access");
+
+    let result = handle.await.expect("tool task should finish");
+    assert!(result.contains("not approved"), "result: {result}");
+}
+
+#[tokio::test]
+async fn non_full_access_declaration_skips_full_access_gate() {
+    // 同一个工具名与参数，仅执行环境声明不同：声明 Shell 时不触发 full-access 确认。
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(DeclaredEnvTool(
+            "custom_shell",
+            blockcell_tools::ExecutionEnvironment::Shell,
+        )));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
+    runtime.confirm_tx = Some(confirm_tx);
+    let msg = test_main_session_inbound("cli", "shell-no-gate");
+
+    let output = runtime
+        .execute_tool_call(&tool_call("custom_shell", serde_json::json!({})), &msg, None)
+        .await;
+    assert!(
+        output.text.contains("ok"),
+        "tool should execute without confirmation: {}",
+        output.text
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), confirm_rx.recv())
+            .await
+            .is_err(),
+        "no confirmation should be requested for a non-full-access declaration"
+    );
+}
+
 #[tokio::test]
 async fn tool_policy_deny_blocks_tool_before_execution() {
     use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
