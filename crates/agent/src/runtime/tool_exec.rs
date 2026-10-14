@@ -227,7 +227,6 @@ pub(super) fn shell_sandbox_escalation_reason(
             let lower = output.to_ascii_lowercase();
             [
                 "operation not permitted",
-                "permission denied",
                 "network is unreachable",
                 "sandbox violation",
             ]

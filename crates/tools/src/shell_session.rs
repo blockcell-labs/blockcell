@@ -78,6 +78,8 @@ struct ShellSession {
     active: Option<ActiveCommand>,
     sandbox_policy: SandboxPolicy,
     pid: Option<u32>,
+    owner_agent_id: String,
+    owner_session_id: String,
 }
 
 #[derive(Clone)]
@@ -88,7 +90,7 @@ pub(crate) struct ShellSessionManager {
     /// 环境，这里保存一份同步索引，供 [`crate::execution_env::requests_full_access`] 在
     /// 同步的工具声明上下文中判定。
     policies: Arc<std::sync::RwLock<HashMap<String, SandboxPolicy>>>,
-    sandbox: Arc<dyn SandboxProvider>,
+    sandbox: Arc<std::sync::RwLock<Arc<dyn SandboxProvider>>>,
 }
 
 impl ShellSessionManager {
@@ -100,8 +102,21 @@ impl ShellSessionManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             policies: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            sandbox,
+            sandbox: Arc::new(std::sync::RwLock::new(sandbox)),
         }
+    }
+
+    pub(crate) fn set_sandbox_provider(&self, sandbox: Arc<dyn SandboxProvider>) {
+        if let Ok(mut guard) = self.sandbox.write() {
+            *guard = sandbox;
+        }
+    }
+
+    fn current_sandbox(&self) -> Arc<dyn SandboxProvider> {
+        self.sandbox
+            .read()
+            .map(|guard| Arc::clone(&guard))
+            .unwrap_or_else(|_| Arc::new(NativeSandboxProvider))
     }
 
     /// 会话创建时固定的沙箱策略；会话不存在返回 `None`。同步读取，供执行环境声明使用。
@@ -123,11 +138,12 @@ impl ShellSessionManager {
             program: String::new(),
             args: Vec::new(),
         };
+        let sandbox = self.current_sandbox();
         #[cfg(unix)]
         let (mut command, command_input, child_control) =
-            build_interactive_shell(self.sandbox.as_ref(), request).await?;
+            build_interactive_shell(sandbox.as_ref(), request).await?;
         #[cfg(windows)]
-        let mut command = build_interactive_shell(self.sandbox.as_ref(), request).await?;
+        let mut command = build_interactive_shell(sandbox.as_ref(), request).await?;
         command
             .current_dir(workspace)
             .stdin(Stdio::piped())
@@ -160,6 +176,7 @@ impl ShellSessionManager {
         tokio::spawn(drain_shell_stream(stderr, Arc::clone(&output)));
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();
+        self.reap_exited_sessions().await;
         self.sessions.lock().await.insert(
             session_id.clone(),
             Arc::new(Mutex::new(ShellSession {
@@ -171,12 +188,105 @@ impl ShellSessionManager {
                 active: None,
                 sandbox_policy,
                 pid,
+                owner_agent_id: owner.agent_id.to_string(),
+                owner_session_id: owner.session_id.to_string(),
             })),
         );
         if let Ok(mut policies) = self.policies.write() {
             policies.insert(session_id.clone(), sandbox_policy);
         }
         Ok(session_id)
+    }
+
+    /// 校验调用方是否为会话的创建者，防止跨会话/跨 Agent 越权操作持久 Shell。
+    pub(crate) async fn verify_owner(
+        &self,
+        session_id: &str,
+        caller: SessionOwner<'_>,
+    ) -> Result<()> {
+        let session = self.get(session_id).await?;
+        let session = session.lock().await;
+        let session_mismatch = !session.owner_session_id.is_empty()
+            && !caller.session_id.is_empty()
+            && session.owner_session_id != caller.session_id;
+        let agent_mismatch = !session.owner_agent_id.is_empty()
+            && !caller.agent_id.is_empty()
+            && session.owner_agent_id != caller.agent_id;
+        if session_mismatch || agent_mismatch {
+            return Err(Error::PermissionDenied(format!(
+                "Shell session {session_id} belongs to another session or agent"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 回收子进程已退出的僵尸会话，避免长期运行泄漏会话表与输出缓冲。
+    pub(crate) async fn reap_exited_sessions(&self) {
+        let entries: Vec<(String, Arc<Mutex<ShellSession>>)> = {
+            let guard = self.sessions.lock().await;
+            guard
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        let mut exited_ids = Vec::new();
+        for (id, session_arc) in entries {
+            if let Ok(mut session) = session_arc.try_lock() {
+                if session.pid.is_none()
+                    || session
+                        .child
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .is_some()
+                {
+                    session.pid = None;
+                    session.active = None;
+                    exited_ids.push(id);
+                }
+            }
+        }
+        if !exited_ids.is_empty() {
+            let mut guard = self.sessions.lock().await;
+            for id in &exited_ids {
+                guard.remove(id);
+            }
+            if let Ok(mut policies) = self.policies.write() {
+                for id in &exited_ids {
+                    policies.remove(id);
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn remove_if_exited(&self, session_id: &str) -> bool {
+        let Ok(session_arc) = self.get(session_id).await else {
+            return false;
+        };
+        let exited = {
+            let mut session = session_arc.lock().await;
+            if session.pid.is_none()
+                || session
+                    .child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                session.pid = None;
+                session.active = None;
+                true
+            } else {
+                false
+            }
+        };
+        if exited {
+            self.sessions.lock().await.remove(session_id);
+            if let Ok(mut policies) = self.policies.write() {
+                policies.remove(session_id);
+            }
+        }
+        exited
     }
 
     async fn get(&self, session_id: &str) -> Result<Arc<Mutex<ShellSession>>> {
@@ -321,6 +431,10 @@ impl ShellSessionManager {
         {
             session.active = None;
             session.pid = None;
+            let mut shared = session.output.lock().await;
+            shared.bytes.clear();
+            shared.bytes.shrink_to_fit();
+            drop(shared);
             return Ok(ShellCommandOutput {
                 output,
                 exit_code: status.code(),
@@ -395,6 +509,11 @@ pub fn session_sandbox_policy(session_id: &str) -> Option<SandboxPolicy> {
     SHELL_SESSIONS.policy_snapshot(session_id)
 }
 
+/// 注入全局持久 `shell` 会话使用的 [`SandboxProvider`]（如自定义容器 / 远程沙箱）。
+pub fn set_shell_sandbox_provider(provider: Arc<dyn SandboxProvider>) {
+    SHELL_SESSIONS.set_sandbox_provider(provider);
+}
+
 /// 仅测试用：直接写入会话策略快照，避免为声明测试拉起真实 shell。
 #[cfg(test)]
 pub(crate) fn insert_session_policy_for_test(session_id: &str, policy: SandboxPolicy) {
@@ -406,7 +525,7 @@ pub(crate) fn insert_session_policy_for_test(session_id: &str, policy: SandboxPo
 #[async_trait]
 impl Tool for ShellTool {
     fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
-        if crate::execution_env::requests_full_access("shell", params) {
+        if crate::execution_env::effective_sandbox_is_full_access(params) {
             crate::ExecutionEnvironment::FullAccess
         } else {
             crate::ExecutionEnvironment::Shell
@@ -484,9 +603,12 @@ impl Tool for ShellTool {
             "poll" | "close" => require_session_id(params, action)?,
             "write_stdin" => {
                 require_session_id(params, action)?;
-                if params.get("input").and_then(Value::as_str).is_none() {
-                    return Err(Error::Validation(
-                        "action=write_stdin requires input".to_string(),
+                let input = params.get("input").and_then(Value::as_str).ok_or_else(|| {
+                    Error::Validation("action=write_stdin requires input".to_string())
+                })?;
+                if crate::exec::is_dangerous_command(input) {
+                    return Err(Error::PermissionDenied(
+                        "Input matches dangerous pattern and is blocked".to_string(),
                     ));
                 }
             }
@@ -507,12 +629,23 @@ impl Tool for ShellTool {
                 .min(3600),
         );
 
+        let caller_agent_id = ctx
+            .agent_identity
+            .as_ref()
+            .map(|identity| identity.agent_id.as_str())
+            .unwrap_or_default();
+        let caller_owner = SessionOwner {
+            agent_id: caller_agent_id,
+            session_id: &ctx.session_key,
+        };
+
         match action {
             "run" => {
                 let command = params["command"].as_str().unwrap_or_default();
                 let session_id = if let Some(session_id) =
                     params.get("session_id").and_then(Value::as_str)
                 {
+                    SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
                     if params.get("sandbox_policy").is_some() {
                         let requested = SandboxPolicy::parse(
                             params.get("sandbox_policy").and_then(Value::as_str),
@@ -529,20 +662,8 @@ impl Tool for ShellTool {
                 } else {
                     let policy =
                         SandboxPolicy::parse(params.get("sandbox_policy").and_then(Value::as_str))?;
-                    let agent_id = ctx
-                        .agent_identity
-                        .as_ref()
-                        .map(|identity| identity.agent_id.as_str())
-                        .unwrap_or_default();
                     let session_id = SHELL_SESSIONS
-                        .create(
-                            &ctx.workspace,
-                            policy,
-                            SessionOwner {
-                                agent_id,
-                                session_id: &ctx.session_key,
-                            },
-                        )
+                        .create(&ctx.workspace, policy, caller_owner)
                         .await?;
                     if let (Some(task_manager), (Some(pid), _)) = (
                         ctx.task_manager.as_ref(),
@@ -555,25 +676,46 @@ impl Tool for ShellTool {
                 let output = SHELL_SESSIONS
                     .run_command(&session_id, command, timeout)
                     .await?;
-                let (_, policy) = SHELL_SESSIONS.session_metadata(&session_id).await?;
+                let (pid, policy) = SHELL_SESSIONS.session_metadata(&session_id).await?;
+                if pid.is_none() {
+                    SHELL_SESSIONS.remove_if_exited(&session_id).await;
+                    if let Some(task_manager) = ctx.task_manager.as_ref() {
+                        task_manager.unregister_shell_process(&session_id);
+                    }
+                }
                 Ok(shell_output_json(&session_id, policy, output))
             }
             "poll" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
+                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
                 let output = SHELL_SESSIONS.poll(session_id, timeout).await?;
-                let (_, policy) = SHELL_SESSIONS.session_metadata(session_id).await?;
+                let (pid, policy) = SHELL_SESSIONS.session_metadata(session_id).await?;
+                if pid.is_none() {
+                    SHELL_SESSIONS.remove_if_exited(session_id).await;
+                    if let Some(task_manager) = ctx.task_manager.as_ref() {
+                        task_manager.unregister_shell_process(session_id);
+                    }
+                }
                 Ok(shell_output_json(session_id, policy, output))
             }
             "write_stdin" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
+                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
                 let input = params["input"].as_str().unwrap_or_default();
                 SHELL_SESSIONS.write_stdin(session_id, input).await?;
                 let output = SHELL_SESSIONS.poll(session_id, timeout).await?;
-                let (_, policy) = SHELL_SESSIONS.session_metadata(session_id).await?;
+                let (pid, policy) = SHELL_SESSIONS.session_metadata(session_id).await?;
+                if pid.is_none() {
+                    SHELL_SESSIONS.remove_if_exited(session_id).await;
+                    if let Some(task_manager) = ctx.task_manager.as_ref() {
+                        task_manager.unregister_shell_process(session_id);
+                    }
+                }
                 Ok(shell_output_json(session_id, policy, output))
             }
             "close" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
+                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
                 SHELL_SESSIONS.close(session_id).await?;
                 if let Some(task_manager) = ctx.task_manager.as_ref() {
                     task_manager.unregister_shell_process(session_id);
@@ -717,7 +859,15 @@ fn terminate_process_group(pid: Option<u32>) {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = pid;
 }
 
@@ -987,5 +1137,59 @@ mod tests {
                 manager.close(&session_id).await.expect("close session");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn session_owner_verification_rejects_cross_session_access() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner {
+                    agent_id: "agent-a",
+                    session_id: "cli:session-a",
+                },
+            )
+            .await
+            .expect("create owned session");
+
+        assert!(manager
+            .verify_owner(
+                &session_id,
+                SessionOwner {
+                    agent_id: "agent-a",
+                    session_id: "cli:session-a",
+                }
+            )
+            .await
+            .is_ok());
+
+        let err = manager
+            .verify_owner(
+                &session_id,
+                SessionOwner {
+                    agent_id: "agent-a",
+                    session_id: "cli:session-b",
+                },
+            )
+            .await
+            .expect_err("cross-session access must be rejected");
+        assert!(matches!(err, Error::PermissionDenied(_)), "{err}");
+
+        manager.close(&session_id).await.expect("close session");
+    }
+
+    #[test]
+    fn write_stdin_blocks_dangerous_commands_in_validate() {
+        let err = ShellTool
+            .validate(&json!({
+                "action": "write_stdin",
+                "session_id": "s1",
+                "input": "rm -rf /\n"
+            }))
+            .expect_err("catastrophic rm in write_stdin must be blocked");
+        assert!(matches!(err, Error::PermissionDenied(_)), "{err}");
     }
 }

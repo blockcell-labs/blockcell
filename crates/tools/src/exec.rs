@@ -181,10 +181,21 @@ impl Tool for ExecTool {
         let timeout_secs = ctx.config.tools.exec.timeout as u64;
         let max_output_chars = 10000;
 
-        // exec 历史上不受沙箱限制（安全由 Guarded Tool Pipeline 的 policy / 路径检查保证），
-        // 故以 FullAccess 运行，且 `execution_environment` 如实声明为 FullAccess；受限执行
-        // 请使用 shell 工具的 sandbox_policy。需要逐次确认的是 full-access 的 shell，
-        // exec 的危险命令由 DangerousOperation 阶段按命令内容把关。
+        // 默认按 FullAccess 运行以保持兼容；若配置了 `tools.exec.sandboxPolicy` 或
+        // `tools.exec.restrictToWorkspace = true`，则按配置的沙箱策略约束进程。
+        let policy = if let Some(raw_policy) = ctx.config.tools.exec.sandbox_policy.as_deref() {
+            SandboxPolicy::parse(Some(raw_policy))?
+        } else if ctx.config.tools.exec.restrict_to_workspace {
+            SandboxPolicy::WorkspaceWrite
+        } else {
+            SandboxPolicy::FullAccess
+        };
+        let writable_roots = if policy == SandboxPolicy::WorkspaceWrite {
+            vec![ctx.workspace.clone()]
+        } else {
+            Vec::new()
+        };
+
         let result = self
             .executor
             .execute(ShellRequest {
@@ -196,8 +207,8 @@ impl Tool for ExecTool {
                 session_id: ctx.session_key.clone(),
                 command: command.to_string(),
                 working_dir,
-                policy: SandboxPolicy::FullAccess,
-                writable_roots: Vec::new(),
+                policy,
+                writable_roots,
                 timeout: Duration::from_secs(timeout_secs),
                 max_output_bytes: max_output_chars * 4,
             })

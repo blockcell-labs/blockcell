@@ -79,12 +79,28 @@ async fn forked_agent_cancels_pending_provider() {
 #[cfg(unix)]
 #[tokio::test]
 async fn forked_agent_cancellation_kills_running_shell_tool() {
-    if blockcell_tools::sandbox::native_backend(
-        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
-    ) == blockcell_tools::sandbox::SandboxBackend::ApprovalRequired
-    {
-        return;
+    struct PassthroughWorkspaceSandbox;
+
+    #[async_trait::async_trait]
+    impl blockcell_tools::sandbox::SandboxProvider for PassthroughWorkspaceSandbox {
+        fn name(&self) -> &'static str {
+            "test-passthrough-sandbox"
+        }
+
+        async fn prepare(
+            &self,
+            request: blockcell_tools::sandbox::SandboxRequest,
+        ) -> blockcell_core::Result<blockcell_tools::sandbox::SandboxHandle> {
+            let mut command = tokio::process::Command::new(&request.program);
+            command.args(&request.args);
+            command.kill_on_drop(true);
+            Ok(blockcell_tools::sandbox::SandboxHandle {
+                command,
+                backend: blockcell_tools::sandbox::SandboxBackend::MacOsSeatbelt,
+            })
+        }
     }
+
     let temp = tempfile::tempdir().expect("temp dir");
     let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
         "test-model",
@@ -104,8 +120,15 @@ async fn forked_agent_cancellation_kills_running_shell_tool() {
         .expect("params should build");
     let abort_token = blockcell_core::AbortToken::new();
     let task_token = abort_token.clone();
+    let executor = Arc::new(blockcell_tools::shell_executor::LocalShellExecutor::new(
+        Arc::new(PassthroughWorkspaceSandbox),
+    ));
     let task = tokio::spawn(async move {
-        blockcell_core::scope_abort_token(task_token, run_forked_agent(params)).await
+        super::tool_exec::with_forked_shell_executor(
+            executor,
+            blockcell_core::scope_abort_token(task_token, run_forked_agent(params)),
+        )
+        .await
     });
 
     tokio::time::timeout(Duration::from_millis(500), async {
@@ -391,30 +414,48 @@ async fn forked_write_rejects_paths_outside_workspace_scope() {
 
 #[tokio::test]
 async fn typed_shell_requires_approval_when_native_sandbox_is_unavailable() {
-    if blockcell_tools::sandbox::native_backend(
-        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
-    ) != blockcell_tools::sandbox::SandboxBackend::ApprovalRequired
-    {
-        return;
+    struct UnavailableSandbox;
+
+    #[async_trait::async_trait]
+    impl blockcell_tools::sandbox::SandboxProvider for UnavailableSandbox {
+        fn name(&self) -> &'static str {
+            "test-unavailable-sandbox"
+        }
+
+        async fn prepare(
+            &self,
+            _request: blockcell_tools::sandbox::SandboxRequest,
+        ) -> blockcell_core::Result<blockcell_tools::sandbox::SandboxHandle> {
+            Err(blockcell_core::Error::PermissionDenied(
+                "native sandbox unavailable; approval required".to_string(),
+            ))
+        }
     }
+
     let tmp = tempfile::tempdir().unwrap();
     let working_dir = Some(tmp.path().to_path_buf());
     let can_use_tool: CanUseToolFn = Arc::new(|_, _| ToolPermission::Allow);
     let scope = vec![WorkspaceScopeEntry::directory(tmp.path().join("src"))];
+    let executor = Arc::new(blockcell_tools::shell_executor::LocalShellExecutor::new(
+        Arc::new(UnavailableSandbox),
+    ));
 
-    let result = execute_forked_tool(
-        "shell",
-        &json!({"command": "echo should-not-run"}),
-        &can_use_tool,
-        &[],
-        &None,
-        &None,
-        &None,
-        &None,
-        &[],
-        &None,
-        &working_dir,
-        &scope,
+    let result = super::tool_exec::with_forked_shell_executor(
+        executor,
+        execute_forked_tool(
+            "shell",
+            &json!({"command": "echo should-not-run"}),
+            &can_use_tool,
+            &[],
+            &None,
+            &None,
+            &None,
+            &None,
+            &[],
+            &None,
+            &working_dir,
+            &scope,
+        ),
     )
     .await;
 

@@ -560,20 +560,19 @@ impl AgentRuntime {
             .await;
         if tool_name == "shell" && shell_action_is_run(&inv.args) {
             if let Some(reason) = shell_sandbox_escalation_reason(&result) {
-                let approved = inv.policy_confirmed
-                    || self
-                        .approve_dangerous_operation(
-                            "shell",
-                            vec![format!(
-                                "sandbox escalation ({reason}): {}",
-                                inv.args
-                                    .get("command")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or_default()
-                            )],
-                            inv.msg,
-                        )
-                        .await;
+                let approved = self
+                    .approve_dangerous_operation(
+                        "shell",
+                        vec![format!(
+                            "sandbox escalation ({reason}): {}",
+                            inv.args
+                                .get("command")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default()
+                        )],
+                        inv.msg,
+                    )
+                    .await;
                 if approved {
                     inv.args = full_access_retry_args(&inv.args);
                     result = self

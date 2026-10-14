@@ -1,6 +1,21 @@
 use super::*;
 use blockcell_tools::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
 
+tokio::task_local! {
+    static FORKED_SHELL_EXECUTOR: Arc<dyn ShellExecutor>;
+}
+
+#[cfg(test)]
+pub(crate) async fn with_forked_shell_executor<F>(
+    executor: Arc<dyn ShellExecutor>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    FORKED_SHELL_EXECUTOR.scope(executor, future).await
+}
+
 pub(crate) fn validate_path_safety(path: &str) -> Result<(), ForkedAgentError> {
     // 检查空字节注入
     if path.contains('\0') {
@@ -205,7 +220,10 @@ pub(crate) async fn execute_shell_command(
             .collect::<Vec<_>>()
     };
     let identity = blockcell_core::current_agent_context();
-    let output = LocalShellExecutor::default()
+    let executor: Arc<dyn ShellExecutor> = FORKED_SHELL_EXECUTOR
+        .try_with(Arc::clone)
+        .unwrap_or_else(|_| Arc::new(LocalShellExecutor::default()));
+    let output = executor
         .execute(ShellRequest {
             agent_id: identity
                 .as_ref()

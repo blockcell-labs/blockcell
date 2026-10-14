@@ -114,14 +114,15 @@ impl<'de> Deserialize<'de> for ExecutionEnvironment {
     }
 }
 
-/// `shell` 本次调用是否会以 full-access 运行（因而需要用户显式确认）。
+/// `shell` 本次调用是否会向 full-access 会话注入执行或输入（因而需要用户显式确认）。
 ///
-/// 这是 `ShellTool` 的环境 / 确认声明与技能脚本嵌套守卫共用的唯一判定规则。
+/// 这是 `ShellTool` 的确认声明与技能脚本嵌套守卫共用的唯一判定规则。
 pub fn requests_full_access(tool_name: &str, args: &Value) -> bool {
     if tool_name != "shell" {
         return false;
     }
-    if args.get("action").and_then(Value::as_str).unwrap_or("run") != "run" {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("run");
+    if !matches!(action, "run" | "write_stdin") {
         return false;
     }
     effective_sandbox_is_full_access(args)
@@ -133,7 +134,7 @@ pub fn requests_full_access(tool_name: &str, args: &Value) -> bool {
 /// 会话策略创建后不可更改（`execute` 会拒绝不一致的 `sandbox_policy`），所以复用时即便不
 /// 重复声明，命令实际仍以会话策略运行。漏掉这一路会让"先建 full-access 会话、后续复用"
 /// 绕过确认。
-fn effective_sandbox_is_full_access(args: &Value) -> bool {
+pub fn effective_sandbox_is_full_access(args: &Value) -> bool {
     if let Some(policy) = args.get("sandbox_policy").and_then(Value::as_str) {
         return policy == "full-access";
     }
@@ -241,10 +242,25 @@ mod tests {
                 "sandbox_policy": "workspace-write"
             })
         ));
-        // 非 run 动作不请求
+        // poll / close 不发送新命令或输入，不请求逐次确认，但 write_stdin 必须请求确认
         assert!(!requests_full_access(
             "shell",
             &json!({"action": "poll", "session_id": "env-test-full"})
+        ));
+        assert!(requests_full_access(
+            "shell",
+            &json!({"action": "write_stdin", "session_id": "env-test-full", "input": "id\n"})
+        ));
+        assert!(!requests_full_access(
+            "shell",
+            &json!({"action": "write_stdin", "session_id": "env-test-write", "input": "id\n"})
+        ));
+        // 环境声明对 full-access 会话的 poll / write_stdin / close 均如实反映 FullAccess
+        assert!(effective_sandbox_is_full_access(
+            &json!({"action": "poll", "session_id": "env-test-full"})
+        ));
+        assert!(effective_sandbox_is_full_access(
+            &json!({"action": "write_stdin", "session_id": "env-test-full", "input": "id\n"})
         ));
     }
 }

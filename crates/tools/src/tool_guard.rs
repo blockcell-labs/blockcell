@@ -115,6 +115,19 @@ pub fn dangerous_operation_items(tool_name: &str, args: &Value) -> Vec<String> {
                 Vec::new()
             }
         }
+        "shell" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
+            let cmd = match action {
+                "run" => field("command"),
+                "write_stdin" => field("input"),
+                _ => "",
+            };
+            if is_dangerous_exec_command(cmd) {
+                vec![format!("command: {}", cmd)]
+            } else {
+                Vec::new()
+            }
+        }
         "file_ops" => {
             let action = field("action");
             let path = field("path");
@@ -359,7 +372,19 @@ mod tests {
             dangerous_operation_items("exec", &json!({"command": "rm -rf build"})),
             vec!["command: rm -rf build"]
         );
+        assert_eq!(
+            dangerous_operation_items("shell", &json!({"command": "rm -rf build"})),
+            vec!["command: rm -rf build"]
+        );
+        assert_eq!(
+            dangerous_operation_items(
+                "shell",
+                &json!({"action": "write_stdin", "session_id": "s1", "input": "rm -rf build\n"})
+            ),
+            vec!["command: rm -rf build\n"]
+        );
         assert!(dangerous_operation_items("exec", &json!({"command": "ls"})).is_empty());
+        assert!(dangerous_operation_items("shell", &json!({"command": "ls"})).is_empty());
         assert_eq!(
             dangerous_operation_items(
                 "file_ops",

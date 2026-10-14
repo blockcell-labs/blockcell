@@ -40,6 +40,8 @@ pub struct ExecConfig {
     pub timeout: u32,
     #[serde(default)]
     pub restrict_to_workspace: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<String>,
 }
 
 impl Default for ExecConfig {
@@ -47,6 +49,7 @@ impl Default for ExecConfig {
         Self {
             timeout: default_exec_timeout(),
             restrict_to_workspace: false,
+            sandbox_policy: None,
         }
     }
 }
