@@ -1588,7 +1588,13 @@ impl AgentRuntime {
                     // review_started() here to avoid double increment.
                     let notify = Some((msg.channel.clone(), msg.chat_id.clone()));
                     if let Some(reservation) = deferred_review_reservation.take() {
-                        self.spawn_review(mode, deferred_review_snapshot, notify, reservation);
+                        self.spawn_review(
+                            mode,
+                            deferred_review_snapshot,
+                            tools.clone(),
+                            notify,
+                            reservation,
+                        );
                     }
                 }
             }

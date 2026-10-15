@@ -28,6 +28,7 @@ impl super::AgentRuntime {
         &self,
         mode: ReviewMode,
         messages: Vec<ChatMessage>,
+        parent_tool_schemas: Vec<serde_json::Value>,
         notify_channel: Option<(String, String)>,
         reservation: crate::learning_coordinator::LearningReviewReservationGuard,
     ) {
@@ -115,25 +116,21 @@ impl super::AgentRuntime {
                 ReviewMode::Combined => crate::forked::create_combined_review_can_use_tool(),
             };
 
-            // 构建工具 Schema (传给 provider.chat() 让 LLM 知道可用工具)
-            let tool_schemas = match mode_clone {
-                ReviewMode::Skill => crate::forked::build_skill_review_tool_schemas(),
-                ReviewMode::Memory => crate::forked::build_memory_review_tool_schemas(),
-                ReviewMode::Combined => crate::forked::build_combined_review_tool_schemas(),
-            };
+            // 缓存对齐: 优先原样复用父轮完整的 tool_schemas（保持 tools[] 字节一致以命中 Prompt Cache），
+            // 仅当父轮无工具（如纯 Chat 模式）或缺失核心 review 工具时才回退到窄 schema。
+            // 安全边界由上方的 can_use_tool 在执行期拦截保障。
+            let tool_schemas = Self::resolve_review_tool_schemas(&mode_clone, &parent_tool_schemas);
+            let cache_safe_tools = Self::tool_definitions_from_schemas(&tool_schemas);
 
             // 构建 ForkedAgent 参数 (与 Hermes 一致: fork_context_messages 承载父对话前缀，
             // prompt_messages 仅承载增量 review 指令)
-            // 如果有 Skill 索引，在 prompt 前附加
-            let full_prompt = if skill_summary.is_empty() {
-                review_prompt
-            } else {
-                format!("{}\n\n## Existing Skills\n{}", review_prompt, skill_summary)
-            };
+            let full_prompt =
+                Self::format_review_user_prompt(&mode_clone, &review_prompt, &skill_summary);
             let prompt_messages = vec![ChatMessage::user(&full_prompt)];
 
             let cache_safe = crate::forked::CacheSafeParams::new(system_prompt, &model)
-                .with_fork_messages(messages);
+                .with_fork_messages(messages)
+                .with_tools(cache_safe_tools);
             let mut params =
                 crate::forked::ForkedAgentParams::new(provider_pool, prompt_messages, cache_safe)
                     .with_can_use_tool(can_use_tool)
@@ -231,6 +228,85 @@ impl super::AgentRuntime {
             }
         }).await;
         });
+    }
+
+    /// 缓存对齐工具解析：当父轮 `parent_tool_schemas` 已包含当前 Review 模式所需的核心工具时，
+    /// 原样返回父轮完整 `tools[]` 以保持字节级缓存前缀一致；否则回退到该模式的窄工具集。
+    pub(super) fn resolve_review_tool_schemas(
+        mode: &ReviewMode,
+        parent_tool_schemas: &[serde_json::Value],
+    ) -> Vec<serde_json::Value> {
+        let has_tool = |target: &str| {
+            parent_tool_schemas.iter().any(|schema| {
+                schema
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    == Some(target)
+            })
+        };
+
+        let parent_has_required = match mode {
+            ReviewMode::Skill => has_tool("skill_manage"),
+            ReviewMode::Memory => has_tool("memory_manage"),
+            ReviewMode::Combined => has_tool("skill_manage") && has_tool("memory_manage"),
+        };
+
+        if parent_has_required {
+            parent_tool_schemas.to_vec()
+        } else {
+            match mode {
+                ReviewMode::Skill => crate::forked::build_skill_review_tool_schemas(),
+                ReviewMode::Memory => crate::forked::build_memory_review_tool_schemas(),
+                ReviewMode::Combined => crate::forked::build_combined_review_tool_schemas(),
+            }
+        }
+    }
+
+    pub(super) fn tool_definitions_from_schemas(
+        schemas: &[serde_json::Value],
+    ) -> Vec<crate::forked::ToolDefinition> {
+        schemas
+            .iter()
+            .filter_map(|schema| {
+                let func = schema.get("function")?;
+                let name = func.get("name")?.as_str()?;
+                let description = func
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default();
+                let parameters = func
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                Some(crate::forked::ToolDefinition::new(
+                    name,
+                    description,
+                    parameters,
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) fn format_review_user_prompt(
+        mode: &ReviewMode,
+        review_prompt: &str,
+        skill_summary: &str,
+    ) -> String {
+        let tool_mode = match mode {
+            ReviewMode::Skill => crate::forked::ReviewToolMode::Skill,
+            ReviewMode::Memory => crate::forked::ReviewToolMode::Memory,
+            ReviewMode::Combined => crate::forked::ReviewToolMode::Combined,
+        };
+        let allowed_tools = crate::forked::roster_names(tool_mode).join(", ");
+        let mut prompt = format!(
+            "{}\n\nIMPORTANT: In this review turn, you may ONLY use the following tools: {}. Do not call any other tools.",
+            review_prompt, allowed_tools
+        );
+        if !skill_summary.is_empty() {
+            prompt.push_str(&format!("\n\n## Existing Skills\n{}", skill_summary));
+        }
+        prompt
     }
 
     /// 从 Review Agent 的 tool 结果中提取操作摘要 (参考 Hermes 行为)
@@ -1006,3 +1082,62 @@ impl super::AgentRuntime {
         registry
     }
 } // impl AgentRuntime
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolve_review_tool_schemas_preserves_parent_schemas_when_compatible() {
+        let parent_schemas = vec![
+            json!({"type": "function", "function": {"name": "exec", "description": "run cmd", "parameters": {}}}),
+            json!({"type": "function", "function": {"name": "skill_manage", "description": "manage skills", "parameters": {}}}),
+            json!({"type": "function", "function": {"name": "memory_manage", "description": "manage memory", "parameters": {}}}),
+        ];
+
+        assert_eq!(
+            super::super::AgentRuntime::resolve_review_tool_schemas(
+                &ReviewMode::Skill,
+                &parent_schemas
+            ),
+            parent_schemas
+        );
+        assert_eq!(
+            super::super::AgentRuntime::resolve_review_tool_schemas(
+                &ReviewMode::Memory,
+                &parent_schemas
+            ),
+            parent_schemas
+        );
+        assert_eq!(
+            super::super::AgentRuntime::resolve_review_tool_schemas(
+                &ReviewMode::Combined,
+                &parent_schemas
+            ),
+            parent_schemas
+        );
+    }
+
+    #[test]
+    fn resolve_review_tool_schemas_falls_back_when_parent_has_no_tools() {
+        let resolved =
+            super::super::AgentRuntime::resolve_review_tool_schemas(&ReviewMode::Skill, &[]);
+        assert_eq!(
+            resolved,
+            crate::forked::build_skill_review_tool_schemas()
+        );
+    }
+
+    #[test]
+    fn format_review_user_prompt_includes_roster_restriction() {
+        let prompt = super::super::AgentRuntime::format_review_user_prompt(
+            &ReviewMode::Memory,
+            MEMORY_REVIEW_PROMPT,
+            "",
+        );
+        assert!(prompt.contains(MEMORY_REVIEW_PROMPT));
+        assert!(prompt.contains("memory_manage"));
+        assert!(prompt.contains("list_dir"));
+    }
+}
