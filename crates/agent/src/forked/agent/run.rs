@@ -139,9 +139,12 @@ pub async fn run_forked_agent(
         }
     };
 
+    let preferred_cache_model = (!params.cache_safe_params.model.is_empty())
+        .then_some(params.cache_safe_params.model.as_str());
     let provider = match acquire_provider_with_retry(
         provider_pool,
         params.model.as_deref(),
+        preferred_cache_model,
         PROVIDER_RETRY_MAX_ATTEMPTS,
         PROVIDER_RETRY_INITIAL_DELAY_MS,
         PROVIDER_RETRY_MAX_DELAY_MS,
@@ -758,6 +761,7 @@ pub(crate) fn inject_preloaded_skills(
 pub(crate) async fn acquire_provider_with_retry(
     provider_pool: &Arc<ProviderPool>,
     model_override: Option<&str>,
+    preferred_cache_model: Option<&str>,
     max_attempts: usize,
     initial_delay_ms: u64,
     max_delay_ms: u64,
@@ -775,6 +779,14 @@ pub(crate) async fn acquire_provider_with_retry(
 
         let acquired = if let Some(model) = model_override {
             provider_pool.acquire_by_model(model)
+        } else if let Some(cache_model) = preferred_cache_model {
+            provider_pool.acquire_by_model(cache_model).or_else(|| {
+                tracing::debug!(
+                    preferred_cache_model = cache_model,
+                    "[forked_agent] Preferred cache-aligned model unavailable in pool, degrading to default acquire()"
+                );
+                provider_pool.acquire()
+            })
         } else {
             provider_pool.acquire()
         };

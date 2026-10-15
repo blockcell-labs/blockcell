@@ -29,6 +29,7 @@ impl super::AgentRuntime {
         mode: ReviewMode,
         messages: Vec<ChatMessage>,
         parent_tool_schemas: Vec<serde_json::Value>,
+        parent_served_model: Option<String>,
         notify_channel: Option<(String, String)>,
         reservation: crate::learning_coordinator::LearningReviewReservationGuard,
     ) {
@@ -46,7 +47,9 @@ impl super::AgentRuntime {
         let builtin_skills_dir = self.paths.builtin_skills_dir();
         let external_skills_dirs = vec![builtin_skills_dir];
         let provider_pool = self.provider_pool.clone();
-        let model = self.config.agents.defaults.model.clone();
+        let model = parent_served_model
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| self.config.agents.defaults.model.clone());
         let max_review_rounds = self.config.self_improve.review.max_rounds;
         let memory_store = self.memory_store.clone();
         let memory_file_store = self.memory_file_store.clone();

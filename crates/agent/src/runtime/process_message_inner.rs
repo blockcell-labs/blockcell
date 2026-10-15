@@ -596,6 +596,7 @@ impl AgentRuntime {
         let mut deferred_review_mode: Option<ReviewMode> = None;
         let mut deferred_review_snapshot: Vec<ChatMessage> = Vec::new();
         let mut deferred_review_reservation: Option<LearningReviewReservationGuard> = None;
+        let mut last_served_model: Option<String> = None;
 
         // Memory Nudge: check before LLM loop (replaces skill_nudge_engine.check_memory_nudge)
         // Memory nudge is based on user turns, not tool iterations
@@ -724,6 +725,10 @@ impl AgentRuntime {
                     break;
                 }
             };
+
+            if !served_by.model.is_empty() {
+                last_served_model = Some(served_by.model.clone());
+            }
 
             info!(
                 content_len = response.content.as_ref().map(|c| c.len()).unwrap_or(0),
@@ -1592,6 +1597,7 @@ impl AgentRuntime {
                             mode,
                             deferred_review_snapshot,
                             tools.clone(),
+                            last_served_model.clone(),
                             notify,
                             reservation,
                         );
