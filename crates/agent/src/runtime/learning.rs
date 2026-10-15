@@ -52,8 +52,14 @@ impl super::AgentRuntime {
         let skill_file_store = self.skill_file_store.clone();
         let skill_mutex = self.skill_mutex.clone();
         let mode_clone = mode.clone();
-        // 与 Hermes 一致: review_agent 继承主 agent 的 system prompt
-        let system_prompt = self.context_builder.build_system_prompt();
+        // 与 Hermes 一致: review_agent 直接复用父快照首条已冻结/已注入的 system message，
+        // 避免 build_system_prompt() 重新渲染导致前缀分叉和双 system message。
+        let system_prompt = messages
+            .first()
+            .filter(|m| m.role == "system")
+            .and_then(|m| m.content.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.context_builder.build_system_prompt());
         let outbound_tx = self.outbound_tx.clone();
         // 共享 skill_index_summary Arc, 供后台 Review 完成后刷新
         let skill_index_cache = self.context_builder.skill_index_summary_arc();
@@ -116,20 +122,20 @@ impl super::AgentRuntime {
                 ReviewMode::Combined => crate::forked::build_combined_review_tool_schemas(),
             };
 
-            // 构建 ForkedAgent 参数 (与 Hermes 一致: 传入对话历史 + review prompt 作为用户消息)
-            // Hermes: review_agent.run_conversation(user_message=prompt, conversation_history=messages_snapshot)
-            let mut review_messages = messages.clone();
+            // 构建 ForkedAgent 参数 (与 Hermes 一致: fork_context_messages 承载父对话前缀，
+            // prompt_messages 仅承载增量 review 指令)
             // 如果有 Skill 索引，在 prompt 前附加
             let full_prompt = if skill_summary.is_empty() {
                 review_prompt
             } else {
                 format!("{}\n\n## Existing Skills\n{}", review_prompt, skill_summary)
             };
-            review_messages.push(ChatMessage::user(&full_prompt));
+            let prompt_messages = vec![ChatMessage::user(&full_prompt)];
 
-            let cache_safe = crate::forked::CacheSafeParams::new(system_prompt, &model);
+            let cache_safe = crate::forked::CacheSafeParams::new(system_prompt, &model)
+                .with_fork_messages(messages);
             let mut params =
-                crate::forked::ForkedAgentParams::new(provider_pool, review_messages, cache_safe)
+                crate::forked::ForkedAgentParams::new(provider_pool, prompt_messages, cache_safe)
                     .with_can_use_tool(can_use_tool)
                     .with_tool_schemas(tool_schemas)
                     .with_query_source("review")

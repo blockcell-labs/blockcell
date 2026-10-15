@@ -68,24 +68,12 @@ pub async fn run_forked_agent(
         ));
     }
 
-    // 构建初始消息（父消息 + 子代理输入）
-    let mut messages: Vec<ChatMessage> = params
-        .cache_safe_params
-        .fork_context_messages
-        .iter()
-        .cloned()
-        .chain(params.prompt_messages.iter().cloned())
-        .collect();
-
-    // 添加系统提示
-    let system_prompt = params
-        .system_prompt
-        .clone()
-        .unwrap_or_else(|| (*params.cache_safe_params.system_prompt).clone());
-
-    if !system_prompt.is_empty() {
-        messages.insert(0, ChatMessage::system(&system_prompt));
-    }
+    // 构建初始消息（父消息前缀 + 子代理增量输入，避免重复插入 system message）
+    let mut messages = build_initial_forked_messages(
+        &params.cache_safe_params,
+        &params.prompt_messages,
+        params.system_prompt.as_deref(),
+    );
 
     inject_preloaded_skills(
         &mut messages,
@@ -629,6 +617,33 @@ pub async fn run_forked_agent(
     })
 }
 
+pub(crate) fn build_initial_forked_messages(
+    cache_safe_params: &CacheSafeParams,
+    prompt_messages: &[ChatMessage],
+    system_prompt_override: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = cache_safe_params
+        .fork_context_messages
+        .iter()
+        .cloned()
+        .chain(prompt_messages.iter().cloned())
+        .collect();
+
+    let system_prompt = system_prompt_override.unwrap_or(cache_safe_params.system_prompt.as_str());
+
+    if !system_prompt.is_empty() {
+        if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            if system_prompt_override.is_some() {
+                messages[0] = ChatMessage::system(system_prompt);
+            }
+        } else {
+            messages.insert(0, ChatMessage::system(system_prompt));
+        }
+    }
+
+    messages
+}
+
 pub(crate) fn insert_initial_prompt(messages: &mut Vec<ChatMessage>, initial_prompt: &str) {
     let insert_at = messages
         .iter()
@@ -874,5 +889,36 @@ mod usage_tests {
             "cache_creation_input_tokens": 0
         });
         assert_eq!(extract_forked_usage(&raw_usage), (200, 45, 150, 0));
+    }
+
+    #[test]
+    fn build_initial_forked_messages_preserves_single_parent_system_message() {
+        use crate::forked::CacheSafeParams;
+        use blockcell_core::types::ChatMessage;
+
+        let parent_snapshot = vec![
+            ChatMessage::system("frozen parent system prompt with skill cards"),
+            ChatMessage::user("deploy the service"),
+            ChatMessage::assistant("service deployed"),
+        ];
+        let cache_safe = CacheSafeParams::new(
+            "frozen parent system prompt with skill cards",
+            "claude-sonnet-4-5",
+        )
+        .with_fork_messages(parent_snapshot);
+        let prompt_messages = vec![ChatMessage::user("Review the conversation above")];
+
+        let built = super::build_initial_forked_messages(&cache_safe, &prompt_messages, None);
+        let system_messages: Vec<_> = built.iter().filter(|m| m.role == "system").collect();
+        assert_eq!(system_messages.len(), 1, "must not duplicate system message");
+        assert_eq!(
+            built[0].content.as_str(),
+            Some("frozen parent system prompt with skill cards")
+        );
+        assert_eq!(built.len(), 4);
+        assert_eq!(
+            built[3].content.as_str(),
+            Some("Review the conversation above")
+        );
     }
 }
