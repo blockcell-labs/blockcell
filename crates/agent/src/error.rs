@@ -44,16 +44,18 @@ pub(crate) fn disabled_skill_result(skill_name: &str) -> String {
     )
 }
 
-/// Build a permission-denied error for dangerous exec commands.
-pub(crate) fn dangerous_exec_denied(has_confirm_channel: bool) -> String {
+/// Build a permission-denied error for dangerous exec/shell commands.
+pub(crate) fn dangerous_exec_denied(tool_name: &str, has_confirm_channel: bool) -> String {
     let hint = if has_confirm_channel {
         "The command looks dangerous (e.g. kill/pkill/killall/service stop). Ask the user to confirm explicitly before running it."
     } else {
         "This channel cannot show an interactive confirm prompt. Reply with '确认执行' (or '确认重启') to proceed, otherwise I will not run kill/pkill/killall/service-stop commands."
     };
     tool_denied_json(
-        "exec",
-        "Permission denied: dangerous exec command requires explicit user confirmation.",
+        tool_name,
+        &format!(
+            "Permission denied: dangerous {tool_name} command requires explicit user confirmation."
+        ),
         hint,
     )
 }

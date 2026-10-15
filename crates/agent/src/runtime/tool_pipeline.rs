@@ -201,9 +201,7 @@ impl AgentRuntime {
                 AdmissionStage::Policy => self.guard_tool_policy(inv).await,
                 AdmissionStage::DangerousOperation => self.guard_dangerous_operation(inv).await,
                 AdmissionStage::PathAccess => self.guard_path_access(inv).await,
-                AdmissionStage::ExplicitConfirmation => {
-                    self.guard_explicit_confirmation(inv).await
-                }
+                AdmissionStage::ExplicitConfirmation => self.guard_explicit_confirmation(inv).await,
             }?;
         }
         Ok(())
@@ -335,7 +333,7 @@ impl AgentRuntime {
 
     /// Dangerous-operation gate: require explicit user confirmation before executing
     /// self-destructive commands or destructive file operations.
-    async fn guard_dangerous_operation(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
+    async fn guard_dangerous_operation(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
         if inv.policy_confirmed {
             return Ok(());
         }
@@ -349,9 +347,12 @@ impl AgentRuntime {
             .approve_dangerous_operation(tool_name, items, inv.msg)
             .await
         {
+            // 危险操作批准即视为本次调用的整体确认：后续的 PathAccess/ExplicitConfirmation
+            // 阶段不再重复弹窗（Confirm 路径自动通过，Deny 路径仍然硬性拒绝）。
+            inv.policy_confirmed = true;
             Ok(())
-        } else if tool_name == "exec" {
-            Err(dangerous_exec_denied(interactive))
+        } else if matches!(tool_name, "exec" | "shell") {
+            Err(dangerous_exec_denied(tool_name, interactive))
         } else {
             Err(dangerous_file_ops_denied())
         }

@@ -5780,6 +5780,65 @@ fn sandbox_permission_failure_is_classified_for_escalation() {
 }
 
 #[tokio::test]
+async fn full_access_shell_dangerous_command_prompts_only_once() {
+    // DangerousOperation 批准后 policy_confirmed 置位，ExplicitConfirmation 不再重复弹窗。
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::shell_session::ShellTool));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
+    runtime.confirm_tx = Some(confirm_tx);
+    let msg = test_main_session_inbound("cli", "double-confirm");
+    let call = tool_call(
+        "shell",
+        serde_json::json!({
+            "command": "pkill -9 blockcell-nonexistent-marker",
+            "sandbox_policy": "full-access"
+        }),
+    );
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
+
+    let request = confirm_rx.recv().await.expect("approval request");
+    request.response_tx.send(true).expect("approve shell");
+    let result = handle.await.expect("shell task should finish");
+
+    // 一次批准覆盖整个调用——channel 已关闭（runtime 随任务结束 drop），不能再有第二个请求
+    assert!(
+        confirm_rx.recv().await.is_none(),
+        "must not prompt a second confirmation"
+    );
+    assert!(!result.contains("not approved"), "{result}");
+}
+
+#[tokio::test]
+async fn rejected_shell_dangerous_command_reports_shell_tool() {
+    // shell 危险命令被拒时，错误必须归因到 shell，而不是 file_ops。
+    let mut runtime = test_runtime();
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::shell_session::ShellTool));
+    let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
+    runtime.confirm_tx = Some(confirm_tx);
+    let msg = test_main_session_inbound("cli", "shell-dangerous-reject");
+    let call = tool_call(
+        "shell",
+        serde_json::json!({"command": "pkill -9 blockcell-nonexistent-marker"}),
+    );
+    let handle =
+        tokio::spawn(async move { runtime.execute_tool_call(&call, &msg, None).await.text });
+
+    let request = confirm_rx.recv().await.expect("approval request");
+    request.response_tx.send(false).expect("reject shell");
+    let result = handle.await.expect("shell task should finish");
+
+    assert!(result.contains("\"tool\":\"shell\""), "{result}");
+    assert!(result.contains("dangerous shell command"), "{result}");
+    assert!(!result.contains("file_ops"), "{result}");
+    assert!(!result.contains("file operation"), "{result}");
+}
+
+#[tokio::test]
 async fn tool_policy_ask_confirmation_skips_duplicate_path_confirmation() {
     use blockcell_core::tool_policy::{
         ToolPolicy, ToolPolicyCondition, ToolPolicyConfig, ToolPolicyDecision,
