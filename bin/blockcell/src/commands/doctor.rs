@@ -294,7 +294,7 @@ pub async fn run() -> anyhow::Result<()> {
     // --- 3. Tools ---
     println!("🔧 Tools");
     let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-    let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+    let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
     let tool_count = registry.tool_names().len();
     print_ok(&format!("{} tools registered", tool_count), "");
     ok_count += 1;

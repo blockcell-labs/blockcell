@@ -93,11 +93,14 @@ pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf])
     let mut profile = String::from(
         "(version 1)\n\
          (allow default)\n\
-         (allow file-read*)\n\
          (deny network*)\n\
          (deny file-write*)\n\
          (allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n",
     );
+    // 受限策略下凭据/敏感系统文件不可读——SBPL 中 deny 恒优先于 allow。
+    // 其余读取仍需放行，否则沙箱内连 /bin/sh、动态库都无法加载，命令根本无法运行。
+    profile.push_str(&seatbelt_sensitive_read_denies()?);
+    profile.push_str("(allow file-read*)\n");
     if policy == SandboxPolicy::WorkspaceWrite {
         let mut temp_roots = vec![PathBuf::from("/private/tmp"), PathBuf::from("/tmp")];
         let env_temp = std::env::temp_dir();
@@ -124,6 +127,45 @@ pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf])
         }
     }
     Ok(profile)
+}
+
+/// 受限策略（ReadOnly / WorkspaceWrite）下禁止读取的凭据与敏感系统文件。
+/// 对应 `PathPolicy::builtin_sensitive_paths` 中的凭据目录，以及 shadow/sudoers 等
+/// 系统密钥文件——全局 `(allow file-read*)` 只放行其余非敏感路径。
+fn seatbelt_sensitive_read_denies() -> Result<String> {
+    let mut rules = String::new();
+    let mut subpaths: Vec<PathBuf> = Vec::new();
+    let mut literals: Vec<PathBuf> = vec![
+        PathBuf::from("/etc/shadow"),
+        PathBuf::from("/etc/sudoers"),
+        PathBuf::from("/etc/master.passwd"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        for dir in [
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".kube",
+            ".azure",
+            ".config/gcloud",
+        ] {
+            subpaths.push(home.join(dir));
+        }
+        literals.push(home.join(".netrc"));
+    }
+    for path in &subpaths {
+        rules.push_str(&format!(
+            "(deny file-read* (subpath \"{}\"))\n",
+            escape_seatbelt_path(path)?
+        ));
+    }
+    for path in &literals {
+        rules.push_str(&format!(
+            "(deny file-read* (literal \"{}\"))\n",
+            escape_seatbelt_path(path)?
+        ));
+    }
+    Ok(rules)
 }
 
 fn append_seatbelt_writable_root(profile: &mut String, root: &Path) -> Result<()> {
@@ -435,10 +477,16 @@ pub(crate) struct SeccompArchSpec {
     pub audit_arch: u32,
     pub is_big_endian: bool,
     pub reject_x32: bool,
-    pub sys_socket: u32,
+    /// 参数 0 为地址族的 socket 创建调用（socket / socketpair）：仅放行 AF_UNIX / AF_NETLINK。
+    /// 其余 socket 操作（connect / bind / sendmsg / ...）有意不拦截——seccomp-BPF 无法
+    /// 解引用 fd 检查其 domain，而沙箱内能自行创建的 socket 已被这里限定为本地 IPC。
+    /// 残留风险仅限外部进程通过 fd 继承 / SCM_RIGHTS 向沙箱内注入网络 socket。
+    pub domain_filtered_syscalls: Vec<u32>,
     pub af_unix: u32,
     pub af_netlink: u32,
     pub deny_errno: u32,
+    /// 无条件拒绝的调用：主要是 32 位 x86 的 SYS_socketcall 复用入口
+    /// （其实参指针无法在 BPF 中解引用，只能整体封禁——旧式二进制的本地 IPC 也随之禁用）。
     pub blocked_syscalls: Vec<u32>,
 }
 
@@ -464,53 +512,59 @@ pub(crate) fn seccomp_arch_spec(
             audit_arch: 0xc000_003e,
             is_big_endian: false,
             reject_x32: true,
-            sys_socket: 41,
+            // socket(41), socketpair(53)
+            domain_filtered_syscalls: vec![41, 53],
             af_unix: LINUX_AF_UNIX,
             af_netlink: LINUX_AF_NETLINK,
             deny_errno,
-            blocked_syscalls: vec![42, 49, 50, 43, 288, 44, 45],
+            blocked_syscalls: Vec::new(),
         }),
         "aarch64" if !is_big_endian => Ok(SeccompArchSpec {
             audit_arch: 0xc000_00b7,
             is_big_endian: false,
             reject_x32: false,
-            sys_socket: 198,
+            // socket(198), socketpair(199)
+            domain_filtered_syscalls: vec![198, 199],
             af_unix: LINUX_AF_UNIX,
             af_netlink: LINUX_AF_NETLINK,
             deny_errno,
-            blocked_syscalls: vec![203, 200, 201, 202, 242, 206, 207],
+            blocked_syscalls: Vec::new(),
         }),
         "x86" if !is_big_endian => Ok(SeccompArchSpec {
             audit_arch: 0x4000_0003,
             is_big_endian: false,
             reject_x32: false,
-            sys_socket: 359,
+            // socket(359), socketpair(360) — direct syscalls added in Linux 4.3
+            domain_filtered_syscalls: vec![359, 360],
             af_unix: LINUX_AF_UNIX,
             af_netlink: LINUX_AF_NETLINK,
             deny_errno,
-            // Include legacy multiplexed SYS_socketcall (102) on 32-bit x86 in addition to
-            // direct socket syscalls so network calls cannot bypass the filter via socketcall.
-            blocked_syscalls: vec![102, 362, 361, 363, 364, 369, 371],
+            // Legacy multiplexed SYS_socketcall(102): its argument pointer cannot be
+            // dereferenced in BPF, so it is blocked outright — otherwise it would be a
+            // trivial bypass for the domain filter (and for all other socket ops).
+            blocked_syscalls: vec![102],
         }),
         "arm" if !is_big_endian => Ok(SeccompArchSpec {
             audit_arch: 0x4000_0028,
             is_big_endian: false,
             reject_x32: false,
-            sys_socket: 281,
+            // socket(281), socketpair(286)
+            domain_filtered_syscalls: vec![281, 286],
             af_unix: LINUX_AF_UNIX,
             af_netlink: LINUX_AF_NETLINK,
             deny_errno,
-            blocked_syscalls: vec![283, 282, 284, 285, 366, 290, 292],
+            blocked_syscalls: Vec::new(),
         }),
         "riscv64" if !is_big_endian => Ok(SeccompArchSpec {
             audit_arch: 0xc000_00f3,
             is_big_endian: false,
             reject_x32: false,
-            sys_socket: 198,
+            // socket(198), socketpair(199) — asm-generic numbering
+            domain_filtered_syscalls: vec![198, 199],
             af_unix: LINUX_AF_UNIX,
             af_netlink: LINUX_AF_NETLINK,
             deny_errno,
-            blocked_syscalls: vec![203, 200, 201, 202, 242, 206, 207],
+            blocked_syscalls: Vec::new(),
         }),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -533,7 +587,9 @@ pub(crate) fn build_network_seccomp_filter(spec: &SeccompArchSpec) -> Vec<Seccom
     const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 
     let arg0_low_offset: u32 = if spec.is_big_endian { 20 } else { 16 };
-    let mut filter = Vec::<SeccompInstruction>::with_capacity(spec.blocked_syscalls.len() * 2 + 16);
+    let mut filter = Vec::<SeccompInstruction>::with_capacity(
+        spec.domain_filtered_syscalls.len() * 6 + spec.blocked_syscalls.len() * 2 + 16,
+    );
 
     // 1. Always verify architecture to prevent multi-arch ABI bypass (e.g. int 0x80 on x86_64)
     filter.push(SeccompInstruction {
@@ -579,45 +635,49 @@ pub(crate) fn build_network_seccomp_filter(spec: &SeccompArchSpec) -> Vec<Seccom
         });
     }
 
-    // 3. For SYS_socket, allow local IPC domains (AF_UNIX, AF_NETLINK) and block network domains
-    filter.push(SeccompInstruction {
-        code: BPF_JMP | BPF_JEQ | BPF_K,
-        jt: 0,
-        jf: 5,
-        k: spec.sys_socket,
-    });
-    filter.push(SeccompInstruction {
-        code: BPF_LD | BPF_W | BPF_ABS,
-        jt: 0,
-        jf: 0,
-        k: arg0_low_offset,
-    });
-    filter.push(SeccompInstruction {
-        code: BPF_JMP | BPF_JEQ | BPF_K,
-        jt: 1,
-        jf: 0,
-        k: spec.af_unix,
-    });
-    filter.push(SeccompInstruction {
-        code: BPF_JMP | BPF_JEQ | BPF_K,
-        jt: 0,
-        jf: 1,
-        k: spec.af_netlink,
-    });
-    filter.push(SeccompInstruction {
-        code: BPF_RET | BPF_K,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_ALLOW,
-    });
-    filter.push(SeccompInstruction {
-        code: BPF_RET | BPF_K,
-        jt: 0,
-        jf: 0,
-        k: spec.deny_errno,
-    });
+    // 3. For each domain-filtered socket creation syscall (socket / socketpair), allow
+    //    local IPC domains (AF_UNIX, AF_NETLINK) and block network domains (AF_INET, ...).
+    //    其余 socket 操作不在此拦截——见 SeccompArchSpec::domain_filtered_syscalls 的说明。
+    for &syscall in &spec.domain_filtered_syscalls {
+        filter.push(SeccompInstruction {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 0,
+            jf: 5,
+            k: syscall,
+        });
+        filter.push(SeccompInstruction {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: arg0_low_offset,
+        });
+        filter.push(SeccompInstruction {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: spec.af_unix,
+        });
+        filter.push(SeccompInstruction {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 0,
+            jf: 1,
+            k: spec.af_netlink,
+        });
+        filter.push(SeccompInstruction {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        });
+        filter.push(SeccompInstruction {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: spec.deny_errno,
+        });
+    }
 
-    // 4. Block network connection/addressing syscalls
+    // 4. Block unconditionally denied syscalls (e.g. legacy SYS_socketcall on x86)
     for &syscall in &spec.blocked_syscalls {
         filter.push(SeccompInstruction {
             code: BPF_JMP | BPF_JEQ | BPF_K,
@@ -766,6 +826,22 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_profile_denies_sensitive_reads() {
+        let profile = build_seatbelt_profile(SandboxPolicy::ReadOnly, &[]).expect("build profile");
+        // 全局 file-read* 保留（命令需要加载二进制/库），但凭据类路径显式 deny
+        assert!(profile.contains("(allow file-read*)"));
+        assert!(profile.contains("(deny file-read*"));
+        assert!(profile.contains("(literal \"/etc/shadow\")"));
+        if let Some(home) = dirs::home_dir() {
+            let ssh = escape_seatbelt_path(&home.join(".ssh")).unwrap();
+            assert!(
+                profile.contains(&format!("(subpath \"{ssh}\")")),
+                "profile should deny reads under ~/.ssh: {profile}"
+            );
+        }
+    }
+
+    #[test]
     fn seatbelt_rejects_control_characters_instead_of_rewriting_paths() {
         let bad_newline = PathBuf::from("/tmp/bad\n)\n(allow file-write*)\n\"path");
         assert!(escape_seatbelt_path(&bad_newline).is_err());
@@ -839,7 +915,7 @@ mod tests {
             simulate_seccomp(&x64_filter, x64.audit_arch, 0x4000_0000 | 41, 1, false),
             deny
         );
-        // Local IPC sockets (AF_UNIX=1, AF_NETLINK=16) allowed, AF_INET=2 denied
+        // socket(41): local IPC domains (AF_UNIX=1, AF_NETLINK=16) allowed, AF_INET=2 denied
         assert_eq!(
             simulate_seccomp(&x64_filter, x64.audit_arch, 41, 1, false),
             SECCOMP_RET_ALLOW
@@ -852,11 +928,24 @@ mod tests {
             simulate_seccomp(&x64_filter, x64.audit_arch, 41, 2, false),
             deny
         );
-        // connect (42) denied, read (0) allowed
+        // socketpair(53) is domain-filtered the same way
         assert_eq!(
-            simulate_seccomp(&x64_filter, x64.audit_arch, 42, 0, false),
+            simulate_seccomp(&x64_filter, x64.audit_arch, 53, 1, false),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 53, 2, false),
             deny
         );
+        // Socket ops on already-created (local-only) fds are allowed: connect(42),
+        // sendmsg(46), recvmsg(47), sendmmsg(307). Local IPC stays functional.
+        for nr in [42u32, 46, 47, 307] {
+            assert_eq!(
+                simulate_seccomp(&x64_filter, x64.audit_arch, nr, 0, false),
+                SECCOMP_RET_ALLOW,
+                "syscall {nr} should stay allowed for local IPC"
+            );
+        }
         assert_eq!(
             simulate_seccomp(&x64_filter, x64.audit_arch, 0, 0, false),
             SECCOMP_RET_ALLOW

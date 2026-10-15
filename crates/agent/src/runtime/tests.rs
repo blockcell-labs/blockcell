@@ -1142,6 +1142,47 @@ async fn test_workspace_internal_deny_rule_is_enforced() {
 }
 
 #[tokio::test]
+async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
+    // 危险命令批准（dangerous_confirmed → confirmed=true, cache=false）跳过 Confirm
+    // 弹窗，但不得把路径写入会话授权缓存——与策略级确认（cache=true）区分开。
+    // 注意不能用 std::env::temp_dir()：macOS 上它在 /private/var 下，会命中内置
+    // 敏感路径 Deny。/tmp → /private/tmp 在内置列表之外，evaluate 为 Confirm。
+    let outside = std::path::PathBuf::from(format!(
+        "/tmp/blockcell-dangerous-scope-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let args = serde_json::json!({"command": format!("cat {}", outside.display())});
+    let msg = test_main_session_inbound("cli", "dangerous-scope");
+
+    // 策略级确认：Confirm 路径放行并缓存到会话，后续同路径不再需要确认
+    let mut runtime_cached = test_runtime();
+    assert!(
+        runtime_cached
+            .check_path_permission_with_confirmation("exec", &args, &msg, true, true)
+            .await
+    );
+    assert!(
+        runtime_cached
+            .check_path_permission_with_confirmation("exec", &args, &msg, false, false)
+            .await
+    );
+
+    // 危险命令确认：本次放行但不写入会话缓存，再次访问必须重新走确认
+    let mut runtime_scoped = test_runtime();
+    assert!(
+        runtime_scoped
+            .check_path_permission_with_confirmation("exec", &args, &msg, true, false)
+            .await
+    );
+    // 无确认通道 → Confirm 路径被拒（说明上次批准没有泄漏到会话级）
+    assert!(
+        !runtime_scoped
+            .check_path_permission_with_confirmation("exec", &args, &msg, false, false)
+            .await
+    );
+}
+
+#[tokio::test]
 async fn test_authorized_read_directory_does_not_authorize_writes() {
     let outside = std::env::temp_dir().join(format!(
         "blockcell-op-cache-policy-{}",

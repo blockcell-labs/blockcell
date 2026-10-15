@@ -190,7 +190,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
 
             let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-            let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+            let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
             let mcp = blockcell_core::mcp_config::McpResolvedConfig::load_merged(&paths)?;
             match IntentToolResolver::new(&config).validate_with_mcp(&registry, Some(&mcp)) {
                 Ok(_) => println!("  validate:  ✓ tools and MCP config ok"),

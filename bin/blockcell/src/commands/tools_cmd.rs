@@ -16,7 +16,8 @@ fn schema_function(schema: &Value) -> &Value {
 pub async fn list(category: Option<String>) -> anyhow::Result<()> {
     let paths = Paths::new();
     let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-    let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+    let config = blockcell_core::Config::load_or_default(&paths)?;
+    let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
     let schemas = registry.get_tool_schemas();
 
     println!();
@@ -61,7 +62,8 @@ pub async fn list(category: Option<String>) -> anyhow::Result<()> {
 pub async fn info(tool_name: &str) -> anyhow::Result<()> {
     let paths = Paths::new();
     let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-    let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+    let config = blockcell_core::Config::load_or_default(&paths)?;
+    let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
     let schemas = registry.get_tool_schemas();
 
     let schema = schemas
@@ -147,7 +149,8 @@ pub async fn info(tool_name: &str) -> anyhow::Result<()> {
 pub async fn test(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
     let paths = Paths::new_configured();
     let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-    let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+    let config = blockcell_core::Config::load_or_default(&paths)?;
+    let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
     let paths = Paths::new_configured();
 
     let tool = registry
@@ -230,7 +233,8 @@ pub async fn toggle(tool_name: &str, enable: bool) -> anyhow::Result<()> {
     // Verify tool exists
     let paths = Paths::new_configured();
     let mcp_manager = Arc::new(McpManager::load(&paths).await?);
-    let registry = build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?;
+    let config = blockcell_core::Config::load_or_default(&paths)?;
+    let registry = build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?;
     if registry.get(tool_name).is_none() {
         eprintln!(
             "⚠ Tool '{}' not found in registry, but toggle state will be recorded.",

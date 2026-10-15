@@ -1025,7 +1025,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 
     // ── Create tool registry (shared for listing tools) ──
     let tool_registry_shared =
-        Arc::new(build_tool_registry_with_all_mcp(Some(&mcp_manager)).await?);
+        Arc::new(build_tool_registry_with_all_mcp(&config, Some(&mcp_manager)).await?);
 
     // ── Set up path confirmation channel (channel-aware) ──
     // pending_ws_confirms: keyed by request_id, for WebUI (ws) confirmations

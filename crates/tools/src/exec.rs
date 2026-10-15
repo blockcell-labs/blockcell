@@ -11,9 +11,12 @@ use crate::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
 use crate::{Tool, ToolContext, ToolSchema};
 
 /// 一次性命令执行。执行位置由注入的 [`ShellExecutor`] 决定，工具本身只描述命令。
+///
+/// 沙箱策略在构造时固定（`with_policy` / `from_config`），运行期不可变：
+/// `execution_environment` 声明与实际执行永远一致，审计记录不会漂移。
 pub struct ExecTool {
     executor: Arc<dyn ShellExecutor>,
-    policy: std::sync::RwLock<SandboxPolicy>,
+    policy: SandboxPolicy,
 }
 
 impl ExecTool {
@@ -22,10 +25,7 @@ impl ExecTool {
     }
 
     pub fn with_policy(executor: Arc<dyn ShellExecutor>, policy: SandboxPolicy) -> Self {
-        Self {
-            executor,
-            policy: std::sync::RwLock::new(policy),
-        }
+        Self { executor, policy }
     }
 
     pub fn from_config(config: &blockcell_core::config::ExecConfig) -> Self {
@@ -47,9 +47,6 @@ impl ExecTool {
 
     fn current_policy(&self) -> SandboxPolicy {
         self.policy
-            .read()
-            .map(|guard| *guard)
-            .unwrap_or(SandboxPolicy::WorkspaceWrite)
     }
 }
 
@@ -146,15 +143,11 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
-    /// 根据当前生效的沙箱策略如实声明执行环境：默认 `WorkspaceWrite` / `ReadOnly` 声明为
-    /// `Shell`，显式配置放宽为 `FullAccess` 时声明为 `FullAccess`。
-    fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
-        let policy = params
-            .get("sandbox_policy")
-            .and_then(Value::as_str)
-            .and_then(|raw| SandboxPolicy::parse(Some(raw)).ok())
-            .unwrap_or_else(|| self.current_policy());
-        match policy {
+    /// 根据构造时固定的沙箱策略如实声明执行环境：`WorkspaceWrite` / `ReadOnly` 声明为
+    /// `Shell`，`FullAccess` 声明为 `FullAccess`。`exec` 不接受 per-call 的
+    /// `sandbox_policy` 参数——声明、审计与实际执行同源，不会被参数伪造。
+    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
+        match self.current_policy() {
             SandboxPolicy::FullAccess => crate::ExecutionEnvironment::FullAccess,
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite => {
                 crate::ExecutionEnvironment::Shell
@@ -193,6 +186,15 @@ impl Tool for ExecTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Validation("Missing required parameter: command".to_string()))?;
 
+        // `exec` 的沙箱策略只能由配置决定，不接受 per-call 覆盖——fail-closed 拒绝，
+        // 避免参数伪造让声明/审计显示与实际策略不一致的 execution environment。
+        if params.get("sandbox_policy").is_some() {
+            return Err(Error::Validation(
+                "exec does not accept a per-call sandbox_policy; it is fixed by tools.exec config"
+                    .to_string(),
+            ));
+        }
+
         if is_dangerous_command(command) {
             return Err(Error::PermissionDenied(
                 "Command matches dangerous pattern and is blocked".to_string(),
@@ -224,12 +226,8 @@ impl Tool for ExecTool {
         let max_output_chars = 10000;
 
         // 默认按 WorkspaceWrite 沙箱运行，防止通过 `exec` 绕过 `shell` 的 OS 沙箱限制；
-        // 仅当显式配置 `tools.exec.sandboxPolicy = "full-access"` 或
-        // `tools.exec.restrictToWorkspace = false` 时才放宽为 FullAccess。
-        let policy = Self::resolve_config_policy(&ctx.config.tools.exec)?;
-        if let Ok(mut guard) = self.policy.write() {
-            *guard = policy;
-        }
+        // 策略在构造时（from_config / with_policy）固定，声明与执行使用同一份值。
+        let policy = self.current_policy();
         let writable_roots = if policy == SandboxPolicy::WorkspaceWrite {
             vec![ctx.workspace.clone()]
         } else {
@@ -429,6 +427,29 @@ mod tests {
         assert_eq!(
             readonly_tool.execution_environment(&json!({"command": "ls"})),
             crate::ExecutionEnvironment::Shell
+        );
+    }
+
+    #[test]
+    fn test_exec_rejects_per_call_sandbox_policy_and_declares_fixed_policy() {
+        let tool = ExecTool::default();
+        // per-call sandbox_policy 参数被拒（fail-closed），不能伪造声明
+        assert!(tool
+            .validate(&json!({"command": "ls", "sandbox_policy": "full-access"}))
+            .is_err());
+        // 即便参数被 listener 注入，声明也只看构造时策略，与实际执行同源
+        assert_eq!(
+            tool.execution_environment(&json!({"command": "ls", "sandbox_policy": "full-access"})),
+            crate::ExecutionEnvironment::Shell
+        );
+
+        let full = ExecTool::with_policy(
+            std::sync::Arc::new(LocalShellExecutor::default()),
+            SandboxPolicy::FullAccess,
+        );
+        assert_eq!(
+            full.execution_environment(&json!({"command": "ls"})),
+            crate::ExecutionEnvironment::FullAccess
         );
     }
 }

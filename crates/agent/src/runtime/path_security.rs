@@ -229,16 +229,22 @@ impl super::AgentRuntime {
         args: &serde_json::Value,
         msg: &InboundMessage,
     ) -> bool {
-        self.check_path_permission_with_confirmation(tool_name, args, msg, false)
+        self.check_path_permission_with_confirmation(tool_name, args, msg, false, false)
             .await
     }
 
+    /// `policy_confirmed`：本次调用已经过用户确认（Policy/DangerousOperation 阶段批准），
+    /// `Confirm` 级路径直接放行不再询问。
+    /// `confirmed_may_cache`：仅当确认为"策略级确认"（`policy_confirmed`）时才把
+    /// `Confirm` 路径写入会话授权缓存；危险命令批准（`dangerous_confirmed`）作用域
+    /// 仅限本次调用，不得扩大为本会话授权。
     pub(super) async fn check_path_permission_with_confirmation(
         &mut self,
         tool_name: &str,
         args: &serde_json::Value,
         msg: &InboundMessage,
         policy_confirmed: bool,
+        confirmed_may_cache: bool,
     ) -> bool {
         if matches!(tool_name, "exec_local" | "exec_skill_script") {
             // These run scripts addressed relative to the active skill
@@ -307,7 +313,7 @@ impl super::AgentRuntime {
                 }
                 PolicyAction::Confirm => {
                     if policy_confirmed {
-                        if self.path_policy.cache_confirmed_dirs() {
+                        if confirmed_may_cache && self.path_policy.cache_confirmed_dirs() {
                             self.authorize_directory(&resolved, access.op);
                         }
                     } else {
@@ -436,7 +442,10 @@ impl super::AgentRuntime {
 /// Used to subject paths referenced inside an `exec` / `shell` command to the
 /// path policy. This is intentionally conservative: when in doubt a token is
 /// treated as a path, so the policy (deny / confirm) gets a chance to run.
+/// 例外：bare `$VAR` 只在"以路径为参数"的命令上下文中才按疑似路径处理，
+/// 避免 `git commit -m "$MSG"` 这类纯文本变量被误报为路径。
 fn extract_command_paths(command: &str) -> Vec<String> {
+    let path_verb_present = command_has_path_consuming_verb(command);
     let mut out = Vec::new();
     for raw in command.split_whitespace() {
         let pieces: Vec<&str> = if !raw.contains("://") && (raw.contains('<') || raw.contains('>'))
@@ -479,6 +488,14 @@ fn extract_command_paths(command: &str) -> Vec<String> {
                 }
                 let normalized = normalize_shell_home_vars(tok);
                 let has_shell_expansion = normalized.contains('$') || normalized.contains('`');
+                // 展开形式只在仍像路径时才触发确认：含 `/` 的组合路径、命令替换
+                // （`$(...)`、反引号），或出现在吃路径命令中的裸 `$VAR`。
+                // 纯文本变量（如 `git commit -m "$MSG"` 的 `$MSG`）不再误报。
+                let expansion_looks_like_path = has_shell_expansion
+                    && (normalized.contains('/')
+                        || normalized.contains("$(")
+                        || normalized.contains('`')
+                        || (is_bare_shell_var(&normalized) && path_verb_present));
                 let looks_like_path = normalized.starts_with('/')
                     || normalized.starts_with("~/")
                     || normalized == "~"
@@ -486,7 +503,7 @@ fn extract_command_paths(command: &str) -> Vec<String> {
                     || normalized.starts_with("../")
                     || normalized == ".."
                     || (normalized.contains('/') && !normalized.contains('='))
-                    || has_shell_expansion;
+                    || expansion_looks_like_path;
                 if looks_like_path {
                     // If an unresolved shell variable or command substitution appears in a
                     // token (e.g. `$FILE`, `$FOO/secret`, or `$(pwd)/x`), never let
@@ -530,6 +547,96 @@ fn extract_command_paths(command: &str) -> Vec<String> {
     }
 
     out
+}
+
+/// token 是否就是单独一个 `$VAR` / `${VAR}`（不含其他字符）。
+fn is_bare_shell_var(tok: &str) -> bool {
+    let name = tok
+        .strip_prefix("${")
+        .and_then(|s| s.strip_suffix('}'))
+        .or_else(|| tok.strip_prefix('$'));
+    name.is_some_and(|n| {
+        !n.is_empty()
+            && !n.starts_with(|c: char| c.is_ascii_digit())
+            && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// 命令中是否出现"以路径为参数"的常见命令名。用于区分 `cat $FILE`
+/// （`$FILE` 可能是路径，需要确认）与 `git commit -m "$MSG"`（`$MSG` 只是文本）。
+/// 这是启发式的防线收窄——带 `/` 或命令替换的展开仍始终按路径处理。
+fn command_has_path_consuming_verb(command: &str) -> bool {
+    const PATH_VERBS: &[&str] = &[
+        "cat",
+        "cp",
+        "mv",
+        "rm",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "dd",
+        "chmod",
+        "chown",
+        "chgrp",
+        "ln",
+        "tar",
+        "touch",
+        "mkdir",
+        "rmdir",
+        "stat",
+        "file",
+        "readlink",
+        "realpath",
+        "ls",
+        "cd",
+        "source",
+        "diff",
+        "sort",
+        "wc",
+        "sed",
+        "awk",
+        "grep",
+        "zip",
+        "unzip",
+        "gzip",
+        "gunzip",
+        "xz",
+        "install",
+        "rsync",
+        "scp",
+        "gpg",
+        "bash",
+        "sh",
+        "zsh",
+        "python",
+        "python3",
+        "node",
+        "ruby",
+        "perl",
+        "vi",
+        "vim",
+        "nano",
+        "jq",
+        "xxd",
+        "od",
+        "hexdump",
+        "cmp",
+        "truncate",
+        "find",
+        "xargs",
+        "md5",
+        "sha256sum",
+        "cksum",
+    ];
+    command.split_whitespace().any(|tok| {
+        let base = tok
+            .trim_matches(|c| c == '"' || c == '\'')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        PATH_VERBS.contains(&base)
+    })
 }
 
 fn normalize_shell_home_vars(tok: &str) -> String {
@@ -667,5 +774,39 @@ mod tests {
             extract_command_paths("python3 -c \"open('../secret').read()\"")
                 .contains(&"../secret".to_string())
         );
+    }
+
+    #[test]
+    fn bare_shell_vars_are_gated_by_command_context() {
+        // 纯文本变量不再被当作路径（修复 `git commit -m "$MSG"` 误报）
+        assert!(extract_command_paths("git commit -m \"$MSG\"").is_empty());
+        assert!(extract_command_paths("echo hello $USER").is_empty());
+        assert!(extract_command_paths(
+            "curl -H \"Authorization: Bearer $TOKEN\" https://example.com"
+        )
+        .is_empty());
+
+        // 吃路径命令中的裸变量仍是疑似路径，不可解析为 workspace-safe
+        assert_eq!(
+            extract_command_paths("cat $FILE"),
+            vec!["/__unresolved_shell_var__/$FILE".to_string()]
+        );
+        assert_eq!(
+            extract_command_paths("sudo rm -rf $DIR"),
+            vec!["/__unresolved_shell_var__/$DIR".to_string()]
+        );
+        assert_eq!(
+            extract_command_paths("cd $TARGET"),
+            vec!["/__unresolved_shell_var__/$TARGET".to_string()]
+        );
+
+        // 含 `/` 或命令替换的展开无论动词如何都按路径处理
+        assert_eq!(
+            extract_command_paths("echo $FOO/id_rsa"),
+            vec!["/__unresolved_shell_var__/$FOO/id_rsa".to_string()]
+        );
+        assert!(extract_command_paths("echo $(pwd)/x")
+            .iter()
+            .any(|p| p.starts_with("/__unresolved_shell_var__/")));
     }
 }

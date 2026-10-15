@@ -1051,12 +1051,13 @@ mod tests {
                 json!({"action": "delete", "path": "a"}),
                 WorkspaceWrite,
             ),
-            // 默认 exec 受 workspace-write 沙箱限制 → Shell；显式 full-access 时为 FullAccess
+            // 默认 exec 受 workspace-write 沙箱限制 → Shell；exec 不接受 per-call
+            // sandbox_policy（仅 config 可放宽），参数被忽略 → 仍声明 Shell
             ("exec", json!({"command": "ls"}), Shell),
             (
                 "exec",
                 json!({"command": "ls", "sandbox_policy": "full-access"}),
-                FullAccess,
+                Shell,
             ),
             ("exec_local", json!({"path": "scripts/run.py"}), FullAccess),
             (

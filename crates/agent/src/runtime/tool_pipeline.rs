@@ -27,6 +27,10 @@ pub(crate) struct ToolInvocation<'a> {
     pub(crate) args: serde_json::Value,
     /// Policy 阶段已获得用户显式确认，后续审批阶段不再重复询问。
     pub(crate) policy_confirmed: bool,
+    /// DangerousOperation 阶段已获得用户批准。与 `policy_confirmed` 的区别：
+    /// 危险命令批准只证明"用户同意这条命令"，作用域限于本次调用——可以跳过
+    /// 后续确认弹窗，但不能把 Confirm 级路径写入会话级授权缓存。
+    pub(crate) dangerous_confirmed: bool,
 }
 
 /// 工具实际执行后的返回内容。
@@ -154,6 +158,7 @@ impl AgentRuntime {
             msg,
             args: tool_call.arguments.clone(),
             policy_confirmed: false,
+            dangerous_confirmed: false,
         };
         if let Err(denied) = self.admit_tool_call(&mut inv).await {
             self.record_rejected_tool_call(&inv, &denied).await;
@@ -348,8 +353,8 @@ impl AgentRuntime {
             .await
         {
             // 危险操作批准即视为本次调用的整体确认：后续的 PathAccess/ExplicitConfirmation
-            // 阶段不再重复弹窗（Confirm 路径自动通过，Deny 路径仍然硬性拒绝）。
-            inv.policy_confirmed = true;
+            // 阶段不再重复弹窗（Confirm 路径本次放行但不写入会话缓存，Deny 路径仍然硬性拒绝）。
+            inv.dangerous_confirmed = true;
             Ok(())
         } else if matches!(tool_name, "exec" | "shell") {
             Err(dangerous_exec_denied(tool_name, interactive))
@@ -365,6 +370,7 @@ impl AgentRuntime {
                 &inv.call.name,
                 &inv.args,
                 inv.msg,
+                inv.policy_confirmed || inv.dangerous_confirmed,
                 inv.policy_confirmed,
             )
             .await
@@ -382,7 +388,7 @@ impl AgentRuntime {
     /// 先确认再执行。判定依据来自工具自身的 [`blockcell_tools::Tool::requires_confirmation`]
     /// 声明，而非执行环境，也不是硬编码工具名——环境是描述性的，只有需要确认才拦截。
     async fn guard_explicit_confirmation(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
-        if inv.policy_confirmed {
+        if inv.policy_confirmed || inv.dangerous_confirmed {
             return Ok(());
         }
         if !self
