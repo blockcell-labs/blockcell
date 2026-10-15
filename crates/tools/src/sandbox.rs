@@ -90,17 +90,19 @@ static SEATBELT_AVAILABLE: Lazy<bool> = Lazy::new(|| {
 });
 
 pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf]) -> Result<String> {
+    // 行序即优先级：SBPL 中**后出现的匹配规则胜出**（见 com.apple.writeconfig.sb /
+    // CryptegraftService.sb 等 Apple 官方 profile 的写法），所以必须
+    // 先放全局 allow，再放具体 deny。若把 (allow file-read*) 放到 deny 之后，
+    // 它会覆盖上面的敏感读 deny，那些规则将全部失效。
     let mut profile = String::from(
         "(version 1)\n\
          (allow default)\n\
+         (allow file-read*)\n\
          (deny network*)\n\
          (deny file-write*)\n\
          (allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n",
     );
-    // 受限策略下凭据/敏感系统文件不可读——SBPL 中 deny 恒优先于 allow。
-    // 其余读取仍需放行，否则沙箱内连 /bin/sh、动态库都无法加载，命令根本无法运行。
     profile.push_str(&seatbelt_sensitive_read_denies()?);
-    profile.push_str("(allow file-read*)\n");
     if policy == SandboxPolicy::WorkspaceWrite {
         let mut temp_roots = vec![PathBuf::from("/private/tmp"), PathBuf::from("/tmp")];
         let env_temp = std::env::temp_dir();
@@ -839,6 +841,20 @@ mod tests {
                 "profile should deny reads under ~/.ssh: {profile}"
             );
         }
+
+        // 顺序决定成败：SBPL 后出现的匹配规则胜出，所以 (allow file-read*) 必须排在
+        // 所有 (deny file-read* ...) 之前，否则这些 deny 会被覆盖、完全失效。
+        let allow_at = profile
+            .find("(allow file-read*)")
+            .expect("profile must allow file reads");
+        let first_deny_at = profile
+            .find("(deny file-read*")
+            .expect("profile must deny sensitive reads");
+        assert!(
+            allow_at < first_deny_at,
+            "(allow file-read*) must precede sensitive read denies, otherwise the denies are \
+             overridden: {profile}"
+        );
     }
 
     #[test]
