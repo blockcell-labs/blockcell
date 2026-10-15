@@ -3,13 +3,32 @@ use serde_json::Value;
 use std::hash::{Hash, Hasher};
 
 pub fn prompt_cache_key(messages: &[ChatMessage]) -> Option<String> {
+    prompt_cache_key_with_tools(messages, &[], "")
+}
+
+pub fn prompt_cache_key_with_tools(
+    messages: &[ChatMessage],
+    tools: &[Value],
+    model: &str,
+) -> Option<String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut found_system = false;
     for message in messages.iter().filter(|message| message.role == "system") {
         message.content.to_string().hash(&mut hasher);
         found_system = true;
     }
-    found_system.then(|| format!("blockcell-{:016x}", hasher.finish()))
+    if !found_system {
+        return None;
+    }
+    if !model.is_empty() {
+        model.hash(&mut hasher);
+    }
+    for tool in tools {
+        if let Ok(canonical) = serde_json::to_string(tool) {
+            canonical.hash(&mut hasher);
+        }
+    }
+    Some(format!("blockcell-{:016x}", hasher.finish()))
 }
 
 /// 构建工具描述文本，注入到 system prompt 中。
@@ -73,5 +92,30 @@ mod tests {
         assert_eq!(prompt_cache_key(&first), prompt_cache_key(&second));
         assert_ne!(prompt_cache_key(&first), prompt_cache_key(&changed));
         assert!(prompt_cache_key(&first).unwrap().starts_with("blockcell-"));
+    }
+
+    #[test]
+    fn prompt_cache_key_with_tools_changes_when_tools_or_model_differ() {
+        let messages = vec![
+            ChatMessage::system("stable rules"),
+            ChatMessage::user("query"),
+        ];
+        let tools_a = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "read_file", "description": "Read file", "parameters": {}}
+        })];
+        let tools_b = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "read_file", "description": "Read file v2", "parameters": {}}
+        })];
+
+        let key_base = prompt_cache_key_with_tools(&messages, &tools_a, "claude-sonnet-4-5");
+        let key_same = prompt_cache_key_with_tools(&messages, &tools_a, "claude-sonnet-4-5");
+        let key_diff_tools = prompt_cache_key_with_tools(&messages, &tools_b, "claude-sonnet-4-5");
+        let key_diff_model = prompt_cache_key_with_tools(&messages, &tools_a, "gpt-4o");
+
+        assert_eq!(key_base, key_same);
+        assert_ne!(key_base, key_diff_tools);
+        assert_ne!(key_base, key_diff_model);
     }
 }

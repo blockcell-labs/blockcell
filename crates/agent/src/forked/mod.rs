@@ -31,6 +31,7 @@ mod cache_safe;
 mod can_use_tool;
 mod context;
 
+pub(crate) use agent::build_initial_forked_messages;
 pub use agent::{
     build_forked_tool_schemas, default_read_only_fork_disallowed_tools, run_forked_agent,
     ForkedAgentParams, ForkedAgentParamsBuilder, ForkedAgentResult, WorkspaceScopeEntry,

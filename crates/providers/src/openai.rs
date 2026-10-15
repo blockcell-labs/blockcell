@@ -381,7 +381,11 @@ impl OpenAIProvider {
             },
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            prompt_cache_key: crate::prompt_utils::prompt_cache_key(messages),
+            prompt_cache_key: crate::prompt_utils::prompt_cache_key_with_tools(
+                messages,
+                tools,
+                &self.model,
+            ),
         };
 
         let mode = if use_native_tools && !tools.is_empty() {
@@ -782,7 +786,11 @@ impl Provider for OpenAIProvider {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }),
-            prompt_cache_key: crate::prompt_utils::prompt_cache_key(messages),
+            prompt_cache_key: crate::prompt_utils::prompt_cache_key_with_tools(
+                messages,
+                tools,
+                &self.model,
+            ),
         };
 
         // 序列化为 Value 以便注入 reasoning_effort/thinking/chat_template_kwargs

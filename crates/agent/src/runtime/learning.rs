@@ -1143,4 +1143,80 @@ mod tests {
         assert!(prompt.contains("memory_manage"));
         assert!(prompt.contains("list_dir"));
     }
+
+    #[test]
+    fn nudge_review_request_aligns_system_tools_and_prefix_with_parent_turn() {
+        let parent_system = "You are BlockCell.\n\n## Active Skill Cards\n- deploy-helper";
+        let parent_snapshot = vec![
+            ChatMessage::system(parent_system),
+            ChatMessage::user("help me deploy"),
+            ChatMessage::assistant("deployed successfully"),
+        ];
+        let parent_tools = vec![
+            json!({"type": "function", "function": {"name": "exec", "description": "Execute command", "parameters": {"type": "object"}}}),
+            json!({"type": "function", "function": {"name": "skill_manage", "description": "Manage skills", "parameters": {"type": "object"}}}),
+            json!({"type": "function", "function": {"name": "memory_manage", "description": "Manage memory", "parameters": {"type": "object"}}}),
+        ];
+        let parent_model = "claude-sonnet-4-5";
+
+        let parent_cache_safe = crate::forked::CacheSafeParams::new(parent_system, parent_model)
+            .with_fork_messages(parent_snapshot.clone())
+            .with_tools(super::super::AgentRuntime::tool_definitions_from_schemas(
+                &parent_tools,
+            ));
+
+        // 模拟 spawn_review 构造 review 请求参数
+        let review_system = parent_snapshot
+            .first()
+            .filter(|m| m.role == "system")
+            .and_then(|m| m.content.as_str())
+            .unwrap()
+            .to_string();
+        let review_tool_schemas = super::super::AgentRuntime::resolve_review_tool_schemas(
+            &ReviewMode::Combined,
+            &parent_tools,
+        );
+        let review_cache_safe = crate::forked::CacheSafeParams::new(review_system, parent_model)
+            .with_fork_messages(parent_snapshot.clone())
+            .with_tools(super::super::AgentRuntime::tool_definitions_from_schemas(
+                &review_tool_schemas,
+            ));
+
+        // C6: CacheSafeParams 与父轮完全兼容
+        assert!(review_cache_safe.is_compatible_with(&parent_cache_safe));
+        // C3: 工具列表逐字节一致
+        assert_eq!(review_tool_schemas, parent_tools);
+
+        // C1 + C2: 构造出的消息列表只有 1 条 system message，且 review prompt 仅作为末尾 user 消息出现
+        let review_user_prompt = super::super::AgentRuntime::format_review_user_prompt(
+            &ReviewMode::Combined,
+            COMBINED_REVIEW_PROMPT,
+            "",
+        );
+        let built_messages = crate::forked::build_initial_forked_messages(
+            &review_cache_safe,
+            &[ChatMessage::user(&review_user_prompt)],
+            None,
+        );
+        assert_eq!(
+            built_messages.iter().filter(|m| m.role == "system").count(),
+            1
+        );
+        assert_eq!(built_messages[0].content.as_str(), Some(parent_system));
+        assert!(!built_messages[0]
+            .content
+            .as_str()
+            .unwrap()
+            .contains("Review the conversation above"));
+        assert_eq!(built_messages.last().unwrap().role, "user");
+
+        // 防回归断言：若 review 侧重渲染了不同的 system prompt，则兼容性检查立刻失败
+        let drifted_cache_safe =
+            crate::forked::CacheSafeParams::new("rebuilt general system prompt", parent_model)
+                .with_fork_messages(parent_snapshot)
+                .with_tools(super::super::AgentRuntime::tool_definitions_from_schemas(
+                    &review_tool_schemas,
+                ));
+        assert!(!drifted_cache_safe.is_compatible_with(&parent_cache_safe));
+    }
 }

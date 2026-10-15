@@ -303,7 +303,11 @@ impl OpenAIResponsesProvider {
             },
             max_output_tokens: self.max_tokens,
             temperature: self.temperature,
-            prompt_cache_key: crate::prompt_utils::prompt_cache_key(messages),
+            prompt_cache_key: crate::prompt_utils::prompt_cache_key_with_tools(
+                messages,
+                tools,
+                &self.model,
+            ),
         };
 
         let request_body = serde_json::to_string(&request).map_err(|e| {
