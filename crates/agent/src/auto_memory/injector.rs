@@ -55,6 +55,7 @@ pub struct InjectedMemory {
 }
 
 /// 记忆注入器
+#[derive(Debug, Clone)]
 pub struct MemoryInjector {
     config: InjectionConfig,
     cache: HashMap<MemoryType, String>,

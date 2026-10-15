@@ -126,6 +126,8 @@ pub struct ContextBuilder {
     memory_store: Option<MemoryStoreHandle>,
     /// Layer 5 记忆注入器 (7 层记忆系统)
     memory_injector: Option<MemoryInjector>,
+    /// 跨消息共享的 Layer 5 记忆注入器快照，确保某条消息内懒加载或热重载后后续消息立即可见
+    shared_memory_injector: Arc<RwLock<Option<MemoryInjector>>>,
     /// Cached capability brief for prompt injection (updated from tick).
     capability_brief: Option<String>,
     /// Skill 索引摘要 (可用 Skill 列表, 注入到系统提示词)
@@ -373,6 +375,7 @@ impl ContextBuilder {
             session_cache: Arc::new(Mutex::new(SessionContextCache::new(capacity))),
             memory_store: None,
             memory_injector: None,
+            shared_memory_injector: Arc::new(RwLock::new(None)),
             capability_brief: None,
             skill_index_summary: Arc::new(RwLock::new(None)),
             prompt_registry: PromptRegistry::with_builtin_sections(),
@@ -380,6 +383,37 @@ impl ContextBuilder {
             candidate_id: None,
         }
     }
+}
+
+impl Clone for ContextBuilder {
+    fn clone(&self) -> Self {
+        let memory_injector = self
+            .shared_memory_injector
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .or_else(|| self.memory_injector.clone());
+        Self {
+            paths: self.paths.clone(),
+            skill_manager: self.skill_manager.clone(),
+            ghost_learning_enabled: self.ghost_learning_enabled,
+            memory_recall_enabled: self.memory_recall_enabled,
+            memory_recall_policy: self.memory_recall_policy.clone(),
+            prompt_budget: self.prompt_budget.clone(),
+            session_cache: Arc::clone(&self.session_cache),
+            memory_store: self.memory_store.clone(),
+            memory_injector,
+            shared_memory_injector: Arc::clone(&self.shared_memory_injector),
+            capability_brief: self.capability_brief.clone(),
+            skill_index_summary: Arc::clone(&self.skill_index_summary),
+            prompt_registry: self.prompt_registry.clone(),
+            agent_id: self.agent_id.clone(),
+            candidate_id: self.candidate_id.clone(),
+        }
+    }
+}
+
+impl ContextBuilder {
 
     pub fn prompt_registry(&self) -> &PromptRegistry {
         &self.prompt_registry
@@ -447,6 +481,10 @@ impl ContextBuilder {
 
     /// Set the Layer 5 memory injector (7-layer memory system).
     pub fn set_memory_injector(&mut self, injector: MemoryInjector) {
+        *self
+            .shared_memory_injector
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(injector.clone());
         self.memory_injector = Some(injector);
     }
 

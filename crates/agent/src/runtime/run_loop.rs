@@ -332,20 +332,7 @@ impl AgentRuntime {
                             };
 
                             let task_manager = self.task_manager.clone();
-                            let config = self.config.clone();
-                            let paths = self.paths.clone();
-                            let outbound_tx = self.outbound_tx.clone();
-                            let confirm_tx = self.confirm_tx.clone();
-                            let memory_store = self.memory_store.clone();
-                            let capability_registry = self.capability_registry.clone();
-                            let core_evolution = self.core_evolution.clone();
-                            let event_tx = self.event_tx.clone();
-                            let agent_id = self.agent_id.clone();
-                            let event_emitter = self.system_event_emitter.clone();
-                            let learning_coordinator = Arc::clone(&self.learning_coordinator);
-                            let tool_registry = self.tool_registry.clone();
                             let task_id_clone = task_id.clone();
-                            let provider_pool = Arc::clone(&self.provider_pool);
                             let conversation_key =
                                 ActiveConversationKey::from_message(&runtime_agent_id, &msg);
                             let task_done_tx = task_done_tx.clone();
@@ -413,27 +400,16 @@ impl AgentRuntime {
                             // Create AbortToken for this message task (child of runtime's token)
                             let msg_abort_token = self.abort_token.child();
                             active_abort_tokens.insert(task_id.clone(), msg_abort_token.clone());
+                            let message_runtime = self.fork_for_message_task(
+                                steering,
+                                steering_sender,
+                                msg_abort_token,
+                            );
                             let handle = tokio::spawn(async move {
                                 run_message_task(
-                                    config,
-                                    paths,
-                                    provider_pool,
-                                    tool_registry,
-                                    task_manager,
-                                    outbound_tx,
-                                    confirm_tx,
-                                    memory_store,
-                                    capability_registry,
-                                    core_evolution,
-                                    event_tx,
-                                    agent_id,
-                                    event_emitter,
-                                    learning_coordinator,
-                                    steering,
-                                    steering_sender,
+                                    message_runtime,
                                     msg,
                                     task_id_clone,
-                                    msg_abort_token,
                                 ).await;
                             });
                             let abort_handle = handle.abort_handle();

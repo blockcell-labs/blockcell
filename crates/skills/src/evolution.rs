@@ -96,6 +96,7 @@ impl Drop for TempFileGuard {
 }
 
 /// 技能自进化管理器
+#[derive(Debug, Clone)]
 pub struct SkillEvolution {
     skills_dir: PathBuf,
     evolution_db: PathBuf,

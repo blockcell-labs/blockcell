@@ -7227,3 +7227,134 @@ async fn event_log_projection_matches_stored_transcript_after_tool_turn() {
     let turns = blockcell_storage::project_turns(&events);
     assert!(!turns[0].tool_call_ids.is_empty());
 }
+
+struct CountingEvolutionNotifier {
+    notified: AtomicUsize,
+}
+
+impl crate::capability_adapter::EvolutionNotifier for CountingEvolutionNotifier {
+    fn notify(&self) {
+        self.notified.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn fork_for_message_task_shares_caches_and_capabilities_while_isolating_turn_state() {
+    use blockcell_core::path_policy::PathOp;
+
+    let mut parent = test_runtime();
+    let skill_evo_notifier = Arc::new(CountingEvolutionNotifier {
+        notified: AtomicUsize::new(0),
+    });
+    parent.set_skill_evolution_worker(
+        skill_evo_notifier.clone() as Arc<dyn crate::capability_adapter::EvolutionNotifier>,
+    );
+    parent.current_turn_id = Some("stale-parent-turn".to_string());
+    parent.current_step = Some(9);
+
+    let (steering1, sender1) = SteeringChannel::new(4);
+    let token1 = parent.abort_token.child();
+    let mut msg_runtime_1 = parent.fork_for_message_task(steering1, sender1, token1.clone());
+
+    let (steering2, sender2) = SteeringChannel::new(4);
+    let token2 = parent.abort_token.child();
+    let msg_runtime_2 = parent.fork_for_message_task(steering2, sender2, token2.clone());
+
+    // 1. 单轮状态与取消树隔离
+    assert!(msg_runtime_1.current_turn_id.is_none());
+    assert!(msg_runtime_1.current_step.is_none());
+    token1.cancel();
+    assert!(msg_runtime_1.abort_token.is_cancelled());
+    assert!(!parent.abort_token.is_cancelled());
+    assert!(!msg_runtime_2.abort_token.is_cancelled());
+
+    // 2. skill_evolution_worker 继承并可正常唤醒
+    msg_runtime_1
+        .skill_evolution_worker
+        .as_ref()
+        .expect("skill_evolution_worker must be inherited")
+        .notify();
+    assert_eq!(skill_evo_notifier.notified.load(Ordering::SeqCst), 1);
+
+    // 3. response_cache 跨消息共享，且与父实例（/clear）同源
+    let long_list = (1..=15)
+        .map(|i| {
+            format!(
+                "{}. 条目 {} 的详细描述内容，确保总字符数超过默认的 800 字符缓存阈值，以便触发 ResponseCache 缓存与 stub 替换逻辑，验证跨消息 recall 是否命中同一份缓存实例。",
+                i, i
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stub = msg_runtime_1
+        .response_cache
+        .maybe_cache_and_stub("cli:shared-session", &long_list, true)
+        .expect("should cache list in message 1");
+    let ref_id = stub
+        .split("ID: ")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .expect("extract ref_id");
+    assert_eq!(
+        msg_runtime_2
+            .response_cache
+            .recall("cli:shared-session", ref_id)
+            .as_deref(),
+        Some(long_list.as_str())
+    );
+    parent.response_cache.clear_session("cli:shared-session");
+    assert!(msg_runtime_2
+        .response_cache
+        .recall("cli:shared-session", ref_id)
+        .is_none());
+
+    // 4. authorized_dirs 跨消息共享（同一目录不重复弹窗）
+    let auth_dir = std::env::temp_dir();
+    msg_runtime_1.authorize_directory(&auth_dir, PathOp::Read);
+    assert!(msg_runtime_2.is_path_authorized(&auth_dir, PathOp::Read));
+
+    // 5. budget_trackers 跨消息累加
+    msg_runtime_1
+        .budget_tracker_for_session("cli:shared-session")
+        .record_usage(120, 30, 10);
+    let budget_snap = msg_runtime_2
+        .budget_tracker_for_session("cli:shared-session")
+        .snapshot();
+    assert_eq!(budget_snap.total_tokens_used, 150);
+
+    // 6. ContextBuilder 的 SessionContextCache 与 skill_index_summary 跨消息共享
+    let _ = msg_runtime_1
+        .context_builder
+        .build_messages_for_session_mode_with_channel(
+            "cli:shared-session",
+            &[],
+            "hello",
+            &[],
+            InteractionMode::Chat,
+            None,
+            &HashSet::new(),
+            &HashSet::new(),
+            "cli",
+            false,
+            &[],
+            &[],
+        );
+    assert!(msg_runtime_2
+        .context_builder
+        .system_prompt_snapshot_reader()
+        .get("cli:shared-session")
+        .is_some());
+
+    msg_runtime_1
+        .context_builder
+        .set_skill_index_summary("shared skill summary".to_string());
+    assert_eq!(
+        msg_runtime_2
+            .context_builder
+            .skill_index_summary_arc()
+            .read()
+            .unwrap()
+            .as_deref(),
+        Some("shared skill summary")
+    );
+}

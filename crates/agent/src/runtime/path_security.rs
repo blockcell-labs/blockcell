@@ -178,13 +178,17 @@ impl super::AgentRuntime {
     /// Optimized (#12): walk ancestors with O(1) HashSet lookups instead of O(n) iteration.
     /// `authorized_dirs` stores already-canonicalized paths, so no re-canonicalization needed.
     pub(super) fn is_path_authorized(&self, resolved: &std::path::Path, op: PathOp) -> bool {
-        if self.authorized_dirs.is_empty() {
+        let authorized_dirs = self
+            .authorized_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if authorized_dirs.is_empty() {
             return false;
         }
         let rp = resolve_for_policy(resolved);
         let mut current = rp.as_path();
         loop {
-            if self.authorized_dirs.contains(&(current.to_path_buf(), op)) {
+            if authorized_dirs.contains(&(current.to_path_buf(), op)) {
                 return true;
             }
             match current.parent() {
@@ -207,7 +211,12 @@ impl super::AgentRuntime {
                 .unwrap_or_else(|| resolved.to_path_buf())
         };
         let dir = resolve_for_policy(&dir);
-        if self.authorized_dirs.insert((dir.clone(), op)) {
+        let inserted = self
+            .authorized_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((dir.clone(), op));
+        if inserted {
             info!(dir = %dir.display(), ?op, "Directory authorized for future access");
         }
     }

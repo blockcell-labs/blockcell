@@ -45,6 +45,7 @@ pub struct VersionHistory {
 }
 
 /// 版本管理器
+#[derive(Debug, Clone)]
 pub struct VersionManager {
     skills_dir: PathBuf,
 }

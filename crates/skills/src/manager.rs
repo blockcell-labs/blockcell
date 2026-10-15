@@ -724,6 +724,7 @@ fn check_openclaw_availability(meta: &SkillMeta) -> (bool, Option<String>) {
     (true, None)
 }
 
+#[derive(Clone)]
 pub struct SkillManager {
     skills: HashMap<String, Skill>,
     version_manager: Option<VersionManager>,

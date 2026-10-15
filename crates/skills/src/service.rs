@@ -180,6 +180,7 @@ type DeployCallback = Arc<dyn Fn(&str) + Send + Sync>;
 /// - `run_pending_evolutions()`: 执行待处理的进化流程（生成→审计→dry run→测试→发布）
 /// - `tick()`: 定期调用，驱动灰度发布的阶段推进和自动回滚
 /// - `set_llm_provider()`: 设置 LLM provider，使 tick() 能自动驱动完整 pipeline
+#[derive(Clone)]
 pub struct EvolutionService {
     evolution: SkillEvolution,
     error_tracker: Arc<Mutex<ErrorTracker>>,

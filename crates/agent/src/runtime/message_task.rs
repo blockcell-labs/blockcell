@@ -105,31 +105,19 @@ pub(crate) fn build_script_skill_summary_prompt(
 }
 
 /// Free async function that runs a user message in the background.
-/// Each message gets its own AgentRuntime so the main loop stays responsive.
-#[allow(clippy::too_many_arguments)]
+/// Uses a lightweight message-scoped runtime forked from the parent AgentRuntime
+/// so shared caches and wired capabilities are preserved without per-message disk rebuilds.
 pub(crate) async fn run_message_task(
-    config: Config,
-    paths: Paths,
-    provider_pool: Arc<ProviderPool>,
-    tool_registry: ToolRegistry,
-    task_manager: TaskManager,
-    outbound_tx: Option<mpsc::Sender<OutboundMessage>>,
-    confirm_tx: Option<mpsc::Sender<ConfirmRequest>>,
-    memory_store: Option<MemoryStoreHandle>,
-    capability_registry: Option<CapabilityRegistryHandle>,
-    core_evolution: Option<CoreEvolutionHandle>,
-    event_tx: Option<broadcast::Sender<String>>,
-    agent_id: Option<String>,
-    event_emitter: EventEmitterHandle,
-    learning_coordinator: Arc<crate::learning_coordinator::LearningCoordinator>,
-    steering: SteeringChannel,
-    steering_sender: SteeringSender,
+    mut runtime: AgentRuntime,
     msg: InboundMessage,
     task_id: String,
-    abort_token: AbortToken,
 ) {
     // 注意：任务已通过 create_and_start_task 标记为 Running，无需再调用 set_running
-    let checkpoint_manager = crate::checkpoint::CheckpointManager::new(&paths.workspace());
+    let checkpoint_manager = crate::checkpoint::CheckpointManager::new(&runtime.paths.workspace());
+    let task_manager = runtime.task_manager.clone();
+    let agent_id = runtime.agent_id.clone();
+    let event_tx = runtime.event_tx.clone();
+    let outbound_tx = runtime.outbound_tx.clone();
     let resumed_task_id = msg
         .metadata
         .get("resumed_task_id")
@@ -151,63 +139,6 @@ pub(crate) async fn run_message_task(
             total_tools: 0,
         })
         .await;
-
-    let mut runtime = match AgentRuntime::new(config, paths, provider_pool, tool_registry) {
-        Ok(r) => r,
-        Err(e) => {
-            if let Some(receipt_id) = completion_receipt_id.as_deref() {
-                blockcell_core::message_receipt::complete_message_receipt(
-                    receipt_id,
-                    Err(e.to_string()),
-                );
-            }
-            task_manager.set_failed(&task_id, &format!("{}", e)).await;
-            if let Some(tx) = &outbound_tx {
-                let mut outbound =
-                    OutboundMessage::new(&msg.channel, &msg.chat_id, &format!("❌ {}", e));
-                outbound.account_id = msg.account_id.clone();
-                let _ = tx.send(outbound).await;
-            }
-            return;
-        }
-    };
-    runtime.install_shared_learning_coordinator(learning_coordinator);
-
-    // Wire up channels
-    if let Some(tx) = outbound_tx.clone() {
-        runtime.set_outbound(tx);
-    }
-    if let Some(tx) = confirm_tx {
-        runtime.set_confirm(tx);
-    }
-    runtime.set_task_manager(task_manager.clone());
-    runtime.set_agent_id(agent_id.clone());
-    runtime.set_event_emitter(event_emitter);
-    runtime.set_steering_channel(steering, steering_sender);
-    if let Some(store) = memory_store {
-        runtime.set_memory_store(store);
-    }
-    if let Err(e) = runtime.init_memory_file_store() {
-        tracing::warn!(error = %e, "Failed to initialize file memory store");
-    }
-    if let Err(e) = runtime.init_skill_file_store() {
-        tracing::warn!(error = %e, "Failed to initialize skill file store");
-    }
-    if let Some(registry) = capability_registry {
-        runtime.set_capability_registry(registry);
-    }
-    if let Some(core_evo) = core_evolution {
-        runtime.set_core_evolution(core_evo);
-    }
-    if let Some(tx) = event_tx.clone() {
-        runtime.set_event_tx(tx);
-    }
-    // Set abort token from parent (enables graceful cancellation)
-    runtime.set_abort_token(abort_token);
-
-    // 初始化 runtime handle（必须在 set_abort_token 之后，确保 handle 捕获正确的 abort_token）
-    runtime.init_runtime_handle();
-    runtime.wire_evolution_deploy_callback();
 
     let error_msg = msg.clone();
 

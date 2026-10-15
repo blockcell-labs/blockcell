@@ -2200,7 +2200,7 @@ pub struct AgentRuntime {
     confirm_tx: Option<mpsc::Sender<ConfirmRequest>>,
     /// Directories that the user has already authorized access to.
     /// Files within these directories will not require separate confirmation.
-    authorized_dirs: HashSet<(PathBuf, blockcell_core::path_policy::PathOp)>,
+    authorized_dirs: Arc<Mutex<HashSet<(PathBuf, blockcell_core::path_policy::PathOp)>>>,
     /// Shared task manager for tracking background subagent tasks.
     task_manager: TaskManager,
     /// Agent id bound to this runtime.
@@ -2398,7 +2398,7 @@ impl AgentRuntime {
             outbound_tx: None,
             inbound_tx: None,
             confirm_tx: None,
-            authorized_dirs: HashSet::new(),
+            authorized_dirs: Arc::new(Mutex::new(HashSet::new())),
             task_manager: TaskManager::new(),
             agent_id: None,
             memory_store: None,
@@ -2461,6 +2461,91 @@ impl AgentRuntime {
         };
         runtime.sync_tool_scope_view("");
         Ok(runtime)
+    }
+
+    /// 从长生命周期父 `AgentRuntime` 派生每消息执行器。
+    ///
+    /// 共享所有昂贵构造产物、有状态缓存（`SessionContextCache`、`ResponseCache`、
+    /// `skill_index_summary`、`authorized_dirs`、`budget_trackers`）与已装配能力
+    /// （`skill_evolution_worker`、`evolution_workflow_store`、`evolution_provider`、
+    /// `memory_file_store`、`skill_file_store`、`memory_injector`），
+    /// 同时保持单消息执行状态（`abort_token`、`steering`、`current_turn_id`/`current_step`）严格隔离。
+    pub(crate) fn fork_for_message_task(
+        &self,
+        steering: SteeringChannel,
+        steering_sender: SteeringSender,
+        abort_token: AbortToken,
+    ) -> Self {
+        let mut runtime = Self {
+            config: self.config.clone(),
+            paths: self.paths.clone(),
+            context_builder: self.context_builder.clone(),
+            provider_pool: Arc::clone(&self.provider_pool),
+            context_compactor: Arc::clone(&self.context_compactor),
+            pre_step_policies: self.pre_step_policies.clone(),
+            tool_registry: self.tool_registry.clone(),
+            session_store: SessionStore::new(self.paths.clone()),
+            audit_logger: AuditLogger::new(self.paths.clone()),
+            outbound_tx: self.outbound_tx.clone(),
+            inbound_tx: self.inbound_tx.clone(),
+            confirm_tx: self.confirm_tx.clone(),
+            authorized_dirs: Arc::clone(&self.authorized_dirs),
+            task_manager: self.task_manager.clone(),
+            agent_id: self.agent_id.clone(),
+            memory_store: self.memory_store.clone(),
+            memory_file_store: self.memory_file_store.clone(),
+            ghost_memory_lifecycle: self.ghost_memory_lifecycle.clone(),
+            skill_file_store: self.skill_file_store.clone(),
+            capability_registry: self.capability_registry.clone(),
+            core_evolution: self.core_evolution.clone(),
+            evolution_worker: self.evolution_worker.clone(),
+            skill_evolution_worker: self.skill_evolution_worker.clone(),
+            evolution_workflow_store: self.evolution_workflow_store.clone(),
+            event_tx: self.event_tx.clone(),
+            system_event_store: self.system_event_store.clone(),
+            system_event_orchestrator: self.system_event_orchestrator.clone(),
+            system_event_emitter: self.system_event_emitter.clone(),
+            main_session_target: self.main_session_target.clone(),
+            shared_session_target: Arc::clone(&self.shared_session_target),
+            cap_request_cooldown: HashMap::new(),
+            channel_contacts: self.channel_contacts.clone(),
+            path_policy: self.path_policy.clone(),
+            tool_policy: self.tool_policy.clone(),
+            event_bus: self.event_bus.clone(),
+            event_tx_slot: self.event_tx_slot.clone(),
+            current_turn_id: None,
+            current_step: None,
+            turn_step_counter: 0,
+            candidate_scope: None,
+            agent_loop: Arc::clone(&self.agent_loop),
+            response_cache: self.response_cache.clone(),
+            memory_system: None,
+            memory_injector_needs_reload: Arc::clone(&self.memory_injector_needs_reload),
+            abort_token,
+            runtime_handle: None,
+            learning_coordinator: Arc::clone(&self.learning_coordinator),
+            skill_mutex: self.skill_mutex.clone(),
+            agent_type_registry: self.agent_type_registry.clone(),
+            write_guard: Arc::clone(&self.write_guard),
+            budget_trackers: Arc::clone(&self.budget_trackers),
+            parent_budget: self.parent_budget.clone(),
+            steering,
+            steering_sender,
+            active_steering_registry: None,
+        };
+        if runtime.memory_file_store.is_none() {
+            if let Err(e) = runtime.init_memory_file_store() {
+                tracing::warn!(error = %e, "Failed to initialize file memory store");
+            }
+        }
+        if runtime.skill_file_store.is_none() {
+            if let Err(e) = runtime.init_skill_file_store() {
+                tracing::warn!(error = %e, "Failed to initialize skill file store");
+            }
+        }
+        runtime.sync_tool_scope_view("");
+        runtime.init_runtime_handle();
+        runtime
     }
 
     /// Set the self-referential runtime handle for the agent tool.
