@@ -127,17 +127,23 @@ impl super::AgentRuntime {
                 }
             }
             "shell" => {
-                let shell_action = args
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("run");
+                let shell_action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
                 let cmd_opt = match shell_action {
-                    "run" => args.get("command").and_then(|v| v.as_str()),
-                    "write_stdin" => args.get("input").and_then(|v| v.as_str()),
+                    "run" => args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    "write_stdin" => args.get("input").and_then(|v| v.as_str()).map(|input| {
+                        let session_id = args
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        blockcell_tools::shell_session::preview_session_stdin(session_id, input)
+                    }),
                     _ => None,
                 };
                 if let Some(cmd) = cmd_opt {
-                    accesses.extend(extract_command_paths(cmd).into_iter().map(|path| {
+                    accesses.extend(extract_command_paths(&cmd).into_iter().map(|path| {
                         PathAccess {
                             path,
                             op: PathOp::Exec,
@@ -261,14 +267,8 @@ impl super::AgentRuntime {
         for access in &path_accesses {
             let resolved = self.resolve_path(&access.path);
 
-            // 1. Workspace-safe → always OK (is_path_safe canonicalizes via
-            // resolve_for_policy, so symlink escapes out of workspace are rejected).
-            if self.is_path_safe(&resolved) {
-                continue;
-            }
-
-            // Hard path-policy denial always wins for paths outside workspace,
-            // including over prior session authorization and ToolPolicy `ask`.
+            // Hard path-policy denial always wins, including over workspace-internal
+            // paths, prior session authorization, and ToolPolicy `ask` approval.
             let action = self.path_policy.evaluate(&resolved, access.op);
             if action == PolicyAction::Deny {
                 warn!(
@@ -277,6 +277,12 @@ impl super::AgentRuntime {
                     "Path access denied by policy"
                 );
                 deny_paths.push(access.path.clone());
+                continue;
+            }
+
+            // 1. Workspace-safe → always OK (is_path_safe canonicalizes via
+            // resolve_for_policy, so symlink escapes out of workspace are rejected).
+            if self.is_path_safe(&resolved) {
                 continue;
             }
 
@@ -433,65 +439,93 @@ impl super::AgentRuntime {
 fn extract_command_paths(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in command.split_whitespace() {
-        let mut candidates = Vec::new();
-        let trimmed = raw.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | ',' | ')' | '('));
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Handle flags carrying path values like `-d@/etc/passwd` or `--file=/etc/passwd`
-        if let Some(rest) = trimmed.strip_prefix("-d@") {
-            candidates.push(rest);
-        } else if trimmed.starts_with('-') {
-            if let Some((_, val)) = trimmed.split_once('=') {
-                candidates.push(val.trim_matches(|c| c == '"' || c == '\''));
-            }
-        } else if let Some((_, val)) = trimmed.split_once('=') {
-            // `dd if=/etc/shadow` or `FOO=/etc/passwd`
-            candidates.push(val.trim_matches(|c| c == '"' || c == '\''));
+        let pieces: Vec<&str> = if !raw.contains("://") && (raw.contains('<') || raw.contains('>'))
+        {
+            raw.split(['<', '>'])
+                .filter(|part| !part.is_empty())
+                .collect()
         } else {
-            candidates.push(trimmed);
-        }
+            vec![raw]
+        };
 
-        for cand in candidates {
-            let tok = cand
-                .trim_start_matches(|c: char| matches!(c, '@' | '>' | '<'))
-                .trim_matches(|c: char| c == '"' || c == '\'');
-            if tok.is_empty() || tok.starts_with('-') || tok.contains("://") {
+        for piece in pieces {
+            let mut candidates = Vec::new();
+            let trimmed =
+                piece.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | ',' | ')' | '(' | '&'));
+            if trimmed.is_empty() {
                 continue;
             }
-            let normalized = normalize_shell_home_vars(tok);
-            let looks_like_path = normalized.starts_with('/')
-                || normalized.starts_with("~/")
-                || normalized == "~"
-                || normalized.starts_with("./")
-                || normalized.starts_with("../")
-                || (normalized.contains('/') && !normalized.contains('='));
-            if looks_like_path {
-                // If an unresolved shell variable or command substitution appears in a
-                // path token (e.g. `$FOO/secret` or `$(pwd)/x`), never let `resolve_path`
-                // join it under workspace and treat it as workspace-safe; anchor it as an
-                // external synthetic path so PathPolicy requires confirmation.
-                if normalized.contains('$') || normalized.contains('`') {
-                    out.push(format!("/__unresolved_shell_var__/{}", normalized.trim_start_matches('/')));
-                } else {
-                    out.push(normalized);
+
+            // Handle flags carrying path values like `-d@/etc/passwd` or `--file=/etc/passwd`
+            if let Some(rest) = trimmed.strip_prefix("-d@") {
+                candidates.push(rest);
+            } else if trimmed.starts_with('-') {
+                if let Some((_, val)) = trimmed.split_once('=') {
+                    candidates.push(val.trim_matches(|c| c == '"' || c == '\''));
+                }
+            } else if let Some((_, val)) = trimmed.split_once('=') {
+                // `dd if=/etc/shadow` or `FOO=/etc/passwd`
+                candidates.push(val.trim_matches(|c| c == '"' || c == '\''));
+            } else {
+                candidates.push(trimmed);
+            }
+
+            for cand in candidates {
+                let tok = cand
+                    .trim_start_matches(|c: char| matches!(c, '@' | '>' | '<' | '&'))
+                    .trim_matches(|c: char| c == '"' || c == '\'');
+                if tok.is_empty() || tok.starts_with('-') || tok.contains("://") {
+                    continue;
+                }
+                let normalized = normalize_shell_home_vars(tok);
+                let has_shell_expansion = normalized.contains('$') || normalized.contains('`');
+                let looks_like_path = normalized.starts_with('/')
+                    || normalized.starts_with("~/")
+                    || normalized == "~"
+                    || normalized.starts_with("./")
+                    || normalized.starts_with("../")
+                    || normalized == ".."
+                    || (normalized.contains('/') && !normalized.contains('='))
+                    || has_shell_expansion;
+                if looks_like_path {
+                    // If an unresolved shell variable or command substitution appears in a
+                    // token (e.g. `$FILE`, `$FOO/secret`, or `$(pwd)/x`), never let
+                    // `resolve_path` join it under workspace and treat it as workspace-safe;
+                    // anchor it as an external synthetic path so PathPolicy requires confirmation.
+                    let entry = if has_shell_expansion {
+                        format!(
+                            "/__unresolved_shell_var__/{}",
+                            normalized.trim_start_matches('/')
+                        )
+                    } else {
+                        normalized
+                    };
+                    if !out.contains(&entry) {
+                        out.push(entry);
+                    }
                 }
             }
         }
     }
 
-    // Also extract quoted absolute / home paths embedded in inline scripts
-    // (e.g. `python3 -c "open('/etc/passwd').read()"`).
+    // Also extract quoted absolute / home / escaping relative paths embedded in inline scripts
+    // (e.g. `python3 -c "open('/etc/passwd').read()"` or `python3 -c "open('../secret').read()"`).
     for segment in command.split(['\'', '"']) {
         let seg = normalize_shell_home_vars(segment.trim());
-        if (seg.starts_with('/') || seg.starts_with("~/"))
-            && !seg.contains(' ')
-            && !seg.contains("://")
-            && seg.len() > 1
-            && !out.contains(&seg)
-        {
-            out.push(seg);
+        let is_inline_path = seg.starts_with('/')
+            || seg.starts_with("~/")
+            || seg.starts_with("../")
+            || seg.starts_with("./")
+            || seg == "..";
+        if is_inline_path && !seg.contains(' ') && !seg.contains("://") && seg.len() > 1 {
+            let entry = if seg.contains('$') || seg.contains('`') {
+                format!("/__unresolved_shell_var__/{}", seg.trim_start_matches('/'))
+            } else {
+                seg
+            };
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
         }
     }
 
@@ -613,6 +647,25 @@ mod tests {
                 .contains(&"/etc/passwd".to_string())
         );
         let unresolved = extract_command_paths("cat $FOO/id_rsa");
-        assert_eq!(unresolved, vec!["/__unresolved_shell_var__/$FOO/id_rsa".to_string()]);
+        assert_eq!(
+            unresolved,
+            vec!["/__unresolved_shell_var__/$FOO/id_rsa".to_string()]
+        );
+        assert_eq!(
+            extract_command_paths("cat $FILE"),
+            vec!["/__unresolved_shell_var__/$FILE".to_string()]
+        );
+        assert_eq!(
+            extract_command_paths("echo x 2>/etc/passwd"),
+            vec!["/etc/passwd".to_string()]
+        );
+        assert_eq!(
+            extract_command_paths("cat</etc/shadow"),
+            vec!["/etc/shadow".to_string()]
+        );
+        assert!(
+            extract_command_paths("python3 -c \"open('../secret').read()\"")
+                .contains(&"../secret".to_string())
+        );
     }
 }

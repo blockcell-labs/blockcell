@@ -118,11 +118,13 @@ pub fn dangerous_operation_items(tool_name: &str, args: &Value) -> Vec<String> {
         "shell" => {
             let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
             let cmd = match action {
-                "run" => field("command"),
-                "write_stdin" => field("input"),
-                _ => "",
+                "run" => field("command").to_string(),
+                "write_stdin" => {
+                    crate::shell_session::preview_session_stdin(field("session_id"), field("input"))
+                }
+                _ => String::new(),
             };
-            if is_dangerous_exec_command(cmd) {
+            if is_dangerous_exec_command(&cmd) {
                 vec![format!("command: {}", cmd)]
             } else {
                 Vec::new()

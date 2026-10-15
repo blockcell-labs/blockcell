@@ -38,7 +38,7 @@ fn default_max_results() -> u32 {
 pub struct ExecConfig {
     #[serde(default = "default_exec_timeout")]
     pub timeout: u32,
-    #[serde(default)]
+    #[serde(default = "crate::default_true")]
     pub restrict_to_workspace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_policy: Option<String>,
@@ -48,7 +48,7 @@ impl Default for ExecConfig {
     fn default() -> Self {
         Self {
             timeout: default_exec_timeout(),
-            restrict_to_workspace: false,
+            restrict_to_workspace: true,
             sandbox_policy: None,
         }
     }

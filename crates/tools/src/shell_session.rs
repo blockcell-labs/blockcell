@@ -78,9 +78,15 @@ struct ShellSession {
     active: Option<ActiveCommand>,
     sandbox_policy: SandboxPolicy,
     pid: Option<u32>,
+    exit_code: Option<i32>,
+    exited_at: Option<tokio::time::Instant>,
+    task_manager: Option<crate::TaskManagerHandle>,
     owner_agent_id: String,
     owner_session_id: String,
 }
+
+const MAX_STDIN_BUFFER_BYTES: usize = 4096;
+const EXITED_SESSION_RETENTION: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(crate) struct ShellSessionManager {
@@ -90,6 +96,9 @@ pub(crate) struct ShellSessionManager {
     /// 环境，这里保存一份同步索引，供 [`crate::execution_env::requests_full_access`] 在
     /// 同步的工具声明上下文中判定。
     policies: Arc<std::sync::RwLock<HashMap<String, SandboxPolicy>>>,
+    /// 各会话通过 `write_stdin` 分片注入的滑动输入窗口，用于跨多次调用识别拆分的危险命令或路径。
+    stdin_buffers: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    reaper_running: Arc<std::sync::atomic::AtomicBool>,
     sandbox: Arc<std::sync::RwLock<Arc<dyn SandboxProvider>>>,
 }
 
@@ -102,6 +111,8 @@ impl ShellSessionManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             policies: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            stdin_buffers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            reaper_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox: Arc::new(std::sync::RwLock::new(sandbox)),
         }
     }
@@ -124,11 +135,88 @@ impl ShellSessionManager {
         self.policies.read().ok()?.get(session_id).copied()
     }
 
+    pub(crate) fn preview_stdin(&self, session_id: &str, chunk: &str) -> String {
+        if session_id.is_empty() {
+            return chunk.to_string();
+        }
+        let existing = self
+            .stdin_buffers
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(session_id).cloned())
+            .unwrap_or_default();
+        if existing.is_empty() {
+            chunk.to_string()
+        } else {
+            normalize_continued_lines(&format!("{existing}{chunk}"))
+        }
+    }
+
+    pub(crate) fn record_stdin_chunk(&self, session_id: &str, chunk: &str) -> String {
+        let Ok(mut guard) = self.stdin_buffers.write() else {
+            return chunk.to_string();
+        };
+        let buf = guard.entry(session_id.to_string()).or_default();
+        buf.push_str(chunk);
+        if buf.len() > MAX_STDIN_BUFFER_BYTES {
+            let mut cut = buf.len() - MAX_STDIN_BUFFER_BYTES;
+            while cut < buf.len() && !buf.is_char_boundary(cut) {
+                cut += 1;
+            }
+            buf.drain(..cut);
+        }
+        normalize_continued_lines(buf)
+    }
+
+    pub(crate) fn clear_stdin_buffer(&self, session_id: &str) {
+        if let Ok(mut guard) = self.stdin_buffers.write() {
+            guard.remove(session_id);
+        }
+    }
+
+    fn ensure_background_reaper(&self) {
+        use std::sync::atomic::Ordering;
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        if self
+            .reaper_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let manager = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                manager.reap_exited_sessions().await;
+                let empty = manager.sessions.lock().await.is_empty();
+                if empty {
+                    manager.reaper_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
+    }
+
+    #[cfg(test)]
     pub(crate) async fn create(
         &self,
         workspace: &Path,
         sandbox_policy: SandboxPolicy,
         owner: SessionOwner<'_>,
+    ) -> Result<String> {
+        self.create_with_task_manager(workspace, sandbox_policy, owner, None)
+            .await
+    }
+
+    pub(crate) async fn create_with_task_manager(
+        &self,
+        workspace: &Path,
+        sandbox_policy: SandboxPolicy,
+        owner: SessionOwner<'_>,
+        task_manager: Option<crate::TaskManagerHandle>,
     ) -> Result<String> {
         let request = SandboxRequest {
             agent_id: owner.agent_id.to_string(),
@@ -176,6 +264,9 @@ impl ShellSessionManager {
         tokio::spawn(drain_shell_stream(stderr, Arc::clone(&output)));
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();
+        if let (Some(tm), Some(pid)) = (task_manager.as_ref(), pid) {
+            tm.register_shell_process(&session_id, pid);
+        }
         self.reap_exited_sessions().await;
         self.sessions.lock().await.insert(
             session_id.clone(),
@@ -188,6 +279,9 @@ impl ShellSessionManager {
                 active: None,
                 sandbox_policy,
                 pid,
+                exit_code: None,
+                exited_at: None,
+                task_manager,
                 owner_agent_id: owner.agent_id.to_string(),
                 owner_session_id: owner.session_id.to_string(),
             })),
@@ -195,10 +289,12 @@ impl ShellSessionManager {
         if let Ok(mut policies) = self.policies.write() {
             policies.insert(session_id.clone(), sandbox_policy);
         }
+        self.ensure_background_reaper();
         Ok(session_id)
     }
 
     /// 校验调用方是否为会话的创建者，防止跨会话/跨 Agent 越权操作持久 Shell。
+    /// 采用严格匹配（fail-closed）：任一身份字段不一致（含一方为空另一方非空）均拒绝。
     pub(crate) async fn verify_owner(
         &self,
         session_id: &str,
@@ -206,13 +302,9 @@ impl ShellSessionManager {
     ) -> Result<()> {
         let session = self.get(session_id).await?;
         let session = session.lock().await;
-        let session_mismatch = !session.owner_session_id.is_empty()
-            && !caller.session_id.is_empty()
-            && session.owner_session_id != caller.session_id;
-        let agent_mismatch = !session.owner_agent_id.is_empty()
-            && !caller.agent_id.is_empty()
-            && session.owner_agent_id != caller.agent_id;
-        if session_mismatch || agent_mismatch {
+        if session.owner_session_id != caller.session_id
+            || session.owner_agent_id != caller.agent_id
+        {
             return Err(Error::PermissionDenied(format!(
                 "Shell session {session_id} belongs to another session or agent"
             )));
@@ -220,7 +312,9 @@ impl ShellSessionManager {
         Ok(())
     }
 
-    /// 回收子进程已退出的僵尸会话，避免长期运行泄漏会话表与输出缓冲。
+    /// 回收子进程已退出的僵尸会话：
+    /// 1. 一旦子进程退出，立即回收 OS 状态并从 `task_manager` 注销进程；
+    /// 2. 若输出缓冲已被读空（或已退出超过保留期），从会话表中彻底移除，避免在最后一次读取前丢输出。
     pub(crate) async fn reap_exited_sessions(&self) {
         let entries: Vec<(String, Arc<Mutex<ShellSession>>)> = {
             let guard = self.sessions.lock().await;
@@ -229,31 +323,48 @@ impl ShellSessionManager {
                 .map(|(k, v)| (k.clone(), Arc::clone(v)))
                 .collect()
         };
-        let mut exited_ids = Vec::new();
+        let mut removable_ids = Vec::new();
         for (id, session_arc) in entries {
             if let Ok(mut session) = session_arc.try_lock() {
-                if session.pid.is_none()
-                    || session
-                        .child
-                        .try_wait()
-                        .ok()
-                        .flatten()
-                        .is_some()
-                {
-                    session.pid = None;
-                    session.active = None;
-                    exited_ids.push(id);
+                if session.exited_at.is_none() {
+                    if let Ok(Some(status)) = session.child.try_wait() {
+                        session.exit_code = status.code();
+                        session.pid = None;
+                        session.exited_at = Some(tokio::time::Instant::now());
+                    } else if session.pid.is_none() {
+                        session.exited_at = Some(tokio::time::Instant::now());
+                    }
+                }
+                if let Some(exited_at) = session.exited_at {
+                    if let Some(tm) = session.task_manager.take() {
+                        tm.unregister_shell_process(&id);
+                    }
+                    let has_unread = session.active.is_some()
+                        || session
+                            .output
+                            .try_lock()
+                            .map(|shared| !shared.bytes.is_empty())
+                            .unwrap_or(true);
+                    if !has_unread || exited_at.elapsed() >= EXITED_SESSION_RETENTION {
+                        session.active = None;
+                        removable_ids.push(id);
+                    }
                 }
             }
         }
-        if !exited_ids.is_empty() {
+        if !removable_ids.is_empty() {
             let mut guard = self.sessions.lock().await;
-            for id in &exited_ids {
+            for id in &removable_ids {
                 guard.remove(id);
             }
             if let Ok(mut policies) = self.policies.write() {
-                for id in &exited_ids {
+                for id in &removable_ids {
                     policies.remove(id);
+                }
+            }
+            if let Ok(mut stdin_buffers) = self.stdin_buffers.write() {
+                for id in &removable_ids {
+                    stdin_buffers.remove(id);
                 }
             }
         }
@@ -265,16 +376,21 @@ impl ShellSessionManager {
         };
         let exited = {
             let mut session = session_arc.lock().await;
-            if session.pid.is_none()
-                || session
-                    .child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .is_some()
-            {
+            if session.exited_at.is_none() {
+                if let Ok(Some(status)) = session.child.try_wait() {
+                    session.exit_code = status.code();
+                    session.pid = None;
+                    session.exited_at = Some(tokio::time::Instant::now());
+                } else if session.pid.is_none() {
+                    session.exited_at = Some(tokio::time::Instant::now());
+                }
+            }
+            if session.exited_at.is_some() {
                 session.pid = None;
                 session.active = None;
+                if let Some(tm) = session.task_manager.take() {
+                    tm.unregister_shell_process(session_id);
+                }
                 true
             } else {
                 false
@@ -285,6 +401,7 @@ impl ShellSessionManager {
             if let Ok(mut policies) = self.policies.write() {
                 policies.remove(session_id);
             }
+            self.clear_stdin_buffer(session_id);
         }
         exited
     }
@@ -366,14 +483,23 @@ impl ShellSessionManager {
         let session = self.get(session_id).await?;
         let mut session = session.lock().await;
         let Some(active) = session.active.as_ref() else {
-            let exit_code = session
-                .child
-                .try_wait()
-                .map_err(blockcell_core::Error::Io)?
-                .and_then(|status| status.code());
+            if session.exited_at.is_none() {
+                if let Some(status) = session
+                    .child
+                    .try_wait()
+                    .map_err(blockcell_core::Error::Io)?
+                {
+                    session.exit_code = status.code();
+                    session.pid = None;
+                    session.exited_at = Some(tokio::time::Instant::now());
+                    if let Some(tm) = session.task_manager.take() {
+                        tm.unregister_shell_process(session_id);
+                    }
+                }
+            }
             return Ok(ShellCommandOutput {
                 output: String::new(),
-                exit_code,
+                exit_code: session.exit_code,
                 running: false,
                 truncated: false,
             });
@@ -424,20 +550,30 @@ impl ShellSessionManager {
             active.delivered_offset = end_offset;
         }
 
-        if let Some(status) = session
-            .child
-            .try_wait()
-            .map_err(blockcell_core::Error::Io)?
-        {
+        if session.exited_at.is_none() {
+            if let Some(status) = session
+                .child
+                .try_wait()
+                .map_err(blockcell_core::Error::Io)?
+            {
+                session.exit_code = status.code();
+                session.pid = None;
+                session.exited_at = Some(tokio::time::Instant::now());
+            }
+        }
+        if session.exited_at.is_some() {
             session.active = None;
             session.pid = None;
+            if let Some(tm) = session.task_manager.take() {
+                tm.unregister_shell_process(session_id);
+            }
             let mut shared = session.output.lock().await;
             shared.bytes.clear();
             shared.bytes.shrink_to_fit();
             drop(shared);
             return Ok(ShellCommandOutput {
                 output,
-                exit_code: status.code(),
+                exit_code: session.exit_code,
                 running: false,
                 truncated,
             });
@@ -452,6 +588,14 @@ impl ShellSessionManager {
     }
 
     pub(crate) async fn write_stdin(&self, session_id: &str, input: &str) -> Result<()> {
+        let combined = self.record_stdin_chunk(session_id, input);
+        if crate::exec::is_dangerous_command(input) || crate::exec::is_dangerous_command(&combined)
+        {
+            self.clear_stdin_buffer(session_id);
+            return Err(Error::PermissionDenied(
+                "Input matches dangerous pattern and is blocked".to_string(),
+            ));
+        }
         let session = self.get(session_id).await?;
         let mut session = session.lock().await;
         session
@@ -476,7 +620,11 @@ impl ShellSessionManager {
         if let Ok(mut policies) = self.policies.write() {
             policies.remove(session_id);
         }
+        self.clear_stdin_buffer(session_id);
         let mut session = session.lock().await;
+        if let Some(tm) = session.task_manager.take() {
+            tm.unregister_shell_process(session_id);
+        }
         terminate_process_group(session.pid);
         let _ = session.child.start_kill();
         let _ = session.child.wait().await;
@@ -489,16 +637,32 @@ impl ShellSessionManager {
     ) -> Result<(Option<u32>, SandboxPolicy)> {
         let session = self.get(session_id).await?;
         let mut session = session.lock().await;
-        if session
-            .child
-            .try_wait()
-            .map_err(blockcell_core::Error::Io)?
-            .is_some()
-        {
-            session.pid = None;
+        if session.exited_at.is_none() {
+            if let Some(status) = session
+                .child
+                .try_wait()
+                .map_err(blockcell_core::Error::Io)?
+            {
+                session.exit_code = status.code();
+                session.pid = None;
+                session.exited_at = Some(tokio::time::Instant::now());
+                if let Some(tm) = session.task_manager.take() {
+                    tm.unregister_shell_process(session_id);
+                }
+            }
         }
         Ok((session.pid, session.sandbox_policy))
     }
+}
+
+/// 预览某持久 `shell` 会话若继续注入 `chunk` 后的累积 `stdin` 缓冲，用于识别跨多次
+/// `write_stdin` 调用拆分的危险命令或路径。
+pub fn preview_session_stdin(session_id: &str, chunk: &str) -> String {
+    SHELL_SESSIONS.preview_stdin(session_id, chunk)
+}
+
+fn normalize_continued_lines(input: &str) -> String {
+    input.replace("\\\r\n", "").replace("\\\n", "")
 }
 
 /// 会话创建时固定的沙箱策略（同步查询）；会话不存在返回 `None`。
@@ -603,10 +767,17 @@ impl Tool for ShellTool {
             "poll" | "close" => require_session_id(params, action)?,
             "write_stdin" => {
                 require_session_id(params, action)?;
+                let session_id = params
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let input = params.get("input").and_then(Value::as_str).ok_or_else(|| {
                     Error::Validation("action=write_stdin requires input".to_string())
                 })?;
-                if crate::exec::is_dangerous_command(input) {
+                let combined = preview_session_stdin(session_id, input);
+                if crate::exec::is_dangerous_command(input)
+                    || crate::exec::is_dangerous_command(&combined)
+                {
                     return Err(Error::PermissionDenied(
                         "Input matches dangerous pattern and is blocked".to_string(),
                     ));
@@ -633,7 +804,8 @@ impl Tool for ShellTool {
             .agent_identity
             .as_ref()
             .map(|identity| identity.agent_id.as_str())
-            .unwrap_or_default();
+            .filter(|id| !id.is_empty())
+            .unwrap_or("default");
         let caller_owner = SessionOwner {
             agent_id: caller_agent_id,
             session_id: &ctx.session_key,
@@ -645,7 +817,9 @@ impl Tool for ShellTool {
                 let session_id = if let Some(session_id) =
                     params.get("session_id").and_then(Value::as_str)
                 {
-                    SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
+                    SHELL_SESSIONS
+                        .verify_owner(session_id, caller_owner)
+                        .await?;
                     if params.get("sandbox_policy").is_some() {
                         let requested = SandboxPolicy::parse(
                             params.get("sandbox_policy").and_then(Value::as_str),
@@ -662,16 +836,14 @@ impl Tool for ShellTool {
                 } else {
                     let policy =
                         SandboxPolicy::parse(params.get("sandbox_policy").and_then(Value::as_str))?;
-                    let session_id = SHELL_SESSIONS
-                        .create(&ctx.workspace, policy, caller_owner)
-                        .await?;
-                    if let (Some(task_manager), (Some(pid), _)) = (
-                        ctx.task_manager.as_ref(),
-                        SHELL_SESSIONS.session_metadata(&session_id).await?,
-                    ) {
-                        task_manager.register_shell_process(&session_id, pid);
-                    }
-                    session_id
+                    SHELL_SESSIONS
+                        .create_with_task_manager(
+                            &ctx.workspace,
+                            policy,
+                            caller_owner,
+                            ctx.task_manager.clone(),
+                        )
+                        .await?
                 };
                 let output = SHELL_SESSIONS
                     .run_command(&session_id, command, timeout)
@@ -687,7 +859,9 @@ impl Tool for ShellTool {
             }
             "poll" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
-                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
+                SHELL_SESSIONS
+                    .verify_owner(session_id, caller_owner)
+                    .await?;
                 let output = SHELL_SESSIONS.poll(session_id, timeout).await?;
                 let (pid, policy) = SHELL_SESSIONS.session_metadata(session_id).await?;
                 if pid.is_none() {
@@ -700,7 +874,9 @@ impl Tool for ShellTool {
             }
             "write_stdin" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
-                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
+                SHELL_SESSIONS
+                    .verify_owner(session_id, caller_owner)
+                    .await?;
                 let input = params["input"].as_str().unwrap_or_default();
                 SHELL_SESSIONS.write_stdin(session_id, input).await?;
                 let output = SHELL_SESSIONS.poll(session_id, timeout).await?;
@@ -715,7 +891,9 @@ impl Tool for ShellTool {
             }
             "close" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
-                SHELL_SESSIONS.verify_owner(session_id, caller_owner).await?;
+                SHELL_SESSIONS
+                    .verify_owner(session_id, caller_owner)
+                    .await?;
                 SHELL_SESSIONS.close(session_id).await?;
                 if let Some(task_manager) = ctx.task_manager.as_ref() {
                     task_manager.unregister_shell_process(session_id);
@@ -1178,6 +1356,37 @@ mod tests {
             .expect_err("cross-session access must be rejected");
         assert!(matches!(err, Error::PermissionDenied(_)), "{err}");
 
+        // Empty caller identity fields must fail closed, never bypass owner verification
+        let empty_session_err = manager
+            .verify_owner(
+                &session_id,
+                SessionOwner {
+                    agent_id: "agent-a",
+                    session_id: "",
+                },
+            )
+            .await
+            .expect_err("empty caller session_id must be rejected");
+        assert!(
+            matches!(empty_session_err, Error::PermissionDenied(_)),
+            "{empty_session_err}"
+        );
+
+        let empty_agent_err = manager
+            .verify_owner(
+                &session_id,
+                SessionOwner {
+                    agent_id: "",
+                    session_id: "cli:session-a",
+                },
+            )
+            .await
+            .expect_err("empty caller agent_id must be rejected");
+        assert!(
+            matches!(empty_agent_err, Error::PermissionDenied(_)),
+            "{empty_agent_err}"
+        );
+
         manager.close(&session_id).await.expect("close session");
     }
 
@@ -1191,5 +1400,122 @@ mod tests {
             }))
             .expect_err("catastrophic rm in write_stdin must be blocked");
         assert!(matches!(err, Error::PermissionDenied(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn write_stdin_blocks_dangerous_command_split_across_chunks() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create shell session");
+
+        let _ = manager
+            .run_command(&session_id, "cat", Duration::from_millis(20))
+            .await
+            .expect("start cat");
+
+        manager
+            .write_stdin(&session_id, "rm -r")
+            .await
+            .expect("first fragment alone is not yet dangerous");
+        let err = manager
+            .write_stdin(&session_id, "f /\n")
+            .await
+            .expect_err("second fragment completing `rm -rf /` must be blocked");
+        assert!(matches!(err, Error::PermissionDenied(_)), "{err}");
+
+        manager.close(&session_id).await.expect("close session");
+    }
+
+    #[tokio::test]
+    async fn reap_preserves_unread_output_and_unregisters_task_manager() {
+        #[derive(Default)]
+        struct RecordingTaskManager {
+            active: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+        }
+
+        #[async_trait]
+        impl crate::TaskManagerOps for RecordingTaskManager {
+            async fn list_tasks_json(&self, _status_filter: Option<String>) -> Value {
+                Value::Null
+            }
+            async fn get_task_json(&self, _task_id: &str) -> Option<Value> {
+                None
+            }
+            async fn summary_json(&self) -> Value {
+                Value::Null
+            }
+            async fn send_message(&self, _task_id: &str, _message: String) -> Result<()> {
+                Ok(())
+            }
+            async fn is_one_shot_task(&self, _task_id: &str) -> bool {
+                false
+            }
+            fn register_shell_process(&self, session_id: &str, pid: u32) {
+                self.active
+                    .lock()
+                    .unwrap()
+                    .insert(session_id.to_string(), pid);
+            }
+            fn unregister_shell_process(&self, session_id: &str) {
+                self.active.lock().unwrap().remove(session_id);
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let recorder = Arc::new(RecordingTaskManager::default());
+        let task_manager: crate::TaskManagerHandle = recorder.clone();
+        let session_id = manager
+            .create_with_task_manager(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+                Some(task_manager),
+            )
+            .await
+            .expect("create shell session");
+
+        assert_eq!(recorder.active.lock().unwrap().len(), 1);
+
+        let timed_out = manager
+            .run_command(
+                &session_id,
+                "sleep 0.08; echo final-words; exit 0",
+                Duration::from_millis(10),
+            )
+            .await
+            .expect("start exiting command");
+        assert!(timed_out.running);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Reaping after process exit must unregister from task_manager immediately,
+        // but keep the session until its unread output has been polled.
+        manager.reap_exited_sessions().await;
+        assert!(
+            recorder.active.lock().unwrap().is_empty(),
+            "exited shell must be unregistered from task_manager on reap"
+        );
+
+        let polled = manager
+            .poll(&session_id, Duration::from_millis(50))
+            .await
+            .expect("unread output must remain pollable after reap");
+        assert!(!polled.running);
+        assert!(
+            polled.output.contains("final-words"),
+            "output was: {:?}",
+            polled.output
+        );
+
+        // Once output is drained, the next reap removes the session entry.
+        manager.reap_exited_sessions().await;
+        assert!(manager.get(&session_id).await.is_err());
     }
 }

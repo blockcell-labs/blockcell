@@ -1040,13 +1040,30 @@ mod tests {
             ("grep", json!({"pattern": "x"}), Local),
             ("glob", json!({"pattern": "*"}), Local),
             ("session_search", json!({"query": "x"}), Local),
-            ("write_file", json!({"path": "a", "content": "x"}), WorkspaceWrite),
+            (
+                "write_file",
+                json!({"path": "a", "content": "x"}),
+                WorkspaceWrite,
+            ),
             ("edit_file", json!({"path": "a"}), WorkspaceWrite),
-            ("file_ops", json!({"action": "delete", "path": "a"}), WorkspaceWrite),
-            // 直接 exec 子进程，不受沙箱限制 → full-access（危险命令由命令级策略把关）
-            ("exec", json!({"command": "ls"}), FullAccess),
+            (
+                "file_ops",
+                json!({"action": "delete", "path": "a"}),
+                WorkspaceWrite,
+            ),
+            // 默认 exec 受 workspace-write 沙箱限制 → Shell；显式 full-access 时为 FullAccess
+            ("exec", json!({"command": "ls"}), Shell),
+            (
+                "exec",
+                json!({"command": "ls", "sandbox_policy": "full-access"}),
+                FullAccess,
+            ),
             ("exec_local", json!({"path": "scripts/run.py"}), FullAccess),
-            ("exec_skill_script", json!({"path": "scripts/run.py"}), FullAccess),
+            (
+                "exec_skill_script",
+                json!({"path": "scripts/run.py"}),
+                FullAccess,
+            ),
             ("shell", json!({"command": "ls"}), Shell),
             (
                 "shell",
@@ -1055,7 +1072,11 @@ mod tests {
             ),
             ("web_fetch", json!({"url": "https://example.com"}), Network),
             ("web_search", json!({"query": "x"}), Network),
-            ("http_request", json!({"url": "https://example.com"}), Network),
+            (
+                "http_request",
+                json!({"url": "https://example.com"}),
+                Network,
+            ),
             ("email", json!({"action": "list"}), Network),
             ("message", json!({"text": "hi"}), Network),
             // 未注册 / 未声明的工具 → 进程内纯计算

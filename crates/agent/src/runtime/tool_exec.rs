@@ -212,28 +212,6 @@ pub(super) fn shell_sandbox_escalation_reason(
         {
             Some(message.clone())
         }
-        Ok(value)
-            if value.get("sandbox_policy").and_then(|item| item.as_str())
-                != Some("full-access")
-                && value
-                    .get("exit_code")
-                    .and_then(|item| item.as_i64())
-                    .is_some_and(|code| code != 0) =>
-        {
-            let output = value
-                .get("output")
-                .and_then(|item| item.as_str())
-                .unwrap_or_default();
-            let lower = output.to_ascii_lowercase();
-            [
-                "operation not permitted",
-                "network is unreachable",
-                "sandbox violation",
-            ]
-            .iter()
-            .find(|marker| lower.contains(**marker))
-            .map(|marker| (*marker).to_string())
-        }
         _ => None,
     }
 }

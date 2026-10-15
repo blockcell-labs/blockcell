@@ -89,7 +89,7 @@ static SEATBELT_AVAILABLE: Lazy<bool> = Lazy::new(|| {
     }
 });
 
-pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf]) -> String {
+pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf]) -> Result<String> {
     let mut profile = String::from(
         "(version 1)\n\
          (allow default)\n\
@@ -110,43 +110,55 @@ pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf])
             temp_roots.push(env_temp);
         }
         for temp_root in &temp_roots {
-            let escaped = escape_seatbelt_path(temp_root);
+            let escaped = escape_seatbelt_path(temp_root)?;
             profile.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
 
         for root in writable_roots {
-            append_seatbelt_writable_root(&mut profile, root);
+            append_seatbelt_writable_root(&mut profile, root)?;
             if let Ok(canonical) = root.canonicalize() {
                 if canonical != *root {
-                    append_seatbelt_writable_root(&mut profile, &canonical);
+                    append_seatbelt_writable_root(&mut profile, &canonical)?;
                 }
             }
         }
     }
-    profile
+    Ok(profile)
 }
 
-fn append_seatbelt_writable_root(profile: &mut String, root: &Path) {
-    let escaped = escape_seatbelt_path(root);
+fn append_seatbelt_writable_root(profile: &mut String, root: &Path) -> Result<()> {
+    let escaped = escape_seatbelt_path(root)?;
     if root.is_file() {
         profile.push_str(&format!("(allow file-write* (literal \"{escaped}\"))\n"));
     } else {
         profile.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
     }
+    Ok(())
 }
 
-fn escape_seatbelt_path(path: &Path) -> String {
-    let mut escaped = String::new();
-    for ch in path.to_string_lossy().chars() {
+fn escape_seatbelt_path(path: &Path) -> Result<String> {
+    let raw = path.to_str().ok_or_else(|| {
+        Error::Validation("Seatbelt path must be valid UTF-8 without raw bytes".to_string())
+    })?;
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
         match ch {
+            '\n' | '\r' | '\0' => {
+                return Err(Error::Validation(
+                    "Seatbelt path contains forbidden control character".to_string(),
+                ));
+            }
+            c if c.is_control() => {
+                return Err(Error::Validation(
+                    "Seatbelt path contains forbidden control character".to_string(),
+                ));
+            }
             '\\' => escaped.push_str("\\\\"),
             '"' => escaped.push_str("\\\""),
-            '\n' | '\r' | '\0' => {}
-            c if c.is_control() => {}
             c => escaped.push(c),
         }
     }
-    escaped
+    Ok(escaped)
 }
 
 impl SandboxBackend {
@@ -231,7 +243,7 @@ impl SandboxProvider for NativeSandboxProvider {
                 command
             }
             SandboxBackend::MacOsSeatbelt => {
-                let profile = build_seatbelt_profile(policy, &writable_roots);
+                let profile = build_seatbelt_profile(policy, &writable_roots)?;
                 let mut command = Command::new("/usr/bin/sandbox-exec");
                 command.arg("-p").arg(profile).arg(&program).args(&args);
                 command
@@ -408,8 +420,107 @@ fn apply_landlock(writable_roots: &[PathBuf]) -> std::io::Result<()> {
     result
 }
 
-#[cfg(target_os = "linux")]
-fn apply_network_seccomp() -> std::io::Result<()> {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SeccompInstruction {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct SeccompArchSpec {
+    pub audit_arch: u32,
+    pub is_big_endian: bool,
+    pub reject_x32: bool,
+    pub sys_socket: u32,
+    pub af_unix: u32,
+    pub af_netlink: u32,
+    pub deny_errno: u32,
+    pub blocked_syscalls: Vec<u32>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_EPERM: u32 = 1;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_AF_UNIX: u32 = 1;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_AF_NETLINK: u32 = 16;
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn seccomp_arch_spec(
+    arch: &str,
+    is_big_endian: bool,
+) -> std::io::Result<SeccompArchSpec> {
+    let deny_errno = SECCOMP_RET_ERRNO | LINUX_EPERM;
+    match arch {
+        "x86_64" if !is_big_endian => Ok(SeccompArchSpec {
+            audit_arch: 0xc000_003e,
+            is_big_endian: false,
+            reject_x32: true,
+            sys_socket: 41,
+            af_unix: LINUX_AF_UNIX,
+            af_netlink: LINUX_AF_NETLINK,
+            deny_errno,
+            blocked_syscalls: vec![42, 49, 50, 43, 288, 44, 45],
+        }),
+        "aarch64" if !is_big_endian => Ok(SeccompArchSpec {
+            audit_arch: 0xc000_00b7,
+            is_big_endian: false,
+            reject_x32: false,
+            sys_socket: 198,
+            af_unix: LINUX_AF_UNIX,
+            af_netlink: LINUX_AF_NETLINK,
+            deny_errno,
+            blocked_syscalls: vec![203, 200, 201, 202, 242, 206, 207],
+        }),
+        "x86" if !is_big_endian => Ok(SeccompArchSpec {
+            audit_arch: 0x4000_0003,
+            is_big_endian: false,
+            reject_x32: false,
+            sys_socket: 359,
+            af_unix: LINUX_AF_UNIX,
+            af_netlink: LINUX_AF_NETLINK,
+            deny_errno,
+            // Include legacy multiplexed SYS_socketcall (102) on 32-bit x86 in addition to
+            // direct socket syscalls so network calls cannot bypass the filter via socketcall.
+            blocked_syscalls: vec![102, 362, 361, 363, 364, 369, 371],
+        }),
+        "arm" if !is_big_endian => Ok(SeccompArchSpec {
+            audit_arch: 0x4000_0028,
+            is_big_endian: false,
+            reject_x32: false,
+            sys_socket: 281,
+            af_unix: LINUX_AF_UNIX,
+            af_netlink: LINUX_AF_NETLINK,
+            deny_errno,
+            blocked_syscalls: vec![283, 282, 284, 285, 366, 290, 292],
+        }),
+        "riscv64" if !is_big_endian => Ok(SeccompArchSpec {
+            audit_arch: 0xc000_00f3,
+            is_big_endian: false,
+            reject_x32: false,
+            sys_socket: 198,
+            af_unix: LINUX_AF_UNIX,
+            af_netlink: LINUX_AF_NETLINK,
+            deny_errno,
+            blocked_syscalls: vec![203, 200, 201, 202, 242, 206, 207],
+        }),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("seccomp network filter is not supported on architecture '{other}'"),
+        )),
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn build_network_seccomp_filter(spec: &SeccompArchSpec) -> Vec<SeccompInstruction> {
     const BPF_LD: u16 = 0x00;
     const BPF_W: u16 = 0x00;
     const BPF_ABS: u16 = 0x20;
@@ -418,68 +529,34 @@ fn apply_network_seccomp() -> std::io::Result<()> {
     const BPF_JGE: u16 = 0x30;
     const BPF_K: u16 = 0x00;
     const BPF_RET: u16 = 0x06;
-    const SECCOMP_SET_MODE_FILTER: u32 = 1;
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
     const SECCOMP_DATA_NR_OFFSET: u32 = 0;
     const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
-    const SECCOMP_DATA_ARG0_LOW_OFFSET: u32 = if cfg!(target_endian = "big") { 20 } else { 16 };
 
-    #[cfg(target_arch = "x86_64")]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = Some(0xc000_003e);
-    #[cfg(target_arch = "aarch64")]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = Some(0xc000_00b7);
-    #[cfg(target_arch = "x86")]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = Some(0x4000_0003);
-    #[cfg(target_arch = "arm")]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = Some(0x4000_0028);
-    #[cfg(target_arch = "riscv64")]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = Some(0xc000_00f3);
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "x86",
-        target_arch = "arm",
-        target_arch = "riscv64"
-    )))]
-    const EXPECTED_AUDIT_ARCH: Option<u32> = None;
+    let arg0_low_offset: u32 = if spec.is_big_endian { 20 } else { 16 };
+    let mut filter = Vec::<SeccompInstruction>::with_capacity(spec.blocked_syscalls.len() * 2 + 16);
 
-    let deny_errno = SECCOMP_RET_ERRNO | libc::EPERM as u32;
-    let blocked = [
-        libc::SYS_connect,
-        libc::SYS_bind,
-        libc::SYS_listen,
-        libc::SYS_accept,
-        libc::SYS_accept4,
-        libc::SYS_sendto,
-        libc::SYS_recvfrom,
-    ];
-    let mut filter = Vec::<libc::sock_filter>::with_capacity(blocked.len() * 2 + 16);
-
-    // 1. Verify architecture to prevent multi-arch ABI bypass (e.g. int 0x80 on x86_64)
-    if let Some(expected_arch) = EXPECTED_AUDIT_ARCH {
-        filter.push(libc::sock_filter {
-            code: BPF_LD | BPF_W | BPF_ABS,
-            jt: 0,
-            jf: 0,
-            k: SECCOMP_DATA_ARCH_OFFSET,
-        });
-        filter.push(libc::sock_filter {
-            code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 1,
-            jf: 0,
-            k: expected_arch,
-        });
-        filter.push(libc::sock_filter {
-            code: BPF_RET | BPF_K,
-            jt: 0,
-            jf: 0,
-            k: deny_errno,
-        });
-    }
+    // 1. Always verify architecture to prevent multi-arch ABI bypass (e.g. int 0x80 on x86_64)
+    filter.push(SeccompInstruction {
+        code: BPF_LD | BPF_W | BPF_ABS,
+        jt: 0,
+        jf: 0,
+        k: SECCOMP_DATA_ARCH_OFFSET,
+    });
+    filter.push(SeccompInstruction {
+        code: BPF_JMP | BPF_JEQ | BPF_K,
+        jt: 1,
+        jf: 0,
+        k: spec.audit_arch,
+    });
+    filter.push(SeccompInstruction {
+        code: BPF_RET | BPF_K,
+        jt: 0,
+        jf: 0,
+        k: spec.deny_errno,
+    });
 
     // 2. Load syscall number
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_LD | BPF_W | BPF_ABS,
         jt: 0,
         jf: 0,
@@ -487,81 +564,98 @@ fn apply_network_seccomp() -> std::io::Result<()> {
     });
 
     // Reject x32 ABI syscalls on x86_64 (__X32_SYSCALL_BIT = 0x40000000)
-    #[cfg(target_arch = "x86_64")]
-    {
-        filter.push(libc::sock_filter {
+    if spec.reject_x32 {
+        filter.push(SeccompInstruction {
             code: BPF_JMP | BPF_JGE | BPF_K,
             jt: 0,
             jf: 1,
             k: 0x4000_0000,
         });
-        filter.push(libc::sock_filter {
+        filter.push(SeccompInstruction {
             code: BPF_RET | BPF_K,
             jt: 0,
             jf: 0,
-            k: deny_errno,
+            k: spec.deny_errno,
         });
     }
 
     // 3. For SYS_socket, allow local IPC domains (AF_UNIX, AF_NETLINK) and block network domains
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_JMP | BPF_JEQ | BPF_K,
         jt: 0,
         jf: 5,
-        k: libc::SYS_socket as u32,
+        k: spec.sys_socket,
     });
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_LD | BPF_W | BPF_ABS,
         jt: 0,
         jf: 0,
-        k: SECCOMP_DATA_ARG0_LOW_OFFSET,
+        k: arg0_low_offset,
     });
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_JMP | BPF_JEQ | BPF_K,
         jt: 1,
         jf: 0,
-        k: libc::AF_UNIX as u32,
+        k: spec.af_unix,
     });
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_JMP | BPF_JEQ | BPF_K,
         jt: 0,
         jf: 1,
-        k: libc::AF_NETLINK as u32,
+        k: spec.af_netlink,
     });
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_RET | BPF_K,
         jt: 0,
         jf: 0,
         k: SECCOMP_RET_ALLOW,
     });
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_RET | BPF_K,
         jt: 0,
         jf: 0,
-        k: deny_errno,
+        k: spec.deny_errno,
     });
 
     // 4. Block network connection/addressing syscalls
-    for syscall in blocked {
-        filter.push(libc::sock_filter {
+    for &syscall in &spec.blocked_syscalls {
+        filter.push(SeccompInstruction {
             code: BPF_JMP | BPF_JEQ | BPF_K,
             jt: 0,
             jf: 1,
-            k: syscall as u32,
+            k: syscall,
         });
-        filter.push(libc::sock_filter {
+        filter.push(SeccompInstruction {
             code: BPF_RET | BPF_K,
             jt: 0,
             jf: 0,
-            k: deny_errno,
+            k: spec.deny_errno,
         });
     }
-    filter.push(libc::sock_filter {
+    filter.push(SeccompInstruction {
         code: BPF_RET | BPF_K,
         jt: 0,
         jf: 0,
         k: SECCOMP_RET_ALLOW,
     });
+    filter
+}
+
+#[cfg(target_os = "linux")]
+fn apply_network_seccomp() -> std::io::Result<()> {
+    const SECCOMP_SET_MODE_FILTER: u32 = 1;
+
+    let spec = seccomp_arch_spec(std::env::consts::ARCH, cfg!(target_endian = "big"))?;
+    let instructions = build_network_seccomp_filter(&spec);
+    let mut filter: Vec<libc::sock_filter> = instructions
+        .into_iter()
+        .map(|ins| libc::sock_filter {
+            code: ins.code,
+            jt: ins.jt,
+            jf: ins.jf,
+            k: ins.k,
+        })
+        .collect();
     let program = libc::sock_fprog {
         len: filter.len() as u16,
         filter: filter.as_mut_ptr(),
@@ -608,7 +702,8 @@ mod tests {
         let workspace = PathBuf::from("/tmp/blockcell workspace");
         let scope = vec![workspace.join("src"), workspace.join("Cargo.toml")];
 
-        let profile = build_seatbelt_profile(SandboxPolicy::WorkspaceWrite, &scope);
+        let profile =
+            build_seatbelt_profile(SandboxPolicy::WorkspaceWrite, &scope).expect("build profile");
 
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(allow file-read*)"));
@@ -661,7 +756,8 @@ mod tests {
     #[test]
     fn read_only_seatbelt_profile_has_no_write_allowance() {
         let profile =
-            build_seatbelt_profile(SandboxPolicy::ReadOnly, &[PathBuf::from("/tmp/workspace")]);
+            build_seatbelt_profile(SandboxPolicy::ReadOnly, &[PathBuf::from("/tmp/workspace")])
+                .expect("build profile");
 
         assert!(profile.contains("(deny file-write*)"));
         assert!(!profile.contains("file-write* (subpath"));
@@ -670,11 +766,108 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_escape_strips_control_characters() {
-        let path = PathBuf::from("/tmp/bad\n)\n(allow file-write*)\n\"path");
-        let escaped = escape_seatbelt_path(&path);
-        assert!(!escaped.contains('\n'));
-        assert!(!escaped.contains('\r'));
-        assert!(escaped.contains("\\\"path"));
+    fn seatbelt_rejects_control_characters_instead_of_rewriting_paths() {
+        let bad_newline = PathBuf::from("/tmp/bad\n)\n(allow file-write*)\n\"path");
+        assert!(escape_seatbelt_path(&bad_newline).is_err());
+        assert!(build_seatbelt_profile(SandboxPolicy::WorkspaceWrite, &[bad_newline]).is_err());
+
+        let bad_nul = PathBuf::from("/tmp/bad\0path");
+        assert!(escape_seatbelt_path(&bad_nul).is_err());
+
+        let valid_quotes = PathBuf::from("/tmp/with\"quote\\slash");
+        let escaped = escape_seatbelt_path(&valid_quotes).expect("valid path");
+        assert_eq!(escaped, "/tmp/with\\\"quote\\\\slash");
+    }
+
+    fn simulate_seccomp(
+        filter: &[SeccompInstruction],
+        arch: u32,
+        nr: u32,
+        arg0: u32,
+        is_big_endian: bool,
+    ) -> u32 {
+        let arg0_offset = if is_big_endian { 20 } else { 16 };
+        let mut acc = 0u32;
+        let mut pc = 0usize;
+        while pc < filter.len() {
+            let ins = filter[pc];
+            match ins.code {
+                // BPF_LD | BPF_W | BPF_ABS
+                0x20 => {
+                    acc = match ins.k {
+                        0 => nr,
+                        4 => arch,
+                        off if off == arg0_offset => arg0,
+                        _ => 0,
+                    };
+                    pc += 1;
+                }
+                // BPF_JMP | BPF_JEQ | BPF_K
+                0x15 => {
+                    let step = if acc == ins.k { ins.jt } else { ins.jf } as usize;
+                    pc += 1 + step;
+                }
+                // BPF_JMP | BPF_JGE | BPF_K
+                0x35 => {
+                    let step = if acc >= ins.k { ins.jt } else { ins.jf } as usize;
+                    pc += 1 + step;
+                }
+                // BPF_RET | BPF_K
+                0x06 => return ins.k,
+                other => panic!("unexpected BPF opcode: {other:#x}"),
+            }
+        }
+        panic!("BPF program did not terminate with RET");
+    }
+
+    #[test]
+    fn seccomp_filter_fails_closed_on_unknown_arch_and_blocks_x32_and_socketcall() {
+        assert!(seccomp_arch_spec("sparc64", true).is_err());
+        assert!(seccomp_arch_spec("x86_64", true).is_err());
+
+        let x64 = seccomp_arch_spec("x86_64", false).expect("x86_64 spec");
+        let x64_filter = build_network_seccomp_filter(&x64);
+        let deny = SECCOMP_RET_ERRNO | LINUX_EPERM;
+
+        // Foreign ABI (e.g. i386 int 0x80 on x86_64) is rejected
+        assert_eq!(
+            simulate_seccomp(&x64_filter, 0x4000_0003, 0, 0, false),
+            deny
+        );
+        // x32 ABI syscall bit is rejected
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 0x4000_0000 | 41, 1, false),
+            deny
+        );
+        // Local IPC sockets (AF_UNIX=1, AF_NETLINK=16) allowed, AF_INET=2 denied
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 41, 1, false),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 41, 16, false),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 41, 2, false),
+            deny
+        );
+        // connect (42) denied, read (0) allowed
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 42, 0, false),
+            deny
+        );
+        assert_eq!(
+            simulate_seccomp(&x64_filter, x64.audit_arch, 0, 0, false),
+            SECCOMP_RET_ALLOW
+        );
+
+        // 32-bit x86 blocks multiplexed SYS_socketcall (102)
+        let x86 = seccomp_arch_spec("x86", false).expect("x86 spec");
+        let x86_filter = build_network_seccomp_filter(&x86);
+        assert_eq!(
+            simulate_seccomp(&x86_filter, x86.audit_arch, 102, 1, false),
+            deny
+        );
     }
 }

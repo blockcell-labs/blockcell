@@ -1105,6 +1105,43 @@ fn read_allow_write_deny_policy(path: &Path) -> String {
 }
 
 #[tokio::test]
+async fn test_workspace_internal_deny_rule_is_enforced() {
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "blockcell-workspace-deny-policy-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let paths = Paths::with_base(base);
+    paths.ensure_dirs().expect("ensure workspace dirs");
+    let secret_dir = paths.workspace().join("secrets");
+    std::fs::create_dir_all(&secret_dir).expect("create workspace secrets dir");
+    let secret_file = secret_dir.join("token.txt");
+    std::fs::write(&secret_file, "secret").expect("write secret file");
+
+    let policy = read_deny_write_allow_policy(&secret_dir);
+    let policy_file = paths.path_access_file();
+    std::fs::write(&policy_file, policy).expect("write path policy");
+
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.security.path_access.policy_file = policy_file.to_string_lossy().to_string();
+
+    let mut runtime = test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config);
+    let msg = test_main_session_inbound("cli", "workspace-deny-policy");
+
+    assert!(
+        !runtime
+            .check_path_permission(
+                "read_file",
+                &serde_json::json!({"path": "secrets/token.txt"}),
+                &msg
+            )
+            .await,
+        "explicit deny rule inside workspace must not be bypassed by is_path_safe"
+    );
+}
+
+#[tokio::test]
 async fn test_authorized_read_directory_does_not_authorize_writes() {
     let outside = std::env::temp_dir().join(format!(
         "blockcell-op-cache-policy-{}",
@@ -5133,13 +5170,26 @@ async fn prefetch_runs_read_only_calls_and_skips_write_and_exec() {
     ];
 
     let prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
-    assert_eq!(prefetched.len(), 2, "only read-only calls should be prefetched");
-    assert!(!prefetched.contains_key("c3"), "write_file must not be prefetched");
-    assert!(!prefetched.contains_key("c4"), "exec must not be prefetched");
+    assert_eq!(
+        prefetched.len(),
+        2,
+        "only read-only calls should be prefetched"
+    );
+    assert!(
+        !prefetched.contains_key("c3"),
+        "write_file must not be prefetched"
+    );
+    assert!(
+        !prefetched.contains_key("c4"),
+        "exec must not be prefetched"
+    );
 
     let alpha = prefetched["c1"].result.as_ref().expect("alpha read ok");
     assert!(alpha.to_string().contains("alpha-content"));
-    assert_eq!(prefetched["c1"].args, serde_json::json!({"path": "alpha.txt"}));
+    assert_eq!(
+        prefetched["c1"].args,
+        serde_json::json!({"path": "alpha.txt"})
+    );
 }
 
 #[tokio::test]
@@ -5288,13 +5338,11 @@ async fn tool_call_audit_records_declared_execution_environment() {
 #[tokio::test]
 async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
     let mut runtime = test_runtime();
-    runtime
-        .tool_registry
-        .register(Arc::new(DeclaredEnvTool(
-            "custom_full_access",
-            blockcell_tools::ExecutionEnvironment::FullAccess,
-            true,
-        )));
+    runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
+        "custom_full_access",
+        blockcell_tools::ExecutionEnvironment::FullAccess,
+        true,
+    )));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
     let msg = test_main_session_inbound("cli", "full-gate-declared");
@@ -5315,7 +5363,10 @@ async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
         .expect("confirmation channel should stay open");
     assert_eq!(request.tool_name, "custom_full_access");
     assert!(
-        request.paths.iter().any(|item| item.contains("full-access")),
+        request
+            .paths
+            .iter()
+            .any(|item| item.contains("full-access")),
         "confirmation should mention full-access: {:?}",
         request.paths
     );
@@ -5329,13 +5380,11 @@ async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
 async fn confirmation_gate_follows_the_flag_not_the_environment() {
     // 同一个执行环境声明（Shell）下，只有 requires_confirmation=true 才触发确认。
     let mut runtime = test_runtime();
-    runtime
-        .tool_registry
-        .register(Arc::new(DeclaredEnvTool(
-            "custom_shell_confirm",
-            blockcell_tools::ExecutionEnvironment::Shell,
-            true,
-        )));
+    runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
+        "custom_shell_confirm",
+        blockcell_tools::ExecutionEnvironment::Shell,
+        true,
+    )));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
     let msg = test_main_session_inbound("cli", "shell-confirm-gate");
@@ -5370,19 +5419,21 @@ async fn confirmation_gate_follows_the_flag_not_the_environment() {
 async fn declaration_without_confirmation_skips_gate() {
     // 同一个工具名与参数，仅声明不同：无需确认时直接执行，不触发任何审批。
     let mut runtime = test_runtime();
-    runtime
-        .tool_registry
-        .register(Arc::new(DeclaredEnvTool(
-            "custom_shell",
-            blockcell_tools::ExecutionEnvironment::Shell,
-            false,
-        )));
+    runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
+        "custom_shell",
+        blockcell_tools::ExecutionEnvironment::Shell,
+        false,
+    )));
     let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
     runtime.confirm_tx = Some(confirm_tx);
     let msg = test_main_session_inbound("cli", "shell-no-gate");
 
     let output = runtime
-        .execute_tool_call(&tool_call("custom_shell", serde_json::json!({})), &msg, None)
+        .execute_tool_call(
+            &tool_call("custom_shell", serde_json::json!({})),
+            &msg,
+            None,
+        )
         .await;
     assert!(
         output.text.contains("ok"),
@@ -5664,7 +5715,11 @@ async fn unavailable_native_sandbox_can_be_approved_and_retried_full_access() {
     // 升级语义：先按原参数失败一次，再以 full-access 重试一次，且重试必须丢掉旧 session_id
     // （否则会落到仍按旧策略建立的会话上，等于没升级）。
     let calls = calls.lock().expect("shell calls");
-    assert_eq!(calls.len(), 2, "escalation must retry exactly once: {calls:?}");
+    assert_eq!(
+        calls.len(),
+        2,
+        "escalation must retry exactly once: {calls:?}"
+    );
     assert_eq!(calls[0].get("sandbox_policy"), None, "{calls:?}");
     assert_eq!(calls[0]["session_id"], "sandbox-session", "{calls:?}");
     assert_eq!(calls[1]["sandbox_policy"], "full-access", "{calls:?}");
@@ -5687,7 +5742,7 @@ async fn rejected_shell_full_access_does_not_execute_command() {
     let call = tool_call(
         "shell",
         serde_json::json!({
-            "command": format!("touch {}", marker.display()),
+            "command": "touch rejected-shell-marker",
             "sandbox_policy": "full-access"
         }),
     );
@@ -5704,15 +5759,23 @@ async fn rejected_shell_full_access_does_not_execute_command() {
 
 #[test]
 fn sandbox_permission_failure_is_classified_for_escalation() {
-    let result = Ok(serde_json::json!({
+    let backend_unavailable = Err(blockcell_core::Error::PermissionDenied(
+        "native sandbox unavailable; approval required".to_string(),
+    ));
+    assert_eq!(
+        super::tool_exec::shell_sandbox_escalation_reason(&backend_unavailable).as_deref(),
+        Some("native sandbox unavailable; approval required")
+    );
+
+    // Untrusted process output strings must not trigger automatic escalation prompts
+    let spoofed_output = Ok(serde_json::json!({
         "sandbox_policy": "workspace-write",
         "exit_code": 1,
         "output": "write failed: Operation not permitted"
     }));
-
     assert_eq!(
-        super::tool_exec::shell_sandbox_escalation_reason(&result).as_deref(),
-        Some("operation not permitted")
+        super::tool_exec::shell_sandbox_escalation_reason(&spoofed_output),
+        None
     );
 }
 

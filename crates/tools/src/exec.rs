@@ -13,11 +13,43 @@ use crate::{Tool, ToolContext, ToolSchema};
 /// 一次性命令执行。执行位置由注入的 [`ShellExecutor`] 决定，工具本身只描述命令。
 pub struct ExecTool {
     executor: Arc<dyn ShellExecutor>,
+    policy: std::sync::RwLock<SandboxPolicy>,
 }
 
 impl ExecTool {
     pub fn new(executor: Arc<dyn ShellExecutor>) -> Self {
-        Self { executor }
+        Self::with_policy(executor, SandboxPolicy::WorkspaceWrite)
+    }
+
+    pub fn with_policy(executor: Arc<dyn ShellExecutor>, policy: SandboxPolicy) -> Self {
+        Self {
+            executor,
+            policy: std::sync::RwLock::new(policy),
+        }
+    }
+
+    pub fn from_config(config: &blockcell_core::config::ExecConfig) -> Self {
+        let policy = Self::resolve_config_policy(config).unwrap_or(SandboxPolicy::WorkspaceWrite);
+        Self::with_policy(Arc::new(LocalShellExecutor::default()), policy)
+    }
+
+    pub fn resolve_config_policy(
+        config: &blockcell_core::config::ExecConfig,
+    ) -> Result<SandboxPolicy> {
+        if let Some(raw_policy) = config.sandbox_policy.as_deref() {
+            SandboxPolicy::parse(Some(raw_policy))
+        } else if config.restrict_to_workspace {
+            Ok(SandboxPolicy::WorkspaceWrite)
+        } else {
+            Ok(SandboxPolicy::FullAccess)
+        }
+    }
+
+    fn current_policy(&self) -> SandboxPolicy {
+        self.policy
+            .read()
+            .map(|guard| *guard)
+            .unwrap_or(SandboxPolicy::WorkspaceWrite)
     }
 }
 
@@ -114,10 +146,20 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
-    /// `exec` 不受沙箱限制（见下方 `execute` 的说明），因此如实声明 `FullAccess`。
-    /// 它不需要逐次确认：危险命令由 DangerousOperation 阶段按命令内容把关。
-    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
-        crate::ExecutionEnvironment::FullAccess
+    /// 根据当前生效的沙箱策略如实声明执行环境：默认 `WorkspaceWrite` / `ReadOnly` 声明为
+    /// `Shell`，显式配置放宽为 `FullAccess` 时声明为 `FullAccess`。
+    fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
+        let policy = params
+            .get("sandbox_policy")
+            .and_then(Value::as_str)
+            .and_then(|raw| SandboxPolicy::parse(Some(raw)).ok())
+            .unwrap_or_else(|| self.current_policy());
+        match policy {
+            SandboxPolicy::FullAccess => crate::ExecutionEnvironment::FullAccess,
+            SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite => {
+                crate::ExecutionEnvironment::Shell
+            }
+        }
     }
 
     fn idempotency(&self, _params: &Value) -> blockcell_core::Idempotency {
@@ -181,15 +223,13 @@ impl Tool for ExecTool {
         let timeout_secs = ctx.config.tools.exec.timeout as u64;
         let max_output_chars = 10000;
 
-        // 默认按 FullAccess 运行以保持兼容；若配置了 `tools.exec.sandboxPolicy` 或
-        // `tools.exec.restrictToWorkspace = true`，则按配置的沙箱策略约束进程。
-        let policy = if let Some(raw_policy) = ctx.config.tools.exec.sandbox_policy.as_deref() {
-            SandboxPolicy::parse(Some(raw_policy))?
-        } else if ctx.config.tools.exec.restrict_to_workspace {
-            SandboxPolicy::WorkspaceWrite
-        } else {
-            SandboxPolicy::FullAccess
-        };
+        // 默认按 WorkspaceWrite 沙箱运行，防止通过 `exec` 绕过 `shell` 的 OS 沙箱限制；
+        // 仅当显式配置 `tools.exec.sandboxPolicy = "full-access"` 或
+        // `tools.exec.restrictToWorkspace = false` 时才放宽为 FullAccess。
+        let policy = Self::resolve_config_policy(&ctx.config.tools.exec)?;
+        if let Ok(mut guard) = self.policy.write() {
+            *guard = policy;
+        }
         let writable_roots = if policy == SandboxPolicy::WorkspaceWrite {
             vec![ctx.workspace.clone()]
         } else {
@@ -352,5 +392,43 @@ mod tests {
                 "expected `{cmd}` to be blocked"
             );
         }
+    }
+
+    #[test]
+    fn test_exec_default_policy_is_workspace_write_and_matches_environment() {
+        let default_cfg = blockcell_core::config::ExecConfig::default();
+        assert!(default_cfg.restrict_to_workspace);
+        assert_eq!(
+            ExecTool::resolve_config_policy(&default_cfg).unwrap(),
+            SandboxPolicy::WorkspaceWrite
+        );
+
+        let tool = ExecTool::default();
+        assert_eq!(
+            tool.execution_environment(&json!({"command": "ls"})),
+            crate::ExecutionEnvironment::Shell
+        );
+
+        let unrestricted_cfg = blockcell_core::config::ExecConfig {
+            timeout: 60,
+            restrict_to_workspace: false,
+            sandbox_policy: None,
+        };
+        let unrestricted_tool = ExecTool::from_config(&unrestricted_cfg);
+        assert_eq!(
+            unrestricted_tool.execution_environment(&json!({"command": "ls"})),
+            crate::ExecutionEnvironment::FullAccess
+        );
+
+        let readonly_cfg = blockcell_core::config::ExecConfig {
+            timeout: 60,
+            restrict_to_workspace: false,
+            sandbox_policy: Some("read-only".to_string()),
+        };
+        let readonly_tool = ExecTool::from_config(&readonly_cfg);
+        assert_eq!(
+            readonly_tool.execution_environment(&json!({"command": "ls"})),
+            crate::ExecutionEnvironment::Shell
+        );
     }
 }

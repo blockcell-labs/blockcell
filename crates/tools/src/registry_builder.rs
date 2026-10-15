@@ -10,6 +10,9 @@ pub async fn build_tool_registry_for_agent_config(
     mcp_manager: Option<&Arc<McpManager>>,
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_defaults();
+    registry.register(Arc::new(crate::exec::ExecTool::from_config(
+        &config.tools.exec,
+    )));
     if let Some(manager) = mcp_manager {
         manager
             .extend_registry_for_rules(
