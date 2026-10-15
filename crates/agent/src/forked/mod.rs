@@ -45,7 +45,8 @@ pub use can_use_tool::{
     build_skill_review_tool_schemas, create_auto_mem_can_use_tool,
     create_combined_review_can_use_tool, create_compact_can_use_tool, create_dream_can_use_tool,
     create_flush_can_use_tool, create_memory_file_can_use_tool, create_memory_review_can_use_tool,
-    create_skill_review_can_use_tool, CanUseToolFn, ToolPermission,
+    create_skill_review_can_use_tool, roster_allows, roster_deny_message, roster_names,
+    CanUseToolFn, ReviewToolMode, ToolPermission,
 };
 pub use context::{
     create_subagent_context, AbortController, ContentReplacementState, FileStateCache,

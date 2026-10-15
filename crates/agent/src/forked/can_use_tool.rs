@@ -150,30 +150,172 @@ pub fn create_compact_can_use_tool() -> CanUseToolFn {
     )
 }
 
-/// 创建 Skill Review 的工具权限检查
-///
-/// Review Agent 只能使用有限的工具:
-/// - skill_manage: 创建/修补 Skill
-/// - list_skills: 查看 Skill 列表
-/// - read_file: 读取 Skill 内容
-/// - grep/glob: 搜索 Skill 文件
-///
-/// 关键: Review Agent **不能** 执行 exec、write_file 等危险操作,
-/// 只能通过 `skill_manage` 的安全通道修改 Skill 文件。
-pub fn create_skill_review_can_use_tool() -> CanUseToolFn {
-    Arc::new(|tool_name: &str, _input: &serde_json::Value| {
-        match tool_name {
-            "skill_manage" | "list_skills" | "read_file" | "grep" | "glob" | "list_dir" => {
-                ToolPermission::Allow
-            }
-            _ => ToolPermission::Deny {
-                message: format!(
-                    "Skill Review only allows skill_manage/list_skills/read_file/grep/glob, attempted: {}",
-                    tool_name
-                ),
-            },
+// ── 工具名单（单一来源） ────────────────────────────────────────────
+//
+// 每种 Review 模式的可用工具集必须只有一个定义处。历史上这里维护了三份独立的
+// 名单（执行期 Allow arm、schema 清单、Deny 消息枚举），导致 Deny 消息漏列
+// `list_dir` 这类"诊断信息不准"的漂移。现在由 `TOOL_ROSTERS` 单一来源派生三者：
+//   1. 执行期 Allow 判定  —— `roster_allows()`
+//   2. 传给 LLM 的 schema —— `build_roster_schemas()`
+//   3. Deny 消息的枚举    —— `roster_deny_message()`
+// 新增或删除工具只需改 `SCHEMA_BUILDERS`，三处自动同步。
+//
+// 注意：`run.rs` 的 `filter_tool_schemas` 仍会按 `params.tools` 白名单再过滤一次，
+// 那是 typed subagent 的语义，与这里的 Review 名单无关。
+
+/// Review 模式。与 `ReviewMode` 的字段一一对应，但这里不依赖 runtime 的枚举，
+/// 避免 `forked` 模块反向依赖 `runtime`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewToolMode {
+    Skill,
+    Memory,
+    Combined,
+    Flush,
+}
+
+impl ReviewToolMode {
+    /// 需要遍历断言"三处名单一致"的模式（Flush 是单工具模式，单独覆盖）。
+    pub const ALL: [ReviewToolMode; 3] = [
+        ReviewToolMode::Skill,
+        ReviewToolMode::Memory,
+        ReviewToolMode::Combined,
+    ];
+
+    /// 该模式的工具名单（顺序即 schema 发送顺序，也是 Deny 消息的列举顺序）。
+    pub fn roster(self) -> &'static [&'static str] {
+        match self {
+            ReviewToolMode::Skill => &SKILL_REVIEW_ROSTER,
+            ReviewToolMode::Memory => &MEMORY_REVIEW_ROSTER,
+            ReviewToolMode::Combined => &COMBINED_REVIEW_ROSTER,
+            ReviewToolMode::Flush => &FLUSH_ROSTER,
         }
-    })
+    }
+
+    fn schema_order(self) -> &'static [SchemaSlot] {
+        match self {
+            ReviewToolMode::Skill => &SKILL_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Memory => &MEMORY_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Combined => &COMBINED_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Flush => &FLUSH_SCHEMA_ORDER,
+        }
+    }
+}
+
+const FLUSH_ROSTER: &[&str] = &["memory_manage"];
+
+const SKILL_REVIEW_ROSTER: &[&str] = &[
+    "skill_manage",
+    "list_skills",
+    "read_file",
+    "grep",
+    "glob",
+    "list_dir",
+];
+
+const MEMORY_REVIEW_ROSTER: &[&str] = &[
+    "memory_manage",
+    "memory_query",
+    "memory_search",
+    "read_file",
+    "grep",
+    "glob",
+    "list_dir",
+];
+
+const COMBINED_REVIEW_ROSTER: &[&str] = &[
+    "skill_manage",
+    "list_skills",
+    "memory_manage",
+    "memory_query",
+    "memory_search",
+    "read_file",
+    "grep",
+    "glob",
+    "list_dir",
+];
+
+/// schema 槽位：工具名 + 构造器。顺序必须与对应的 `*_ROSTER` 完全一致，
+/// 由 `roster_and_schemas_agree` 测试逐模式断言。
+type SchemaSlot = (&'static str, fn() -> serde_json::Value);
+
+const FLUSH_SCHEMA_ORDER: &[SchemaSlot] =
+    &[("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value)];
+
+const SKILL_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
+    ("skill_manage", build_skill_manage_schema as fn() -> serde_json::Value),
+    ("list_skills", build_list_skills_schema as fn() -> serde_json::Value),
+    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    ("grep", build_grep_schema as fn() -> serde_json::Value),
+    ("glob", build_glob_schema as fn() -> serde_json::Value),
+    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+];
+
+const MEMORY_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
+    ("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value),
+    ("memory_query", build_memory_query_schema as fn() -> serde_json::Value),
+    ("memory_search", build_memory_search_schema as fn() -> serde_json::Value),
+    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    ("grep", build_grep_schema as fn() -> serde_json::Value),
+    ("glob", build_glob_schema as fn() -> serde_json::Value),
+    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+];
+
+const COMBINED_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
+    ("skill_manage", build_skill_manage_schema as fn() -> serde_json::Value),
+    ("list_skills", build_list_skills_schema as fn() -> serde_json::Value),
+    ("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value),
+    ("memory_query", build_memory_query_schema as fn() -> serde_json::Value),
+    ("memory_search", build_memory_search_schema as fn() -> serde_json::Value),
+    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    ("grep", build_grep_schema as fn() -> serde_json::Value),
+    ("glob", build_glob_schema as fn() -> serde_json::Value),
+    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+];
+
+/// 执行期判定：`name` 是否在 `mode` 的名单内。
+pub fn roster_allows(mode: ReviewToolMode, name: &str) -> bool {
+    mode.roster().contains(&name)
+}
+
+/// 由名单派生的 Deny 消息，枚举与 Allow arm 完全一致。
+pub fn roster_deny_message(mode: ReviewToolMode, attempted: &str) -> String {
+    format!(
+        "{} only allows {}, attempted: {}",
+        mode.label(),
+        mode.roster().join("/"),
+        attempted
+    )
+}
+
+impl ReviewToolMode {
+    /// 该模式在错误消息中的显示名。
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewToolMode::Skill => "Skill Review",
+            ReviewToolMode::Memory => "Memory Review",
+            ReviewToolMode::Combined => "Combined Review",
+            ReviewToolMode::Flush => "Flush mode",
+        }
+    }
+}
+
+/// 由名单派生 schema 列表。顺序与 `roster()` 一致。
+fn build_roster_schemas(mode: ReviewToolMode) -> Vec<serde_json::Value> {
+    mode.schema_order()
+        .iter()
+        .map(|(_, build)| build())
+        .collect()
+}
+
+/// 返回该模式名单对应的工具名集合（顺序同 `roster()`）。
+///
+/// 供上层在需要"这个 fork 允许哪些工具"时查询，避免它们再维护一份名单。
+pub fn roster_names(mode: ReviewToolMode) -> Vec<&'static str> {
+    mode.roster().to_vec()
+}
+
+pub fn create_skill_review_can_use_tool() -> CanUseToolFn {
+    make_roster_guard(ReviewToolMode::Skill)
 }
 
 /// 创建 Flush (Memory Flush) 的工具权限检查
@@ -183,21 +325,11 @@ pub fn create_skill_review_can_use_tool() -> CanUseToolFn {
 ///
 /// 与 Hermes 一致: flush 仅暴露 memory 工具 (等价于 memory_upsert)
 pub fn create_flush_can_use_tool() -> CanUseToolFn {
-    Arc::new(
-        |tool_name: &str, _input: &serde_json::Value| match tool_name {
-            "memory_manage" => ToolPermission::Allow,
-            _ => ToolPermission::Deny {
-                message: format!(
-                    "Flush mode only allows memory_manage, attempted: {}",
-                    tool_name
-                ),
-            },
-        },
-    )
+    make_roster_guard(ReviewToolMode::Flush)
 }
 
 pub fn build_flush_tool_schemas() -> Vec<serde_json::Value> {
-    vec![build_memory_manage_schema()]
+    build_roster_schemas(ReviewToolMode::Flush)
 }
 
 /// 创建 Memory Review 的工具权限检查
@@ -210,20 +342,7 @@ pub fn build_flush_tool_schemas() -> Vec<serde_json::Value> {
 /// - read_file: 读取文件内容
 /// - grep/glob: 搜索文件
 pub fn create_memory_review_can_use_tool() -> CanUseToolFn {
-    Arc::new(|tool_name: &str, _input: &serde_json::Value| {
-        match tool_name {
-            "memory_manage" | "memory_query" | "memory_search"
-            | "read_file" | "grep" | "glob" | "list_dir" => {
-                ToolPermission::Allow
-            }
-            _ => ToolPermission::Deny {
-                message: format!(
-                    "Memory Review only allows memory_manage/memory_query/memory_search/read_file/grep/glob, attempted: {}",
-                    tool_name
-                ),
-            },
-        }
-    })
+    make_roster_guard(ReviewToolMode::Memory)
 }
 
 /// 创建 Combined Review (Skill + Memory) 的工具权限检查
@@ -238,19 +357,18 @@ pub fn create_memory_review_can_use_tool() -> CanUseToolFn {
 /// - read_file: 读取文件内容
 /// - grep/glob: 搜索文件
 pub fn create_combined_review_can_use_tool() -> CanUseToolFn {
-    Arc::new(|tool_name: &str, _input: &serde_json::Value| {
-        match tool_name {
-            "skill_manage" | "list_skills"
-            | "memory_manage" | "memory_query" | "memory_search"
-            | "read_file" | "grep" | "glob" | "list_dir" => {
-                ToolPermission::Allow
+    make_roster_guard(ReviewToolMode::Combined)
+}
+
+/// 由名单构造执行期守卫。
+fn make_roster_guard(mode: ReviewToolMode) -> CanUseToolFn {
+    Arc::new(move |tool_name: &str, _input: &serde_json::Value| {
+        if roster_allows(mode, tool_name) {
+            ToolPermission::Allow
+        } else {
+            ToolPermission::Deny {
+                message: roster_deny_message(mode, tool_name),
             }
-            _ => ToolPermission::Deny {
-                message: format!(
-                    "Combined Review only allows skill_manage/list_skills/memory_manage/memory_query/memory_search/read_file/grep/glob, attempted: {}",
-                    tool_name
-                ),
-            },
         }
     })
 }
@@ -259,42 +377,17 @@ pub fn create_combined_review_can_use_tool() -> CanUseToolFn {
 ///
 /// 这些 schema 会传给 provider.chat() 的 tools 参数，让 LLM 知道可用的工具及其参数。
 pub fn build_skill_review_tool_schemas() -> Vec<serde_json::Value> {
-    vec![
-        build_skill_manage_schema(),
-        build_list_skills_schema(),
-        build_read_file_schema(),
-        build_grep_schema(),
-        build_glob_schema(),
-        build_list_dir_schema(),
-    ]
+    build_roster_schemas(ReviewToolMode::Skill)
 }
 
 /// 构建 Memory Review 模式的 LLM 工具 schema 列表
 pub fn build_memory_review_tool_schemas() -> Vec<serde_json::Value> {
-    vec![
-        build_memory_manage_schema(),
-        build_memory_query_schema(),
-        build_memory_search_schema(),
-        build_read_file_schema(),
-        build_grep_schema(),
-        build_glob_schema(),
-        build_list_dir_schema(),
-    ]
+    build_roster_schemas(ReviewToolMode::Memory)
 }
 
 /// 构建 Combined Review 模式的 LLM 工具 schema 列表
 pub fn build_combined_review_tool_schemas() -> Vec<serde_json::Value> {
-    vec![
-        build_skill_manage_schema(),
-        build_list_skills_schema(),
-        build_memory_manage_schema(),
-        build_memory_query_schema(),
-        build_memory_search_schema(),
-        build_read_file_schema(),
-        build_grep_schema(),
-        build_glob_schema(),
-        build_list_dir_schema(),
-    ]
+    build_roster_schemas(ReviewToolMode::Combined)
 }
 
 // ── 工具 Schema 定义 ──────────────────────────────────────────────
@@ -890,6 +983,126 @@ fn is_path_within_directory_path(path: &Path, directory: &Path) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── 工具名单单一来源（P1-0） ──────────────────────────────────
+    //
+    // 目标是消灭"三份名单各自漂移"这个类别。下面四个断言对应文档
+    // `docs/design/ghost-review-cache-alignment-design.md` §7 验收标准第 6 条：
+    //   Allow 集合 == schema 工具名集合，且 Deny 消息枚举与 Allow arm 一致。
+
+    fn schema_names(mode: ReviewToolMode) -> Vec<String> {
+        build_roster_schemas(mode)
+            .iter()
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .expect("schema must carry function.name")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// roster 与 schema_order 逐模式一致（含顺序）。
+    /// 这是最核心的一条：一旦有人只改一侧，这里立刻红。
+    #[test]
+    fn roster_and_schemas_agree_per_mode() {
+        for mode in ReviewToolMode::ALL {
+            let roster: Vec<String> = mode.roster().iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                schema_names(mode),
+                roster,
+                "{:?}: schema 顺序/内容与 roster 不一致",
+                mode
+            );
+        }
+    }
+
+    /// Flush 是单工具模式，单独覆盖（不在 `ALL` 里）。
+    #[test]
+    fn flush_roster_and_schema_agree() {
+        assert_eq!(
+            schema_names(ReviewToolMode::Flush),
+            vec!["memory_manage".to_string()]
+        );
+    }
+
+    /// `create_*_can_use_tool` 的 Allow 集合必须等于各自的 roster。
+    #[test]
+    fn guards_allow_exactly_their_roster() {
+        for mode in ReviewToolMode::ALL {
+            let guard = make_roster_guard(mode);
+            for allowed in mode.roster() {
+                assert!(
+                    matches!(guard(allowed, &json!({})), ToolPermission::Allow),
+                    "{:?}: roster 内的 {:?} 应被 Allow",
+                    mode,
+                    allowed
+                );
+            }
+            // 名单外一律 Deny（取几个确定不在任何名单里的名字）
+            for denied in ["exec", "shell", "write_file", "file_write", "web_fetch"] {
+                assert!(
+                    matches!(guard(denied, &json!({})), ToolPermission::Deny { .. }),
+                    "{:?}: 名单外的 {:?} 应被 Deny",
+                    mode,
+                    denied
+                );
+            }
+        }
+    }
+
+    /// Deny 消息必须完整枚举 Allow 集合——这是本次修正的真实缺陷
+    /// （三条消息都漏列 `list_dir`）。
+    #[test]
+    fn deny_message_enumerates_full_roster() {
+        for mode in ReviewToolMode::ALL {
+            let guard = make_roster_guard(mode);
+            let ToolPermission::Deny { message } = guard("definitely_not_a_tool", &json!({}))
+            else {
+                panic!("{:?}: 名单外工具应被 Deny", mode);
+            };
+            for allowed in mode.roster() {
+                assert!(
+                    message.contains(allowed),
+                    "{:?}: Deny 消息漏列 {:?}（实际消息: {}）",
+                    mode,
+                    allowed,
+                    message
+                );
+            }
+            // 反向：消息里不应出现名单外的名字
+            for outside in ["exec", "shell", "write_file"] {
+                assert!(
+                    !message.contains(outside),
+                    "{:?}: Deny 消息多列了 {:?}（实际消息: {}）",
+                    mode,
+                    outside,
+                    message
+                );
+            }
+        }
+    }
+
+    /// 各模式的 `create_*` / `build_*` 公开 API 与 roster 派生结果等价
+    /// （防止公开入口绕开 roster）。
+    #[test]
+    fn public_apis_are_roster_backed() {
+        assert!(matches!(
+            create_skill_review_can_use_tool()("list_dir", &json!({})),
+            ToolPermission::Allow
+        ));
+        assert!(matches!(
+            create_memory_review_can_use_tool()("list_dir", &json!({})),
+            ToolPermission::Allow
+        ));
+        assert!(matches!(
+            create_combined_review_can_use_tool()("list_dir", &json!({})),
+            ToolPermission::Allow
+        ));
+        assert_eq!(schema_names(ReviewToolMode::Skill).len(), 6);
+        assert_eq!(schema_names(ReviewToolMode::Memory).len(), 7);
+        assert_eq!(schema_names(ReviewToolMode::Combined).len(), 9);
+    }
 
     #[test]
     fn test_read_only_commands() {
