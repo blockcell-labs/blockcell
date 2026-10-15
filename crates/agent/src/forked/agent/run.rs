@@ -269,25 +269,10 @@ pub async fn run_forked_agent(
             }
         };
 
-        // 提取用量
+        // 提取用量（兼容 Anthropic/OpenAI/Gemini/Ollama 归一化后的 prompt_tokens/completion_tokens 与 input_tokens/output_tokens）
         if !response.usage.is_null() {
-            let usage = &response.usage;
-            let input = usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output = usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_creation = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let (input, output, cache_read, cache_creation) =
+                extract_forked_usage(&response.usage);
             total_usage.accumulate(input, output, cache_read, cache_creation);
         }
 
@@ -818,4 +803,76 @@ pub(crate) async fn acquire_provider_with_retry(
     }
 
     Err(ForkedAgentError::NoProviderAvailable)
+}
+
+pub(crate) fn extract_forked_usage(usage: &serde_json::Value) -> (u64, u64, u64, u64) {
+    fn read_u64(usage: &serde_json::Value, keys: &[&str]) -> u64 {
+        keys.iter()
+            .find_map(|key| usage.get(*key))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+                    .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            })
+            .unwrap_or(0)
+    }
+
+    let input = read_u64(
+        usage,
+        &[
+            "input_tokens",
+            "inputTokens",
+            "prompt_tokens",
+            "promptTokens",
+            "promptTokenCount",
+        ],
+    );
+    let output = read_u64(
+        usage,
+        &[
+            "output_tokens",
+            "outputTokens",
+            "completion_tokens",
+            "completionTokens",
+            "candidatesTokenCount",
+        ],
+    );
+    let cache_read = read_u64(
+        usage,
+        &["cache_read_input_tokens", "cacheReadInputTokens"],
+    );
+    let cache_creation = read_u64(
+        usage,
+        &["cache_creation_input_tokens", "cacheCreationInputTokens"],
+    );
+    (input, output, cache_read, cache_creation)
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::extract_forked_usage;
+    use serde_json::json;
+
+    #[test]
+    fn extract_forked_usage_supports_normalized_prompt_tokens_and_raw_input_tokens() {
+        let anthropic_normalized = json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "cache_read_input_tokens": 90,
+            "cache_creation_input_tokens": 15
+        });
+        assert_eq!(
+            extract_forked_usage(&anthropic_normalized),
+            (120, 30, 90, 15)
+        );
+
+        let raw_usage = json!({
+            "input_tokens": 200,
+            "output_tokens": 45,
+            "cache_read_input_tokens": 150,
+            "cache_creation_input_tokens": 0
+        });
+        assert_eq!(extract_forked_usage(&raw_usage), (200, 45, 150, 0));
+    }
 }

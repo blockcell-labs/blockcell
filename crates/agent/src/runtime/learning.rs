@@ -38,6 +38,7 @@ impl super::AgentRuntime {
         };
         tracing::info!("[Nudge] 阈值到达, 启动后台 {:?} Review", mode);
 
+        let paths_for_metrics = self.paths.clone();
         let skills_dir = self.paths.skills_dir();
         // 克隆一份供 ForkedAgent 使用（spawn_blocking 会 move 原始值）
         let skills_dir_clone = skills_dir.clone();
@@ -165,6 +166,13 @@ impl super::AgentRuntime {
 
             match crate::forked::run_forked_agent(params).await {
                 Ok(result) => {
+                    crate::ghost_metrics::get_ghost_metrics(&paths_for_metrics)
+                        .record_fork_prompt_cache_usage(
+                            label,
+                            result.total_usage.input_tokens,
+                            result.total_usage.cache_read_input_tokens,
+                            result.total_usage.cache_creation_input_tokens,
+                        );
                     if result.truncated {
                         tracing::warn!(mode = ?mode_clone, "[Nudge] Review 结果被截断，可能丢失部分信息");
                     }

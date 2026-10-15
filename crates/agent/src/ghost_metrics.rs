@@ -5,6 +5,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use blockcell_core::Paths;
 use serde::Serialize;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkPromptCacheUsageSnapshot {
+    pub prompt_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct GhostMetrics {
     episodes_captured: AtomicU64,
@@ -14,6 +22,7 @@ pub struct GhostMetrics {
     prompt_input_tokens: AtomicU64,
     cache_read_input_tokens: AtomicU64,
     cache_creation_input_tokens: AtomicU64,
+    fork_prompt_cache_usage: Mutex<HashMap<String, ForkPromptCacheUsageSnapshot>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -26,6 +35,7 @@ pub struct GhostMetricsSnapshot {
     pub prompt_input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub cache_creation_input_tokens: u64,
+    pub fork_prompt_cache_usage: HashMap<String, ForkPromptCacheUsageSnapshot>,
 }
 
 impl GhostMetrics {
@@ -59,7 +69,34 @@ impl GhostMetrics {
             .fetch_add(cache_creation_input_tokens, Ordering::Relaxed);
     }
 
+    pub fn record_fork_prompt_cache_usage(
+        &self,
+        fork_label: &str,
+        prompt_input_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    ) {
+        self.record_prompt_cache_usage(
+            prompt_input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
+        let mut guard = self
+            .fork_prompt_cache_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(fork_label.to_string()).or_default();
+        entry.prompt_input_tokens += prompt_input_tokens;
+        entry.cache_read_input_tokens += cache_read_input_tokens;
+        entry.cache_creation_input_tokens += cache_creation_input_tokens;
+    }
+
     pub fn snapshot(&self) -> GhostMetricsSnapshot {
+        let fork_prompt_cache_usage = self
+            .fork_prompt_cache_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         GhostMetricsSnapshot {
             episodes_captured: self.episodes_captured.load(Ordering::Relaxed),
             reviews_started: self.reviews_started.load(Ordering::Relaxed),
@@ -68,6 +105,7 @@ impl GhostMetrics {
             prompt_input_tokens: self.prompt_input_tokens.load(Ordering::Relaxed),
             cache_read_input_tokens: self.cache_read_input_tokens.load(Ordering::Relaxed),
             cache_creation_input_tokens: self.cache_creation_input_tokens.load(Ordering::Relaxed),
+            fork_prompt_cache_usage,
         }
     }
 
@@ -82,6 +120,10 @@ impl GhostMetrics {
         self.prompt_input_tokens.store(0, Ordering::SeqCst);
         self.cache_read_input_tokens.store(0, Ordering::SeqCst);
         self.cache_creation_input_tokens.store(0, Ordering::SeqCst);
+        self.fork_prompt_cache_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -121,10 +163,18 @@ mod tests {
     fn prompt_cache_usage_is_exposed_in_snapshot() {
         let metrics = GhostMetrics::default();
         metrics.record_prompt_cache_usage(200, 140, 20);
+        metrics.record_fork_prompt_cache_usage("skill_nudge_review", 100, 80, 10);
 
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.prompt_input_tokens, 200);
-        assert_eq!(snapshot.cache_read_input_tokens, 140);
-        assert_eq!(snapshot.cache_creation_input_tokens, 20);
+        assert_eq!(snapshot.prompt_input_tokens, 300);
+        assert_eq!(snapshot.cache_read_input_tokens, 220);
+        assert_eq!(snapshot.cache_creation_input_tokens, 30);
+        let fork_bucket = snapshot
+            .fork_prompt_cache_usage
+            .get("skill_nudge_review")
+            .expect("fork bucket should exist");
+        assert_eq!(fork_bucket.prompt_input_tokens, 100);
+        assert_eq!(fork_bucket.cache_read_input_tokens, 80);
+        assert_eq!(fork_bucket.cache_creation_input_tokens, 10);
     }
 }
