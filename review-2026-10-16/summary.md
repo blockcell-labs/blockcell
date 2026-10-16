@@ -42,7 +42,12 @@
 > 以及 §3-A 的 email 附件名、napcat 媒体文件名、wecom media_id（另含 V3 自查新增 4 处同类漏点）。
 > 验证：`cargo check` / `clippy` / `test -p blockcell-channels -p blockcell-tools` 全绿（channels 161 + tools 481）。
 > 明细与文件级改动见 [`FIX-BATCH0.md`](FIX-BATCH0.md)。
-> **未动**：P0-7（Gemini 默认路由）、P0-8（验收假通过）、P0-9（config set 重写）与 §3-B~I 全部条目 —— 属 Batch 1 及之后。
+> **未动**：P0-7（Gemini 默认路由）、P0-8（验收假通过）、P0-9（config set 重写）—— 属 Batch 2 及之后。
+>
+> **Batch 1 修复状态（2026-10-16，commit `2f1766c` + `289330a`）**
+> §3-B 的准入接线（knowledge_forget / termux_api 七个设备副作用动作 / napcat 群管理 `check_admin_permission`）、
+> `ToolPolicy` 改为 Deny > Ask > Allow、fork 路径 `can_use_tool` 默认值改为「按该 fork 声明的 schema 名单派生 allowlist」均已修复并验证
+> （tools 481 + core 全绿 + agent 842 passed）。有意未做项及理由见 [`FIX-BATCH1.md`](FIX-BATCH1.md) 的 1.8 / 1.9。
 
 ---
 
@@ -156,7 +161,7 @@
 > 原则：P0 集中一批修完再回归；每批后跑受影响 crate 的单测（注意需先 `npm run build`，见 W0 §2）。
 
 - **Batch 0（安全阻断级，最高优先）**：wecom 验签（P0-1）、5 适配器文件名清洗（P0-6）、4 处脚本/命令注入（P0-2/3/4/5）、email 附件名 + napcat 文件名 + wecom media_id（P1-A）
-- **Batch 1（准入与权限）**：`requires_confirmation` 全量接线 + 把 `can_use_tool` / `requires_confirmation` 默认改为拒绝；`check_admin_permission` 修正；`ToolPolicy` 加 deny 优先
+- **Batch 1（准入与权限）✅ 已完成**：`requires_confirmation` 接线到 knowledge_forget / termux_api；`check_admin_permission` 改 fail-closed；`ToolPolicy` 加 deny 优先；fork 路径 `can_use_tool` 默认改 fail-closed。提交 `2f1766c` + `289330a`
 - **Batch 2（数据与配置）**：`config set` 保留未建模键（P0-9）、Gemini 默认路由（P0-7）、encrypt IV/algorithm、alerts rules 加锁、audit 哈希链跨进程锁、`merge_episode_metadata` 单事务
 - **Batch 3（路径与凭据收敛）**：`video_process` 字段对齐、`network_monitor` 接入 ssrf、gateway/CLI 密钥回显脱敏、`.env` 权限与覆盖语义
 - **Batch 4（资源上限）**：统一 zip / 下载 / CSV / 音视频 / WS 帧 / 内存池上限，池加 LRU
