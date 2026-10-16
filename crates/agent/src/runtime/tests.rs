@@ -7358,3 +7358,39 @@ fn fork_for_message_task_shares_caches_and_capabilities_while_isolating_turn_sta
         Some("shared skill summary")
     );
 }
+
+#[tokio::test]
+async fn fork_for_message_task_preserves_session_memory_system_across_messages() {
+    let parent = test_runtime();
+    let session_key = "cli:shared-layer4";
+
+    {
+        let (steering1, sender1) = SteeringChannel::new(4);
+        let token1 = parent.abort_token.child();
+        let mut msg_runtime_1 = parent.fork_for_message_task(steering1, sender1, token1);
+        msg_runtime_1
+            .init_memory_system(session_key.to_string())
+            .await
+            .expect("init memory system in message 1");
+        msg_runtime_1
+            .memory_system
+            .as_mut()
+            .expect("memory_system initialized")
+            .skill_tracker_mut()
+            .record_load("deploy-skill", "deployed service in turn 1");
+        // msg_runtime_1 在此作用域结束时 drop，自动将 MemorySystem 归还到父级共享槽
+    }
+
+    let (steering2, sender2) = SteeringChannel::new(4);
+    let token2 = parent.abort_token.child();
+    let mut msg_runtime_2 = parent.fork_for_message_task(steering2, sender2, token2);
+    let reused = msg_runtime_2
+        .session_memory_systems
+        .lock()
+        .unwrap()
+        .remove(session_key)
+        .expect("session MemorySystem should be returned to shared pool on drop");
+    assert_eq!(reused.session_id(), session_key);
+    assert_eq!(reused.skill_tracker().get_recent_skills(1000).len(), 1);
+    msg_runtime_2.memory_system = Some(reused);
+}

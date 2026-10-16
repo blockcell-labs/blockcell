@@ -401,7 +401,7 @@ impl AgentRuntime {
             }
         }
 
-        // Layer 4: Initialize memory system if needed
+        // Layer 4: Initialize or reuse session-level memory system
         // 使用 persist_session_key（非 session_key）：cron delivery/转发场景下
         // Session Memory 文件、pending marker、.session_memory_state.json
         // 应写入目标会话目录，而非来源会话
@@ -411,7 +411,20 @@ impl AgentRuntime {
             .map(|memory_system| memory_system.session_id() != persist_session_key)
             .unwrap_or(true);
         if needs_memory_system_init {
-            if let Err(e) = self.init_memory_system(persist_session_key.clone()).await {
+            if let Some(prev) = self.memory_system.take() {
+                self.session_memory_systems
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(prev.session_id().to_string(), prev);
+            }
+            let cached_ms = self
+                .session_memory_systems
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&persist_session_key);
+            if let Some(ms) = cached_ms {
+                self.memory_system = Some(ms);
+            } else if let Err(e) = self.init_memory_system(persist_session_key.clone()).await {
                 warn!(error = %e, "[layer4] Failed to initialize memory system");
             }
         }

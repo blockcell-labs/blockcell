@@ -2260,6 +2260,9 @@ pub struct AgentRuntime {
     response_cache: crate::response_cache::ResponseCache,
     /// 7-Layer Memory System integration.
     memory_system: Option<crate::memory_system::MemorySystem>,
+    /// Shared session-indexed MemorySystem pool so per-message forked runtimes
+    /// preserve Layer 4 trackers (FileTracker/SkillTracker) and avoid re-running init_memory_system I/O.
+    session_memory_systems: Arc<Mutex<HashMap<String, crate::memory_system::MemorySystem>>>,
     /// Flag to signal that memory injector cache needs refresh after Layer 5 extraction.
     /// Uses Arc<AtomicBool> because background tasks need to set this flag.
     memory_injector_needs_reload: Arc<std::sync::atomic::AtomicBool>,
@@ -2431,6 +2434,7 @@ impl AgentRuntime {
                 response_cache_config,
             ),
             memory_system: None,
+            session_memory_systems: Arc::new(Mutex::new(HashMap::new())),
             memory_injector_needs_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             abort_token: AbortToken::new(),
             runtime_handle: None,
@@ -2520,6 +2524,7 @@ impl AgentRuntime {
             agent_loop: Arc::clone(&self.agent_loop),
             response_cache: self.response_cache.clone(),
             memory_system: None,
+            session_memory_systems: Arc::clone(&self.session_memory_systems),
             memory_injector_needs_reload: Arc::clone(&self.memory_injector_needs_reload),
             abort_token,
             runtime_handle: None,
@@ -2681,6 +2686,16 @@ impl blockcell_tools::RuntimeHandle for AgentRuntime {
     fn context_window_snapshot(&self, session_key: &str) -> blockcell_core::ContextWindowSnapshot {
         self.budget_tracker_for_session(session_key)
             .context_window_snapshot()
+    }
+}
+
+impl Drop for AgentRuntime {
+    fn drop(&mut self) {
+        if let Some(ms) = self.memory_system.take() {
+            if let Ok(mut map) = self.session_memory_systems.lock() {
+                map.insert(ms.session_id().to_string(), ms);
+            }
+        }
     }
 }
 
