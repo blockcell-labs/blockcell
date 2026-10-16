@@ -16,6 +16,8 @@ import tempfile
 import time
 from typing import Any
 
+from common_verify import parse_tests_run, restore_fixture_tests
+
 ROOT = pathlib.Path(__file__).resolve().parent
 METRICS_FILE = ".blockcell-eval-metrics.json"
 REQUIRED_FIELDS = {"id", "category", "prompt", "fixture", "acceptance"}
@@ -158,10 +160,17 @@ def run_task(
             agent_output = (error.stdout or "")[-20_000:]
 
     acceptance = ROOT / task["acceptance"]
+    # The workspace is agent-controlled, so the acceptance must not be able to
+    # be gamed: put the pristine fixture tests back before verifying, and refuse
+    # a run that discovered no test at all (`unittest discover` exits 0 after
+    # printing "Ran 0 tests"). Both checks are independent of the agent-reported
+    # metrics file, which is untrusted.
+    fixture_tests_restored = restore_fixture_tests(ROOT / task["fixture"], workspace)
     verification = _run(
         [sys.executable, "-B", str(acceptance), str(workspace)], workspace, timeout
     )
-    passed = verification.returncode == 0
+    acceptance_tests_run = parse_tests_run(verification.stdout)
+    passed = verification.returncode == 0 and acceptance_tests_run >= 1
     metrics = _load_metrics(workspace)
     metrics["timed_out"] = timed_out
     metrics.setdefault("tool_calls", 0)
@@ -169,7 +178,12 @@ def run_task(
     metrics.setdefault("subagent_errors", 0)
     metrics.setdefault("input_tokens", 0)
     metrics.setdefault("output_tokens", 0)
-    failure_category = None if passed else classify_failure(metrics, max_tool_calls)
+    if passed:
+        failure_category = None
+    elif acceptance_tests_run == 0:
+        failure_category = "verification_missing"
+    else:
+        failure_category = classify_failure(metrics, max_tool_calls)
     changed = _run(["git", "status", "--porcelain"], workspace, 10).stdout.splitlines()
     return {
         "task_id": task["id"],
@@ -179,6 +193,8 @@ def run_task(
         "duration_seconds": round(time.monotonic() - started, 3),
         "tool_calls": int(metrics["tool_calls"]),
         "tests_run": int(metrics["tests_run"]),
+        "acceptance_tests_run": acceptance_tests_run,
+        "fixture_tests_restored": fixture_tests_restored,
         "input_tokens": int(metrics["input_tokens"]),
         "output_tokens": int(metrics["output_tokens"]),
         "subagent_errors": int(metrics["subagent_errors"]),

@@ -1,12 +1,40 @@
 import json
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+import common_verify
 import runner
+
+PASSING_TEST = (
+    "import unittest\n"
+    "\n"
+    "\n"
+    "class Sample(unittest.TestCase):\n"
+    "    def test_ok(self):\n"
+    "        self.assertTrue(True)\n"
+)
+FAILING_TEST = (
+    "import unittest\n"
+    "\n"
+    "\n"
+    "class Sample(unittest.TestCase):\n"
+    "    def test_ok(self):\n"
+    "        self.assertTrue(False)\n"
+)
+TRIVIAL_TEST = (
+    "import unittest\n"
+    "\n"
+    "\n"
+    "class Sample(unittest.TestCase):\n"
+    "    def test_nothing(self):\n"
+    "        pass\n"
+)
 
 
 class CodingEvalRunnerTests(unittest.TestCase):
@@ -83,6 +111,97 @@ class CodingEvalRunnerTests(unittest.TestCase):
         self.assertEqual(report["average_tool_calls"], 15.0)
         self.assertEqual(report["average_tokens"], 225.0)
         self.assertEqual(report["failure_categories"], {"editing_failure": 1})
+
+    def test_parse_tests_run_reads_unittest_summary(self):
+        self.assertEqual(common_verify.parse_tests_run("Ran 0 tests in 0.000s\n"), 0)
+        self.assertEqual(common_verify.parse_tests_run("Ran 1 test in 0.001s\n"), 1)
+        self.assertEqual(common_verify.parse_tests_run("blah\nRan 12 tests in 0.1s\n"), 12)
+        self.assertEqual(common_verify.parse_tests_run("no summary here"), -1)
+
+    def _run_acceptance(
+        self, fixture_files: dict[str, str], workspace_files: dict[str, str]
+    ) -> dict[str, object]:
+        """Drive a real task shim against a real workspace, like the runner does."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            task_dir = root / "task"
+            fixture_repo = task_dir / "repo"
+            fixture_repo.mkdir(parents=True)
+            for name, content in fixture_files.items():
+                (fixture_repo / name).write_text(content, encoding="utf-8")
+
+            shim = task_dir / "verify.py"
+            shim.write_text(
+                "import sys\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "from common_verify import main\n"
+                "raise SystemExit(main())\n",
+                encoding="utf-8",
+            )
+
+            workspace = root / "workspace"
+            workspace.mkdir()
+            for name, content in workspace_files.items():
+                (workspace / name).write_text(content, encoding="utf-8")
+
+            completed = subprocess.run(
+                [sys.executable, "-B", str(shim), str(workspace)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return {
+                "returncode": completed.returncode,
+                "output": completed.stdout + completed.stderr,
+                "workspace_tests": {
+                    path.name: path.read_text(encoding="utf-8")
+                    for path in sorted(workspace.glob("test_*.py"))
+                },
+            }
+
+    def test_acceptance_guard_refuses_a_run_that_discovered_no_tests(self):
+        # Regression for the P0: `unittest discover` exits 0 after "Ran 0 tests",
+        # so an agent that deletes every test used to be scored as a pass.
+        result = self._run_acceptance({}, {})
+
+        self.assertEqual(result["returncode"], common_verify.GUARD_FAILURE_EXIT)
+        self.assertIn("Ran 0 tests", result["output"])
+        self.assertIn("refusing to certify", result["output"])
+
+    def test_acceptance_restores_fixture_tests_the_agent_deleted(self):
+        result = self._run_acceptance(
+            {"test_sample.py": PASSING_TEST},
+            {},
+        )
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["workspace_tests"], {"test_sample.py": PASSING_TEST})
+
+    def test_acceptance_ignores_a_weakened_fixture_test(self):
+        # The agent replaced the shipped (failing) test with a trivially passing
+        # one; the pristine fixture test must be what actually runs.
+        result = self._run_acceptance(
+            {"test_sample.py": FAILING_TEST},
+            {"test_sample.py": TRIVIAL_TEST},
+        )
+
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertEqual(result["workspace_tests"], {"test_sample.py": FAILING_TEST})
+
+    def test_agent_argv_keeps_prompt_as_one_argument_without_shell_expansion(self):
+        task = {"prompt": "fix 'quoted' $HOME and `date`", "id": "t1"}
+        workspace = pathlib.Path("/tmp/ws")
+
+        argv = runner._agent_argv(
+            "agent --prompt {prompt} --workspace {workspace} --task {task_id}",
+            task,
+            workspace,
+        )
+
+        self.assertEqual(
+            argv,
+            ["agent", "--prompt", task["prompt"], "--workspace", "/tmp/ws", "--task", "t1"],
+        )
 
 
 if __name__ == "__main__":

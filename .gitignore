@@ -94,6 +94,10 @@ Thumbs.db
 *.temp
 *.log
 *.bak
+
+# coding-eval 运行报告（由 runner.py 默认写入，不应提交）
+tests/coding_eval/latest-report.json
+
 # Added by code-review-graph
 .code-review-graph/
 .mcp.json
