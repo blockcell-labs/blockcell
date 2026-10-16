@@ -599,6 +599,18 @@ pub async fn run_forked_agent(
 
     let cache_hit_rate = total_usage.cache_hit_rate();
 
+    let path_hint = params
+        .working_dir
+        .as_deref()
+        .or(params.skills_dir.as_deref());
+    crate::ghost_metrics::record_fork_prompt_cache_usage_from_fork(
+        path_hint,
+        params.fork_label,
+        total_usage.input_tokens,
+        total_usage.cache_read_input_tokens,
+        total_usage.cache_creation_input_tokens,
+    );
+
     // 记录 Layer 7 agent_completed 事件（带 duration 和 cache_hit_rate）
     memory_event!(
         layer7,

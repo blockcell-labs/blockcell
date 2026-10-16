@@ -40,7 +40,9 @@ impl super::AgentRuntime {
         };
         tracing::info!("[Nudge] 阈值到达, 启动后台 {:?} Review", mode);
 
-        let paths_for_metrics = self.paths.clone();
+        // 确保该 paths 对应的 GhostMetrics 实例已在全局注册表中初始化，
+        // 以便 run_forked_agent 结束时按路径前缀自动归入正确的 GhostMetrics。
+        let _ = crate::ghost_metrics::get_ghost_metrics(&self.paths);
         let skills_dir = self.paths.skills_dir();
         // 克隆一份供 ForkedAgent 使用（spawn_blocking 会 move 原始值）
         let skills_dir_clone = skills_dir.clone();
@@ -156,29 +158,14 @@ impl super::AgentRuntime {
             // 传入 skill_mutex（防止 review agent 与主 agent 并发修改同一 Skill）
             params = params.with_skill_mutex(skill_mutex);
 
-            // 传入 skills_dir（Skill/Combined 模式需要，否则 skill_manage/list_skills 无法工作）
-            match mode_clone {
-                ReviewMode::Skill | ReviewMode::Combined => {
-                    // skills_dir 已在上方被 move 到 spawn_blocking 中用于构建索引，
-                    // 但 ForkedAgent 也需要它来执行 skill_manage 工具。
-                    // 由于 PathBuf 实现了 Clone，我们在 spawn_blocking 之前克隆一份。
-                    // 注意: 此处 skills_dir_clone 是从外层闭包捕获的。
-                    params = params.with_skills_dir(skills_dir_clone.clone());
-                    // 传入 external_skills_dirs (builtin_skills_dir) 以支持跨目录搜索
-                    params = params.with_external_skills_dirs(external_skills_dirs.clone());
-                }
-                ReviewMode::Memory => {}
+            // 传入 skills_dir（Skill/Combined 用于执行技能工具，同时为所有模式提供工作区路径提示以关联 GhostMetrics）
+            params = params.with_skills_dir(skills_dir_clone.clone());
+            if matches!(mode_clone, ReviewMode::Skill | ReviewMode::Combined) {
+                params = params.with_external_skills_dirs(external_skills_dirs.clone());
             }
 
             match crate::forked::run_forked_agent(params).await {
                 Ok(result) => {
-                    crate::ghost_metrics::get_ghost_metrics(&paths_for_metrics)
-                        .record_fork_prompt_cache_usage(
-                            label,
-                            result.total_usage.input_tokens,
-                            result.total_usage.cache_read_input_tokens,
-                            result.total_usage.cache_creation_input_tokens,
-                        );
                     if result.truncated {
                         tracing::warn!(mode = ?mode_clone, "[Nudge] Review 结果被截断，可能丢失部分信息");
                     }

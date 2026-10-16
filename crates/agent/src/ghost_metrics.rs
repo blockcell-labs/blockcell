@@ -155,6 +155,43 @@ pub fn reset_ghost_metrics_for_paths(paths: &Paths) {
     get_ghost_metrics(paths).reset();
 }
 
+/// 由 `run_forked_agent` 统一调用，将所有类型的 Fork（review / auto_memory / compact_summary /
+/// session_memory / fork / typed subagent）缓存与输入 token 按 `fork_label` 汇入 GhostMetrics。
+pub fn record_fork_prompt_cache_usage_from_fork(
+    path_hint: Option<&std::path::Path>,
+    fork_label: &str,
+    prompt_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+) {
+    let registry = metrics_registry()
+        .lock()
+        .expect("ghost metrics registry lock poisoned");
+    if let Some(hint) = path_hint {
+        if let Some((_, metrics)) = registry
+            .iter()
+            .filter(|(base, _)| hint.starts_with(std::path::Path::new(base.as_str())))
+            .max_by_key(|(base, _)| base.len())
+        {
+            metrics.record_fork_prompt_cache_usage(
+                fork_label,
+                prompt_input_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            );
+            return;
+        }
+    }
+    for metrics in registry.values() {
+        metrics.record_fork_prompt_cache_usage(
+            fork_label,
+            prompt_input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +213,37 @@ mod tests {
         assert_eq!(fork_bucket.prompt_input_tokens, 100);
         assert_eq!(fork_bucket.cache_read_input_tokens, 80);
         assert_eq!(fork_bucket.cache_creation_input_tokens, 10);
+    }
+
+    #[test]
+    fn fork_usage_helper_routes_all_fork_labels_to_matching_paths_metrics() {
+        let base = std::env::temp_dir().join(format!(
+            "blockcell-ghost-metrics-fork-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let paths = Paths::with_base(base.clone());
+        reset_ghost_metrics_for_paths(&paths);
+
+        let memory_dir = base.join("memory");
+        record_fork_prompt_cache_usage_from_fork(Some(&memory_dir), "auto_memory", 150, 120, 10);
+        record_fork_prompt_cache_usage_from_fork(
+            Some(&paths.skills_dir()),
+            "compact_summary",
+            300,
+            250,
+            0,
+        );
+
+        let snap = ghost_metrics_summary(&paths);
+        assert_eq!(
+            snap.fork_prompt_cache_usage["auto_memory"].cache_read_input_tokens,
+            120
+        );
+        assert_eq!(
+            snap.fork_prompt_cache_usage["compact_summary"].cache_read_input_tokens,
+            250
+        );
+        assert_eq!(snap.prompt_input_tokens, 450);
+        assert_eq!(snap.cache_read_input_tokens, 370);
     }
 }
