@@ -66,6 +66,16 @@
 > IM 入站媒体（whatsapp/dingtalk）无上限、`session_memory_systems` 池无上限均已修复。
 > 有意不做三项（napcat 每消息 spawn 背压、`stream_subscribe` 背压、WS 帧上限），理由见 [`FIX-BATCH4.md`](FIX-BATCH4.md)。
 > 验证：tools 487 + channels 161 + agent 842 全绿。
+>
+> **Batch 5 修复状态（2026-10-16，commit `a0cf2d5` + `887eeec`）**
+> §3-F 的 async 纪律：`knowledge_graph` / `knowledge_forget` 的 rusqlite 与文件 IO、
+> 两个 evolution worker 的 `EvolutionWorkflowStore` 同步 SQL（含心跳任务）、
+> `CrossProcessLock::acquire`、`memory_manage` 的 canonical 文件写入全部改走 `spawn_blocking`；
+> `knowledge_graph` 自开连接补 WAL + `busy_timeout`；
+> `cron run_tick` 的 `operation_lock` 收敛为「决策 + 落盘」「提交结果」两个短临界区，
+> 投递阶段释放锁（新增回归测试反证）。
+> 验证：scheduler 58 + storage 84/6 + tools 487/8 全绿；`cargo check --workspace` exit 0。
+> 明细与延后项（连接缓存、cron 任务间并发）见 [`FIX-BATCH5.md`](FIX-BATCH5.md)。
 
 ---
 
@@ -183,7 +193,7 @@
 - **Batch 2（数据与配置）✅ 已完成**：`config set` 保留未建模键与 `${ENV}` 占位符（P0-9）、Gemini 默认路由（P0-7）、encrypt IV/algorithm/密码传递、alerts rules 加锁、audit 哈希链跨进程锁、`merge_episode_metadata` 单事务。提交 `59601f3` + `4cfb64b` + `a67e5e7` + `6c93115`
 - **Batch 3（路径与凭据收敛）✅ 已完成**：`video_process` 参数对齐 `output_path`、`network_monitor` 接入 SSRF 防线、gateway/CLI 凭据统一掩码（读时脱敏 + 写时还原）、`.env` 权限 0600 与空值不覆盖环境变量。提交 `30c9b90` + `f805820` + `6e52264`
 - **Batch 4（资源上限）✅ 已完成（核心项）**：OOXML 解压上限、CSV 文件/行数上限、Whisper 25 MB 预检、IM 入站媒体 25 MB 上限、session MemorySystem 池上限 64。提交 `73ea2e9` + `9eb3617` + `1dd95b0`。背压类三项（napcat spawn / stream_subscribe / WS 帧）有意延后，需先定丢弃语义
-- **Batch 5（async 纪律）**：rusqlite 与跨进程锁调用全部出 async（`spawn_blocking`）
+- **Batch 5（async 纪律）✅ 已完成**：`knowledge_graph` / `knowledge_forget` / `memory_manage` 的阻塞 IO、两个 evolution worker 的 `EvolutionWorkflowStore` 同步 SQL（含心跳）、`CrossProcessLock::acquire` 全部出 async（`spawn_blocking`）；`knowledge_graph` 补 WAL + `busy_timeout`；`cron run_tick` 长任务出 `operation_lock`。提交 `a0cf2d5` + `887eeec`。延后：knowledge_graph 连接缓存、cron 任务间并发投递
 - **Batch 6（闭环）**：验收脚本假通过（P0-8）、恢复 CI 门禁、补 cron/ed25519/evolution/MCP 测试、文档同步（docs/03、09、17、20）
 
 ---
