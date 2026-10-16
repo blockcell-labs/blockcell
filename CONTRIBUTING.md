@@ -34,6 +34,35 @@ cargo test -p blockcell-core
 cargo test -p blockcell-skills
 ```
 
+### 本地测试门禁 / Local test gate
+
+CI 在获得 GitHub Actions 预算前保持禁用，因此本地门禁是唯一的自动化防线：
+
+CI stays disabled until the project has GitHub Actions budget, so the local gate is the only automated line of defence:
+
+```bash
+make test        # cargo test --workspace + harness 自测 + 3 个基础设施脚本
+make test-webui  # WebUI 单测（需要 webui/node_modules）
+make hooks       # 安装 .githooks/pre-push：推送前自动运行 make test
+```
+
+`make test` 会在 `webui/dist` 过期时自动重建（Rust 测试嵌入该产物，`bin/blockcell/build.rs` 会校验哈希）。
+单次推送可用 `BLOCKCELL_SKIP_HOOKS=1 git push` 跳过钩子。
+
+`make test` rebuilds a stale `webui/dist` automatically (Rust tests embed it and `bin/blockcell/build.rs` verifies its hash). Skip the hook for a single push with `BLOCKCELL_SKIP_HOOKS=1 git push`.
+
+### tests/ 目录 / The tests/ directory
+
+`tests/` 存放两类资产，都不是产品行为的 e2e 测试：
+
+`tests/` holds two kinds of assets; neither is a product-behaviour e2e suite:
+
+- `tests/coding_eval/` — agent 编码能力评测 harness（20 个隔离任务，`runner.py` 驱动）。自测用 `make test-python`。验收脚本在运行测试前会从原始 fixture 恢复 `test_*.py`，并要求至少跑过 1 个测试，因此删改验收测试无法伪造通过。
+- `tests/*.sh` — 安装 / 发布 / 供应链基础设施测试，用 `make test-infra` 运行。
+
+- `tests/coding_eval/` — the coding-ability benchmark harness (20 isolated tasks, driven by `runner.py`); self-tested by `make test-python`. The acceptance step restores the fixture's `test_*.py` before running and refuses a run that discovered no test, so deleting or weakening the acceptance tests cannot fake a pass.
+- `tests/*.sh` — install / release / supply-chain infrastructure tests, run by `make test-infra`.
+
 ## 修改原则 / Change Guidelines
 
 - 每个提交只处理一个清晰问题，避免混入无关格式化、生成文件或本地系统文件。
@@ -59,13 +88,17 @@ cargo fmt --all -- --check
 cargo test -p <affected-package>
 ```
 
-如果改动跨越多个 crate、共享配置或公共接口，请运行完整 workspace 测试：
+如果改动跨越多个 crate、共享配置或公共接口，请运行完整 workspace 测试（等价于 `make test-rust`）：
 
-For changes spanning multiple crates, shared configuration, or public interfaces, run the full workspace tests:
+For changes spanning multiple crates, shared configuration, or public interfaces, run the full workspace tests (equivalent to `make test-rust`):
 
 ```bash
 cargo test --workspace
 ```
+
+提交前建议直接运行 `make test`（见上文「本地测试门禁」）。执行过 `make hooks` 的克隆会在 `git push` 时自动运行它。
+
+Before pushing, prefer running `make test` (see "Local test gate" above). Clones that ran `make hooks` run it automatically on `git push`.
 
 文档修改还应确认相对链接存在，命令示例与当前 CLI 帮助一致。
 

@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+#
+# Pre-push gate.
+#
+# CI is intentionally disabled until the project has GitHub Actions budget (see
+# tests/release_workflow_infrastructure.sh), so this hook is what keeps the
+# pushed history green. It runs the same suite as `make test`.
+#
+# Install once per clone:
+#     make hooks          # git config core.hooksPath .githooks
+#
+# Skip a single push (e.g. a docs-only change):
+#     BLOCKCELL_SKIP_HOOKS=1 git push
+set -eu
+
+if [ "${BLOCKCELL_SKIP_HOOKS:-}" = "1" ]; then
+  echo "pre-push: skipped (BLOCKCELL_SKIP_HOOKS=1)"
+  exit 0
+fi
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+echo "pre-push: running 'make test' (set BLOCKCELL_SKIP_HOOKS=1 to skip)"
+exec make test
