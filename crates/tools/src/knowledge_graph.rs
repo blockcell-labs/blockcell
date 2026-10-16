@@ -127,44 +127,55 @@ impl Tool for KnowledgeGraphTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let action = params["action"].as_str().unwrap_or("");
         let graph_name = params
             .get("graph_name")
             .and_then(|v| v.as_str())
             .unwrap_or("default");
         validate_graph_name(graph_name)?;
+        let db_path = resolve_graph_db_path(&ctx.workspace, graph_name)?;
 
         debug!(
-            action = action,
+            action = params["action"].as_str().unwrap_or(""),
             graph = graph_name,
             "knowledge_graph execute"
         );
 
-        // Open or create the graph database
-        let db_path = resolve_graph_db_path(&ctx.workspace, graph_name)?;
+        // rusqlite is blocking and a connection is opened per call: run the whole action
+        // on a blocking thread instead of stalling the async runtime.
+        tokio::task::spawn_blocking(move || {
+            let action = params["action"].as_str().unwrap_or("");
+            let db = rusqlite::Connection::open(&db_path)
+                .map_err(|e| Error::Tool(format!("Failed to open graph database: {}", e)))?;
 
-        let db = rusqlite::Connection::open(&db_path)
-            .map_err(|e| Error::Tool(format!("Failed to open graph database: {}", e)))?;
+            // This tool owns its own connection instead of going through the
+            // storage crate, so it must reproduce the same concurrency hygiene:
+            // WAL + busy_timeout let concurrent agents/sessions wait for a lock
+            // rather than fail with SQLITE_BUSY on a shared `{graph_name}.db`.
+            db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+                .map_err(|e| Error::Tool(format!("Failed to configure graph database: {}", e)))?;
 
-        init_schema(&db)?;
+            init_schema(&db)?;
 
-        match action {
-            "add_entity" => action_add_entity(&db, &params),
-            "get_entity" => action_get_entity(&db, &params),
-            "update_entity" => action_update_entity(&db, &params),
-            "delete_entity" => action_delete_entity(&db, &params),
-            "search_entities" => action_search_entities(&db, &params),
-            "merge_entity" => action_merge_entity(&db, &params),
-            "add_relation" => action_add_relation(&db, &params),
-            "get_relations" => action_get_relations(&db, &params),
-            "delete_relation" => action_delete_relation(&db, &params),
-            "find_path" => action_find_path(&db, &params),
-            "subgraph" => action_subgraph(&db, &params),
-            "stats" => action_stats(&db),
-            "export" => action_export(&db, &params, &ctx),
-            "query" => action_query(&db, &params),
-            _ => Err(Error::Tool(format!("Unknown action: {}", action))),
-        }
+            match action {
+                "add_entity" => action_add_entity(&db, &params),
+                "get_entity" => action_get_entity(&db, &params),
+                "update_entity" => action_update_entity(&db, &params),
+                "delete_entity" => action_delete_entity(&db, &params),
+                "search_entities" => action_search_entities(&db, &params),
+                "merge_entity" => action_merge_entity(&db, &params),
+                "add_relation" => action_add_relation(&db, &params),
+                "get_relations" => action_get_relations(&db, &params),
+                "delete_relation" => action_delete_relation(&db, &params),
+                "find_path" => action_find_path(&db, &params),
+                "subgraph" => action_subgraph(&db, &params),
+                "stats" => action_stats(&db),
+                "export" => action_export(&db, &params, &ctx),
+                "query" => action_query(&db, &params),
+                other => Err(Error::Tool(format!("Unknown action: {}", other))),
+            }
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("knowledge_graph worker failed: {e}")))?
     }
 }
 

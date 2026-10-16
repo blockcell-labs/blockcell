@@ -89,42 +89,49 @@ impl Tool for KnowledgeForgetTool {
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         self.validate(&params)?;
-        let action = params["action"].as_str().unwrap_or_default();
-        let query = params["query"].as_str().unwrap_or_default().trim();
-        let paths = Paths::with_base_and_workspace(ctx.base.clone(), ctx.workspace.clone());
-        let matches = collect_matches(&paths, &ctx, query)?;
-        let preview_token = preview_token(query, &ctx.session_key, &matches)?;
+        // The index rebuild, SQLite writes and file removals are blocking (and
+        // `collect_matches` can walk the whole knowledge directory): keep them off the
+        // async worker.
+        tokio::task::spawn_blocking(move || {
+            let action = params["action"].as_str().unwrap_or_default();
+            let query = params["query"].as_str().unwrap_or_default().trim();
+            let paths = Paths::with_base_and_workspace(ctx.base.clone(), ctx.workspace.clone());
+            let matches = collect_matches(&paths, &ctx, query)?;
+            let preview_token = preview_token(query, &ctx.session_key, &matches)?;
 
-        if action == "preview" {
-            return Ok(json!({
-                "action": "preview",
+            if action == "preview" {
+                return Ok(json!({
+                    "action": "preview",
+                    "query": query,
+                    "matches": matches,
+                    "preview_token": preview_token,
+                    "requires_confirmation": true
+                }));
+            }
+
+            let supplied = params["preview_token"].as_str().unwrap_or_default();
+            if supplied != preview_token {
+                return Err(Error::Validation(
+                    "preview_token no longer matches the exact affected knowledge; run preview again"
+                        .to_string(),
+                ));
+            }
+            let reason = params
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("user request");
+            let removed = confirm_matches(&paths, &ctx, &matches, reason)?;
+            audit_forget(&paths, &ctx, query, reason, &matches)?;
+            Ok(json!({
+                "action": "confirm",
                 "query": query,
-                "matches": matches,
-                "preview_token": preview_token,
-                "requires_confirmation": true
-            }));
-        }
-
-        let supplied = params["preview_token"].as_str().unwrap_or_default();
-        if supplied != preview_token {
-            return Err(Error::Validation(
-                "preview_token no longer matches the exact affected knowledge; run preview again"
-                    .to_string(),
-            ));
-        }
-        let reason = params
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("user request");
-        let removed = confirm_matches(&paths, &ctx, &matches, reason)?;
-        audit_forget(&paths, &ctx, query, reason, &matches)?;
-        Ok(json!({
-            "action": "confirm",
-            "query": query,
-            "removed": removed,
-            "tombstoned": matches.len(),
-            "audit": "GhostLedger"
-        }))
+                "removed": removed,
+                "tombstoned": matches.len(),
+                "audit": "GhostLedger"
+            }))
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("knowledge_forget worker failed: {e}")))?
     }
 }
 

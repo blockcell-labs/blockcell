@@ -193,61 +193,73 @@ impl Tool for MemoryManageTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let store = get_memory_file_store(&ctx)?;
+        let store = get_memory_file_store(&ctx)?.clone();
         let action = params
             .get("action")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| Error::Tool("Missing or non-string parameter: action".to_string()))?;
+            .ok_or_else(|| Error::Tool("Missing or non-string parameter: action".to_string()))?
+            .to_string();
         let target = params
             .get("target")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| Error::Tool("Missing or non-string parameter: target".to_string()))?;
+            .ok_or_else(|| Error::Tool("Missing or non-string parameter: target".to_string()))?
+            .to_string();
         let scope = params
             .get("scope")
             .and_then(|value| value.as_str())
-            .unwrap_or("session");
-        let mut result = match action {
-            "add" => store.add_scoped_file_memory_json(
-                scope,
-                target,
-                params
-                    .get("content")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
+            .unwrap_or("session")
+            .to_string();
+        let content = params
+            .get("content")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let old_text = params
+            .get("old_text")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+
+        // File-backed memory writes snapshot, atomically rewrite and fsync the
+        // canonical files, so run them on a blocking thread like the other
+        // memory tools instead of stalling a tokio worker.
+        let mut result = {
+            let store = store.clone();
+            let action = action.clone();
+            let target = target.clone();
+            let scope = scope.clone();
+            let content = content.clone();
+            let old_text = old_text.clone();
+            run_store_blocking(move || match action.as_str() {
+                "add" => store.add_scoped_file_memory_json(
+                    &scope,
+                    &target,
+                    content.as_deref().ok_or_else(|| {
                         Error::Tool("Missing or non-string parameter: content".to_string())
                     })?,
-            ),
-            "replace" => store.replace_scoped_file_memory_json(
-                scope,
-                target,
-                params
-                    .get("old_text")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
+                ),
+                "replace" => store.replace_scoped_file_memory_json(
+                    &scope,
+                    &target,
+                    old_text.as_deref().ok_or_else(|| {
                         Error::Tool("Missing or non-string parameter: old_text".to_string())
                     })?,
-                params
-                    .get("content")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
+                    content.as_deref().ok_or_else(|| {
                         Error::Tool("Missing or non-string parameter: content".to_string())
                     })?,
-            ),
-            "remove" => store.remove_scoped_file_memory_json(
-                scope,
-                target,
-                params
-                    .get("old_text")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
+                ),
+                "remove" => store.remove_scoped_file_memory_json(
+                    &scope,
+                    &target,
+                    old_text.as_deref().ok_or_else(|| {
                         Error::Tool("Missing or non-string parameter: old_text".to_string())
                     })?,
-            ),
-            "undo_latest" => store.restore_latest_scoped_file_memory_json(scope, target),
-            _ => unreachable!("validated action"),
-        }?;
+                ),
+                "undo_latest" => store.restore_latest_scoped_file_memory_json(&scope, &target),
+                _ => unreachable!("validated action"),
+            })
+            .await?
+        };
         if let Some(result) = result.as_object_mut() {
-            result.insert("scope".to_string(), Value::String(scope.to_string()));
+            result.insert("scope".to_string(), Value::String(scope.clone()));
         }
 
         if result
@@ -256,12 +268,8 @@ impl Tool for MemoryManageTool {
             .unwrap_or(false)
         {
             if let Some(lifecycle) = ctx.ghost_memory_lifecycle.as_ref() {
-                let content = params
-                    .get("content")
-                    .or_else(|| params.get("old_text"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let _ = lifecycle.on_memory_write_json(target, action, content);
+                let content = content.as_deref().or(old_text.as_deref()).unwrap_or("");
+                let _ = lifecycle.on_memory_write_json(&target, &action, content);
             }
         }
         Ok(result)
