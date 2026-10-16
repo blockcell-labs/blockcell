@@ -42,7 +42,8 @@
 > 以及 §3-A 的 email 附件名、napcat 媒体文件名、wecom media_id（另含 V3 自查新增 4 处同类漏点）。
 > 验证：`cargo check` / `clippy` / `test -p blockcell-channels -p blockcell-tools` 全绿（channels 161 + tools 481）。
 > 明细与文件级改动见 [`FIX-BATCH0.md`](FIX-BATCH0.md)。
-> **未动**：P0-8（验收假通过，属 Batch 6 闭环批次）与 §3-C~I 的其余条目。
+> **未动**：P0-8（验收假通过，属 Batch 6 闭环批次）、`/v1/config/raw` 的明文回显（需与 gateway 鉴权模型一并设计）、
+> `tools/sandbox.rs` 的 Landlock 读限制与 `tool_guard.rs` 的 `rm --recursive` 漏检（属 Batch 4/5），以及 §3-D~I 的其余条目。
 >
 > **Batch 1 修复状态（2026-10-16，commit `2f1766c` + `289330a`）**
 > §3-B 的准入接线（knowledge_forget / termux_api 七个设备副作用动作 / napcat 群管理 `check_admin_permission`）、
@@ -53,6 +54,12 @@
 > P0-7（Gemini 默认路由）、P0-9（`config set` 丢键）、encrypt 的 IV/算法/密码传递、alerts `rules.json` 加锁、
 > audit 哈希链跨进程锁、`merge_episode_metadata` 单事务均已修复并验证（providers 98 + storage 84 + tools 484 + bin 167 全绿）。
 > 另附带重建了 webui 嵌入产物（`59601f3`），使 bin crate 恢复可编译。明细见 [`FIX-BATCH2.md`](FIX-BATCH2.md)。
+>
+> **Batch 3 修复状态（2026-10-16，commit `30c9b90` + `f805820` + `6e52264`）**
+> §3-C 的两项（`video_process` 写路径策略失效、`network_monitor` 绕过 SSRF）与 §3-H 的凭据回显
+> （gateway `/v1/config`、`/v1/channels`，CLI `config show`/`get`）已修；`.env` 权限 0600 与空值不覆盖环境变量已修。
+> 掩码为「读时脱敏 + 写时还原」双向设计，前端把掩码原样回传不会覆盖真实密钥。
+> 验证：tools 487 + core 129 + bin 167 全绿。明细见 [`FIX-BATCH3.md`](FIX-BATCH3.md)。
 
 ---
 
@@ -168,7 +175,7 @@
 - **Batch 0（安全阻断级，最高优先）**：wecom 验签（P0-1）、5 适配器文件名清洗（P0-6）、4 处脚本/命令注入（P0-2/3/4/5）、email 附件名 + napcat 文件名 + wecom media_id（P1-A）
 - **Batch 1（准入与权限）✅ 已完成**：`requires_confirmation` 接线到 knowledge_forget / termux_api；`check_admin_permission` 改 fail-closed；`ToolPolicy` 加 deny 优先；fork 路径 `can_use_tool` 默认改 fail-closed。提交 `2f1766c` + `289330a`
 - **Batch 2（数据与配置）✅ 已完成**：`config set` 保留未建模键与 `${ENV}` 占位符（P0-9）、Gemini 默认路由（P0-7）、encrypt IV/algorithm/密码传递、alerts rules 加锁、audit 哈希链跨进程锁、`merge_episode_metadata` 单事务。提交 `59601f3` + `4cfb64b` + `a67e5e7` + `6c93115`
-- **Batch 3（路径与凭据收敛）**：`video_process` 字段对齐、`network_monitor` 接入 ssrf、gateway/CLI 密钥回显脱敏、`.env` 权限与覆盖语义
+- **Batch 3（路径与凭据收敛）✅ 已完成**：`video_process` 参数对齐 `output_path`、`network_monitor` 接入 SSRF 防线、gateway/CLI 凭据统一掩码（读时脱敏 + 写时还原）、`.env` 权限 0600 与空值不覆盖环境变量。提交 `30c9b90` + `f805820` + `6e52264`
 - **Batch 4（资源上限）**：统一 zip / 下载 / CSV / 音视频 / WS 帧 / 内存池上限，池加 LRU
 - **Batch 5（async 纪律）**：rusqlite 与跨进程锁调用全部出 async（`spawn_blocking`）
 - **Batch 6（闭环）**：验收脚本假通过（P0-8）、恢复 CI 门禁、补 cron/ed25519/evolution/MCP 测试、文档同步（docs/03、09、17、20）
