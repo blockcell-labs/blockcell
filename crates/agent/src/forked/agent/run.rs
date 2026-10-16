@@ -517,12 +517,13 @@ pub async fn run_forked_agent(
                     if let Err(e) = event_tx.send(event.to_string()) {
                         tracing::warn!(error = %e, tool = tool_name, "[forked_agent] failed to send tool_call_end event");
                     }
-                    // tool_call_result: WebUI 使用，更新工具调用状态从 running -> done
+                    // tool_call_result: WebUI 使用，更新工具调用状态从 running -> done/error
                     let result_event = serde_json::json!({
                         "type": "tool_call_result",
                         "call_id": tool_call.id,
                         "task_id": params.task_id,
                         "result": result_content,
+                        "is_error": !tool_success,
                         "duration_ms": 0,
                     });
                     if let Err(e) = event_tx.send(result_event.to_string()) {

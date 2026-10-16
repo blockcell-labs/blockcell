@@ -54,6 +54,7 @@ impl AgentEventListener for WsToolEventListener {
                 call_id,
                 result,
                 duration_ms,
+                outcome,
                 ..
             } => serde_json::json!({
                 "type": "tool_call_result",
@@ -64,6 +65,8 @@ impl AgentEventListener for WsToolEventListener {
                 "tool": tool_name,
                 "call_id": call_id,
                 "result": result,
+                "is_error": outcome.is_error(),
+                "outcome": outcome,
                 "duration_ms": duration_ms,
             }),
             _ => return Ok(EventDecision::Continue),

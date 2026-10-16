@@ -238,3 +238,50 @@ test('message_done preserves reasoning and ends streaming after thinking-first f
   assert.equal(messages[0].reasoning, '我在思考');
   assert.equal(messages[0].content, '你好！');
 });
+
+test('tool_call_result marks tool card as error when is_error is true and done otherwise', () => {
+  resetStore();
+  const store = useChatStore.getState();
+
+  store.handleWsEvent({
+    type: 'tool_call_start',
+    chat_id: 'chat-1',
+    call_id: 'call_ok',
+    tool: 'read_file',
+    params: { path: 'README.md' },
+  });
+  store.handleWsEvent({
+    type: 'tool_call_start',
+    chat_id: 'chat-1',
+    call_id: 'call_err',
+    tool: 'exec',
+    params: { command: 'rm -rf /' },
+  });
+
+  store.handleWsEvent({
+    type: 'tool_call_result',
+    chat_id: 'chat-1',
+    call_id: 'call_ok',
+    tool: 'read_file',
+    result: 'ok content',
+    is_error: false,
+    outcome: 'succeeded',
+    duration_ms: 12,
+  });
+  store.handleWsEvent({
+    type: 'tool_call_result',
+    chat_id: 'chat-1',
+    call_id: 'call_err',
+    tool: 'exec',
+    result: { error: 'Policy denied', policy: 'tool_policy' },
+    is_error: true,
+    outcome: 'rejected',
+    duration_ms: 1,
+  });
+
+  const { messages } = useChatStore.getState();
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolCalls?.length, 2);
+  assert.equal(messages[0].toolCalls?.[0].status, 'done');
+  assert.equal(messages[0].toolCalls?.[1].status, 'error');
+});

@@ -8,7 +8,6 @@ export type WsEventType =
   | 'tool_call_result'
   | 'message_done'
   | 'session_bound'
-  | 'task_update'
   | 'confirm_request'
   | 'error'
   | 'thinking'
@@ -34,9 +33,12 @@ export interface WsEvent {
   content?: string;
   reasoning_content?: string;
   tool?: string;
+  tool_name?: string;
   call_id?: string;
   params?: any;
   result?: any;
+  is_error?: boolean;
+  outcome?: string;
   duration_ms?: number;
   tool_calls?: number;
   status?: string;

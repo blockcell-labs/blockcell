@@ -41,7 +41,17 @@ export function CommandPicker({ open, query, onSelect, onClose, containerRef }: 
           getSkills().catch(() => ({ skills: [], count: 0 })),
         ]);
 
-        const tools: CommandItem[] = (toolsData.tools || []).map((t: any) => ({
+        const visibleTools = (toolsData.tools || [])
+          .filter((t: any) => t?.visibility !== 'discoverable')
+          .sort((a: any, b: any) => {
+            const orderDiff = (a?.order ?? 0) - (b?.order ?? 0);
+            if (orderDiff !== 0) return orderDiff;
+            const nameA = a?.name || String(a);
+            const nameB = b?.name || String(b);
+            return nameA.localeCompare(nameB);
+          });
+
+        const tools: CommandItem[] = visibleTools.map((t: any) => ({
           name: t.name || t,
           description: t.description || '',
           kind: 'tool' as const,
@@ -55,9 +65,9 @@ export function CommandPicker({ open, query, onSelect, onClose, containerRef }: 
           source: s.source,
         }));
 
-        // Tools first, then skills, both sorted alphabetically
+        // Tools first (sorted by presentation order then name), then skills sorted alphabetically
         const allItems = [
-          ...tools.sort((a, b) => a.name.localeCompare(b.name)),
+          ...tools,
           ...skills.sort((a, b) => a.name.localeCompare(b.name)),
         ];
 

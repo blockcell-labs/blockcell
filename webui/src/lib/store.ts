@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { SessionInfo, ChatMsg } from './api';
 import type { WsEvent, ConnectionState, DisconnectReason } from './ws';
-import { notifyTaskCompleted, notifyAlertTriggered, notifySystemEvent } from './notifications';
+import { notifyAlertTriggered, notifySystemEvent } from './notifications';
 
 function normalizeSessionId(id: string) {
   return id.replace(/:/g, '_');
@@ -511,22 +511,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       case 'tool_call_result': {
+        const nextStatus: 'done' | 'error' = event.is_error ? 'error' : 'done';
         state.updateLastAssistantMessage((m) => ({
           ...m,
           toolCalls: (m.toolCalls || []).map((tc) =>
             tc.id === event.call_id
-              ? { ...tc, result: event.result, durationMs: event.duration_ms, status: 'done' as const }
+              ? { ...tc, result: event.result, durationMs: event.duration_ms, status: nextStatus }
               : tc
           ),
         }));
-        break;
-      }
-
-      case 'task_update': {
-        // Send browser notification for task completion
-        if (event.status === 'Completed' || event.status === 'Failed') {
-          notifyTaskCompleted(event.label || event.task_id || 'Task', event.status === 'Completed');
-        }
         break;
       }
 

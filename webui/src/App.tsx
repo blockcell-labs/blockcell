@@ -80,7 +80,7 @@ export default function App() {
     }
     const wsEventBatcher = new WsEventBatcher<WsEvent>((event) => {
       if (event.type === 'confirm_request' && event.request_id) {
-        setConfirmDialog({ requestId: event.request_id, tool: event.tool || '', paths: event.paths || [] });
+        setConfirmDialog({ requestId: event.request_id, tool: event.tool_name || event.tool || '', paths: event.paths || [] });
       } else {
         handleWsEventRef.current(event);
       }
