@@ -415,7 +415,12 @@ impl CronService {
     }
 
     pub async fn run_tick(&self) -> Result<()> {
-        let _operation_guard = self.operation_lock.lock().await;
+        // The operation lock only guards the short schedule/commit critical sections
+        // below — NOT job delivery. `execute_job_internal` waits for the runtime
+        // receipt (production timeout 15 min), so holding the lock across it would
+        // stall `add_job`/`remove_job`/`save` (and the gateway write API) for the
+        // whole wait, and delay every other due job.
+        let operation_guard = self.operation_lock.lock().await;
         // Reload from disk, merging in-memory execution state for already-initialized jobs.
         // New jobs added by CronTool (disk-only) are picked up; existing job scheduling
         // state (next_run_at_ms / last_run_at_ms) is preserved to avoid double-firing.
@@ -486,6 +491,8 @@ impl CronService {
         }
 
         // Deliver due jobs, then commit completion only for acknowledged sends.
+        // Release the operation lock first: delivery can block for minutes.
+        drop(operation_guard);
         let inbound_tx = self.inbound_tx.clone();
         let event_emitter = self.event_emitter.clone();
         let agent_id = self.agent_id.clone();
@@ -505,6 +512,9 @@ impl CronService {
             return Ok(());
         }
 
+        // Re-acquire the operation lock only for the short commit section so the
+        // result merge stays serialized against concurrent add/remove/save.
+        let _operation_guard = self.operation_lock.lock().await;
         let mut jobs = self.jobs.write().await;
         let mut delete_ids = Vec::new();
         for (job_id, delivery) in delivery_results {
@@ -1216,6 +1226,54 @@ mod tests {
             saved.jobs.is_empty(),
             "delete_after_run job should be removed from disk"
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_tick_releases_operation_lock_during_job_delivery() {
+        let paths = Paths::with_base(
+            std::env::temp_dir().join(format!("blockcell-cron-service-{}", uuid::Uuid::new_v4())),
+        );
+        tokio::fs::create_dir_all(paths.cron_dir())
+            .await
+            .expect("create cron dir");
+        let store = JobStore {
+            version: 1,
+            jobs: vec![test_due_at_job()],
+        };
+        tokio::fs::write(
+            paths.cron_jobs_file(),
+            serde_json::to_string_pretty(&store).expect("serialize cron store"),
+        )
+        .await
+        .expect("write cron store");
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let service = Arc::new(CronService::new(paths, tx));
+
+        // Start a tick. It delivers the due job and then blocks waiting for the
+        // runtime completion receipt (in production up to 15 min).
+        let tick = tokio::spawn({
+            let service = service.clone();
+            async move { service.run_tick().await }
+        });
+
+        // Receipt is now pending: the tick is parked inside `execute_job_internal`.
+        let message = rx.recv().await.expect("receive cron inbound message");
+
+        // A concurrent write must not wait on the in-flight delivery.
+        let added = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            service.add_job(test_job()),
+        )
+        .await;
+        assert!(
+            added.is_ok(),
+            "add_job blocked on an in-flight tick delivery: run_tick must not hold operation_lock while awaiting the receipt"
+        );
+        added.expect("timeout arm").expect("add_job");
+
+        complete_cron_message(&message, Ok(()));
+        tick.await.expect("join tick task").expect("run tick");
     }
 
     #[tokio::test]

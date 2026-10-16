@@ -188,7 +188,12 @@ impl DreamState {
         let lock_path = config_dir
             .join(DREAM_STATE_FILE)
             .with_extension("json.lock");
-        let _lock_guard = CrossProcessLock::acquire(&lock_path).map_err(|e| {
+        let _lock_guard = crate::blocking::run_blocking_io({
+            let lock_path = lock_path.clone();
+            move || CrossProcessLock::acquire(&lock_path)
+        })
+        .await
+        .map_err(|e| {
             tracing::warn!(
                 error = %e,
                 "[dream] save: 获取跨进程锁失败，拒绝写入以防止覆盖风险"

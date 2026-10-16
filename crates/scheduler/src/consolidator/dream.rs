@@ -144,7 +144,13 @@ impl DreamConsolidator {
 
             // 重试获取状态锁，最多 3 次（间隔递增），确保 is_consolidating=false 能落盘
             let state_lock_guard = {
-                let mut guard_result = CrossProcessLock::acquire(&state_lock_path);
+                // CrossProcessLock::acquire 内部是 thread::sleep 重试循环（最坏 ~6s），
+                // 必须放到 blocking 线程，否则会阻塞 tokio worker。
+                let mut guard_result = crate::blocking::run_blocking_io({
+                    let path = state_lock_path.clone();
+                    move || CrossProcessLock::acquire(&path)
+                })
+                .await;
                 let mut retry_count = 0;
                 const MAX_STATE_LOCK_RETRIES: u32 = 3;
                 while let Err(e) = guard_result {
@@ -177,7 +183,11 @@ impl DreamConsolidator {
                     // 递增等待：100ms, 200ms, 300ms
                     tokio::time::sleep(std::time::Duration::from_millis(100 * retry_count as u64))
                         .await;
-                    guard_result = CrossProcessLock::acquire(&state_lock_path);
+                    guard_result = crate::blocking::run_blocking_io({
+                        let path = state_lock_path.clone();
+                        move || CrossProcessLock::acquire(&path)
+                    })
+                    .await;
                 }
                 let guard = match guard_result {
                     Ok(g) => g,

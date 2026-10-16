@@ -1,3 +1,4 @@
+pub mod blocking;
 pub mod consolidator;
 pub mod cron_service;
 pub mod dream_service;

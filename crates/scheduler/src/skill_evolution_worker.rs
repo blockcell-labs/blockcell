@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::blocking;
 use crate::evolution_worker::run_with_lease_guard;
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
@@ -50,8 +51,8 @@ impl SkillEvolutionWorker {
         }
     }
 
-    fn finalize_observation_workflows(&self) -> Result<()> {
-        for workflow in self.store.list_workflows(Some("Observing"))? {
+    async fn finalize_observation_workflows(&self) -> Result<()> {
+        for workflow in blocking::list_workflows(&self.store, Some("Observing")).await? {
             let Ok(record) = self.service.evolution().load_record(&workflow.description) else {
                 continue;
             };
@@ -63,8 +64,8 @@ impl SkillEvolutionWorker {
             } else {
                 None
             };
-            self.store
-                .update_workflow_status(&workflow.id, status, detail.as_deref())?;
+            blocking::update_workflow_status(&self.store, &workflow.id, status, detail.as_deref())
+                .await?;
         }
         Ok(())
     }
@@ -131,7 +132,7 @@ impl SkillEvolutionWorker {
     /// 驱动一次 skill evolution pipeline tick（单次模式使用）
     /// 返回 true 表示本次 claim 到了 workflow，false 表示无可 claim 的 workflow。
     pub async fn tick(&self) -> bool {
-        if let Err(e) = self.recover() {
+        if let Err(e) = self.recover().await {
             warn!(error = %e, "Failed to recover skill evolution workflows");
         }
 
@@ -139,18 +140,21 @@ impl SkillEvolutionWorker {
             warn!(error = %e, "Failed to sync pending skill evolution records");
         }
 
-        let workflow = match self.store.claim_next(
+        let workflow = match blocking::claim_next(
+            &self.store,
             &self.worker_id,
             self.lease_duration_secs,
             Some("skill"),
             None,
-        ) {
+        )
+        .await
+        {
             Ok(Some(workflow)) => workflow,
             Ok(None) => {
                 if let Err(e) = self.service.tick_observations().await {
                     warn!(error = %e, "Skill evolution observation tick failed");
                 }
-                if let Err(e) = self.finalize_observation_workflows() {
+                if let Err(e) = self.finalize_observation_workflows().await {
                     warn!(error = %e, "Failed to finalize skill observation workflows");
                 }
                 return false;
@@ -169,20 +173,26 @@ impl SkillEvolutionWorker {
             "Claimed skill evolution workflow"
         );
 
-        if self.cancelled(&workflow) {
-            let _ = self.store.update_workflow_status_if_owned(
+        if self.cancelled(&workflow).await {
+            let _ = blocking::update_workflow_status_if_owned(
+                &self.store,
                 &workflow.id,
                 &self.worker_id,
                 "Cancelled",
                 None,
-            );
-            let _ = self.store.release_lease(&workflow.id, &self.worker_id);
+            )
+            .await;
+            let _ = blocking::release_lease(&self.store, &workflow.id, &self.worker_id).await;
             return true;
         }
 
-        match self
-            .store
-            .renew_lease(&workflow.id, &self.worker_id, self.lease_duration_secs)
+        match blocking::renew_lease(
+            &self.store,
+            &workflow.id,
+            &self.worker_id,
+            self.lease_duration_secs,
+        )
+        .await
         {
             Ok(true) => {}
             Ok(false) => {
@@ -195,14 +205,18 @@ impl SkillEvolutionWorker {
             }
         }
 
-        let step_id = match self
-            .store
-            .insert_step(&workflow.id, SKILL_PIPELINE_STEP, None)
+        let step_id = match blocking::insert_step(
+            &self.store,
+            &workflow.id,
+            SKILL_PIPELINE_STEP,
+            None,
+        )
+        .await
         {
             Ok(id) => id,
             Err(e) => {
                 error!(workflow_id = %workflow.id, error = %e, "Failed to insert skill evolution step");
-                let _ = self.store.release_lease(&workflow.id, &self.worker_id);
+                let _ = blocking::release_lease(&self.store, &workflow.id, &self.worker_id).await;
                 return true;
             }
         };
@@ -221,9 +235,13 @@ impl SkillEvolutionWorker {
             return true;
         };
 
-        match self
-            .store
-            .renew_lease(&workflow.id, &self.worker_id, self.lease_duration_secs)
+        match blocking::renew_lease(
+            &self.store,
+            &workflow.id,
+            &self.worker_id,
+            self.lease_duration_secs,
+        )
+        .await
         {
             Ok(true) => {}
             Ok(false) => {
@@ -238,18 +256,23 @@ impl SkillEvolutionWorker {
 
         match result {
             Ok(PipelineOutcome::Done(output_json)) => {
-                if !self.complete_step(&workflow, &step_id, Some(&output_json)) {
+                if !self
+                    .complete_step(&workflow, &step_id, Some(&output_json))
+                    .await
+                {
                     return true;
                 }
                 // Use "Observing" instead of "Promoted" — the skill is in
                 // observation window and may still be rolled back if error
                 // rate exceeds threshold. "Promoted" would prevent rollback.
-                let _ = self.store.update_workflow_status_if_owned(
+                let _ = blocking::update_workflow_status_if_owned(
+                    &self.store,
                     &workflow.id,
                     &self.worker_id,
                     "Observing",
                     None,
-                );
+                )
+                .await;
             }
             Ok(PipelineOutcome::StillRunning) => {
                 // Pipeline 仍在运行 — 不是失败也不是完成。
@@ -261,15 +284,21 @@ impl SkillEvolutionWorker {
                     workflow_id = %workflow.id,
                     "Skill evolution pipeline still running, deferring with backoff"
                 );
-                if !self.complete_step(&workflow, &step_id, Some("{\"status\":\"StillRunning\"}")) {
+                if !self
+                    .complete_step(&workflow, &step_id, Some("{\"status\":\"StillRunning\"}"))
+                    .await
+                {
                     return true;
                 }
-                match self.store.defer_workflow_if_owned(
+                match blocking::defer_workflow_if_owned(
+                    &self.store,
                     &workflow.id,
                     &self.worker_id,
                     60, // 60 秒 backoff
                     Some("StillRunning — pipeline in progress, deferring"),
-                ) {
+                )
+                .await
+                {
                     Ok(true) => {
                         // 不调用 notify_one() — 让 poll interval 自然触发下次检查
                     }
@@ -283,35 +312,41 @@ impl SkillEvolutionWorker {
             }
             Err(e) => {
                 let message = e.to_string();
-                let _ = self.store.fail_step_if_owned(
+                let _ = blocking::fail_step_if_owned(
+                    &self.store,
                     &workflow.id,
                     &step_id,
                     &self.worker_id,
                     &message,
-                );
+                )
+                .await;
                 if self.skill_record_is_terminal(&workflow) {
-                    let _ = self.store.update_workflow_status_if_owned(
+                    let _ = blocking::update_workflow_status_if_owned(
+                        &self.store,
                         &workflow.id,
                         &self.worker_id,
                         "Failed",
                         Some(&message),
-                    );
+                    )
+                    .await;
                 } else {
-                    let _ = self.store.schedule_retry_if_owned(
+                    let _ = blocking::schedule_retry_if_owned(
+                        &self.store,
                         &workflow.id,
                         &self.worker_id,
                         Some(&message),
-                    );
+                    )
+                    .await;
                 }
             }
         }
 
-        let _ = self.store.release_lease(&workflow.id, &self.worker_id);
+        let _ = blocking::release_lease(&self.store, &workflow.id, &self.worker_id).await;
 
         if let Err(e) = self.service.tick_observations().await {
             warn!(error = %e, "Skill evolution observation tick failed");
         }
-        if let Err(e) = self.finalize_observation_workflows() {
+        if let Err(e) = self.finalize_observation_workflows().await {
             warn!(error = %e, "Failed to finalize skill observation workflows");
         }
 
@@ -324,7 +359,7 @@ impl SkillEvolutionWorker {
             return Ok(());
         }
 
-        let existing = self.store.list_workflows(None)?;
+        let existing = blocking::list_workflows(&self.store, None).await?;
         for (skill_name, evolution_id) in pending {
             if existing.iter().any(|workflow| {
                 workflow.description == evolution_id && Self::workflow_blocks_enqueue(workflow)
@@ -332,7 +367,8 @@ impl SkillEvolutionWorker {
                 continue;
             }
 
-            let workflow_id = self.store.enqueue(&skill_name, &evolution_id, "skill")?;
+            let workflow_id =
+                blocking::enqueue(&self.store, &skill_name, &evolution_id, "skill").await?;
             info!(
                 workflow_id = %workflow_id,
                 skill = %skill_name,
@@ -460,15 +496,20 @@ impl SkillEvolutionWorker {
             .unwrap_or(false)
     }
 
-    fn complete_step(
+    async fn complete_step(
         &self,
         workflow: &WorkflowRecord,
         step_id: &str,
         output_json: Option<&str>,
     ) -> bool {
-        match self
-            .store
-            .complete_step_if_owned(&workflow.id, step_id, &self.worker_id, output_json)
+        match blocking::complete_step_if_owned(
+            &self.store,
+            &workflow.id,
+            step_id,
+            &self.worker_id,
+            output_json,
+        )
+        .await
         {
             Ok(true) => true,
             Ok(false) => {
@@ -482,8 +523,8 @@ impl SkillEvolutionWorker {
         }
     }
 
-    fn cancelled(&self, workflow: &WorkflowRecord) -> bool {
-        match self.store.read_pending_events(&workflow.id) {
+    async fn cancelled(&self, workflow: &WorkflowRecord) -> bool {
+        match blocking::read_pending_events(&self.store, &workflow.id).await {
             Ok(events) => events.iter().any(|event| event.event_type == "cancel"),
             Err(e) => {
                 warn!(workflow_id = %workflow.id, error = %e, "Failed to read skill evolution events");
@@ -519,7 +560,7 @@ impl SkillEvolutionWorker {
                 tokio::select! {
                     _ = &mut stop_rx => break,
                     _ = interval.tick() => {
-                        match store.renew_lease(&workflow_id, &worker_id, lease_duration_secs) {
+                        match blocking::renew_lease(&store, &workflow_id, &worker_id, lease_duration_secs).await {
                             Ok(true) => {
                                 consecutive_failures = 0;
                             }
@@ -546,8 +587,8 @@ impl SkillEvolutionWorker {
         (stop_tx, lost_rx, handle)
     }
 
-    fn recover(&self) -> Result<()> {
-        let recovered = self.store.recover_expired_leases()?;
+    async fn recover(&self) -> Result<()> {
+        let recovered = blocking::recover_expired_leases(&self.store).await?;
         if !recovered.is_empty() {
             info!(
                 count = recovered.len(),
