@@ -20,6 +20,51 @@ pub enum ToolPermission {
 /// 接收工具名称和输入参数，返回权限决策。
 pub type CanUseToolFn = Arc<dyn Fn(&str, &serde_json::Value) -> ToolPermission + Send + Sync>;
 
+/// 允许名单策略：只有名单内的工具可执行，其余一律拒绝。
+///
+/// 供 subagent / typed fork 使用——其可执行工具集必须与传给模型的 schema 名单一致，
+/// 不能依赖「未配置即放行」的默认值。
+pub fn create_allowlist_can_use_tool(allowed: Vec<String>) -> CanUseToolFn {
+    Arc::new(move |tool_name, _input| {
+        if allowed.iter().any(|name| name == tool_name) {
+            ToolPermission::Allow
+        } else if allowed.is_empty() {
+            ToolPermission::Deny {
+                message: format!(
+                    "Tool '{}' denied: this forked agent declares no tools and no tool policy",
+                    tool_name
+                ),
+            }
+        } else {
+            ToolPermission::Deny {
+                message: format!(
+                    "Tool '{}' denied: not part of this agent's toolset ({})",
+                    tool_name,
+                    allowed.join("/")
+                ),
+            }
+        }
+    })
+}
+
+/// 从 tool schema 列表提取工具名。
+///
+/// 兼容两种形状：`{"type":"function","function":{"name": …}}`（fork/typed 使用）
+/// 与 `{"name": …}`。
+pub fn tool_names_from_schemas(schemas: &[serde_json::Value]) -> Vec<String> {
+    schemas
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| schema.get("name"))
+                .and_then(|name| name.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 /// 工具 trait 的简化接口（避免依赖完整的 Tool 类型）
 ///
 /// 在实际集成时，这应该与 blockcell_tools 中的 Tool trait 对应。
@@ -1352,5 +1397,42 @@ mod tests {
 
         // 清理临时目录
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn allowlist_policy_denies_everything_outside_the_list() {
+        let guard =
+            create_allowlist_can_use_tool(vec!["read_file".to_string(), "list_dir".to_string()]);
+
+        assert!(matches!(
+            guard("read_file", &json!({})),
+            ToolPermission::Allow
+        ));
+        assert!(matches!(guard("list_dir", &json!({})), ToolPermission::Allow));
+        match guard("exec", &json!({})) {
+            ToolPermission::Deny { message } => assert!(message.contains("read_file")),
+            other => panic!("expected deny, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_allowlist_denies_all() {
+        let guard = create_allowlist_can_use_tool(Vec::new());
+        assert!(matches!(
+            guard("read_file", &json!({})),
+            ToolPermission::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_names_are_extracted_from_both_schema_shapes() {
+        let schemas = vec![
+            json!({"type": "function", "function": {"name": "read_file"}}),
+            json!({"name": "list_dir"}),
+        ];
+        assert_eq!(
+            tool_names_from_schemas(&schemas),
+            vec!["read_file".to_string(), "list_dir".to_string()]
+        );
     }
 }

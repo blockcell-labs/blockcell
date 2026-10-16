@@ -116,6 +116,10 @@ async fn forked_agent_cancellation_kills_running_shell_tool() {
         .working_dir(temp.path().to_path_buf())
         .event_tx(event_tx)
         .max_turns(1)
+        // Test-only: this fork exercises the shell cancellation path, so it must be
+        // allowed to run the tool. Production forks derive their policy from their
+        // schema list instead (see `ForkedAgentParams::builder`).
+        .can_use_tool(Arc::new(|_, _| ToolPermission::Allow))
         .build()
         .expect("params should build");
     let abort_token = blockcell_core::AbortToken::new();

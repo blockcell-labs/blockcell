@@ -185,7 +185,10 @@ impl ForkedAgentParams {
             provider_pool: Some(provider_pool),
             prompt_messages,
             cache_safe_params,
-            can_use_tool: Arc::new(|_, _| ToolPermission::Allow),
+            // Fail closed: a forked agent must be given an explicit policy (roster or
+            // allowlist). The old allow-all default made "forgot to configure" equal to
+            // "everything permitted".
+            can_use_tool: crate::forked::create_allowlist_can_use_tool(Vec::new()),
             query_source: "forked",
             fork_label: "forked",
             overrides: None,
@@ -594,13 +597,22 @@ impl ForkedAgentParamsBuilder {
             return Err(ForkedAgentError::NoProviderAvailable);
         }
 
+        let tool_schemas = self.tool_schemas.unwrap_or_default();
+        // Fail closed: without an explicit policy, allow exactly the tools this fork
+        // declares to the model and deny everything else. The previous allow-all
+        // default let an unconfigured fork execute any tool the executor supported —
+        // including ones never advertised in its schema list.
+        let can_use_tool = self.can_use_tool.unwrap_or_else(|| {
+            crate::forked::create_allowlist_can_use_tool(
+                crate::forked::tool_names_from_schemas(&tool_schemas),
+            )
+        });
+
         Ok(ForkedAgentParams {
             prompt_messages: self.prompt_messages,
             cache_safe_params: self.cache_safe_params,
             provider_pool: self.provider_pool,
-            can_use_tool: self
-                .can_use_tool
-                .unwrap_or_else(|| Arc::new(|_, _| ToolPermission::Allow)),
+            can_use_tool,
             query_source: self.query_source,
             fork_label: self.fork_label,
             overrides: self.overrides,
@@ -616,7 +628,7 @@ impl ForkedAgentParamsBuilder {
             workspace_scope: self.workspace_scope,
             event_tx: self.event_tx,
             progress_tx: self.progress_tx,
-            tool_schemas: self.tool_schemas.unwrap_or_default(),
+            tool_schemas,
             task_id: self.task_id,
             memory_store: self.memory_store,
             memory_file_store: self.memory_file_store,
