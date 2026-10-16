@@ -139,12 +139,18 @@ pub async fn run_forked_agent(
         }
     };
 
+    let path_hint = params
+        .working_dir
+        .as_deref()
+        .or(params.skills_dir.as_deref());
     let preferred_cache_model = (!params.cache_safe_params.model.is_empty())
         .then_some(params.cache_safe_params.model.as_str());
     let provider = match acquire_provider_with_retry(
         provider_pool,
         params.model.as_deref(),
         preferred_cache_model,
+        path_hint,
+        params.fork_label,
         PROVIDER_RETRY_MAX_ATTEMPTS,
         PROVIDER_RETRY_INITIAL_DELAY_MS,
         PROVIDER_RETRY_MAX_DELAY_MS,
@@ -770,10 +776,13 @@ pub(crate) fn inject_preloaded_skills(
 ///
 /// 在每次重试前和 sleep 期间（每 200ms）检查 `abort_token`，
 /// 如果已取消则立即返回 `ForkedAgentError::Aborted`。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn acquire_provider_with_retry(
     provider_pool: &Arc<ProviderPool>,
     model_override: Option<&str>,
     preferred_cache_model: Option<&str>,
+    path_hint: Option<&Path>,
+    fork_label: &str,
     max_attempts: usize,
     initial_delay_ms: u64,
     max_delay_ms: u64,
@@ -793,10 +802,13 @@ pub(crate) async fn acquire_provider_with_retry(
             provider_pool.acquire_by_model(model)
         } else if let Some(cache_model) = preferred_cache_model {
             provider_pool.acquire_by_model(cache_model).or_else(|| {
-                tracing::debug!(
-                    preferred_cache_model = cache_model,
-                    "[forked_agent] Preferred cache-aligned model unavailable in pool, degrading to default acquire()"
-                );
+                if attempt == 0 {
+                    crate::ghost_metrics::record_fork_alignment_miss_from_fork(
+                        path_hint,
+                        fork_label,
+                        "preferred_cache_model_unavailable",
+                    );
+                }
                 provider_pool.acquire()
             })
         } else {

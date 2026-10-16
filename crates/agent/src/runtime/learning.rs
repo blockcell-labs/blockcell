@@ -124,6 +124,14 @@ impl super::AgentRuntime {
             // 缓存对齐: 优先原样复用父轮完整的 tool_schemas（保持 tools[] 字节一致以命中 Prompt Cache），
             // 仅当父轮无工具（如纯 Chat 模式）或缺失核心 review 工具时才回退到窄 schema。
             // 安全边界由上方的 can_use_tool 在执行期拦截保障。
+            let parent_cache_safe_tools = Self::tool_definitions_from_schemas(&parent_tool_schemas);
+            let parent_cache_safe = crate::forked::CacheSafeParams::new(
+                system_prompt.clone(),
+                model.clone(),
+            )
+            .with_fork_messages(messages.clone())
+            .with_tools(parent_cache_safe_tools);
+
             let tool_schemas = Self::resolve_review_tool_schemas(&mode_clone, &parent_tool_schemas);
             let cache_safe_tools = Self::tool_definitions_from_schemas(&tool_schemas);
 
@@ -136,6 +144,17 @@ impl super::AgentRuntime {
             let cache_safe = crate::forked::CacheSafeParams::new(system_prompt, &model)
                 .with_fork_messages(messages)
                 .with_tools(cache_safe_tools);
+
+            // C10: 生产期校验 CacheSafeParams 与父轮是否兼容；若不兼容（例如父轮为无工具 Chat 模式
+            // 导致回退窄 schema），记录告警与指标并平滑降级为冷请求继续执行。
+            if !cache_safe.is_compatible_with(&parent_cache_safe) {
+                crate::ghost_metrics::record_fork_alignment_miss_from_fork(
+                    Some(&skills_dir_clone),
+                    label,
+                    "cache_safe_params_incompatible_with_parent",
+                );
+            }
+
             let mut params =
                 crate::forked::ForkedAgentParams::new(provider_pool, prompt_messages, cache_safe)
                     .with_can_use_tool(can_use_tool)
