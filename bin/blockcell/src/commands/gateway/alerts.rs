@@ -54,6 +54,10 @@ pub(super) async fn handle_alerts_create(
     State(state): State<GatewayState>,
     Json(req): Json<AlertCreateRequest>,
 ) -> impl IntoResponse {
+    // Serialize the read-modify-write: without the lock two concurrent requests read the
+    // same snapshot and the later write drops the other's rule.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let alerts_dir = state.paths.workspace().join("alerts");
     let _ = tokio::fs::create_dir_all(&alerts_dir).await;
     let path = alerts_dir.join("rules.json");
@@ -110,6 +114,9 @@ pub(super) async fn handle_alerts_update(
     AxumPath(rule_id): AxumPath<String>,
     Json(updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Same read-modify-write protection as `handle_alerts_create`.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let path = state.paths.workspace().join("alerts").join("rules.json");
     if !path.exists() {
         return Json(serde_json::json!({ "error": "No alert rules found" }));
@@ -168,6 +175,9 @@ pub(super) async fn handle_alerts_delete(
     State(state): State<GatewayState>,
     AxumPath(rule_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    // Same read-modify-write protection as `handle_alerts_create`.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let path = state.paths.workspace().join("alerts").join("rules.json");
     if !path.exists() {
         return Json(serde_json::json!({ "status": "not_found" }));

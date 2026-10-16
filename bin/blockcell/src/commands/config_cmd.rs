@@ -1,5 +1,8 @@
 use blockcell_core::{
-    config::{parse_json5_value, stringify_json5_pretty},
+    config::{
+        parse_json5_value, parse_json5_value_preserving_env, stringify_json5_pretty,
+        write_json5_pretty,
+    },
     Config, Paths,
 };
 use serde_json::Value;
@@ -261,17 +264,32 @@ fn parse_config_cli_value(value: &str) -> Value {
 /// Set a config value by dot-separated key path.
 pub async fn set(key: &str, value: &str) -> anyhow::Result<()> {
     let paths = Paths::new();
-    let config = Config::load_or_default(&paths)?;
-    let mut json = serde_json::to_value(&config)?;
+    let config_path = paths.config_file();
+
+    // Edit the raw file rather than round-tripping through the typed `Config`: the old
+    // implementation serialized the struct back over the file, silently dropping every
+    // key the struct does not model plus the user's comments (irreversible data loss).
+    // Working on the parsed file also leaves `${ENV}` placeholders in other keys intact
+    // instead of writing expanded secrets back to disk.
+    let mut json: Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        parse_json5_value_preserving_env(&content).map_err(|e| {
+            anyhow::anyhow!("failed to parse {}: {}", config_path.display(), e)
+        })?
+    } else {
+        serde_json::to_value(Config::default())?
+    };
 
     // Try to parse value as JSON5, fall back to plain string.
     let parsed: Value = parse_config_cli_value(value);
 
     set_json_path(&mut json, key, parsed.clone());
 
-    // Write back
-    let new_config: Config = serde_json::from_value(json)?;
-    new_config.save(&paths.config_file())?;
+    // Refuse to leave an unloadable config behind if the key path was a typo.
+    serde_json::from_value::<Config>(json.clone())
+        .map_err(|e| anyhow::anyhow!("refusing to write an invalid config: {}", e))?;
+
+    write_json5_pretty(&config_path, &json)?;
 
     if parsed.is_string() {
         println!("✓ Set {} = {}", key, parsed.as_str().unwrap());
