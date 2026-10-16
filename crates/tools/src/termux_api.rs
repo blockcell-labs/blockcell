@@ -191,6 +191,25 @@ impl Tool for TermuxApiTool {
         Ok(())
     }
 
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        // Actions with irreversible or privacy-sensitive device side effects.
+        // The rest of the Termux:API surface (battery info, sensors, toast, …) is
+        // read-only or cosmetic and stays confirmation-free.
+        matches!(
+            params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("info"),
+            "sms_send"
+                | "telephony_call"
+                | "clipboard_set"
+                | "download"
+                | "infrared_transmit"
+                | "keystore"
+                | "wifi_enable"
+        )
+    }
+
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let action = params
             .get("action")

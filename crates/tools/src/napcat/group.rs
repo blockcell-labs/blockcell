@@ -339,10 +339,14 @@ fn check_admin_permission(ctx: &ToolContext, tool_name: &str, params: &Value) ->
             Err(Error::Tool(format!("Permission denied: {}", reason)))
         }
         PermissionResult::NeedsConfirmation => {
-            // For now, we treat confirmation as a warning in logs
-            // In a full implementation, this would trigger a confirmation flow
-            tracing::warn!(tool = tool_name, "Operation requires confirmation");
-            Ok(())
+            // Fail closed: a "needs confirmation" verdict means the caller is not
+            // cleared to run this group-management action. It used to be logged and
+            // then allowed, which silently voided `require_confirmation`.
+            tracing::warn!(tool = tool_name, "Operation requires confirmation; denying");
+            Err(Error::Tool(format!(
+                "Permission denied: {} requires explicit confirmation",
+                tool_name
+            )))
         }
     }
 }

@@ -309,6 +309,13 @@ impl ToolPolicy {
     }
 
     pub fn evaluate(&self, ctx: &ToolCallContext<'_>) -> PolicyEvalResult {
+        // Deny outranks Ask, which outranks Allow: a broad `allow` rule can never
+        // shadow a more specific `deny` no matter where it is declared (the classic
+        // first-match-wins pitfall). Within one decision the first declared
+        // matching rule still wins.
+        let mut ask: Option<&CompiledRule> = None;
+        let mut allow: Option<&CompiledRule> = None;
+
         for rule in &self.compiled {
             if !rule
                 .tool_globs
@@ -321,27 +328,23 @@ impl ToolPolicy {
                 continue;
             }
 
-            if self.simulation_mode {
-                info!(
-                    rule = %rule.name,
-                    tool = %ctx.tool_name,
-                    would_decide = ?rule.decision,
-                    "[SIMULATION] Tool policy matched; allowing call"
-                );
-                return PolicyEvalResult {
-                    decision: ToolPolicyDecision::Allow,
-                    matched_rule: Some(rule.name.clone()),
-                    description: rule.description.clone(),
-                    simulated: true,
-                };
+            match rule.decision {
+                ToolPolicyDecision::Deny => return self.eval_result(rule, ctx.tool_name),
+                ToolPolicyDecision::Ask => {
+                    if ask.is_none() {
+                        ask = Some(rule);
+                    }
+                }
+                ToolPolicyDecision::Allow => {
+                    if allow.is_none() {
+                        allow = Some(rule);
+                    }
+                }
             }
+        }
 
-            return PolicyEvalResult {
-                decision: rule.decision,
-                matched_rule: Some(rule.name.clone()),
-                description: rule.description.clone(),
-                simulated: false,
-            };
+        if let Some(rule) = ask.or(allow) {
+            return self.eval_result(rule, ctx.tool_name);
         }
 
         PolicyEvalResult {
@@ -349,6 +352,29 @@ impl ToolPolicy {
             matched_rule: None,
             description: None,
             simulated: false,
+        }
+    }
+
+    /// 把命中规则转成评估结果；模拟模式下只报告命中项，实际一律放行。
+    fn eval_result(&self, rule: &CompiledRule, tool_name: &str) -> PolicyEvalResult {
+        if self.simulation_mode {
+            info!(
+                rule = %rule.name,
+                tool = %tool_name,
+                would_decide = ?rule.decision,
+                "[SIMULATION] Tool policy matched; allowing call"
+            );
+        }
+
+        PolicyEvalResult {
+            decision: if self.simulation_mode {
+                ToolPolicyDecision::Allow
+            } else {
+                rule.decision
+            },
+            matched_rule: Some(rule.name.clone()),
+            description: rule.description.clone(),
+            simulated: self.simulation_mode,
         }
     }
 

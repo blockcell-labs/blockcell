@@ -196,6 +196,34 @@ fn malformed_policy_file_fails_closed() {
 }
 
 #[test]
+fn deny_and_ask_outrank_allow_regardless_of_order() {
+    // Regression: first-match-wins let a broad `allow` shadow a specific `deny`
+    // declared after it. Deny must win no matter where it appears.
+    let policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![
+            rule("allow-all", "*", ToolPolicyDecision::Allow),
+            rule("deny-exec", "exec", ToolPolicyDecision::Deny),
+        ],
+        ..Default::default()
+    });
+    let eval = policy.evaluate(&ctx("exec", &serde_json::json!({}), "cli"));
+    assert_eq!(eval.decision, ToolPolicyDecision::Deny);
+    assert_eq!(eval.matched_rule.as_deref(), Some("deny-exec"));
+
+    // Ask also outranks Allow.
+    let policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![
+            rule("allow-all", "*", ToolPolicyDecision::Allow),
+            rule("ask-writes", "write_file", ToolPolicyDecision::Ask),
+        ],
+        ..Default::default()
+    });
+    let eval = policy.evaluate(&ctx("write_file", &serde_json::json!({}), "cli"));
+    assert_eq!(eval.decision, ToolPolicyDecision::Ask);
+    assert_eq!(eval.matched_rule.as_deref(), Some("ask-writes"));
+}
+
+#[test]
 fn unknown_inherited_group_fails_closed() {
     let mut inherited = rule("strict", "*", ToolPolicyDecision::Ask);
     inherited.inherit_from = Some("missing-group".to_string());

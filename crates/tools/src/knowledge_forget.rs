@@ -79,6 +79,14 @@ impl Tool for KnowledgeForgetTool {
         Ok(())
     }
 
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        // `confirm` is the step that actually deletes across canonical files,
+        // session memory and SQLite. Without a user-side gate the model can
+        // approve its own deletion by re-calling with the token it just received
+        // from `preview`.
+        params.get("action").and_then(Value::as_str) == Some("confirm")
+    }
+
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         self.validate(&params)?;
         let action = params["action"].as_str().unwrap_or_default();
