@@ -1606,9 +1606,27 @@ impl AgentRuntime {
                     // review_started() here to avoid double increment.
                     let notify = Some((msg.channel.clone(), msg.chat_id.clone()));
                     if let Some(reservation) = deferred_review_reservation.take() {
+                        // 使用当前回合结束时的完整 current_messages（并补入本轮最终 assistant 回复），
+                        // 确保 Memory/Skill/Combined Review 都能看到本轮完整工具轨迹与最终回答，
+                        // 且避免末尾两条连续 user 消息在 Anthropic 转换时被合并导致缓存断点错位。
+                        let mut review_snapshot = if current_messages.len()
+                            >= deferred_review_snapshot.len()
+                        {
+                            current_messages.clone()
+                        } else {
+                            deferred_review_snapshot
+                        };
+                        if review_snapshot.last().map(|m| m.role.as_str()) != Some("assistant") {
+                            let final_assistant = history
+                                .last()
+                                .filter(|m| m.role == "assistant")
+                                .cloned()
+                                .unwrap_or_else(|| ChatMessage::assistant(&final_response));
+                            review_snapshot.push(final_assistant);
+                        }
                         self.spawn_review(
                             mode,
-                            deferred_review_snapshot,
+                            review_snapshot,
                             tools.clone(),
                             last_served_model.clone(),
                             notify,

@@ -374,6 +374,15 @@ impl AnthropicProvider {
                     Self::mark_content_cacheable(content);
                 }
             }
+            // 第 4 个 Anthropic 缓存断点：当消息数 >= 4 时同时标记 len - 4。
+            // 父轮长度为 L 时缓存断点在 L - 2；Fork Review 追加 [assistant_final, user_review] 后
+            // 长度为 L + 2，此时 (L + 2) - 4 == L - 2，恰好与父轮的历史缓存断点对齐。
+            if messages.len() >= 4 {
+                let fork_aligned_index = messages.len() - 4;
+                if let Some(content) = messages[fork_aligned_index].get_mut("content") {
+                    Self::mark_content_cacheable(content);
+                }
+            }
         }
     }
 
@@ -962,6 +971,37 @@ mod tests {
             "ephemeral"
         );
         assert!(request["messages"][2]["content"].is_string());
+    }
+
+    #[test]
+    fn anthropic_fourth_breakpoint_aligns_fork_with_parent_history_breakpoint() {
+        // 父轮有 3 条消息 (L = 3)，断点落在 index = L - 2 = 1 ("assistant reply 1")
+        // Fork Review 追加 [assistant_final, user_review] 后共 5 条消息 (L_fork = 5)，
+        // L_fork - 4 = 1 与 L_fork - 2 = 3 均被打上断点，其中 index 1 与父轮完全对齐。
+        let mut fork_request = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "system": "System prompt",
+            "tools": [{"name": "memory_manage"}],
+            "messages": [
+                {"role": "user", "content": "turn 1 user"},
+                {"role": "assistant", "content": "turn 1 assistant"},
+                {"role": "user", "content": "turn 2 user"},
+                {"role": "assistant", "content": "turn 2 final response"},
+                {"role": "user", "content": "Review the conversation above"}
+            ]
+        });
+
+        AnthropicProvider::apply_prompt_cache_breakpoints(&mut fork_request);
+
+        assert_eq!(
+            fork_request["messages"][1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            fork_request["messages"][3]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(fork_request["messages"][4]["content"].is_string());
     }
 
     #[test]
