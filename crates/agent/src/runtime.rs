@@ -2689,12 +2689,31 @@ impl blockcell_tools::RuntimeHandle for AgentRuntime {
     }
 }
 
+/// Cap on the shared session MemorySystem pool. Entries are reconstructible (the pool
+/// only avoids re-running Layer 4 init I/O), so eviction need not be LRU-exact; without a
+/// cap a long-lived gateway process grows with every session it has ever served.
+const MAX_SESSION_MEMORY_SYSTEMS: usize = 64;
+
+impl AgentRuntime {
+    /// Return a MemorySystem to the shared pool, evicting an arbitrary entry when full.
+    fn return_memory_system_to_pool(&self, ms: crate::memory_system::MemorySystem) {
+        let Ok(mut map) = self.session_memory_systems.lock() else {
+            return;
+        };
+        let session_id = ms.session_id().to_string();
+        if map.len() >= MAX_SESSION_MEMORY_SYSTEMS && !map.contains_key(&session_id) {
+            if let Some(evicted) = map.keys().next().cloned() {
+                map.remove(&evicted);
+            }
+        }
+        map.insert(session_id, ms);
+    }
+}
+
 impl Drop for AgentRuntime {
     fn drop(&mut self) {
         if let Some(ms) = self.memory_system.take() {
-            if let Ok(mut map) = self.session_memory_systems.lock() {
-                map.insert(ms.session_id().to_string(), ms);
-            }
+            self.return_memory_system_to_pool(ms);
         }
     }
 }

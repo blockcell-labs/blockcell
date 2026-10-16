@@ -412,10 +412,7 @@ impl AgentRuntime {
             .unwrap_or(true);
         if needs_memory_system_init {
             if let Some(prev) = self.memory_system.take() {
-                self.session_memory_systems
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(prev.session_id().to_string(), prev);
+                self.return_memory_system_to_pool(prev);
             }
             let cached_ms = self
                 .session_memory_systems
