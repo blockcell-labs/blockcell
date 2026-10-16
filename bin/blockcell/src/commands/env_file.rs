@@ -43,16 +43,56 @@ pub fn ensure_and_load_blockcell_env(paths: &Paths) -> anyhow::Result<()> {
 
     let env_path = paths.env_file();
     if !env_path.exists() {
-        fs::write(&env_path, default_env_template()).with_context(|| {
+        write_private_env_file(&env_path, default_env_template()).with_context(|| {
             format!(
                 "failed to create default env file at {}",
                 env_path.display()
             )
         })?;
         info!(path = %env_path.display(), "Created default blockcell .env file");
+    } else {
+        // Older installs created this file world-readable; it holds API keys.
+        restrict_env_file_permissions(&env_path);
     }
 
     load_env_file(&env_path)
+}
+
+/// Create the .env file owner-only: it stores API keys, and the process umask would
+/// otherwise leave it at 0644 (readable by every local user).
+fn write_private_env_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+        file.flush()?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+    }
+}
+
+/// Tighten permissions on an existing .env file (best effort).
+fn restrict_env_file_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 fn load_env_file(path: &Path) -> anyhow::Result<()> {
@@ -62,6 +102,11 @@ fn load_env_file(path: &Path) -> anyhow::Result<()> {
     let mut loaded = 0usize;
     for line in content.lines() {
         if let Some((key, value)) = parse_env_assignment(line) {
+            // An empty entry in the generated template must not clobber a real value the
+            // shell already exported — that silently disabled auth (e.g. OPENAI_API_KEY).
+            if value.is_empty() && std::env::var(&key).is_ok_and(|existing| !existing.is_empty()) {
+                continue;
+            }
             // This runs during command startup, before worker threads are spawned.
             unsafe {
                 std::env::set_var(key, value);
