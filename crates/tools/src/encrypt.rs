@@ -5,10 +5,18 @@ use tracing::debug;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
+/// The only cipher the `openssl enc` backend provides. AEAD modes (aes-256-gcm,
+/// chacha20-poly1305) are not available through `openssl enc`, so they are rejected
+/// instead of being silently substituted.
+const SUPPORTED_ALGORITHM: &str = "aes-256-cbc";
+/// Header written in front of raw-key ciphertext: 16-byte magic + 32 hex chars of IV.
+const KEY_MODE_MAGIC: &[u8; 16] = b"BLOCKCELL-IV-V1\n";
+const KEY_MODE_IV_HEX_LEN: usize = 32;
+
 /// Encryption and security tool.
 ///
 /// Actions:
-/// - **encrypt_file** / **decrypt_file**: AES-256-GCM file encryption/decryption
+/// - **encrypt_file** / **decrypt_file**: AES-256-CBC file encryption/decryption (openssl enc backend)
 /// - **generate_password**: Cryptographically secure password generation
 /// - **generate_key**: Generate encryption keys (AES-256, random bytes)
 /// - **hash_file**: Compute file hash (SHA-256, SHA-512)
@@ -26,7 +34,7 @@ impl Tool for EncryptTool {
         props.insert("output_path".into(), json!({"type": "string", "description": "(encrypt_file/decrypt_file) Output file path. Default: input + .enc / removes .enc"}));
         props.insert("password".into(), json!({"type": "string", "description": "(encrypt_file/decrypt_file) Encryption password. Used to derive AES-256 key via PBKDF2."}));
         props.insert("key".into(), json!({"type": "string", "description": "(encrypt_file/decrypt_file) Raw AES-256 key as hex string (64 hex chars). Alternative to password."}));
-        props.insert("algorithm".into(), json!({"type": "string", "enum": ["aes-256-gcm", "chacha20-poly1305"], "description": "(encrypt_file/decrypt_file) Encryption algorithm. Default: aes-256-gcm"}));
+        props.insert("algorithm".into(), json!({"type": "string", "enum": ["aes-256-cbc"], "description": "(encrypt_file/decrypt_file) Encryption algorithm. Only aes-256-cbc is available (openssl enc backend). Default: aes-256-cbc"}));
         props.insert("length".into(), json!({"type": "integer", "description": "(generate_password) Password length. Default: 20. (generate_key) Key size in bits: 128/256. Default: 256"}));
         props.insert("charset".into(), json!({"type": "string", "enum": ["alphanumeric", "ascii", "numeric", "hex", "custom"], "description": "(generate_password) Character set. Default: ascii (letters+digits+symbols)"}));
         props.insert("custom_chars".into(), json!({"type": "string", "description": "(generate_password) Custom character set when charset='custom'"}));
@@ -96,7 +104,7 @@ impl Tool for EncryptTool {
     }
 }
 
-// ─── File encryption (AES-256-GCM via openssl CLI) ──────────────────────────
+// ─── File encryption (AES-256-CBC via openssl CLI) ──────────────────────────
 
 async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value> {
     let path = params
@@ -125,46 +133,64 @@ async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
         return Err(Error::Tool(format!("File not found: {}", resolved_path)));
     }
 
-    // Use openssl enc for AES-256-GCM encryption
-    let mut args = vec![
-        "enc".to_string(),
-        "-aes-256-cbc".to_string(),
-        "-salt".to_string(),
-        "-pbkdf2".to_string(),
-        "-iter".to_string(),
-        "100000".to_string(),
-        "-in".to_string(),
-        resolved_path.clone(),
-        "-out".to_string(),
-        resolved_output.clone(),
-    ];
+    // Use openssl enc for AES-256-CBC encryption
+    let algorithm = params
+        .get("algorithm")
+        .and_then(|v| v.as_str())
+        .unwrap_or(SUPPORTED_ALGORITHM);
+    if algorithm != SUPPORTED_ALGORITHM {
+        return Err(Error::Validation(format!(
+            "unsupported algorithm '{algorithm}': the openssl enc backend only provides {SUPPORTED_ALGORITHM}"
+        )));
+    }
 
     if let Some(pw) = password {
-        args.push("-pass".to_string());
-        args.push(format!("pass:{}", pw));
+        // The passphrase travels over stdin (`-pass stdin`), never argv: a
+        // `-pass pass:…` argument is visible to every other process via `ps`.
+        let args = vec![
+            "enc".to_string(),
+            "-aes-256-cbc".to_string(),
+            "-salt".to_string(),
+            "-pbkdf2".to_string(),
+            "-iter".to_string(),
+            "100000".to_string(),
+            "-in".to_string(),
+            resolved_path.clone(),
+            "-out".to_string(),
+            resolved_output.clone(),
+            "-pass".to_string(),
+            "stdin".to_string(),
+        ];
+        run_openssl_enc(&args, Some(passphrase_stdin(pw))).await?;
     } else if let Some(k) = key_hex {
         if k.len() != 64 {
             return Err(Error::Tool(
                 "key must be 64 hex characters (256 bits)".into(),
             ));
         }
-        args.push("-K".to_string());
-        args.push(k.to_string());
-        // Generate random IV
-        args.push("-iv".to_string());
-        let iv = generate_hex_bytes(16);
-        args.push(iv.clone());
-    }
+        // Raw-key mode: openssl `enc` does not persist an explicit `-iv`, so the IV is
+        // kept in a header in front of the ciphertext. Without it the output could never
+        // be decrypted (the previous implementation generated an IV and dropped it).
+        let iv_hex = generate_hex_bytes(16);
+        let args = vec![
+            "enc".to_string(),
+            "-aes-256-cbc".to_string(),
+            "-K".to_string(),
+            k.to_string(),
+            "-iv".to_string(),
+            iv_hex.clone(),
+        ];
+        let plaintext = std::fs::read(&resolved_path)
+            .map_err(|e| Error::Tool(format!("Failed to read {}: {}", resolved_path, e)))?;
+        let ciphertext = run_openssl_enc(&args, Some(plaintext)).await?;
 
-    let output = tokio::process::Command::new("openssl")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| Error::Tool(format!("openssl not found or failed: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!("Encryption failed: {}", stderr)));
+        let mut payload =
+            Vec::with_capacity(KEY_MODE_MAGIC.len() + iv_hex.len() + ciphertext.len());
+        payload.extend_from_slice(KEY_MODE_MAGIC);
+        payload.extend_from_slice(iv_hex.as_bytes());
+        payload.extend_from_slice(&ciphertext);
+        std::fs::write(&resolved_output, payload)
+            .map_err(|e| Error::Tool(format!("Failed to write {}: {}", resolved_output, e)))?;
     }
 
     let file_size = std::fs::metadata(&resolved_output)
@@ -214,39 +240,62 @@ async fn action_decrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
         return Err(Error::Tool(format!("File not found: {}", resolved_path)));
     }
 
-    let mut args = vec![
-        "enc".to_string(),
-        "-aes-256-cbc".to_string(),
-        "-d".to_string(),
-        "-pbkdf2".to_string(),
-        "-iter".to_string(),
-        "100000".to_string(),
-        "-in".to_string(),
-        resolved_path.clone(),
-        "-out".to_string(),
-        resolved_output.clone(),
-    ];
-
-    if let Some(pw) = password {
-        args.push("-pass".to_string());
-        args.push(format!("pass:{}", pw));
-    } else if let Some(k) = key_hex {
-        args.push("-K".to_string());
-        args.push(k.to_string());
+    let algorithm = params
+        .get("algorithm")
+        .and_then(|v| v.as_str())
+        .unwrap_or(SUPPORTED_ALGORITHM);
+    if algorithm != SUPPORTED_ALGORITHM {
+        return Err(Error::Validation(format!(
+            "unsupported algorithm '{algorithm}': the openssl enc backend only provides {SUPPORTED_ALGORITHM}"
+        )));
     }
 
-    let output = tokio::process::Command::new("openssl")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| Error::Tool(format!("openssl not found or failed: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Tool(format!(
-            "Decryption failed (wrong password?): {}",
-            stderr
-        )));
+    if let Some(pw) = password {
+        let args = vec![
+            "enc".to_string(),
+            "-aes-256-cbc".to_string(),
+            "-d".to_string(),
+            "-pbkdf2".to_string(),
+            "-iter".to_string(),
+            "100000".to_string(),
+            "-in".to_string(),
+            resolved_path.clone(),
+            "-out".to_string(),
+            resolved_output.clone(),
+            "-pass".to_string(),
+            "stdin".to_string(),
+        ];
+        run_openssl_enc(&args, Some(passphrase_stdin(pw)))
+            .await
+            .map_err(|e| Error::Tool(format!("Decryption failed (wrong password?): {e}")))?;
+    } else if let Some(k) = key_hex {
+        let raw = std::fs::read(&resolved_path)
+            .map_err(|e| Error::Tool(format!("Failed to read {}: {}", resolved_path, e)))?;
+        let header_len = KEY_MODE_MAGIC.len() + KEY_MODE_IV_HEX_LEN;
+        if raw.len() < header_len || !raw.starts_with(KEY_MODE_MAGIC) {
+            return Err(Error::Tool(
+                "encrypted file has no IV header: it was produced by a version that did not \
+                 persist the IV, so it cannot be decrypted — re-encrypt the source file"
+                    .into(),
+            ));
+        }
+        let iv_hex = std::str::from_utf8(&raw[KEY_MODE_MAGIC.len()..header_len])
+            .map_err(|_| Error::Tool("encrypted file has a corrupt IV header".into()))?
+            .to_string();
+        let args = vec![
+            "enc".to_string(),
+            "-aes-256-cbc".to_string(),
+            "-d".to_string(),
+            "-K".to_string(),
+            k.to_string(),
+            "-iv".to_string(),
+            iv_hex,
+        ];
+        let plaintext = run_openssl_enc(&args, Some(raw[header_len..].to_vec()))
+            .await
+            .map_err(|e| Error::Tool(format!("Decryption failed: {e}")))?;
+        std::fs::write(&resolved_output, plaintext)
+            .map_err(|e| Error::Tool(format!("Failed to write {}: {}", resolved_output, e)))?;
     }
 
     let file_size = std::fs::metadata(&resolved_output)
@@ -429,6 +478,53 @@ fn action_generate_key(params: &Value) -> Result<Value> {
         "format": "hex",
         "note": "Store this key securely. It cannot be recovered if lost.",
     }))
+}
+
+/// Passphrase bytes for openssl's `-pass stdin` (a single line).
+fn passphrase_stdin(password: &str) -> Vec<u8> {
+    let mut bytes = password.as_bytes().to_vec();
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Run `openssl enc` with `args`, feeding `stdin_payload` (if any) and returning stdout.
+///
+/// Both secrets and file payloads travel over stdin, so neither the passphrase nor the
+/// plaintext/ciphertext ever appears in the process table.
+async fn run_openssl_enc(args: &[String], stdin_payload: Option<Vec<u8>>) -> Result<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut command = tokio::process::Command::new("openssl");
+    command.args(args);
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| Error::Tool(format!("openssl not found or failed: {}", e)))?;
+
+    if let Some(payload) = stdin_payload {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&payload)
+                .await
+                .map_err(|e| Error::Tool(format!("failed to write to openssl stdin: {}", e)))?;
+            drop(stdin);
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| Error::Tool(format!("openssl failed: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Tool(format!("openssl failed: {}", stderr)));
+    }
+
+    Ok(output.stdout)
 }
 
 fn generate_hex_bytes(count: usize) -> String {
@@ -794,5 +890,146 @@ mod tests {
         ] {
             assert!(tool.validate(&json!({"action": action})).is_ok());
         }
+    }
+
+    fn test_ctx(workspace: &std::path::Path) -> ToolContext {
+        ToolContext {
+            workspace: workspace.to_path_buf(),
+            base: workspace.to_path_buf(),
+            builtin_skills_dir: None,
+            active_skill_dir: None,
+            session_key: "cli:test".to_string(),
+            channel: "cli".to_string(),
+            account_id: None,
+            sender_id: Some("user".to_string()),
+            chat_id: "test".to_string(),
+            config: blockcell_core::Config::default(),
+            permissions: blockcell_core::types::PermissionSet::new(),
+            task_manager: None,
+            memory_store: None,
+            memory_file_store: None,
+            ghost_memory_lifecycle: None,
+            skill_file_store: None,
+            session_search: None,
+            outbound_tx: None,
+            spawn_handle: None,
+            capability_registry: None,
+            core_evolution: None,
+            event_emitter: None,
+            channel_contacts_file: None,
+            response_cache: None,
+            runtime_handle: None,
+            agent_identity: None,
+            skill_mutex: None,
+            agent_type_registry: None,
+            evolution_workflow_store: None,
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("blockcell-encrypt-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Raw-key mode must persist the IV, otherwise the ciphertext is unrecoverable.
+    #[tokio::test]
+    async fn key_mode_round_trip_recovers_plaintext() {
+        let dir = scratch_dir("key");
+        let ctx = test_ctx(&dir);
+        std::fs::write(dir.join("plain.txt"), b"secret payload").expect("write source");
+
+        let key = generate_hex_bytes(32);
+        let encrypted = action_encrypt_file(
+            &json!({"action": "encrypt_file", "path": "plain.txt", "key": key}),
+            &ctx,
+        )
+        .await
+        .expect("encrypt");
+        let enc_path = encrypted["output"].as_str().expect("output path").to_string();
+
+        let raw = std::fs::read(&enc_path).expect("read ciphertext");
+        assert!(
+            raw.starts_with(KEY_MODE_MAGIC),
+            "ciphertext must carry the IV header"
+        );
+
+        let out_path = dir.join("out.txt");
+        let decrypted = action_decrypt_file(
+            &json!({
+                "action": "decrypt_file",
+                "path": enc_path,
+                "key": key,
+                "output_path": out_path.to_string_lossy(),
+            }),
+            &ctx,
+        )
+        .await
+        .expect("decrypt");
+        assert_eq!(decrypted["status"], "decrypted");
+        assert_eq!(
+            std::fs::read(&out_path).expect("read plaintext"),
+            b"secret payload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The passphrase travels over stdin (`-pass stdin`), and must still round-trip.
+    #[tokio::test]
+    async fn password_mode_round_trip_recovers_plaintext() {
+        let dir = scratch_dir("pw");
+        let ctx = test_ctx(&dir);
+        std::fs::write(dir.join("plain.txt"), b"passphrase payload").expect("write source");
+
+        let encrypted = action_encrypt_file(
+            &json!({"action": "encrypt_file", "path": "plain.txt", "password": "correct horse"}),
+            &ctx,
+        )
+        .await
+        .expect("encrypt");
+        let enc_path = encrypted["output"].as_str().expect("output path").to_string();
+
+        let out_path = dir.join("out.txt");
+        action_decrypt_file(
+            &json!({
+                "action": "decrypt_file",
+                "path": enc_path,
+                "password": "correct horse",
+                "output_path": out_path.to_string_lossy(),
+            }),
+            &ctx,
+        )
+        .await
+        .expect("decrypt");
+        assert_eq!(
+            std::fs::read(&out_path).expect("read plaintext"),
+            b"passphrase payload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AEAD modes are advertised nowhere and must be rejected, not silently downgraded.
+    #[tokio::test]
+    async fn unsupported_algorithm_is_rejected() {
+        let dir = scratch_dir("algo");
+        let ctx = test_ctx(&dir);
+        std::fs::write(dir.join("a.txt"), b"x").expect("write source");
+
+        let error = action_encrypt_file(
+            &json!({
+                "action": "encrypt_file",
+                "path": "a.txt",
+                "password": "pw",
+                "algorithm": "aes-256-gcm",
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("aes-256-gcm must be rejected");
+        assert!(format!("{error}").contains("aes-256-gcm"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
