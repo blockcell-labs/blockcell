@@ -42,7 +42,7 @@ impl Tool for VideoProcessTool {
             arr_str_prop("(merge) Multiple input file paths to concatenate"),
         );
         props.insert(
-            "output".into(),
+            "output_path".into(),
             str_prop("Output file path. Default: auto-generated in workspace/media/"),
         );
         props.insert(
@@ -239,7 +239,7 @@ impl VideoProcessTool {
     }
 
     fn resolve_output(ctx: &ToolContext, params: &Value, default_ext: &str) -> String {
-        if let Some(out) = params.get("output").and_then(|v| v.as_str()) {
+        if let Some(out) = params.get("output_path").and_then(|v| v.as_str()) {
             if !out.is_empty() {
                 return resolve_path(ctx, out);
             }

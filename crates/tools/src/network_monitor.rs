@@ -675,9 +675,13 @@ async fn action_http_check(params: &Value) -> Result<Value> {
 
     let start = std::time::Instant::now();
 
-    let client = reqwest::Client::builder()
+    // SSRF guard: same protection as `http_request` — refuse private/internal targets
+    // and validate every redirect hop.
+    crate::ssrf::ensure_url_allowed(url).await?;
+
+    let client = crate::ssrf::safe_client_builder()
         .timeout(std::time::Duration::from_secs(timeout))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(crate::ssrf::redirect_policy(true))
         .build()
         .map_err(|e| Error::Tool(format!("HTTP client error: {}", e)))?;
 
@@ -732,8 +736,13 @@ async fn action_bandwidth(params: &Value) -> Result<Value> {
         .unwrap_or("https://speed.cloudflare.com/__down?bytes=10000000");
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
-    let client = reqwest::Client::builder()
+    // Same SSRF guard as `http_check`: the default test URL is public, but `url` is a
+    // caller-supplied parameter and could point at link-local/metadata endpoints.
+    crate::ssrf::ensure_url_allowed(url).await?;
+
+    let client = crate::ssrf::safe_client_builder()
         .timeout(std::time::Duration::from_secs(timeout))
+        .redirect(crate::ssrf::redirect_policy(true))
         .build()
         .map_err(|e| Error::Tool(format!("HTTP client error: {}", e)))?;
 
