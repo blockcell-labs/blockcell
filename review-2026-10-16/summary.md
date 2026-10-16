@@ -60,6 +60,12 @@
 > （gateway `/v1/config`、`/v1/channels`，CLI `config show`/`get`）已修；`.env` 权限 0600 与空值不覆盖环境变量已修。
 > 掩码为「读时脱敏 + 写时还原」双向设计，前端把掩码原样回传不会覆盖真实密钥。
 > 验证：tools 487 + core 129 + bin 167 全绿。明细见 [`FIX-BATCH3.md`](FIX-BATCH3.md)。
+>
+> **Batch 4 修复状态（2026-10-16，commit `73ea2e9` + `9eb3617` + `1dd95b0`）**
+> §3-E 的资源上限：OOXML 解压炸弹（docx/pptx/xlsx）、CSV 全量入内存、Whisper 上传无上限、
+> IM 入站媒体（whatsapp/dingtalk）无上限、`session_memory_systems` 池无上限均已修复。
+> 有意不做三项（napcat 每消息 spawn 背压、`stream_subscribe` 背压、WS 帧上限），理由见 [`FIX-BATCH4.md`](FIX-BATCH4.md)。
+> 验证：tools 487 + channels 161 + agent 842 全绿。
 
 ---
 
@@ -176,7 +182,7 @@
 - **Batch 1（准入与权限）✅ 已完成**：`requires_confirmation` 接线到 knowledge_forget / termux_api；`check_admin_permission` 改 fail-closed；`ToolPolicy` 加 deny 优先；fork 路径 `can_use_tool` 默认改 fail-closed。提交 `2f1766c` + `289330a`
 - **Batch 2（数据与配置）✅ 已完成**：`config set` 保留未建模键与 `${ENV}` 占位符（P0-9）、Gemini 默认路由（P0-7）、encrypt IV/algorithm/密码传递、alerts rules 加锁、audit 哈希链跨进程锁、`merge_episode_metadata` 单事务。提交 `59601f3` + `4cfb64b` + `a67e5e7` + `6c93115`
 - **Batch 3（路径与凭据收敛）✅ 已完成**：`video_process` 参数对齐 `output_path`、`network_monitor` 接入 SSRF 防线、gateway/CLI 凭据统一掩码（读时脱敏 + 写时还原）、`.env` 权限 0600 与空值不覆盖环境变量。提交 `30c9b90` + `f805820` + `6e52264`
-- **Batch 4（资源上限）**：统一 zip / 下载 / CSV / 音视频 / WS 帧 / 内存池上限，池加 LRU
+- **Batch 4（资源上限）✅ 已完成（核心项）**：OOXML 解压上限、CSV 文件/行数上限、Whisper 25 MB 预检、IM 入站媒体 25 MB 上限、session MemorySystem 池上限 64。提交 `73ea2e9` + `9eb3617` + `1dd95b0`。背压类三项（napcat spawn / stream_subscribe / WS 帧）有意延后，需先定丢弃语义
 - **Batch 5（async 纪律）**：rusqlite 与跨进程锁调用全部出 async（`spawn_blocking`）
 - **Batch 6（闭环）**：验收脚本假通过（P0-8）、恢复 CI 门禁、补 cron/ed25519/evolution/MCP 测试、文档同步（docs/03、09、17、20）
 
