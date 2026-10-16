@@ -739,10 +739,11 @@ impl DingTalkChannel {
         );
         let file_path = media_dir.join(&filename);
 
-        let bytes = file_resp
-            .bytes()
-            .await
-            .map_err(|e| Error::Channel(format!("DingTalk media read failed: {}", e)))?;
+        let bytes = crate::security::read_response_limited(
+            file_resp,
+            crate::security::MAX_MEDIA_DOWNLOAD_BYTES,
+        )
+        .await?;
         tokio::fs::write(&file_path, &bytes)
             .await
             .map_err(|e| Error::Channel(format!("DingTalk media write failed: {}", e)))?;

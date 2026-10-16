@@ -325,6 +325,17 @@ impl WhatsAppChannel {
     ) -> Result<String> {
         use std::io::Write;
 
+        // Bound the payload *before* decoding: base64 inflates by ~4/3, and the bridge is
+        // external input, so decoding an oversized attachment would allocate it in full.
+        // This mirrors the 25 MB limit used by the HTTP media paths.
+        let max_encoded_len = (crate::security::MAX_MEDIA_DOWNLOAD_BYTES as usize / 3) * 4 + 4;
+        if data.len() > max_encoded_len {
+            return Err(Error::Channel(format!(
+                "WhatsApp media exceeds the {} byte limit",
+                crate::security::MAX_MEDIA_DOWNLOAD_BYTES
+            )));
+        }
+
         // Decode base64
         let bytes = base64_decode(data)
             .map_err(|e| Error::Channel(format!("Failed to decode WhatsApp media: {}", e)))?;
