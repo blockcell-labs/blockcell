@@ -1,0 +1,30 @@
+    Checking blockcell-core v0.1.7 (/Users/apple/rustdev/magicbot/blockcell/crates/core)
+   Compiling blockcell v0.1.7 (/Users/apple/rustdev/magicbot/blockcell/bin/blockcell)
+error: failed to run custom build command for `blockcell v0.1.7 (/Users/apple/rustdev/magicbot/blockcell/bin/blockcell)`
+
+Caused by:
+  process didn't exit successfully: `/Users/apple/rustdev/magicbot/blockcell/target/debug/build/blockcell-75cb13f2df9d8c6e/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/index.html
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/package-lock.json
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/package.json
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/postcss.config.mjs
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/public/icon.svg
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/public/manifest.json
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/public/sw.js
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/scripts/source-hashes.mjs
+  cargo:rerun-if-changed=/Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui/src/App.tsx
+
+  --- stderr
+
+  thread 'main' (1591109) panicked at bin/blockcell/build.rs:101:9:
+  assertion `left == right` failed: embedded WebUI is stale because src/App.tsx changed; run `npm run build` in /Users/apple/rustdev/magicbot/blockcell/bin/blockcell/../../webui
+    left: "560a4329192ad97cd0f265d5fec6de0cf65b8caee20576b9aefae5ffc510f7f5"
+   right: "327438ab0500bc6d25c0220a714d8d8b61c418b85b1a25fea1704ca35f3e16fd"
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
+crates/core/src/budget.rs:299:15: warning: current MSRV (Minimum Supported Rust Version) is `1.85.0` but this item is stable since `1.87.0`
+crates/core/src/file_store.rs:25:14: warning: file opened with `create`, but `truncate` behavior not defined
+crates/core/src/file_store.rs:77:19: warning: current MSRV (Minimum Supported Rust Version) is `1.85.0` but this item is stable since `1.89.0`
+warning: `blockcell-core` (lib) generated 3 warnings
+clippy_exit=101
