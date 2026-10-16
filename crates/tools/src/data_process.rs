@@ -214,16 +214,36 @@ fn load_data(workspace: &Path, params: &Value) -> Result<Vec<Value>> {
             .get("has_header")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        return read_csv_to_json(&path, delimiter, has_header);
+        let (rows, _total) = read_csv_to_json(&path, delimiter, has_header, MAX_CSV_ROWS)?;
+        return Ok(rows);
     }
     Err(Error::Tool("No data source provided".to_string()))
 }
 
-fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result<Vec<Value>> {
+/// Upper bound for the CSV file we are willing to load into memory at once.
+const MAX_CSV_FILE_BYTES: u64 = 128 * 1024 * 1024;
+/// Default cap on stored rows when the caller does not pass `limit`. Parsing stops
+/// storing rows past the cap, but `total_rows` still reports the real row count.
+const MAX_CSV_ROWS: usize = 50_000;
+
+fn read_csv_to_json(
+    path: &PathBuf,
+    delimiter: &str,
+    has_header: bool,
+    max_rows: usize,
+) -> Result<(Vec<Value>, usize)> {
     if !path.exists() {
         return Err(Error::NotFound(format!(
             "CSV file not found: {}",
             path.display()
+        )));
+    }
+
+    let file_size = std::fs::metadata(path)?.len();
+    if file_size > MAX_CSV_FILE_BYTES {
+        return Err(Error::Tool(format!(
+            "CSV file is {} bytes, above the {} byte limit",
+            file_size, MAX_CSV_FILE_BYTES
         )));
     }
 
@@ -248,11 +268,12 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
         if let Some(Ok(record)) = first_record {
             (0..record.len()).map(|i| format!("col{}", i)).collect()
         } else {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
     };
 
     let mut rows = Vec::new();
+    let mut total = 0usize;
 
     // If no header, we need to re-read from scratch
     if !has_header {
@@ -264,6 +285,10 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
 
         for result in rdr2.records() {
             let record = result.map_err(|e| Error::Tool(format!("CSV parse error: {}", e)))?;
+            total += 1;
+            if rows.len() >= max_rows {
+                continue;
+            }
             let mut row = serde_json::Map::new();
             for (i, field) in record.iter().enumerate() {
                 let key = headers
@@ -277,6 +302,10 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
     } else {
         for result in rdr.records() {
             let record = result.map_err(|e| Error::Tool(format!("CSV parse error: {}", e)))?;
+            total += 1;
+            if rows.len() >= max_rows {
+                continue;
+            }
             let mut row = serde_json::Map::new();
             for (i, field) in record.iter().enumerate() {
                 let key = headers
@@ -289,7 +318,7 @@ fn read_csv_to_json(path: &PathBuf, delimiter: &str, has_header: bool) -> Result
         }
     }
 
-    Ok(rows)
+    Ok((rows, total))
 }
 
 /// Try to parse a string value as number or boolean, fall back to string.
@@ -326,12 +355,11 @@ fn action_read_csv(workspace: &Path, params: &Value) -> Result<Value> {
         .unwrap_or(true);
     let limit = params.get("limit").and_then(|v| v.as_u64());
 
-    let mut rows = read_csv_to_json(&path, delimiter, has_header)?;
-    let total = rows.len();
-
-    if let Some(lim) = limit {
-        rows.truncate(lim as usize);
-    }
+    // Bound memory: rows past the cap are counted but not materialised, so `total_rows`
+    // stays truthful while the response cannot grow without limit.
+    let requested = limit.map(|l| l as usize);
+    let max_rows = requested.unwrap_or(MAX_CSV_ROWS).min(MAX_CSV_ROWS);
+    let (rows, total) = read_csv_to_json(&path, delimiter, has_header, max_rows)?;
 
     // Extract column names from first row
     let columns: Vec<String> = rows

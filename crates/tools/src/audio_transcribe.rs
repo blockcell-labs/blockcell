@@ -480,6 +480,20 @@ async fn try_api_transcribe(
              Alternatively, install whisper locally: pip install openai-whisper".into()
         ))?;
 
+    // The transcription endpoint rejects uploads above 25 MB; checking first avoids
+    // reading a multi-gigabyte file into memory only to have the request refused.
+    const MAX_TRANSCRIBE_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| Error::Tool(format!("Failed to stat audio file: {}", e)))?
+        .len();
+    if file_size > MAX_TRANSCRIBE_UPLOAD_BYTES {
+        return Err(Error::Tool(format!(
+            "audio file is {} bytes, above the {} byte limit of the transcription API; \
+             split or compress it first",
+            file_size, MAX_TRANSCRIBE_UPLOAD_BYTES
+        )));
+    }
+
     // Read file
     let file_bytes = std::fs::read(path)
         .map_err(|e| Error::Tool(format!("Failed to read audio file: {}", e)))?;

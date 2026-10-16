@@ -3,8 +3,44 @@ use calamine::{open_workbook_auto, Data, Reader};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+/// Upper bound for a single decompressed OOXML part. Office files are ZIP archives, and
+/// a high-ratio document would otherwise expand into gigabytes ("zip bomb").
+const MAX_OOXML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bound on the number of slides we walk in one presentation.
+const MAX_PPTX_SLIDES: usize = 500;
+/// Upper bound for the on-disk size of a spreadsheet handed to calamine (which loads
+/// the whole workbook into memory).
+const MAX_EXCEL_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Read a ZIP entry into a String, refusing anything that decompresses past
+/// [`MAX_OOXML_ENTRY_BYTES`].
+fn read_zip_entry(entry: &mut impl Read, name: &str) -> Result<String> {
+    let mut buffer = Vec::new();
+    entry
+        .take(MAX_OOXML_ENTRY_BYTES + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|e| Error::Tool(format!("Failed to read {}: {}", name, e)))?;
+    if buffer.len() as u64 > MAX_OOXML_ENTRY_BYTES {
+        return Err(Error::Tool(format!(
+            "{} exceeds the {} byte decompression limit",
+            name, MAX_OOXML_ENTRY_BYTES
+        )));
+    }
+    String::from_utf8(buffer).map_err(|e| Error::Tool(format!("{} is not valid UTF-8: {}", name, e)))
+}
+
 /// Read an Excel file (.xlsx, .xls) and return its content as text.
 pub fn read_excel(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)
+        .map_err(|e| Error::Tool(format!("Failed to stat Excel file: {}", e)))?
+        .len();
+    if size > MAX_EXCEL_FILE_BYTES {
+        return Err(Error::Tool(format!(
+            "Excel file is {} bytes, above the {} byte limit",
+            size, MAX_EXCEL_FILE_BYTES
+        )));
+    }
+
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| Error::Tool(format!("Failed to open Excel file: {}", e)))?;
 
@@ -81,15 +117,12 @@ pub fn read_docx(path: &Path) -> Result<String> {
         .map_err(|e| Error::Tool(format!("Failed to read docx as ZIP: {}", e)))?;
 
     // The main document content is in word/document.xml
-    let mut xml_content = String::new();
-    {
+    let xml_content = {
         let mut doc_file = archive
             .by_name("word/document.xml")
             .map_err(|e| Error::Tool(format!("Failed to find document.xml in docx: {}", e)))?;
-        doc_file
-            .read_to_string(&mut xml_content)
-            .map_err(|e| Error::Tool(format!("Failed to read document.xml: {}", e)))?;
-    }
+        read_zip_entry(&mut doc_file, "word/document.xml")?
+    };
 
     extract_text_from_xml(&xml_content, "w:t")
 }
@@ -113,6 +146,13 @@ pub fn read_pptx(path: &Path) -> Result<String> {
         }
     }
     slide_names.sort();
+    if slide_names.len() > MAX_PPTX_SLIDES {
+        return Err(Error::Tool(format!(
+            "presentation has {} slides, above the {} slide limit",
+            slide_names.len(),
+            MAX_PPTX_SLIDES
+        )));
+    }
 
     let mut output = String::new();
     for (idx, slide_name) in slide_names.iter().enumerate() {
@@ -121,15 +161,12 @@ pub fn read_pptx(path: &Path) -> Result<String> {
         }
         output.push_str(&format!("## Slide {}\n\n", idx + 1));
 
-        let mut xml_content = String::new();
-        {
+        let xml_content = {
             let mut slide_file = archive
                 .by_name(slide_name)
                 .map_err(|e| Error::Tool(format!("Failed to read {}: {}", slide_name, e)))?;
-            slide_file
-                .read_to_string(&mut xml_content)
-                .map_err(|e| Error::Tool(format!("Failed to read slide XML: {}", e)))?;
-        }
+            read_zip_entry(&mut slide_file, slide_name)?
+        };
 
         match extract_text_from_xml(&xml_content, "a:t") {
             Ok(text) => output.push_str(&text),
