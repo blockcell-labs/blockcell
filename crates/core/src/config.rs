@@ -376,6 +376,135 @@ where
     write_text_atomic_durable(path, &content)
 }
 
+/// Placeholder substituted for secret values in API responses and CLI output.
+///
+/// The same constant doubles as the "leave unchanged" marker on the write path: a
+/// client that received the mask may send it back without wiping the real secret
+/// (see [`restore_masked_secrets`]).
+pub const SECRET_MASK: &str = "********";
+
+/// Whether a config key names a credential that must never be echoed verbatim.
+///
+/// Matching is name-based and therefore approximate: `key`-suffixed names plus a few
+/// well-known markers. A false positive only hides a non-secret value from display.
+pub fn is_secret_key(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    const SECRET_MARKERS: &[&str] = &[
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "privatekey",
+        "accesskey",
+        "signingkey",
+        "encryptkey",
+        "verificationkey",
+    ];
+    SECRET_MARKERS.iter().any(|marker| lowered.contains(marker)) || lowered.ends_with("key")
+}
+
+/// Replace every secret-looking value in `value` with [`SECRET_MASK`], in place.
+pub fn mask_secret_values(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if is_secret_key(key) {
+                    if !entry.is_null() {
+                        *entry = Value::String(SECRET_MASK.to_string());
+                    }
+                } else {
+                    mask_secret_values(entry);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                mask_secret_values(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Put stored secrets back where `incoming` still carries [`SECRET_MASK`].
+///
+/// Read endpoints mask credentials; when a client echoes that payload back, every
+/// masked leaf means "unchanged" and must be replaced with the value on disk instead
+/// of being persisted as the literal mask.
+pub fn restore_masked_secrets(current: &Value, incoming: &mut Value) {
+    // Checked before destructuring so the mutable borrow of `incoming` is free when
+    // the stored value is written back.
+    if incoming.as_str() == Some(SECRET_MASK) {
+        *incoming = current.clone();
+        return;
+    }
+
+    match incoming {
+        Value::Object(map) => {
+            let Value::Object(current_map) = current else {
+                return;
+            };
+            for (key, value) in map.iter_mut() {
+                if let Some(stored) = current_map.get(key) {
+                    restore_masked_secrets(stored, value);
+                }
+            }
+        }
+        Value::Array(items) => {
+            let Value::Array(current_items) = current else {
+                return;
+            };
+            for (stored, value) in current_items.iter().zip(items.iter_mut()) {
+                restore_masked_secrets(stored, value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod secret_masking_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn masks_credentials_and_keeps_other_values() {
+        let mut value = json!({
+            "providers": {"openai": {"apiKey": "sk-real", "api_base": "https://api.openai.com/v1"}},
+            "channels": {"telegram": {"token": "123:abc", "proxy": "socks5://127.0.0.1:7890"}},
+            "agents": {"defaults": {"model": "gpt-5"}}
+        });
+
+        mask_secret_values(&mut value);
+
+        assert_eq!(value["providers"]["openai"]["apiKey"], json!(SECRET_MASK));
+        assert_eq!(
+            value["providers"]["openai"]["api_base"],
+            json!("https://api.openai.com/v1")
+        );
+        assert_eq!(value["channels"]["telegram"]["token"], json!(SECRET_MASK));
+        assert_eq!(
+            value["channels"]["telegram"]["proxy"],
+            json!("socks5://127.0.0.1:7890")
+        );
+        assert_eq!(value["agents"]["defaults"]["model"], json!("gpt-5"));
+    }
+
+    #[test]
+    fn restore_puts_stored_secrets_back_for_masked_entries() {
+        let current = json!({"providers": {"openai": {"apiKey": "sk-real"}}});
+        let mut incoming =
+            json!({"providers": {"openai": {"apiKey": SECRET_MASK, "model": "gpt-5"}}});
+
+        restore_masked_secrets(&current, &mut incoming);
+
+        assert_eq!(incoming["providers"]["openai"]["apiKey"], json!("sk-real"));
+        assert_eq!(incoming["providers"]["openai"]["model"], json!("gpt-5"));
+    }
+}
+
 #[cfg(windows)]
 fn replace_file_atomic_durable(tmp_path: &Path, path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;

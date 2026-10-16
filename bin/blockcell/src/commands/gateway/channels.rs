@@ -263,7 +263,43 @@ pub(super) async fn handle_channels_list(State(state): State<GatewayState>) -> i
             ]
         }
     ]);
-    Json(serde_json::json!({ "channels": channels }))
+
+    // Never echo channel credentials back over HTTP: mask every field the payload
+    // itself marks as secret. `apply_channel_fields` treats the mask as "unchanged".
+    let mut payload = serde_json::json!({ "channels": channels });
+    mask_secret_channel_fields(&mut payload);
+    Json(payload)
+}
+
+/// Replace the value of every field flagged `"secret": true` with the shared mask.
+fn mask_secret_channel_fields(payload: &mut serde_json::Value) {
+    let Some(channels) = payload
+        .get_mut("channels")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for channel in channels {
+        let Some(fields) = channel
+            .get_mut("fields")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for field in fields {
+            if field.get("secret").and_then(|value| value.as_bool()) != Some(true) {
+                continue;
+            }
+            let Some(value) = field.get_mut("value") else {
+                continue;
+            };
+            // An empty value carries no secret; leaving it empty keeps the UI honest.
+            if value.as_str().is_some_and(|text| !text.is_empty()) {
+                *value =
+                    serde_json::Value::String(blockcell_core::config::SECRET_MASK.to_string());
+            }
+        }
+    }
 }
 
 /// PUT /v1/channels/:id — update channel config fields
@@ -291,6 +327,10 @@ fn apply_channel_fields(
         .ok_or_else(|| anyhow::anyhow!("invalid channel config for '{}'", channel_id))?;
 
     for (key, value) in fields {
+        // A masked value coming back from the UI means "keep the stored secret".
+        if value.as_str() == Some(blockcell_core::config::SECRET_MASK) {
+            continue;
+        }
         let coerced = match key.as_str() {
             "proxy" => match value.as_str().unwrap_or("") {
                 "" => serde_json::Value::Null,

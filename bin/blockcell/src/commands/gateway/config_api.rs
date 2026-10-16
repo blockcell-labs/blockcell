@@ -17,10 +17,12 @@ fn load_config_value_or_state(state: &GatewayState) -> serde_json::Value {
 // P1: Config management endpoints
 // ---------------------------------------------------------------------------
 
-/// GET /v1/config — get config (returns plaintext API keys)
+/// GET /v1/config — get config with credentials masked.
 /// Always reads from disk so edits via PUT are immediately reflected.
 pub(super) async fn handle_config_get(State(state): State<GatewayState>) -> impl IntoResponse {
-    Json(load_config_value_or_state(&state))
+    let mut value = load_config_value_or_state(&state);
+    blockcell_core::config::mask_secret_values(&mut value);
+    Json(value)
 }
 
 /// GET /v1/config/raw — get raw config.json5 text
@@ -58,7 +60,13 @@ pub(super) async fn handle_config_update(
     let _config_guard = state.config_write_lock.lock().await;
     let config_path = state.paths.config_file();
 
-    match serde_json::from_value::<Config>(req.config) {
+    // The read endpoint masks credentials; a client echoing the mask back means
+    // "keep the stored value", so restore them from disk before applying.
+    let current = load_config_value_or_state(&state);
+    let mut incoming = req.config;
+    blockcell_core::config::restore_masked_secrets(&current, &mut incoming);
+
+    match serde_json::from_value::<Config>(incoming) {
         Ok(new_config) => match new_config.save(&config_path) {
             Ok(_) => Json(
                 serde_json::json!({ "status": "ok", "message": "Config updated. Restart gateway to apply changes." }),

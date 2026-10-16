@@ -1,7 +1,7 @@
 use blockcell_core::{
     config::{
-        parse_json5_value, parse_json5_value_preserving_env, stringify_json5_pretty,
-        write_json5_pretty,
+        is_secret_key, mask_secret_values, parse_json5_value, parse_json5_value_preserving_env,
+        stringify_json5_pretty, write_json5_pretty, SECRET_MASK,
     },
     Config, Paths,
 };
@@ -11,7 +11,9 @@ use serde_json::Value;
 pub async fn show() -> anyhow::Result<()> {
     let paths = Paths::new();
     let config = Config::load_or_default(&paths)?;
-    let json = serde_json::to_value(&config)?;
+    let mut json = serde_json::to_value(&config)?;
+    // Never print credentials: this output lands in terminals, logs and bug reports.
+    mask_secret_values(&mut json);
 
     println!();
     println!("📋 Current Configuration");
@@ -243,7 +245,11 @@ pub async fn get(key: &str) -> anyhow::Result<()> {
     let value = resolve_json_path(&json, key);
     match value {
         Some(v) => {
-            if v.is_string() {
+            // Mask credentials even when asked for one explicitly: otherwise the value
+            // ends up in terminals, logs and shell history.
+            if is_secret_key(key) {
+                println!("{}", SECRET_MASK);
+            } else if v.is_string() {
                 println!("{}", v.as_str().unwrap());
             } else {
                 println!("{}", serde_json::to_string_pretty(&v)?);
