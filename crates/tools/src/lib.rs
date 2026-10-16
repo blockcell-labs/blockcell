@@ -96,6 +96,73 @@ pub fn safe_truncate(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
+/// Escape a value for interpolation into a single- or double-quoted Python string
+/// literal. External input must never be spliced into generated Python source raw.
+pub fn escape_python_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Reduce an externally supplied file name to a single safe path component.
+///
+/// Strips directory separators and traversal segments; falls back to `file` when
+/// nothing usable remains. Used for media/attachment names that originate from IM
+/// platforms or LLM tool arguments.
+pub fn safe_file_name(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or("").trim();
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(test)]
+mod escaping_tests {
+    use super::*;
+
+    #[test]
+    fn python_literals_cannot_be_broken_out_of() {
+        assert_eq!(escape_python_string("a'b"), "a\\'b");
+        assert_eq!(escape_python_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_python_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_python_string("a\nb"), "a\\nb");
+        assert_eq!(
+            escape_python_string("zh',__import__('os')"),
+            "zh\\',__import__(\\'os\\')"
+        );
+    }
+
+    #[test]
+    fn file_names_are_reduced_to_one_component() {
+        assert_eq!(
+            safe_file_name("../../.ssh/authorized_keys"),
+            "authorized_keys"
+        );
+        assert_eq!(safe_file_name("C:\\temp\\evil.sh"), "evil.sh");
+        assert_eq!(safe_file_name(".."), "file");
+        assert_eq!(safe_file_name(""), "file");
+        assert_eq!(safe_file_name("报告.pdf"), "报告.pdf");
+    }
+}
+
 /// Sender handle for outbound messages (used by message tool).
 pub type OutboundSender = mpsc::Sender<OutboundMessage>;
 

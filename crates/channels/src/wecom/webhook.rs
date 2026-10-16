@@ -89,9 +89,9 @@ pub(crate) async fn download_and_decrypt_longconn_media(
         .unwrap_or_else(|| ext_from_content_type(&content_type, media_type).to_string());
     let filename = format!(
         "wecom_long_{}_{}.{}",
-        media_type,
+        crate::security::safe_path_component(media_type),
         chrono::Utc::now().timestamp_millis(),
-        ext
+        crate::security::safe_path_component(&ext)
     );
     let path = media_dir.join(filename);
     tokio::fs::write(&path, &plain)
@@ -433,18 +433,28 @@ pub async fn process_webhook(
         .map(|s| s.as_str())
         .unwrap_or("");
 
-    if !wecom_cfg.callback_token.is_empty()
-        && !msg_encrypt.is_empty()
-        && !verify_signature_4(
+    // Fail closed: once a callback token is configured, every POST must carry an
+    // encrypted payload with a valid signature. A missing <Encrypt> tag must not
+    // silently downgrade to parsing an unverified plaintext body.
+    if !wecom_cfg.callback_token.is_empty() {
+        if msg_encrypt.is_empty() {
+            tracing::warn!("WeCom webhook: POST missing <Encrypt>, rejecting unverified body");
+            return (403, "Forbidden: missing encrypted payload".to_string());
+        }
+        if !verify_signature_4(
             &wecom_cfg.callback_token,
             timestamp,
             nonce,
             &msg_encrypt,
             msg_signature,
-        )
-    {
-        tracing::warn!("WeCom webhook: POST signature verification failed");
-        return (403, "Forbidden: invalid signature".to_string());
+        ) {
+            tracing::warn!("WeCom webhook: POST signature verification failed");
+            return (403, "Forbidden: invalid signature".to_string());
+        }
+    } else {
+        tracing::warn!(
+            "WeCom webhook: callback_token not configured; accepting unverified POST body"
+        );
     }
 
     // Decrypt the message body
@@ -456,6 +466,12 @@ pub async fn process_webhook(
                 return (200, "success".to_string());
             }
         }
+    } else if !wecom_cfg.callback_token.is_empty() {
+        // Token configured but no AES key: refuse to fall back to plaintext parsing.
+        tracing::error!(
+            "WeCom webhook: encoding_aes_key not configured, cannot decrypt verified payload"
+        );
+        return (403, "Forbidden: encryption key not configured".to_string());
     } else {
         // No encryption configured — treat body as plain XML
         body.to_string()

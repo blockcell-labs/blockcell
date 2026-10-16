@@ -41,25 +41,22 @@ const QQ_FILE_CDN_PATTERNS: &[&str] = &[
 pub fn detect_url_type(url: &str, config: &NapCatConfig) -> UrlDetectionResult {
     // 1. Check for Base64 data
     if url.starts_with("base64://") {
-        debug!(
-            url_prefix = &url[..20.min(url.len())],
-            "Detected Base64 data URL"
-        );
+        let url_prefix: String = url.chars().take(20).collect();
+        debug!(url_prefix = %url_prefix, "Detected Base64 data URL");
         return UrlDetectionResult::simple(UrlType::Base64Data, DownloadStrategy::DecodeBase64);
     }
 
     // 2. Check for local file path
     if url.starts_with("file:///") || url.starts_with("file://") {
-        debug!(
-            url_prefix = &url[..20.min(url.len())],
-            "Detected local file URL"
-        );
+        let url_prefix: String = url.chars().take(20).collect();
+        debug!(url_prefix = %url_prefix, "Detected local file URL");
         return UrlDetectionResult::simple(UrlType::LocalPath, DownloadStrategy::ReadLocalFile);
     }
 
     // 3. Check for data URI (data:image/png;base64,...)
     if url.starts_with("data:") {
-        debug!(url_prefix = &url[..20.min(url.len())], "Detected data URI");
+        let url_prefix: String = url.chars().take(20).collect();
+        debug!(url_prefix = %url_prefix, "Detected data URI");
         return UrlDetectionResult::simple(UrlType::Base64Data, DownloadStrategy::DecodeBase64);
     }
 

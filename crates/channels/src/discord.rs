@@ -390,7 +390,13 @@ impl DiscordChannel {
             .await
             .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
-        let filename = format!("discord_{}_{}", &attachment.id, &attachment.filename);
+        // attachment.id / filename come from the platform payload: sanitize both
+        // so a crafted name cannot escape the media directory.
+        let filename = format!(
+            "discord_{}_{}",
+            crate::security::safe_path_component(&attachment.id),
+            crate::security::safe_path_component(&attachment.filename)
+        );
         let path = self.media_dir.join(&filename);
 
         let bytes =

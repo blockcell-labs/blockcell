@@ -451,6 +451,9 @@ pub async fn download_media_to_workspace(
             format!("media_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"))
         }
     });
+    // filename / chat_id are LLM- or platform-supplied: reduce them to safe path
+    // components so they cannot escape the downloads directory.
+    let filename = crate::safe_file_name(&filename);
 
     // Expand workspace path if it starts with ~
     let workspace_dir = if workspace.starts_with('~') {
@@ -471,7 +474,7 @@ pub async fn download_media_to_workspace(
             .strip_prefix("user:")
             .or_else(|| cid.strip_prefix("group:"))
             .unwrap_or(cid);
-        format!("{}_{}", date_str, id_part)
+        format!("{}_{}", date_str, crate::safe_file_name(id_part))
     } else {
         date_str.clone()
     };

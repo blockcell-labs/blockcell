@@ -728,8 +728,15 @@ impl DingTalkChannel {
             .await
             .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
-        let safe_code = &download_code[..download_code.len().min(16)];
-        let filename = format!("dingtalk_{}_{}.{}", media_type, safe_code, ext);
+        // download_code / media_type / ext are externally influenced: truncate on a
+        // char boundary and sanitize so the name cannot escape the media directory.
+        let safe_code: String = download_code.chars().take(16).collect();
+        let filename = format!(
+            "dingtalk_{}_{}.{}",
+            crate::security::safe_path_component(media_type),
+            crate::security::safe_path_component(&safe_code),
+            crate::security::safe_path_component(ext)
+        );
         let file_path = media_dir.join(&filename);
 
         let bytes = file_resp

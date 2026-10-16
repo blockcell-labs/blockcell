@@ -656,12 +656,18 @@ async fn download_lark_resource(
         .await
         .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
-    let safe_key = resource_key.replace(['/', '\\', ':'], "_");
+    // resource_key / resource_type / ext are platform supplied: truncate on a char
+    // boundary and sanitize every component so the name cannot escape media_dir.
+    let safe_key: String = resource_key
+        .replace(['/', '\\', ':'], "_")
+        .chars()
+        .take(24)
+        .collect();
     let filename = format!(
         "lark_{}_{}.{}",
-        resource_type,
-        &safe_key[..safe_key.len().min(24)],
-        ext
+        crate::security::safe_path_component(resource_type),
+        crate::security::safe_path_component(&safe_key),
+        crate::security::safe_path_component(ext)
     );
     let file_path = media_dir.join(&filename);
 

@@ -149,10 +149,8 @@ impl MediaDownloader for Base64DataDownloader {
         let start_time = Instant::now();
         let url = &request.source;
 
-        debug!(
-            url_prefix = &url[..50.min(url.len())],
-            "Processing base64 data URL"
-        );
+        let url_prefix: String = url.chars().take(50).collect();
+        debug!(url_prefix = %url_prefix, "Processing base64 data URL");
 
         // Decode the base64 data
         let (data, mime_type) = Self::decode_data_url(url)?;

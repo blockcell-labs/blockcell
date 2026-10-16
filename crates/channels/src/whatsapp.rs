@@ -345,9 +345,14 @@ impl WhatsAppChannel {
                 _ => "bin",
             });
 
-        let stem = filename
-            .map(|n| n.rsplit('.').nth(1).unwrap_or(n).to_string())
-            .unwrap_or_else(|| format!("whatsapp_{}", media_type));
+        // Sanitize the platform-supplied stem and extension: they are attacker
+        // controlled and must never carry path separators or `..` segments.
+        let stem = crate::security::safe_path_component(
+            &filename
+                .map(|n| n.rsplit('.').nth(1).unwrap_or(n).to_string())
+                .unwrap_or_else(|| format!("whatsapp_{}", media_type)),
+        );
+        let ext = crate::security::safe_path_component(ext);
 
         let fname = format!("{}_{}.{}", stem, chrono::Utc::now().timestamp_millis(), ext);
         let path = self.media_dir.join(&fname);

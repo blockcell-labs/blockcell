@@ -119,13 +119,15 @@ impl MediaDownloader for LocalFileDownloader {
             .strip_prefix("user:")
             .or_else(|| request.chat_id.strip_prefix("group:"))
             .unwrap_or(&request.chat_id);
-        let subdir_name = format!("{}_{}", date_str, id_part);
+        // chat_id / filename are platform supplied: reduce both to safe path
+        // components so they cannot escape the media directory.
+        let subdir_name = format!("{}_{}", date_str, crate::security::safe_path_component(id_part));
 
         let dest_dir = Path::new(&workspace_dir)
             .join(&request.config.media_download_dir)
             .join(&subdir_name);
 
-        let dest_path = dest_dir.join(&filename);
+        let dest_path = dest_dir.join(crate::security::safe_path_component(&filename));
 
         // Copy file to destination
         let copied = Self::copy_file(src_path, &dest_path).await?;

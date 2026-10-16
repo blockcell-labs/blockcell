@@ -124,6 +124,17 @@ pub(crate) async fn validate_public_http_url(value: &str) -> Result<Url> {
             "Private media URL target is not allowed".to_string(),
         ));
     }
+    // Reject IP literals deterministically instead of relying on DNS: `host_str()`
+    // keeps the brackets for IPv6, so strip them before parsing. Without this the
+    // loopback/link-local verdict depends on the host resolver's behaviour.
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if is_forbidden_ip(ip) {
+            return Err(Error::Channel(
+                "Private media URL target is not allowed".to_string(),
+            ));
+        }
+    }
     let port = url.port_or_known_default().unwrap_or(80);
     let addresses: Vec<_> = tokio::net::lookup_host((host, port))
         .await

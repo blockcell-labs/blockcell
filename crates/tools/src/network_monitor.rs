@@ -363,6 +363,42 @@ fn guess_service(port: u16) -> &'static str {
 
 // ─── SSL Check ──────────────────────────────────────────────────────────────
 
+/// Pipe a PEM blob through `openssl x509 -noout …` without invoking a shell.
+async fn openssl_x509_summary(pem: &[u8]) -> Result<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = tokio::process::Command::new("openssl")
+        .args([
+            "x509",
+            "-noout",
+            "-subject",
+            "-issuer",
+            "-dates",
+            "-serial",
+            "-fingerprint",
+            "-ext",
+            "subjectAltName",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| Error::Tool(format!("openssl x509 failed: {}", e)))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        // openssl may exit early when there is no certificate; ignore write errors
+        // and let the (empty) stdout path below report the failure.
+        let _ = stdin.write_all(pem).await;
+        drop(stdin);
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| Error::Tool(format!("openssl x509 failed: {}", e)))?;
+    Ok(output.stdout)
+}
+
 async fn action_ssl_check(params: &Value) -> Result<Value> {
     let host = params
         .get("host")
@@ -371,20 +407,22 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
     let port = params.get("port").and_then(|v| v.as_u64()).unwrap_or(443);
     let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
 
-    // Use openssl s_client to get certificate info
-    let cmd = format!(
-        "echo | openssl s_client -connect {}:{} -servername {} 2>/dev/null | openssl x509 -noout -subject -issuer -dates -serial -fingerprint -ext subjectAltName 2>/dev/null",
-        host, port, host
-    );
-
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
+    // Invoke openssl directly (no shell): host/port are caller supplied and must
+    // never be interpreted as shell syntax.
+    let s_client = tokio::process::Command::new("openssl")
+        .arg("s_client")
+        .arg("-connect")
+        .arg(format!("{}:{}", host, port))
+        .arg("-servername")
+        .arg(host)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .output()
         .await
         .map_err(|e| Error::Tool(format!("openssl failed: {}", e)))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let x509_summary = openssl_x509_summary(&s_client.stdout).await?;
+    let stdout = String::from_utf8_lossy(&x509_summary).to_string();
 
     if stdout.trim().is_empty() {
         return Err(Error::Tool(format!(
@@ -438,14 +476,15 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
         }
     }
 
-    // Also check TLS version
-    let tls_cmd = format!(
-        "echo | openssl s_client -connect {}:{} -servername {} 2>/dev/null | grep 'Protocol\\|Cipher'",
-        host, port, host
-    );
-    if let Ok(tls_output) = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&tls_cmd)
+    // Also check TLS version (same direct-invocation rule as above)
+    if let Ok(tls_output) = tokio::process::Command::new("openssl")
+        .arg("s_client")
+        .arg("-connect")
+        .arg(format!("{}:{}", host, port))
+        .arg("-servername")
+        .arg(host)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .output()
         .await
     {

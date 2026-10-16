@@ -73,11 +73,14 @@ pub(crate) async fn download_wecom_media(
         .await
         .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
+    // media_id is caller/platform supplied: truncate on a char boundary and
+    // sanitize every component so it cannot escape media_dir or panic on slicing.
+    let id_prefix: String = media_id.chars().take(16).collect();
     let filename = format!(
         "wecom_{}_{}.{}",
-        media_type,
-        &media_id[..media_id.len().min(16)],
-        ext
+        crate::security::safe_path_component(media_type),
+        crate::security::safe_path_component(&id_prefix),
+        crate::security::safe_path_component(&ext)
     );
     let file_path = media_dir.join(&filename);
 

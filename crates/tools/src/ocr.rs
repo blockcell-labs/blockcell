@@ -233,7 +233,7 @@ async fn ocr_vision(path: &str, language: Option<&str>) -> Result<String> {
             "[{}]",
             mapped
                 .iter()
-                .map(|l| format!("'{}'", l))
+                .map(|l| format!("'{}'", crate::escape_python_string(l)))
                 .collect::<Vec<_>>()
                 .join(",")
         )
@@ -276,7 +276,7 @@ if results:
         if candidates:
             print(candidates[0].string())
 "#,
-        path = path.replace('\'', "\\'"),
+        path = crate::escape_python_string(path),
         lang_array = lang_array
     );
 

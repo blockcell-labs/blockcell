@@ -526,11 +526,14 @@ impl FeishuChannel {
             .await
             .map_err(|e| Error::Channel(format!("Failed to create media dir: {}", e)))?;
 
+        // file_key may contain multi-byte characters: truncate on char boundary and
+        // sanitize all components so they cannot escape the media directory.
+        let key_prefix: String = file_key.chars().take(8).collect();
         let filename = format!(
             "feishu_{}_{}.{}",
-            file_type,
-            &file_key[..8.min(file_key.len())],
-            ext
+            crate::security::safe_path_component(file_type),
+            crate::security::safe_path_component(&key_prefix),
+            crate::security::safe_path_component(ext)
         );
         let path = self.media_dir.join(&filename);
 

@@ -768,7 +768,10 @@ fn parse_email_body(
                     });
 
                     if let Some(dir) = save_dir {
-                        let save_path = expand_path(dir, workspace).join(&filename);
+                        // The attachment name comes from the message and is fully
+                        // attacker controlled: reduce it to one path component.
+                        let save_path =
+                            expand_path(dir, workspace).join(crate::safe_file_name(&filename));
                         if let Some(parent) = save_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }

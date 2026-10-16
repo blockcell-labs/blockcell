@@ -367,7 +367,7 @@ for w in wl:
             print(w.get(Quartz.kCGWindowNumber, 0))
             sys.exit(0)
 print("")"#,
-        app.replace('"', "\\\"")
+        crate::escape_python_string(app)
     );
 
     let output = Command::new("python3")
@@ -783,7 +783,9 @@ delay 0.2"#,
         if i > 0 {
             element_ref.push_str(" of ");
         }
-        element_ref.push_str(part);
+        // ui_path is caller supplied: escape before splicing into AppleScript so it
+        // cannot break out of the element reference (e.g. `(do shell script "...")`).
+        element_ref.push_str(&escape_applescript(part));
     }
     element_ref.push_str(" of window 1");
 
