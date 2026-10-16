@@ -1,4 +1,4 @@
-use blockcell_core::{Paths, Result};
+use blockcell_core::{Error, Paths, Result};
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -339,6 +339,16 @@ impl AuditLogger {
         if let Some(parent) = log_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Cross-process exclusion: the process-local mutex above cannot stop another
+        // blockcell process (gateway + CLI) from appending to the same log with a stale
+        // `prev_hash`, which silently breaks the hash chain.
+        let _cross_process_guard = crate::file_lock::lock_exclusive(&log_file).map_err(|error| {
+            Error::Storage(format!(
+                "failed to lock audit log {}: {error}",
+                log_file.display()
+            ))
+        })?;
 
         self.recover_prev_hash();
 

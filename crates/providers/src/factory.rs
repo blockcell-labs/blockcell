@@ -14,6 +14,7 @@ pub(crate) fn default_api_base(provider_name: &str) -> &'static str {
         "deepseek" => "https://api.deepseek.com/v1",
         "groq" => "https://api.groq.com/openai/v1",
         "zhipu" | "glm" => "https://open.bigmodel.cn/api/paas/v4",
+        "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
         "kimi" | "moonshot" => "https://api.moonshot.cn/v1",
         "qwen" => "https://api.qwen.ai/v1",
         "xai" => "https://api.x.ai/v1",
@@ -192,16 +193,18 @@ pub fn create_provider_with_tool_mode(
             global_proxy,
             no_proxy,
         )?) as Box<dyn Provider>),
-        "gemini" => Ok(Box::new(GeminiProvider::new_with_proxy(
-            &resolved_cfg.api_key,
-            resolved_cfg.api_base.as_deref(),
-            model,
-            max_tokens,
-            temperature,
-            provider_proxy,
-            global_proxy,
-            no_proxy,
-        )?) as Box<dyn Provider>),
+        "gemini" if resolved_cfg.api_type == "gemini" => {
+            Ok(Box::new(GeminiProvider::new_with_proxy(
+                &resolved_cfg.api_key,
+                resolved_cfg.api_base.as_deref(),
+                model,
+                max_tokens,
+                temperature,
+                provider_proxy,
+                global_proxy,
+                no_proxy,
+            )?) as Box<dyn Provider>)
+        }
         "ollama" => {
             let api_base = resolved_cfg
                 .api_base
