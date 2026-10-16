@@ -7394,3 +7394,110 @@ async fn fork_for_message_task_preserves_session_memory_system_across_messages()
     assert_eq!(reused.skill_tracker().get_recent_skills(1000).len(), 1);
     msg_runtime_2.memory_system = Some(reused);
 }
+
+#[test]
+fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runtime() {
+    let parent = test_runtime();
+    let skills_dir = parent.paths.skills_dir();
+    std::fs::create_dir_all(&skills_dir).expect("create skills_dir");
+
+    let write_skill_md = |name: &str, desc: &str, body: &str| {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        std::fs::write(
+            dir.join("meta.yaml"),
+            format!("name: {name}\ndescription: {desc}\n"),
+        )
+        .expect("write meta.yaml");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {desc}\n---\n\n{body}\n"),
+        )
+        .expect("write SKILL.md");
+    };
+
+    // 路径 1: 主轮通过 skill_manage 写入并触发 reload_skills() → 下一条派生消息立即可见
+    {
+        let (s1, tx1) = SteeringChannel::new(4);
+        let mut msg1 = parent.fork_for_message_task(s1, tx1, parent.abort_token.child());
+        write_skill_md("skill_via_manage", "created by skill_manage", "Step 1: run manage");
+        let added = msg1.context_builder.reload_skills();
+        assert!(added.contains(&"skill_via_manage".to_string()));
+    }
+    {
+        let (s2, tx2) = SteeringChannel::new(4);
+        let msg2 = parent.fork_for_message_task(s2, tx2, parent.abort_token.child());
+        assert!(
+            msg2.context_builder
+                .skill_manager()
+                .unwrap()
+                .get("skill_via_manage")
+                .is_some(),
+            "path 1 (skill_manage) must be visible in next forked runtime without rescanning"
+        );
+        assert!(
+            msg2.context_builder
+                .skill_index_summary_arc()
+                .read()
+                .unwrap()
+                .as_deref()
+                .unwrap_or_default()
+                .contains("skill_via_manage"),
+            "path 1 should also refresh shared skill_index_summary"
+        );
+    }
+
+    // 路径 2: 后台 Nudge Review 异步更新 skill_index_summary_arc → 下一条派生消息立即可见
+    {
+        let (s1, tx1) = SteeringChannel::new(4);
+        let msg1 = parent.fork_for_message_task(s1, tx1, parent.abort_token.child());
+        let arc = msg1.context_builder.skill_index_summary_arc();
+        *arc.write().unwrap() = Some("- skill_via_background_review: learned in review".to_string());
+    }
+    {
+        let (s2, tx2) = SteeringChannel::new(4);
+        let msg2 = parent.fork_for_message_task(s2, tx2, parent.abort_token.child());
+        let summary = msg2
+            .context_builder
+            .skill_index_summary_arc()
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        assert!(summary.contains("skill_via_background_review"));
+    }
+
+    // 路径 3: 技能自进化部署（invalidate_prompt_snapshot + 更新 SKILL.md）→ 下一条消息 reload 后可见最新内容
+    write_skill_md("skill_via_manage", "evolved description v2", "Step 1: evolved body v2");
+    blockcell_skills::SkillManager::invalidate_prompt_snapshot(&parent.paths)
+        .expect("invalidate prompt snapshot");
+    {
+        let (s3, tx3) = SteeringChannel::new(4);
+        let mut msg3 = parent.fork_for_message_task(s3, tx3, parent.abort_token.child());
+        let _ = msg3.context_builder.reload_skills();
+        let active = msg3
+            .context_builder
+            .resolve_active_skill_by_name("skill_via_manage", &HashSet::new())
+            .expect("resolve evolved skill");
+        assert!(active.prompt_md.contains("evolved body v2"));
+    }
+
+    // 路径 4: 用户手工在磁盘新增技能文件 → 下一条消息启动 reload_skills() 后可见并回写共享槽
+    write_skill_md("skill_via_manual_edit", "manually added by user", "Manual instructions");
+    {
+        let (s4, tx4) = SteeringChannel::new(4);
+        let mut msg4 = parent.fork_for_message_task(s4, tx4, parent.abort_token.child());
+        let added = msg4.context_builder.reload_skills();
+        assert!(added.contains(&"skill_via_manual_edit".to_string()));
+    }
+    {
+        let (s5, tx5) = SteeringChannel::new(4);
+        let msg5 = parent.fork_for_message_task(s5, tx5, parent.abort_token.child());
+        assert!(msg5
+            .context_builder
+            .skill_manager()
+            .unwrap()
+            .get("skill_via_manual_edit")
+            .is_some());
+    }
+}

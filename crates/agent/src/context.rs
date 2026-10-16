@@ -118,6 +118,8 @@ Use memory for durable facts about the user and environment.
 pub struct ContextBuilder {
     paths: Paths,
     skill_manager: Option<SkillManager>,
+    /// 跨消息共享的 SkillManager 快照，确保某条消息内热重载或配置更新后后续派生消息立即可见
+    shared_skill_manager: Arc<RwLock<Option<SkillManager>>>,
     ghost_learning_enabled: bool,
     memory_recall_enabled: bool,
     memory_recall_policy: MemoryRecallConfig,
@@ -364,9 +366,11 @@ impl ContextBuilder {
         skill_manager.set_openclaw_skill_enabled(config.openclaw_skill_enabled);
         let _ = skill_manager.load_from_paths(&paths);
 
+        let shared_skill_manager = Arc::new(RwLock::new(Some(skill_manager.clone())));
         Self {
             paths,
             skill_manager: Some(skill_manager),
+            shared_skill_manager,
             ghost_learning_enabled: config.memory.learning_system.enabled()
                 && config.agents.ghost.learning.capture_enabled(),
             memory_recall_enabled: config.agents.ghost.learning.recall_enabled(),
@@ -387,6 +391,12 @@ impl ContextBuilder {
 
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
+        let skill_manager = self
+            .shared_skill_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .or_else(|| self.skill_manager.clone());
         let memory_injector = self
             .shared_memory_injector
             .read()
@@ -395,7 +405,8 @@ impl Clone for ContextBuilder {
             .or_else(|| self.memory_injector.clone());
         Self {
             paths: self.paths.clone(),
-            skill_manager: self.skill_manager.clone(),
+            skill_manager,
+            shared_skill_manager: Arc::clone(&self.shared_skill_manager),
             ghost_learning_enabled: self.ghost_learning_enabled,
             memory_recall_enabled: self.memory_recall_enabled,
             memory_recall_policy: self.memory_recall_policy.clone(),
@@ -472,6 +483,10 @@ impl ContextBuilder {
     }
 
     pub fn set_skill_manager(&mut self, manager: SkillManager) {
+        *self
+            .shared_skill_manager
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
         self.skill_manager = Some(manager);
     }
 
@@ -550,6 +565,10 @@ impl ContextBuilder {
     pub fn sync_capabilities(&mut self, capability_ids: Vec<String>) {
         if let Some(ref mut manager) = self.skill_manager {
             manager.sync_capabilities(capability_ids);
+            *self
+                .shared_skill_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
         }
     }
 
@@ -576,6 +595,10 @@ impl ContextBuilder {
             if let Some(evo) = manager.evolution_service_mut() {
                 evo.set_llm_provider(provider);
             }
+            *self
+                .shared_skill_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
         }
     }
 
@@ -586,15 +609,25 @@ impl ContextBuilder {
             if let Some(evo) = manager.evolution_service_mut() {
                 evo.set_deploy_callback(callback);
             }
+            *self
+                .shared_skill_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
         }
     }
 
     /// Re-scan skill directories and pick up newly created skills.
     /// Returns the names of newly discovered skills.
     pub fn reload_skills(&mut self) -> Vec<String> {
-        if let Some(ref mut manager) = self.skill_manager {
+        let new_skills = if let Some(ref mut manager) = self.skill_manager {
             match manager.reload_skills(&self.paths) {
-                Ok(new_skills) => new_skills,
+                Ok(new_skills) => {
+                    *self
+                        .shared_skill_manager
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
+                    new_skills
+                }
                 Err(e) => {
                     tracing::warn!(error = ?e, "Failed to reload skills");
                     vec![]
@@ -602,7 +635,16 @@ impl ContextBuilder {
             }
         } else {
             vec![]
+        };
+        if !new_skills.is_empty() {
+            self.refresh_skill_index_summary();
+            self.session_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .system_prompt_snapshots
+                .clear();
         }
+        new_skills
     }
 
     /// Build system prompt with all content (legacy, no intent filtering).
