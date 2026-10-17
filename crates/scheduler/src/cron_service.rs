@@ -885,7 +885,7 @@ impl CronService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Timelike, Utc};
 
     #[derive(Clone, Default)]
     struct RecordingEmitter {
@@ -1351,5 +1351,199 @@ mod tests {
             ids,
             std::collections::HashSet::from(["first".to_string(), "second".to_string()])
         );
+    }
+
+    // ── Schedule computation (Every / At / Cron, timezone, DST) ────────────
+
+    fn job_with_schedule(schedule: crate::job::JobSchedule) -> CronJob {
+        let now_ms = Utc::now().timestamp_millis();
+        CronJob {
+            id: "job-schedule".to_string(),
+            name: "schedule test".to_string(),
+            enabled: true,
+            schedule,
+            payload: crate::job::JobPayload {
+                kind: "reminder".to_string(),
+                message: "tick".to_string(),
+                deliver: false,
+                channel: None,
+                to: None,
+                script_kind: None,
+                skill_name: None,
+            },
+            state: crate::job::JobState::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
+        }
+    }
+
+    fn at_schedule(at_ms: Option<i64>) -> crate::job::JobSchedule {
+        crate::job::JobSchedule {
+            kind: ScheduleKind::At,
+            at_ms,
+            every_ms: None,
+            expr: None,
+            tz: None,
+            run_immediately: false,
+        }
+    }
+
+    fn every_schedule(every_ms: Option<i64>, run_immediately: bool) -> crate::job::JobSchedule {
+        crate::job::JobSchedule {
+            kind: ScheduleKind::Every,
+            at_ms: None,
+            every_ms,
+            expr: None,
+            tz: None,
+            run_immediately,
+        }
+    }
+
+    fn cron_schedule(expr: &str) -> crate::job::JobSchedule {
+        crate::job::JobSchedule {
+            kind: ScheduleKind::Cron,
+            at_ms: None,
+            every_ms: None,
+            expr: Some(expr.to_string()),
+            tz: None,
+            run_immediately: false,
+        }
+    }
+
+    fn schedule_service() -> CronService {
+        let (tx, _rx) = mpsc::channel(1);
+        let base =
+            std::env::temp_dir().join(format!("blockcell-cron-sched-{}", uuid::Uuid::new_v4()));
+        CronService::new(Paths::with_base(base), tx)
+    }
+
+    #[test]
+    fn at_job_in_the_past_is_due_and_keeps_its_deadline() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut job = job_with_schedule(at_schedule(Some(now_ms - 1_000)));
+
+        assert!(service.calculate_next_run(&mut job, now_ms, None));
+        assert_eq!(job.state.next_run_at_ms, Some(now_ms - 1_000));
+    }
+
+    #[test]
+    fn at_job_in_the_future_is_not_due_yet() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut job = job_with_schedule(at_schedule(Some(now_ms + 60_000)));
+
+        assert!(!service.calculate_next_run(&mut job, now_ms, None));
+        assert_eq!(job.state.next_run_at_ms, Some(now_ms + 60_000));
+    }
+
+    #[test]
+    fn at_job_without_a_deadline_never_runs() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut job = job_with_schedule(at_schedule(None));
+
+        assert!(!service.calculate_next_run(&mut job, now_ms, None));
+        assert!(job.state.next_run_at_ms.is_none());
+    }
+
+    #[test]
+    fn every_job_honours_run_immediately_and_advances_the_clock() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+
+        let mut immediate = job_with_schedule(every_schedule(Some(60_000), true));
+        assert!(service.calculate_next_run(&mut immediate, now_ms, None));
+        assert_eq!(immediate.state.next_run_at_ms, Some(now_ms + 60_000));
+
+        let mut deferred = job_with_schedule(every_schedule(Some(60_000), false));
+        assert!(!service.calculate_next_run(&mut deferred, now_ms, None));
+        assert_eq!(deferred.state.next_run_at_ms, Some(now_ms + 60_000));
+    }
+
+    #[test]
+    fn every_job_without_an_interval_never_runs() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut job = job_with_schedule(every_schedule(None, true));
+
+        assert!(!service.calculate_next_run(&mut job, now_ms, None));
+        assert!(job.state.next_run_at_ms.is_none());
+    }
+
+    #[test]
+    fn cron_job_waits_for_its_first_scheduled_time() {
+        let service = schedule_service();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut job = job_with_schedule(cron_schedule("0 0 9 * * *"));
+
+        assert!(!service.calculate_next_run(&mut job, now_ms, None));
+
+        let next_ms = job
+            .state
+            .next_run_at_ms
+            .expect("next run must be scheduled");
+        assert!(next_ms > now_ms, "cron jobs wait for the next occurrence");
+        let utc = Utc.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!((utc.hour(), utc.minute(), utc.second()), (9, 0, 0));
+    }
+
+    #[test]
+    fn cron_expression_is_evaluated_in_the_configured_timezone() {
+        let service = schedule_service();
+        let shanghai = parse_timezone("Asia/Shanghai").unwrap();
+
+        let next_ms = service
+            .calculate_next_cron_run_ms("0 0 9 * * *", Some(&shanghai))
+            .expect("next 09:00 in Shanghai");
+
+        let local = shanghai.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!((local.hour(), local.minute(), local.second()), (9, 0, 0));
+
+        // 09:00 in UTC+8 is 01:00 UTC, so the timezone really drove the result.
+        let utc = Utc.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!(utc.hour(), 1);
+    }
+
+    #[test]
+    fn cron_schedule_tracks_dst_transitions_in_an_observing_zone() {
+        let service = schedule_service();
+        let new_york = parse_timezone("America/New_York").unwrap();
+
+        let next_ms = service
+            .calculate_next_cron_run_ms("0 0 12 * * *", Some(&new_york))
+            .expect("next noon in New York");
+
+        // Noon is never skipped by DST, so it must stay local noon.
+        let local = new_york.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!((local.hour(), local.minute()), (12, 0));
+
+        // New York is UTC-4 (EDT) or UTC-5 (EST) depending on the date.
+        let utc = Utc.timestamp_millis_opt(next_ms).unwrap();
+        assert!(
+            matches!(utc.hour(), 16 | 17),
+            "expected 16:00 or 17:00 UTC, got {}:00",
+            utc.hour()
+        );
+    }
+
+    #[test]
+    fn invalid_cron_expression_yields_no_schedule() {
+        let service = schedule_service();
+
+        assert!(service
+            .calculate_next_cron_run_ms("not a cron expression", None)
+            .is_none());
+        assert!(service.calculate_next_cron_run_ms("", None).is_none());
+    }
+
+    #[test]
+    fn parse_timezone_accepts_iana_names_and_rejects_unknown_zones() {
+        assert!(parse_timezone("UTC").is_some());
+        assert!(parse_timezone("Asia/Shanghai").is_some());
+        assert!(parse_timezone("America/New_York").is_some());
+        assert!(parse_timezone("Not/AZone").is_none());
+        assert!(parse_timezone("").is_none());
     }
 }
