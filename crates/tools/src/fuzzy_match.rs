@@ -529,27 +529,36 @@ fn line_similarity(a: &str, b: &str) -> f64 {
         return 0.0;
     }
 
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
+    let a_counts = char_counts(a);
+    similarity_against_counts(b, b.chars().count(), &a_counts)
+}
 
-    let max_len = a_chars.len().max(b_chars.len());
-
-    // 计算共同字符数
-    let mut a_counts: HashMap<char, usize> = HashMap::new();
-    for ch in &a_chars {
-        *a_counts.entry(*ch).or_insert(0) += 1;
+fn char_counts(s: &str) -> HashMap<char, usize> {
+    let mut counts: HashMap<char, usize> = HashMap::new();
+    for ch in s.chars() {
+        *counts.entry(ch).or_insert(0) += 1;
     }
-    let mut common = 0;
-    for ch in &b_chars {
-        if let Some(count) = a_counts.get_mut(ch) {
-            if *count > 0 {
-                *count -= 1;
-                common += 1;
-            }
-        }
-    }
+    counts
+}
 
-    // 重叠系数: common / max_len
+/// candidate 行与预计算的 expected 字符多重集的重叠系数。
+/// 供滑动窗口批量比较复用：needle 侧计数只构建一次，
+/// 每次比较仅为 candidate 建一份计数（原实现每比较一次分配 Vec<char>×2 + HashMap）。
+fn similarity_against_counts(
+    candidate: &str,
+    candidate_len: usize,
+    expected: &HashMap<char, usize>,
+) -> f64 {
+    let candidate_counts = char_counts(candidate);
+    let expected_len: usize = expected.values().sum();
+    let max_len = candidate_len.max(expected_len);
+    if max_len == 0 {
+        return 0.0;
+    }
+    let common: usize = candidate_counts
+        .iter()
+        .map(|(ch, c)| (*c).min(expected.get(ch).copied().unwrap_or(0)))
+        .sum();
     common as f64 / max_len as f64
 }
 
@@ -562,13 +571,21 @@ pub fn closest_line_context(content: &str, needle: &str, radius: usize) -> Optio
     }
 
     let window_size = needle_lines.len().min(content_lines.len());
+    // needle 侧逐行字符计数只构建一次，避免 O(content×needle) 重复分配
+    let needle_profiles: Vec<HashMap<char, usize>> = needle_lines
+        .iter()
+        .map(|line| char_counts(line.trim()))
+        .collect();
     let mut best_start = 0usize;
     let mut best_score = f64::NEG_INFINITY;
     for start in 0..=content_lines.len() - window_size {
         let score = content_lines[start..start + window_size]
             .iter()
-            .zip(needle_lines.iter())
-            .map(|(candidate, expected)| line_similarity(candidate.trim(), expected.trim()))
+            .zip(needle_profiles.iter())
+            .map(|(candidate, expected_counts)| {
+                let candidate = candidate.trim();
+                similarity_against_counts(candidate, candidate.chars().count(), expected_counts)
+            })
             .sum::<f64>()
             / window_size as f64;
         if score > best_score {
@@ -601,22 +618,34 @@ fn strategy_context_aware(content: &str, old_string: &str) -> Vec<MatchSpan> {
 
     let mut spans = Vec::new();
     let window_size = old_lines.len();
+    // needle 侧逐行字符计数只构建一次，避免 O(content×needle) 重复分配
+    let old_profiles: Vec<HashMap<char, usize>> = old_lines
+        .iter()
+        .map(|line| char_counts(line.trim()))
+        .collect();
 
     for start in 0..=content_lines.len().saturating_sub(window_size) {
         let window = &content_lines[start..start + window_size];
 
-        // 逐行相似度 ≥ 80%, 整体 ≥ 50%
-        let mut line_similarities = Vec::new();
-        for (cl, ol) in window.iter().zip(old_lines.iter()) {
-            line_similarities.push(line_similarity(cl.trim(), ol.trim()));
+        // 逐行相似度 ≥ 80%, 整体 ≥ 50%；任一行 <0.8 即可提前否决该窗口
+        let mut min_line_sim = 1.0f64;
+        let mut sum_sim = 0.0f64;
+        for (cl, expected_counts) in window.iter().zip(old_profiles.iter()) {
+            let candidate = cl.trim();
+            let sim = similarity_against_counts(
+                candidate,
+                candidate.chars().count(),
+                expected_counts,
+            );
+            if sim < 0.8 {
+                min_line_sim = sim;
+                break;
+            }
+            min_line_sim = min_line_sim.min(sim);
+            sum_sim += sim;
         }
 
-        let min_line_sim = line_similarities
-            .iter()
-            .cloned()
-            .reduce(f64::min)
-            .unwrap_or(0.0);
-        let avg_sim = line_similarities.iter().sum::<f64>() / line_similarities.len() as f64;
+        let avg_sim = sum_sim / window_size as f64;
 
         if min_line_sim >= 0.8 && avg_sim >= 0.5 {
             let start_byte = line_byte_offset(content, start);

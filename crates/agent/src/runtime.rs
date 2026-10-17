@@ -120,21 +120,34 @@ impl ToolCallOutput {
 
 /// 回合内的工具调用守卫，主循环与技能循环共用：
 /// - 单工具调用上限（`maxToolIterations` / `maxToolIterationsByTool`）；
+/// - 回合总调用上限：取 `max(default_limit, 按工具上限的最大值)`，
+///   `maxToolIterations` 由此同时构成单回合成本硬上限，
+///   而显式放宽某工具的上限（如 exec: 500）仍被尊重；
 /// - 同一调用（工具名 + 参数）连续未成功达到阈值即停止。
 struct ToolLoopGuard {
     default_limit: u32,
     limits_by_tool: HashMap<String, u32>,
+    global_limit: u32,
     call_counts: HashMap<String, u32>,
+    total_calls: u32,
     last_signature: Option<String>,
     consecutive_failures: u32,
 }
 
 impl ToolLoopGuard {
     fn new(default_limit: u32, limits_by_tool: HashMap<String, u32>) -> Self {
+        let global_limit = limits_by_tool
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(default_limit);
         Self {
             default_limit,
             limits_by_tool,
+            global_limit,
             call_counts: HashMap::new(),
+            total_calls: 0,
             last_signature: None,
             consecutive_failures: 0,
         }
@@ -144,7 +157,7 @@ impl ToolLoopGuard {
         &self.call_counts
     }
 
-    /// 计入一次调用；超过该工具的调用上限时返回作为工具结果的拒绝内容。
+    /// 计入一次调用；超过该工具的调用上限或回合总上限时返回作为工具结果的拒绝内容。
     fn admit(&mut self, tool_name: &str) -> std::result::Result<(), String> {
         let limit = self
             .limits_by_tool
@@ -153,13 +166,22 @@ impl ToolLoopGuard {
             .unwrap_or(self.default_limit);
         let count = self.call_counts.entry(tool_name.to_string()).or_insert(0);
         *count += 1;
-        if *count <= limit {
+        self.total_calls += 1;
+        if *count <= limit && self.total_calls <= self.global_limit {
             return Ok(());
         }
+        if *count > limit {
+            return Err(serde_json::json!({
+                "error": format!("Tool '{}' execeeded max call limit ({}).", tool_name, limit),
+                "tool": tool_name,
+                "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
+            })
+            .to_string());
+        }
         Err(serde_json::json!({
-            "error": format!("Tool '{}' execeeded max call limit ({}).", tool_name, limit),
+            "error": format!("Exceeded max total tool iterations ({}).", self.global_limit),
             "tool": tool_name,
-            "hint": "Reduce repeated tool calls or adjust maxToolIterationsByTool."
+            "hint": "Reduce total tool calls in one turn or raise maxToolIterations."
         })
         .to_string())
     }

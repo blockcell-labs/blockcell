@@ -279,6 +279,36 @@ impl MemoryStore {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!("Begin restore transaction error: {}", e))
             })?;
+            // 预检：同 (dedup_key, session_key) 已有活动行时，恢复会触发部分唯一索引
+            // 冲突并只剩裸 UNIQUE constraint failed。提前给出可操作的错误，
+            // 指明冲突条目 id 便于调用方先删除/归档它再恢复。
+            let conflict: Option<String> = tx
+                .query_row(
+                    "SELECT t2.id FROM memory_items t1
+                     JOIN memory_items t2
+                       ON t1.dedup_key = t2.dedup_key
+                      AND COALESCE(t1.session_key, '') = COALESCE(t2.session_key, '')
+                     WHERE t1.id = ?1
+                       AND t1.deleted_at IS NOT NULL
+                       AND t1.dedup_key IS NOT NULL
+                       AND t1.dedup_key != ''
+                       AND t2.deleted_at IS NULL
+                       AND t2.id != t1.id
+                       AND (?2 IS NULL OR t1.session_key = ?2)",
+                    params![id, session_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!("Restore conflict check error: {}", e))
+                })?;
+            if let Some(conflict_id) = conflict {
+                return Err(blockcell_core::Error::Storage(format!(
+                    "Cannot restore {id}: another active item {conflict_id} already holds \
+                     the same dedup_key and session_key. Delete that item first, \
+                     or keep it and leave {id} archived."
+                )));
+            }
             let affected = tx
                 .execute(
                     "UPDATE memory_items

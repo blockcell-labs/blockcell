@@ -23,6 +23,7 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 shellexpand = "3"
 uuid = { workspace = true }
+fs2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

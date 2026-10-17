@@ -5,6 +5,7 @@
 //! save_history 使用 temp + fsync + atomic rename，防止崩溃/半写导致 JSON 损坏。
 
 use blockcell_core::{Error, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -41,307 +42,73 @@ pub struct CapabilityVersionHistory {
 
 // === Per-capability 跨进程文件锁 ===
 
-/// 锁超时阈值（秒）：超过此时间的锁视为 stale
-const CAP_LOCK_STALE_THRESHOLD_SECS: u64 = 300;
 /// 获取锁的重试间隔（毫秒）
 const CAP_LOCK_RETRY_INTERVAL_MS: u64 = 100;
 /// 获取锁的最大重试次数
 const CAP_LOCK_MAX_RETRIES: u32 = 50;
 
-/// Per-capability 跨进程文件锁
+/// Per-capability 跨进程文件锁。
 ///
-/// 使用 `tool_versions/<safe_id>.lock` 文件实现跨进程互斥。
-/// 锁文件内容为 PID:timestamp，用于检测 stale 锁。
-/// 使用 `OpenOptions::create_new(true)` 原子创建锁文件，避免 TOCTOU 竞争。
+/// 使用 `tool_versions/<safe_id>.lock` 文件 + fs2/flock advisory lock 实现跨进程互斥：
+/// 进程退出/崩溃时 OS 自动释放，无需 stale 检测与 PID 存活探测；
+/// 锁随 fd 关闭（guard Drop）释放，不存在"读 token → 比对 → 删文件"的
+/// check-then-act 释放窗口。锁文件内容仅作诊断信息（PID:timestamp），不承载锁语义。
 struct CapabilityFileLock {
     lock_path: PathBuf,
-    /// 当前进程的锁 token（PID:timestamp），用于释放时校验
-    lock_token: String,
 }
 
 impl CapabilityFileLock {
     fn new(versions_dir: &Path, capability_id: &str) -> Self {
         let safe_id = safe_capability_id(capability_id);
         let lock_path = versions_dir.join(format!("{}.lock", safe_id));
-        // 预生成锁 token，避免 try_acquire 中重复计算
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let lock_token = format!("{}:{}", std::process::id(), now_ts);
-        Self {
-            lock_path,
-            lock_token,
-        }
+        Self { lock_path }
     }
 
-    /// 尝试获取锁，返回 guard 或 None。
-    /// 使用 `OpenOptions::create_new(true)` 原子创建锁文件，
-    /// 避免 exists() + write() 之间的 TOCTOU 竞争。
-    /// stale 锁接管时使用"读取内容 -> 验证仍是 stale -> 原子删除 -> create_new"流程，
-    /// 防止两个进程同时看到 stale 后互相删除对方的新锁。
-    fn try_acquire(&self) -> Option<CapabilityLockGuard> {
+    /// 带重试地获取 fs2 排他文件锁。锁文件长期保留（同 file_lock 的锚点设计），
+    /// 不存在 stale 锁文件概念：无持有者的文件可立即获得锁。
+    fn acquire_with_retry(&self) -> Option<CapabilityLockGuard> {
         if let Some(parent) = self.lock_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-
-        // 先尝试原子创建锁文件（create_new 在文件已存在时返回错误）
-        let result = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
-            .open(&self.lock_path);
-
-        match result {
-            Ok(mut file) => {
-                // 成功原子创建锁文件，写入 token 内容
-                use std::io::Write;
-                if let Err(e) = file.write_all(self.lock_token.as_bytes()) {
-                    // 写入 token 失败，清理并返回 None
-                    let _ = fs::remove_file(&self.lock_path);
-                    warn!(
-                        lock_path = %self.lock_path.display(),
-                        error = %e,
-                        "[能力版本] 写入锁 token 失败"
-                    );
-                    return None;
-                }
-                // 显式关闭文件句柄，确保 Windows 上文件不被占用
-                drop(file);
-                // 原子创建成功，返回 guard（携带 token 用于释放校验）
-                Some(CapabilityLockGuard {
-                    lock_path: self.lock_path.clone(),
-                    lock_token: self.lock_token.clone(),
-                })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // 锁文件已存在，检查是否 stale
-                // 读取锁文件内容，用于后续原子验证
-                let stale_content = match fs::read_to_string(&self.lock_path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        // 无法读取锁文件（权限问题等），视为无法接管
-                        return None;
-                    }
-                };
-
-                if self.is_stale_with_content(&stale_content) {
-                    warn!(
-                        lock_path = %self.lock_path.display(),
-                        "[能力版本] 检测到 stale 锁，尝试原子接管"
-                    );
-                    // 原子接管：删除前必须验证锁文件内容仍是刚才判定 stale 的同一份
-                    // 防止两个进程同时看到 stale 后，A 接管成功写入新锁，B 仍删除 A 的新锁
-                    let verified = self.verify_and_remove_stale(&stale_content);
-                    if !verified {
-                        // 验证失败：锁文件内容已变化（其他进程已接管），放弃本次获取
-                        warn!(
-                            lock_path = %self.lock_path.display(),
-                            "[能力版本] stale 锁验证失败，锁已被其他进程接管"
-                        );
-                        return None;
-                    }
-                    // 验证通过并已删除 stale 锁，重试原子创建
-                    let retry_result = fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&self.lock_path);
-                    match retry_result {
-                        Ok(mut file) => {
-                            use std::io::Write;
-                            if let Err(e) = file.write_all(self.lock_token.as_bytes()) {
-                                let _ = fs::remove_file(&self.lock_path);
-                                warn!(
-                                    lock_path = %self.lock_path.display(),
-                                    error = %e,
-                                    "[能力版本] 重试写入锁 token 失败"
-                                );
-                                return None;
-                            }
-                            // 显式关闭文件句柄
-                            drop(file);
-                            Some(CapabilityLockGuard {
-                                lock_path: self.lock_path.clone(),
-                                lock_token: self.lock_token.clone(),
-                            })
-                        }
-                        Err(_) => {
-                            // 另一个进程在清除后抢先创建了锁
-                            None
-                        }
-                    }
-                } else {
-                    // 锁仍有效，无法获取
-                    None
-                }
-            }
-            Err(e) => {
-                // 其他错误（权限、磁盘满等）
-                warn!(
-                    lock_path = %self.lock_path.display(),
-                    error = %e,
-                    "[能力版本] 创建锁文件失败"
-                );
-                None
-            }
-        }
-    }
-
-    /// 基于已读取的内容判断锁是否 stale，避免重复读取锁文件
-    fn is_stale_with_content(&self, content: &str) -> bool {
-        // 解析 PID:timestamp
-        let parts: Vec<&str> = content.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            // 格式错误，视为 stale
-            return true;
-        }
-
-        // 检查时间戳是否超过 stale 阈值
-        let timestamp: u64 = parts[1].parse().unwrap_or(0);
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let elapsed_secs = now_ts.saturating_sub(timestamp);
-        if elapsed_secs > CAP_LOCK_STALE_THRESHOLD_SECS {
-            return true;
-        }
-
-        // 检查持有锁的进程是否已退出
-        let pid: u32 = parts[0].parse().unwrap_or(0);
-        if pid == 0 {
-            return true;
-        }
-
-        // 跨平台进程存活检查
-        #[cfg(unix)]
-        let alive = {
-            // Unix: kill(pid, 0) 检查进程是否存在
-            unsafe { libc::kill(pid as i32, 0) == 0 }
-        };
-        #[cfg(windows)]
-        let alive = {
-            // Windows: OpenProcess 检查进程是否仍在运行
-            use windows_sys::Win32::Foundation::CloseHandle;
-            use windows_sys::Win32::System::Threading::{
-                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION,
-            };
-            unsafe {
-                let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
-                if handle.is_null() {
-                    false
-                } else {
-                    let mut exit_code: u32 = 0;
-                    let result = GetExitCodeProcess(handle, &mut exit_code);
-                    CloseHandle(handle);
-                    // STILL_ACTIVE (259) 表示进程仍在运行
-                    result != 0 && exit_code == 259
-                }
-            }
-        };
-        #[cfg(not(any(unix, windows)))]
-        let alive = true; // 保守策略：假设进程存活
-
-        // 进程已退出则视为 stale
-        !alive
-    }
-
-    /// 原子验证并删除 stale 锁：
-    /// 1. 重新读取锁文件内容
-    /// 2. 与之前判定 stale 时读取的内容比对
-    /// 3. 内容一致才删除，不一致说明其他进程已接管
-    fn verify_and_remove_stale(&self, expected_content: &str) -> bool {
-        match fs::read_to_string(&self.lock_path) {
-            Ok(current_content) => {
-                if current_content == expected_content {
-                    // 内容仍是刚才判定 stale 的同一份，安全删除
-                    fs::remove_file(&self.lock_path).is_ok()
-                } else {
-                    // 内容已变化，其他进程已接管此锁，不可删除
-                    false
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // 锁文件已被其他进程删除并接管，无需再操作
-                false
-            }
-            Err(_) => {
-                // 读取失败（权限等），保守策略：不删除
-                false
-            }
-        }
-    }
-
-    /// 带重试地获取锁
-    fn acquire_with_retry(&self) -> Option<CapabilityLockGuard> {
+            .create(true)
+            .truncate(false)
+            .open(&self.lock_path)
+            .ok()?;
         for _ in 0..CAP_LOCK_MAX_RETRIES {
-            if let Some(guard) = self.try_acquire() {
-                return Some(guard);
-            }
-            std::thread::sleep(Duration::from_millis(CAP_LOCK_RETRY_INTERVAL_MS));
-        }
-        // 重试耗尽后，强制尝试原子接管 stale 锁
-        let stale_content = match fs::read_to_string(&self.lock_path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // 锁文件已不存在，直接尝试创建
-                return self.try_acquire();
-            }
-            Err(_) => return None,
-        };
-        if self.is_stale_with_content(&stale_content) {
-            warn!(
-                lock_path = %self.lock_path.display(),
-                "[能力版本] 重试耗尽，强制尝试原子接管 stale 锁"
-            );
-            // 使用原子验证后再删除，而非直接 remove_file
-            let verified = self.verify_and_remove_stale(&stale_content);
-            if verified {
-                // 成功删除 stale 锁，尝试创建新锁
-                return self.try_acquire();
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    let owner = format!(
+                        "{}:{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    );
+                    let _ = file.set_len(0);
+                    let _ = (&file).write_all(owner.as_bytes());
+                    return Some(CapabilityLockGuard { _file: file });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(CAP_LOCK_RETRY_INTERVAL_MS));
+                }
+                Err(_) => return None,
             }
         }
+        warn!(
+            lock_path = %self.lock_path.display(),
+            "[能力版本] 获取跨进程锁重试耗尽"
+        );
         None
     }
 }
 
-/// 锁的 RAII guard，drop 时校验锁内容仍是自己的 token 再删除释放。
+/// 锁的 RAII guard：fd 随 Drop 关闭即释放 OS 锁。
 pub struct CapabilityLockGuard {
-    lock_path: PathBuf,
-    /// 持锁时写入的 token，释放时校验锁文件内容与此一致才删除
-    lock_token: String,
-}
-
-impl Drop for CapabilityLockGuard {
-    fn drop(&mut self) {
-        // 释放时校验锁内容仍是自己的 token，防止误删其他进程的锁
-        match fs::read_to_string(&self.lock_path) {
-            Ok(content) if content == self.lock_token => {
-                // token 匹配，安全删除
-                let _ = fs::remove_file(&self.lock_path);
-            }
-            Ok(content) => {
-                // token 不匹配，锁已被其他进程接管，不删除
-                warn!(
-                    lock_path = %self.lock_path.display(),
-                    expected_token = %self.lock_token,
-                    actual_token = %content,
-                    "[能力版本] 释放锁时 token 不匹配，锁已被其他进程接管，跳过删除"
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // 锁文件已不存在，无需删除
-            }
-            Err(e) => {
-                // 其他读取错误，尝试删除（保守策略）
-                warn!(
-                    lock_path = %self.lock_path.display(),
-                    error = %e,
-                    "[能力版本] 释放锁时读取失败，尝试删除"
-                );
-                let _ = fs::remove_file(&self.lock_path);
-            }
-        }
-    }
+    _file: fs::File,
 }
 
 /// 使用 per-capability 锁执行操作

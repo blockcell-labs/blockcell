@@ -664,6 +664,42 @@ fn test_soft_delete_and_restore() {
 }
 
 #[test]
+fn test_restore_conflict_reports_actionable_error() {
+    let (store, _dir) = test_store();
+    let params = || UpsertParams {
+        scope: "short_term".to_string(),
+        item_type: "note".to_string(),
+        title: None,
+        content: "dup".to_string(),
+        summary: None,
+        tags: vec![],
+        source: "user".to_string(),
+        channel: None,
+        session_key: None,
+        importance: 0.5,
+        dedup_key: Some("same-key".to_string()),
+        expires_at: None,
+    };
+
+    // A 被软删后，upsert 同 dedup_key 会插入新行 B（A 不参与查重）
+    let a = store.upsert(params()).unwrap();
+    assert!(store.soft_delete(&a.id).unwrap());
+    let b = store.upsert(params()).unwrap();
+    assert_ne!(a.id, b.id);
+
+    // 恢复 A 会撞上"同 dedup_key+session_key 的活动 B"，应得到可操作的错误
+    // 而非裸 UNIQUE constraint failed
+    let err = store.restore(&a.id).unwrap_err().to_string();
+    assert!(err.contains(&b.id), "error should name the conflicting item: {err}");
+    assert!(err.contains("dedup_key"), "{err}");
+
+    // 冲突的 B 仍在活动状态，A 仍在回收站（状态未被误改）
+    let results = store.query(&QueryParams::default()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].item.id, b.id);
+}
+
+#[test]
 fn test_brief_generation() {
     let (store, _dir) = test_store();
 

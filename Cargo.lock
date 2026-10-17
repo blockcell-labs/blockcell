@@ -626,6 +626,7 @@ dependencies = [
  "blockcell-core",
  "chrono",
  "flate2",
+ "fs2",
  "libc",
  "md5",
  "rhai",

@@ -96,16 +96,45 @@ fn identical_tool_call_failures_trip_after_three_attempts() {
 
 #[test]
 fn loop_guard_enforces_default_and_per_tool_call_limits() {
-    let mut guard = ToolLoopGuard::new(2, HashMap::from([("exec".to_string(), 1)]));
+    // default=4 且 {exec:1} → global_limit=4：read_file 四次占满全局预算。
+    let mut guard = ToolLoopGuard::new(4, HashMap::from([("exec".to_string(), 1)]));
 
     assert!(guard.admit("read_file").is_ok());
+    assert!(guard.admit("read_file").is_ok());
+    assert!(guard.admit("read_file").is_ok());
+    assert!(guard.admit("read_file").is_ok());
+    // per-tool 检查优先：read_file 第 5 次报自身上限而非全局
+    let denied = guard.admit("read_file").unwrap_err();
+    assert!(denied.contains("max call limit (4)"), "{denied}");
+
+    // exec 自身余量尚存，但全局预算已耗尽 → 全局拒绝
+    let denied = guard.admit("exec").unwrap_err();
+    assert!(denied.contains("max total tool iterations (4)"), "{denied}");
+    // 再次尝试则 per-tool 上限先命中
+    assert!(guard.admit("exec").unwrap_err().contains("(1)"));
+    assert_eq!(guard.call_counts().get("read_file"), Some(&5));
+}
+
+#[test]
+fn loop_guard_enforces_global_limit_across_distinct_tools() {
+    // 默认上限同时构成回合总上限：两个工具各调 1+2 次共 3 次即顶到 global=2。
+    let mut guard = ToolLoopGuard::new(2, HashMap::new());
+    assert!(guard.admit("read_file").is_ok());
+    assert!(guard.admit("exec").is_ok());
+    let denied = guard.admit("web_fetch").unwrap_err();
+    assert!(denied.contains("max total tool iterations (2)"), "{denied}");
+}
+
+#[test]
+fn loop_guard_global_limit_yields_to_larger_per_tool_override() {
+    // 显式放宽某工具上限会抬高总上限至该值（exec: 5 → 总共允许 5 次）。
+    let mut guard = ToolLoopGuard::new(2, HashMap::from([("exec".to_string(), 5)]));
+    for _ in 0..4 {
+        assert!(guard.admit("exec").is_ok());
+    }
     assert!(guard.admit("read_file").is_ok());
     let denied = guard.admit("read_file").unwrap_err();
-    assert!(denied.contains("max call limit (2)"), "{denied}");
-
-    assert!(guard.admit("exec").is_ok());
-    assert!(guard.admit("exec").unwrap_err().contains("(1)"));
-    assert_eq!(guard.call_counts().get("read_file"), Some(&3));
+    assert!(denied.contains("max total tool iterations (5)"), "{denied}");
 }
 
 #[test]
