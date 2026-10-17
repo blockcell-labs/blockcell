@@ -373,6 +373,7 @@ pub struct Check {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer;
     use tempfile::TempDir;
 
     fn executable_temp_dir() -> TempDir {
@@ -496,5 +497,96 @@ mod tests {
             .status()
             .is_ok_and(|status| status.success());
         assert!(!alive, "timed-out healthcheck process {pid} is still alive");
+    }
+
+    // ── Signature verification (supply-chain critical path) ────────────────
+
+    fn signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn verifier_for(key: &ed25519_dalek::SigningKey) -> SignatureVerifier {
+        SignatureVerifier::from_hex(&hex::encode(key.verifying_key().to_bytes())).unwrap()
+    }
+
+    #[test]
+    fn signature_verifier_accepts_a_matching_signature() {
+        let key = signing_key();
+        let signature = key.sign(b"blockcell update payload");
+
+        assert!(verifier_for(&key)
+            .verify(
+                b"blockcell update payload",
+                &hex::encode(signature.to_bytes())
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn signature_verifier_rejects_a_tampered_message() {
+        let key = signing_key();
+        let signature = key.sign(b"blockcell update payload");
+
+        let error = verifier_for(&key)
+            .verify(
+                b"blockcell update payloaD",
+                &hex::encode(signature.to_bytes()),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("verification failed"), "{error}");
+    }
+
+    #[test]
+    fn signature_verifier_rejects_a_signature_from_another_key() {
+        let signer = signing_key();
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let signature = signer.sign(b"blockcell update payload");
+
+        assert!(verifier_for(&attacker)
+            .verify(
+                b"blockcell update payload",
+                &hex::encode(signature.to_bytes())
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn signature_verifier_accepts_base64_encoded_signatures() {
+        let key = signing_key();
+        let signature = key.sign(b"blockcell update payload");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+        assert!(verifier_for(&key)
+            .verify(b"blockcell update payload", &encoded)
+            .is_ok());
+    }
+
+    #[test]
+    fn signature_verifier_rejects_malformed_signature_encodings() {
+        let key = signing_key();
+        let verifier = verifier_for(&key);
+
+        let error = verifier.verify(b"payload", "!!!not-base64!!!").unwrap_err();
+        assert!(
+            error.to_string().contains("Invalid signature encoding"),
+            "{error}"
+        );
+
+        // Valid base64 but not 64 bytes long.
+        let error = verifier.verify(b"payload", "deadbeef").unwrap_err();
+        assert!(error.to_string().contains("64 bytes"), "{error}");
+
+        // Well-formed 64-byte signature that simply does not match.
+        let error = verifier.verify(b"payload", &"ab".repeat(64)).unwrap_err();
+        assert!(error.to_string().contains("verification failed"), "{error}");
+    }
+
+    #[test]
+    fn signature_verifier_rejects_malformed_public_keys() {
+        assert!(SignatureVerifier::from_hex("not-hex").is_err());
+        // 31 / 33 bytes: a raw ed25519 public key must be exactly 32 bytes.
+        assert!(SignatureVerifier::from_hex(&"ab".repeat(31)).is_err());
+        assert!(SignatureVerifier::from_hex(&"ab".repeat(33)).is_err());
     }
 }

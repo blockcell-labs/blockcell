@@ -672,6 +672,7 @@ fn replace_staging_file(source: &Path, destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::manifest::Artifact;
+    use ed25519_dalek::Signer;
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -930,5 +931,125 @@ mod tests {
             error.to_string().contains("manifest is too large"),
             "{error}"
         );
+    }
+
+    // ── Signature gate on the download/apply path ──────────────────────────
+
+    fn signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+    }
+
+    fn signed_manifest(key: &ed25519_dalek::SigningKey, url: &str) -> Manifest {
+        let mut manifest = manifest(url.to_string(), b"artifact bytes");
+        let payload = manifest.signature_payload(&manifest.artifacts[0]);
+        let signature = key.sign(&payload);
+        manifest.artifacts[0].sig = Some(hex::encode(signature.to_bytes()));
+        manifest
+    }
+
+    fn manager_with_public_key(temp: &TempDir, key: &ed25519_dalek::SigningKey) -> UpdateManager {
+        let mut config = Config::default();
+        config.auto_upgrade.require_signature = true;
+        config.auto_upgrade.public_key = Some(hex::encode(key.verifying_key().to_bytes()));
+        UpdateManager::new(config, Paths::with_base(temp.path().to_path_buf()))
+    }
+
+    #[test]
+    fn verify_signature_accepts_a_valid_signature() {
+        let temp = TempDir::new().unwrap();
+        let key = signing_key();
+        let manifest = signed_manifest(&key, "https://example.invalid/blockcell");
+
+        assert!(manager_with_public_key(&temp, &key)
+            .verify_signature(&manifest, &manifest.artifacts[0])
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_rewritten_download_url() {
+        let temp = TempDir::new().unwrap();
+        let key = signing_key();
+        let mut manifest = signed_manifest(&key, "https://example.invalid/blockcell");
+        // A MITM repoints the artifact at another host after the signature was made.
+        manifest.artifacts[0].url = "https://evil.invalid/blockcell".to_string();
+
+        let error = manager_with_public_key(&temp, &key)
+            .verify_signature(&manifest, &manifest.artifacts[0])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("verification failed"), "{error}");
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_rewritten_version() {
+        let temp = TempDir::new().unwrap();
+        let key = signing_key();
+        let mut manifest = signed_manifest(&key, "https://example.invalid/blockcell");
+        // Replaying an old signature under a new version number must fail.
+        manifest.version = "999.0.0".to_string();
+
+        assert!(manager_with_public_key(&temp, &key)
+            .verify_signature(&manifest, &manifest.artifacts[0])
+            .is_err());
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_signature_from_another_key() {
+        let temp = TempDir::new().unwrap();
+        let publisher = signing_key();
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+        let manifest = signed_manifest(&publisher, "https://example.invalid/blockcell");
+
+        // The verifier trusts the attacker's key; the publisher's signature must not pass.
+        assert!(manager_with_public_key(&temp, &attacker)
+            .verify_signature(&manifest, &manifest.artifacts[0])
+            .is_err());
+    }
+
+    #[test]
+    fn verify_signature_requires_a_signature() {
+        let temp = TempDir::new().unwrap();
+        let key = signing_key();
+        let mut manifest = signed_manifest(&key, "https://example.invalid/blockcell");
+        manifest.artifacts[0].sig = None;
+
+        let error = manager_with_public_key(&temp, &key)
+            .verify_signature(&manifest, &manifest.artifacts[0])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Signature required"), "{error}");
+    }
+
+    // ── Version comparison (upgrade / downgrade decision) ──────────────────
+
+    #[test]
+    fn version_comparison_is_semantic_not_lexicographic() {
+        assert!(UpdateManager::version_greater("1.2.10", "1.2.9"));
+        assert!(!UpdateManager::version_greater("1.2.9", "1.2.10"));
+        assert!(!UpdateManager::version_greater("2.0.0", "10.0.0"));
+    }
+
+    #[test]
+    fn version_greater_handles_v_prefix_and_prereleases() {
+        assert!(UpdateManager::version_greater("v1.2.4", "1.2.3"));
+        assert!(!UpdateManager::version_greater("1.2.3", "1.2.3"));
+        // A release outranks its own pre-release, in both directions.
+        assert!(UpdateManager::version_greater("1.0.0", "1.0.0-beta.1"));
+        assert!(!UpdateManager::version_greater("1.0.0-beta.1", "1.0.0"));
+    }
+
+    #[test]
+    fn version_satisfies_minimum_host_version() {
+        assert!(UpdateManager::version_satisfies("1.2.3", "1.2.3"));
+        assert!(UpdateManager::version_satisfies("v1.3.0", "1.2.3"));
+        assert!(!UpdateManager::version_satisfies("1.2.2", "1.2.3"));
+    }
+
+    #[test]
+    fn version_comparison_falls_back_to_numeric_segments() {
+        // "1.2" is not valid semver, so the numeric fallback must kick in.
+        assert!(UpdateManager::version_greater("1.2", "1.1"));
+        assert!(UpdateManager::version_greater("1.10", "1.2"));
+        assert!(!UpdateManager::version_greater("1.1", "1.2"));
     }
 }
