@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{Tool, ToolContext, ToolSchema};
 
 /// Persistent alert rule store — saved to workspace/alerts/rules.json
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AlertStore {
     version: u32,
     rules: Vec<AlertRule>,
@@ -546,8 +546,19 @@ fn action_delete(paths: &Paths, params: &Value) -> Result<Value> {
 
 /// Evaluate a single rule: fetch data, extract metric, compare, return result.
 /// This does NOT send notifications — the agent runtime tick handles that.
+/// Run a short blocking store operation off the async worker, matching the
+/// `spawn_blocking` discipline used by the CRUD actions above.
+async fn run_store_io<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Tool(format!("Alert store task failed: {}", e)))?
+}
+
 async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Result<Value> {
-    let mut store = load_store(paths)?;
+    let paths_c = paths.clone();
+    let mut store = run_store_io(move || load_store(&paths_c)).await?;
     let rule_id = params["rule_id"].as_str().unwrap();
     let now = Utc::now().timestamp_millis();
 
@@ -589,7 +600,8 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
         Err(e) => {
             store.rules[rule_idx].state.last_error = Some(format!("{}", e));
             store.rules[rule_idx].state.last_check_at = Some(now);
-            save_store(paths, &store)?;
+            let (paths_c, store_c) = (paths.clone(), store.clone());
+            run_store_io(move || save_store(&paths_c, &store_c)).await?;
             return Ok(json!({
                 "rule_id": rule_id,
                 "error": format!("Source tool failed: {}", e),
@@ -609,7 +621,8 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
                 metric_path
             ));
             store.rules[rule_idx].state.last_check_at = Some(now);
-            save_store(paths, &store)?;
+            let (paths_c, store_c) = (paths.clone(), store.clone());
+            run_store_io(move || save_store(&paths_c, &store_c)).await?;
             return Ok(json!({
                 "rule_id": rule_id,
                 "error": format!("metric_path '{}' not found in result", metric_path),
@@ -682,7 +695,8 @@ async fn action_evaluate(paths: &Paths, ctx: &ToolContext, params: &Value) -> Re
     let notify_channel = rule.notify.channel.clone();
     let on_trigger_count = on_trigger_actions.len();
     let _ = rule;
-    save_store(paths, &store)?;
+    let (paths_c, store_c) = (paths.clone(), store.clone());
+    run_store_io(move || save_store(&paths_c, &store_c)).await?;
 
     let mut action_results = Vec::new();
     if actually_triggered && !on_trigger_actions.is_empty() {

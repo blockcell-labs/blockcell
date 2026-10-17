@@ -203,14 +203,16 @@ impl AgentRuntime {
         msg: &InboundMessage,
     ) {
         self.audit_logger.set_session_id(&msg.session_key());
-        let _ = self.audit_logger.log_permission_decision(
+        if let Err(e) = self.audit_logger.log_permission_decision(
             tool_name,
             format!("{:?}", eval.decision),
             eval.matched_rule.clone(),
             eval.description.clone(),
             eval.simulated,
             &msg.session_key(),
-        );
+        ) {
+            warn!(tool = tool_name, error = %e, "Permission-decision audit write failed");
+        }
     }
 }
 

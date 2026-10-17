@@ -458,6 +458,13 @@ fn tokenize_shell(code: &str) -> Vec<String> {
                 chars.next();
                 tokens.push("&&".to_string());
             }
+            // Command substitution and subshell groupings are command
+            // boundaries: `echo $(rm -rf /)` or "echo `rm -rf /`" must expose the
+            // inner `rm` as a command, not hide it inside the `echo` arguments.
+            '(' | ')' | '`' => {
+                flush(&mut current, &mut tokens);
+                tokens.push(";".to_string());
+            }
             ch if ch.is_whitespace() => flush(&mut current, &mut tokens),
             '\\' => {
                 if let Some(next) = chars.next() {
@@ -533,6 +540,25 @@ fn check_shell_dangerous_commands(code: &str, violations: &mut Vec<StaticViolati
                 }
             }
             "sudo" => push_shell_violation("Detected privileged command execution", violations),
+            "xargs" => {
+                // `find . | xargs rm -rf` hides the delegated command in xargs'
+                // arguments; inspect the first non-flag argument.
+                let delegated = tokens[command_index + 1..end]
+                    .iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(|arg| shell_command_name(arg).to_ascii_lowercase());
+                if let Some(name) = delegated {
+                    match name.as_str() {
+                        "rm" | "rmdir" | "sh" | "bash" | "zsh" | "eval" | "exec" | "sudo"
+                        | "python" | "python3" | "node" | "nodejs" | "perl" | "ruby" | "php"
+                        | "curl" | "wget" | "xargs" => push_shell_violation(
+                            "Detected dangerous command delegated via xargs",
+                            violations,
+                        ),
+                        _ => {}
+                    }
+                }
+            }
             "eval" | "exec" => {
                 push_shell_violation("Detected exec-like command execution", violations)
             }
@@ -779,6 +805,22 @@ print(message)
             assert!(
                 !result.passed,
                 "recursive remove should be rejected: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_command_substitution_and_xargs_bypass_are_rejected() {
+        for code in [
+            "#!/bin/sh\necho $(rm -rf /)",
+            "#!/bin/sh\necho `rm -rf /`",
+            "#!/bin/sh\nfind . | xargs rm -rf",
+            "#!/bin/sh\necho ok; (rm -rf /tmp/data)",
+        ] {
+            let result = static_audit(&SkillType::LocalScript, code);
+            assert!(
+                !result.passed,
+                "indirect dangerous command should be rejected: {code}"
             );
         }
     }

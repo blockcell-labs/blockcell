@@ -274,7 +274,7 @@ impl AgentRuntime {
         // 与 `tool/call` 事件同名对齐：审计同样记录本次调用声明的执行环境。
         let environment = self.tool_registry.execution_environment(&call.name, args);
         self.audit_logger.set_session_id(&session_key);
-        let _ = self
+        if let Err(e) = self
             .audit_logger
             .log_tool_call_audit(blockcell_storage::ToolCallAudit {
                 tool_name: &call.name,
@@ -286,7 +286,10 @@ impl AgentRuntime {
                 call_id: Some(call.id.clone()),
                 outcome: Some(outcome.as_str()),
                 environment: Some(environment.as_str()),
-            });
+            })
+        {
+            warn!(tool = %call.name, error = %e, "Tool-call audit write failed");
+        }
     }
 
     /// 非交互通道依据用户原文中的显式确认，交互通道走确认请求。
@@ -619,12 +622,10 @@ impl AgentRuntime {
         duration_ms: u64,
     ) -> ToolExecution {
         let idempotency = self.tool_registry.idempotency(tool_name, args);
-        let outcome = ToolOutcome::from_failure(
-            result
-                .as_ref()
-                .err()
-                .map(|error| FailureKind::classify_tool_error(error, idempotency)),
-        );
+        let failure = result
+            .as_ref()
+            .err()
+            .map(|error| FailureKind::classify_tool_error(error, idempotency));
         let (result_str, result_json) = match result {
             Ok(val) => (val.to_string(), val),
             Err(e) => {
@@ -632,6 +633,13 @@ impl AgentRuntime {
                 (err_str.clone(), serde_json::json!({"error": err_str}))
             }
         };
+        // Tools often report failure as `Ok({"error": ...})` / `{"status": "error"}`
+        // instead of an Err. Classify those as failed as well, consistent with
+        // `tool_call_failed` on the main loop — otherwise evolution signals and
+        // audit outcomes record soft failures as successes.
+        let outcome = ToolOutcome::from_failure(failure.or_else(|| {
+            tool_result_indicates_error(&result_str).then_some(FailureKind::ToolFailed)
+        }));
         ToolExecution {
             result_str,
             result_json,

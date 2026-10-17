@@ -251,11 +251,12 @@ fn confirm_matches(
 ) -> Result<usize> {
     let file_store = ctx.memory_file_store.as_ref();
     let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db())?;
-    for item in matches {
-        index.record_forgotten_content(&item.content, reason)?;
-    }
     let mut removed = 0usize;
     for item in matches {
+        // Tombstone each entry only after its deletion succeeded, so a mid-loop
+        // failure leaves "removed entries tombstoned, rest untouched" instead of
+        // "everything tombstoned but only partially removed" — with the old
+        // ordering, undeleted entries could never be re-learned.
         match item.kind.as_str() {
             "canonical_file" => {
                 let store = file_store.ok_or_else(|| {
@@ -270,6 +271,7 @@ fn confirm_matches(
                         format!("[id:{}]", item.key)
                     },
                 )?;
+                index.record_forgotten_content(&item.content, reason)?;
                 removed += 1;
             }
             "session_file" => {
@@ -281,6 +283,7 @@ fn confirm_matches(
                     item.target.as_deref().unwrap_or("memory"),
                     &item.content,
                 )?;
+                index.record_forgotten_content(&item.content, reason)?;
                 removed += 1;
             }
             "sqlite_short_term" => {
@@ -288,6 +291,7 @@ fn confirm_matches(
                     Error::Tool("Memory store not available for short-term forget".to_string())
                 })?;
                 if store.soft_delete_in_session(&item.key, &ctx.session_key)? {
+                    index.record_forgotten_content(&item.content, reason)?;
                     removed += 1;
                 }
             }

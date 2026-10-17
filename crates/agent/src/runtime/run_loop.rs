@@ -304,6 +304,15 @@ impl AgentRuntime {
                                                 chat_id = %msg.chat_id,
                                                 "Active steering channel is full; rejecting newest steering message"
                                             );
+                                            super::message_task::deliver_message_task_failure(
+                                                &msg,
+                                                "steering_rejected",
+                                                self.agent_id.as_deref(),
+                                                "当前任务正在处理中，输入队列已满，请稍后重发这条消息",
+                                                self.event_tx.as_ref(),
+                                                self.outbound_tx.as_ref(),
+                                            )
+                                            .await;
                                             continue;
                                         }
                                         SteeringRouteOutcome::Closed => {

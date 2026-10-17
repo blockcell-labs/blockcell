@@ -426,10 +426,18 @@ async fn patch_skill(
         )));
     }
 
-    // 3. 模糊匹配替换
-    let (new_content, match_count, strategy) =
-        fuzzy_find_and_replace(&content, old_string, new_string, replace_all)
-            .map_err(|e| blockcell_core::Error::Skill(format!("Fuzzy match failed: {}", e)))?;
+    // 3. 模糊匹配替换 —— O(N×M) 的 CPU 密集操作，移出 async executor
+    let (content_c, old_c, new_c) = (
+        content.clone(),
+        old_string.to_string(),
+        new_string.to_string(),
+    );
+    let (new_content, match_count, strategy) = tokio::task::spawn_blocking(move || {
+        fuzzy_find_and_replace(&content_c, &old_c, &new_c, replace_all)
+    })
+    .await
+    .map_err(|e| blockcell_core::Error::Tool(format!("Patch task failed: {}", e)))?
+    .map_err(|e| blockcell_core::Error::Skill(format!("Fuzzy match failed: {}", e)))?;
 
     // 4. 备份原内容 (用于回滚)
     let original_content = content.clone();
