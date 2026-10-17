@@ -892,7 +892,11 @@ fn action_export(db: &rusqlite::Connection, params: &Value, ctx: &ToolContext) -
     };
 
     if let Some(path) = output_path {
-        let resolved = if path.starts_with('/') || path.starts_with("~/") {
+        let resolved = if let Some(rest) = path.strip_prefix("~/") {
+            dirs::home_dir()
+                .map(|home| home.join(rest).to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string())
+        } else if path.starts_with('/') {
             path.to_string()
         } else {
             ctx.workspace.join(path).to_string_lossy().to_string()

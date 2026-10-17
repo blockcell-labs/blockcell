@@ -407,14 +407,19 @@ impl AgentRuntime {
         let environment = self
             .tool_registry
             .execution_environment(&inv.call.name, &inv.args);
+        // Non-command tools would otherwise render an empty confirmation popup;
+        // fall back to the generic argument summary so users see what is approved.
+        let detail = inv
+            .args
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| summarize_tool_args(&inv.args));
         let items = vec![format!(
             "{} {}: {}",
             environment.as_str(),
             inv.call.name,
-            inv.args
-                .get("command")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
+            detail
         )];
         if self
             .approve_dangerous_operation(&inv.call.name, items, inv.msg)

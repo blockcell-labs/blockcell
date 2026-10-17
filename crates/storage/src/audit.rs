@@ -209,7 +209,11 @@ impl AuditLogger {
         })
     }
 
-    pub fn log_tool_call_audit(&mut self, call: ToolCallAudit<'_>) -> Result<()> {
+    pub fn log_tool_call_audit(&mut self, mut call: ToolCallAudit<'_>) -> Result<()> {
+        // Tool params/results may carry credentials (api keys, tokens,
+        // passwords); mask secret-looking keys before they hit disk.
+        blockcell_core::config::mask_secret_values(&mut call.params);
+        blockcell_core::config::mask_secret_values(&mut call.result);
         let event = AuditEvent::ToolCall {
             tool_name: call.tool_name.to_string(),
             params: call.params,
@@ -650,6 +654,35 @@ mod tests {
         match &events[0] {
             AuditEvent::ToolCall { tool_name, .. } => {
                 assert_eq!(tool_name, "read_file");
+            }
+            _ => panic!("Expected ToolCall event"),
+        }
+    }
+
+    #[test]
+    fn test_tool_call_audit_masks_secret_values() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = Paths::with_base(temp_dir.path().to_path_buf());
+        let mut logger = AuditLogger::new(paths.clone());
+
+        logger
+            .log_tool_call(
+                "encrypt",
+                serde_json::json!({"password": "hunter2", "path": "/tmp/a"}),
+                serde_json::json!({"api_token": "tok-123", "status": "ok"}),
+                "cli:default",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let events = logger.read_today().unwrap();
+        match &events[0] {
+            AuditEvent::ToolCall { params, result, .. } => {
+                assert_eq!(params["password"], "********");
+                assert_eq!(params["path"], "/tmp/a");
+                assert_eq!(result["api_token"], "********");
+                assert_eq!(result["status"], "ok");
             }
             _ => panic!("Expected ToolCall event"),
         }

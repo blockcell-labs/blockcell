@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
             let arguments = match func.get("arguments") {
                 Some(serde_json::Value::String(s)) => {
                     serde_json::from_str(s).unwrap_or_else(|e| {
-                        warn!(error = %e, raw = %s, "Failed to parse tool call arguments as JSON, using empty object");
+                        warn!(error = %e, raw_len = %s.len(), raw_head = %s.chars().take(128).collect::<String>(), "Failed to parse tool call arguments as JSON, using empty object");
                         serde_json::Value::Object(serde_json::Map::new())
                     })
                 }
@@ -300,7 +300,7 @@ impl ToolCallAccumulator {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
             serde_json::from_str(&self.arguments).unwrap_or_else(|e| {
-                warn!(error = %e, raw = %self.arguments, "Failed to parse accumulated tool call arguments, using empty object");
+                warn!(error = %e, raw_len = %self.arguments.len(), raw_head = %self.arguments.chars().take(128).collect::<String>(), "Failed to parse accumulated tool call arguments, using empty object");
                 serde_json::Value::Object(serde_json::Map::new())
             })
         };

@@ -44,7 +44,11 @@ fn default_upgrade_channel() -> String {
 }
 
 fn default_require_signature() -> bool {
-    default_upgrade_public_key().is_some()
+    // Fail closed: without an embedded key this used to default to false, which
+    // let `autoUpgrade.enabled` accept SHA256-only updates. Requiring a
+    // signature with no key errors out in verify_signature instead; users who
+    // intentionally want unsigned updates can still set requireSignature=false.
+    true
 }
 
 fn default_upgrade_public_key() -> Option<String> {
@@ -63,9 +67,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signature_requirement_defaults_to_whether_a_trusted_key_is_available() {
+    fn signature_requirement_defaults_on_even_without_a_trusted_key() {
         let config = AutoUpgradeConfig::default();
 
-        assert_eq!(config.require_signature, config.public_key.is_some());
+        // Fail closed: missing a key means verification errors out, never that
+        // unsigned updates are accepted silently.
+        assert!(config.require_signature);
     }
 }

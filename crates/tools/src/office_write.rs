@@ -805,7 +805,7 @@ async fn run_python_script(
 }
 
 fn quote_python_str(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+    format!("'{}'", crate::escape_python_string(s))
 }
 
 fn normalize_style(style: Option<&Value>) -> Value {
@@ -907,7 +907,9 @@ mod tests {
     #[test]
     fn test_quote_python_str() {
         assert_eq!(quote_python_str("hello"), "'hello'");
-        assert_eq!(quote_python_str("it's a \"test\""), "'it\\'s a \"test\"'");
+        // `\"` inside a single-quoted Python literal still reads back as `"`.
+        assert_eq!(quote_python_str("it's a \"test\""), "'it\\'s a \\\"test\\\"'");
+        assert_eq!(quote_python_str("a\nb"), "'a\\nb'");
     }
 
     #[test]

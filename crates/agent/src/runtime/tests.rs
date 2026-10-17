@@ -1207,6 +1207,30 @@ async fn test_authorized_read_directory_does_not_authorize_writes() {
     );
 }
 
+#[test]
+fn test_authorize_directory_does_not_persist_filesystem_root() {
+    use blockcell_core::path_policy::PathOp;
+
+    // Approving a file directly under `/` used to cache `/` itself, after which
+    // is_path_authorized's ancestor walk exempted every path for that op.
+    let mut runtime = test_runtime();
+    runtime.authorize_directory(
+        std::path::Path::new("/blockcell-root-sentry.txt"),
+        PathOp::Write,
+        "cli:root-scope",
+    );
+    assert!(!runtime.is_path_authorized(
+        std::path::Path::new("/etc/hostname"),
+        PathOp::Write,
+        "cli:root-scope"
+    ));
+    assert!(!runtime.is_path_authorized(
+        std::path::Path::new("/tmp/anything"),
+        PathOp::Write,
+        "cli:root-scope"
+    ));
+}
+
 #[tokio::test]
 async fn test_email_attachment_is_checked_as_read() {
     let outside =

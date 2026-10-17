@@ -672,7 +672,7 @@ print('OK')
 }
 
 fn quote_python_str(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+    format!("'{}'", crate::escape_python_string(s))
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
@@ -732,6 +732,9 @@ mod tests {
         assert_eq!(quote_python_str("hello"), "'hello'");
         assert_eq!(quote_python_str("it's"), "'it\\'s'");
         assert_eq!(quote_python_str("a\\b"), "'a\\\\b'");
+        // Newlines and control chars must not break the single-line literal.
+        assert_eq!(quote_python_str("a\nb"), "'a\\nb'");
+        assert_eq!(quote_python_str("a\tb"), "'a\\tb'");
     }
 
     #[test]

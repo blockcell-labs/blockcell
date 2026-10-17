@@ -229,6 +229,11 @@ impl super::AgentRuntime {
                 .unwrap_or_else(|| resolved.to_path_buf())
         };
         let dir = resolve_for_policy(&dir);
+        // A filesystem-root entry would exempt every path for `op` in this
+        // session; the single access was already approved, just don't persist it.
+        if dir.parent().is_none() {
+            return;
+        }
         let mut authorized_dirs = self
             .authorized_dirs
             .lock()

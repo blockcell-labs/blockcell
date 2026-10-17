@@ -413,10 +413,18 @@ async fn patch_skill(
         )));
     }
 
-    // 2. 读取当前内容
+    // 2. 读取当前内容 (与 create/edit 同口径的字符数上限, 防止超大文件把
+    //    fuzzy 匹配的 O(N×M) 代价放大到挂死 executor)
     let content = tokio::fs::read_to_string(&target_file)
         .await
         .map_err(blockcell_core::Error::Io)?;
+    if content.chars().count() > MAX_SKILL_CONTENT_CHARS {
+        return Err(blockcell_core::Error::Validation(format!(
+            "Skill file exceeds maximum size of {} characters (got {})",
+            MAX_SKILL_CONTENT_CHARS,
+            content.chars().count()
+        )));
+    }
 
     // 3. 模糊匹配替换
     let (new_content, match_count, strategy) =
