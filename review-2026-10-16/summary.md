@@ -77,16 +77,22 @@
 > 验证：scheduler 58 + storage 84/6 + tools 487/8 全绿；`cargo check --workspace` exit 0。
 > 明细与延后项（连接缓存、cron 任务间并发）见 [`FIX-BATCH5.md`](FIX-BATCH5.md)。
 >
-> **Batch 6 修复状态（2026-10-16，第一部分已完成）**
+> **Batch 6 修复状态（2026-10-17，已完成）**
 > 6A：P0-8 验收假通过——`common_verify.py` 跑测试前从原始 fixture 恢复 `test_*.py`，
 > 并解析 `Ran N tests` 对 `N < 1` 以退出码 2 拒绝；`runner.py` 的 `passed` 改为
 > 「returncode == 0 且验收至少跑了 1 个测试」；harness 自测补 5 例编排层用例。
 > 6B：`make test`（rust + harness 自测 + 3 个基础设施脚本）+ `.githooks/pre-push` +
 > CONTRIBUTING 两节说明；`latest-report.json` 加入 `.gitignore`。
-> 验证：`make test` exit 0；`cargo test --workspace` **2210 passed / 0 failed**；
+> 6C：补 48 例单测——updater ed25519 验签与版本比较（+15）、scheduler cron 时间计算/时区/DST（+10）、
+> skills evolution 契约/观察/回滚（+16）、MCP 协议级（python3 假 stdio server，+7）。
+> 6D：文档同步——docs/03（web_search 后端、exec 超时）、docs/09（状态机/删除 Testing 阶段/观察窗口替代灰度/
+> 版本目录/四形态边界/双层审计）、docs/12（签名门控 + 应用前重建信任链 + 原子替换实况）、
+> docs/17（alerts `--source` JSON 格式）、docs/20（冷却保底未实现）+ `pool.rs` 注释与私有函数名同步；
+> `-v/--verbose` 由死代码改为真接线（强制 debug 等级）。
+> 验证：`make test` exit 0；`cargo test --workspace` **2257 passed / 0 failed**；
 > harness 自测 8 passed；反证——作弊 agent 删除/清空 fixture 测试后仍被判 `false`。
 > **有意不恢复 CI**（尊重「等 Actions 预算」既有决策，改用本地门禁降级）。
-> 6C（cron / ed25519 / evolution / MCP 单测）与 6D（docs 同步）见 [`FIX-BATCH6.md`](FIX-BATCH6.md)。
+> 明细与延后项（updater apply 降级门控、providers 冷却保底、e2e P2/P3）见 [`FIX-BATCH6.md`](FIX-BATCH6.md)。
 
 ---
 
@@ -205,7 +211,7 @@
 - **Batch 3（路径与凭据收敛）✅ 已完成**：`video_process` 参数对齐 `output_path`、`network_monitor` 接入 SSRF 防线、gateway/CLI 凭据统一掩码（读时脱敏 + 写时还原）、`.env` 权限 0600 与空值不覆盖环境变量。提交 `30c9b90` + `f805820` + `6e52264`
 - **Batch 4（资源上限）✅ 已完成（核心项）**：OOXML 解压上限、CSV 文件/行数上限、Whisper 25 MB 预检、IM 入站媒体 25 MB 上限、session MemorySystem 池上限 64。提交 `73ea2e9` + `9eb3617` + `1dd95b0`。背压类三项（napcat spawn / stream_subscribe / WS 帧）有意延后，需先定丢弃语义
 - **Batch 5（async 纪律）✅ 已完成**：`knowledge_graph` / `knowledge_forget` / `memory_manage` 的阻塞 IO、两个 evolution worker 的 `EvolutionWorkflowStore` 同步 SQL（含心跳）、`CrossProcessLock::acquire` 全部出 async（`spawn_blocking`）；`knowledge_graph` 补 WAL + `busy_timeout`；`cron run_tick` 长任务出 `operation_lock`。提交 `a0cf2d5` + `887eeec`。延后：knowledge_graph 连接缓存、cron 任务间并发投递
-- **Batch 6（闭环）🔄 第一部分已完成**：验收脚本假通过（P0-8，fixture 测试恢复 + `Ran N tests >= 1` 守卫 + runner 判定加固 + harness 自测）、本地门禁（`make test` + `.githooks/pre-push` + CONTRIBUTING）已修。**待办**：6C 补单测（cron 时间计算 / ed25519 验签 / evolution 部署链路 / MCP 协议级）、6D 文档同步（docs/03、09、12、17、20）。**有意不做**：恢复 `ci.yml`（改用本地门禁降级，尊重「等 Actions 预算」决策）。明细见 [`FIX-BATCH6.md`](FIX-BATCH6.md)
+- **Batch 6（闭环）✅ 已完成**：验收脚本假通过（P0-8，fixture 测试恢复 + `Ran N tests >= 1` 守卫 + runner 判定加固 + harness 自测）、本地门禁（`make test` + `.githooks/pre-push` + CONTRIBUTING）、补 48 例单测（updater ed25519 验签与版本比较 / scheduler cron 时间计算与时区 DST / skills evolution 契约-观察-回滚 / MCP 协议级）、文档同步（docs/03、09、12、17、20）。**有意不做**：恢复 `ci.yml`（改用本地门禁降级）、updater `apply` 降级门控（行为变更）、providers 冷却保底（改文档而非改行为）。明细见 [`FIX-BATCH6.md`](FIX-BATCH6.md)
 
 ---
 
