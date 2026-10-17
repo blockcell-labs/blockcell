@@ -386,23 +386,39 @@ async fn auth_middleware(
 blockcell 有一个完整的自升级流程：
 
 ```
-1. 检查 manifest（版本清单）
-2. 验证签名（ed25519-dalek）
-3. 下载新版本
-4. 原子替换（rename 保证原子性）
-5. 失败时自动回滚
+1. 检查 manifest（版本清单）—— HTTPS 强制、限 1MB、禁止 https→http 重定向降级
+2. 下载新版本 —— 流式 SHA-256 与 manifest 声明比对，限 256MB
+3. 验证签名（ed25519-dalek）—— 由 autoUpgrade.requireSignature 门控
+   （默认值 = 编译期是否嵌入公钥；未配置公钥时该步骤不可用）
+4. 应用前重建信任链 —— 从 staging 元数据重新构造签名载荷并重新验签 + 重算 SHA-256，
+   覆盖"下载与安装之间被篡改"的窗口
+5. 维护窗口检查 → 切换前健康检查（--version / --self-check / 动态库依赖）
+6. 原子替换（同目录临时文件 + rename；先备份当前版本，failed 版本保留供取证）
+7. 切换后健康检查失败 → 自动回滚到备份版本
 ```
 
+签名载荷把 `channel / version / os / arch / url / sha256` 全部纳入签名，从构造上封死
+"把旧版本的合法签名产物重新包装成伪造的新版本"。
+
 ```rust
-// updater/atomic.rs
-pub fn atomic_replace(new_binary: &Path, target: &Path) -> Result<()> {
-    let backup = target.with_extension("bak");
-    fs::copy(target, &backup)?;  // 备份当前版本
-    fs::rename(new_binary, target)?;  // 原子替换
-    // 如果后续验证失败，可以从 backup 恢复
-    Ok(())
+// updater/manager.rs::apply —— 应用前重建信任链（简化示意）
+let metadata = self.load_staged_update_metadata()?;      // current.json
+if staging_path != expected_path || version != metadata.version {
+    return Err(Error::Validation("Staged update does not match persisted metadata".into()));
+}
+Sha256Verifier::verify_file(staging_path, &metadata.sha256)?;   // 重新比对摘要
+if self.config.auto_upgrade.require_signature {
+    let manifest = metadata.as_manifest();
+    self.verify_signature(&manifest, &manifest.artifacts[0])?;  // 重新验签
 }
 ```
+
+原子替换不是简单的"单份 `.bak` + rename"：`AtomicSwitcher` 用文件锁（PID 存活检查 +
+陈旧锁恢复）、带时间戳的多份备份、切换前后健康检查，失败时自动恢复备份。
+
+> 契约注意：CLI 的 `upgrade download` → `upgrade apply` 路径允许安装 staging 中已持久化的
+> 版本（即"手动升级/降级"语义），`min_host_version` 只在 `update_flow`（自动升级）里检查；
+> 且 `requireSignature` 可被显式关闭，此时信任退化为"manifest 与产物同源的 SHA-256"。
 
 ---
 

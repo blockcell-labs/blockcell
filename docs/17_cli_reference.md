@@ -795,15 +795,15 @@ blockcell alerts add --name <NAME> --source <SOURCE> --field <FIELD> \
 | 选项 | 说明 |
 |------|------|
 | `--name <NAME>` | 规则名称 |
-| `--source <SOURCE>` | 数据源，格式 `tool:action:param`（如 `finance_api:stock_quote:600519`） |
-| `--field <FIELD>` | 监控字段（如 `price`、`change_pct`） |
+| `--source <SOURCE>` | 数据源，**JSON 工具调用对象**，必须含字符串 `tool` 字段（如 `{"tool":"system_info","params":{"category":"hardware"}}`） |
+| `--field <FIELD>` | 监控字段路径（如 `price`、`change_pct`） |
 | `--operator <OP>` | 比较运算符：`gt` / `lt` / `gte` / `lte` / `eq` / `ne` / `change_pct` / `cross_above` / `cross_below` |
-| `--threshold <VALUE>` | 阈值 |
+| `--threshold <VALUE>` | 阈值（必须是数字） |
 
 **示例：**
 ```bash
 blockcell alerts add --name "茅台跌停预警" \
-  --source "finance_api:stock_quote:600519" \
+  --source '{"tool":"finance_api","params":{"action":"stock_quote","symbol":"600519"}}' \
   --field "change_pct" \
   --operator lt \
   --threshold "-9.5"

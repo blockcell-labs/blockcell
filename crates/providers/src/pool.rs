@@ -246,10 +246,10 @@ impl ProviderPool {
     /// 从池中获取一个 provider 实例及其索引。
     ///
     /// 选取算法：
-    /// 1. 过滤出 Healthy（或冷却已到期的）条目
+    /// 1. 过滤出 Healthy（冷却已到期的先被恢复）条目
     /// 2. 按 priority 升序分组，取最高优先级组
     /// 3. 在组内按 weight 加权随机选取
-    /// 4. 若 healthy 池为空，临时解除所有冷却（降级保底）
+    /// 4. 若没有健康条目，返回 `None`——不会临时解除冷却
     ///
     /// 返回 `(entry_index, Arc<dyn Provider>)`
     pub fn acquire(&self) -> Option<(usize, Arc<dyn Provider>)> {
@@ -311,7 +311,7 @@ impl ProviderPool {
         });
         self.recover_cooling_entries(&mut state);
 
-        let candidates = self.healthy_or_cooling_fallback_indices(&mut state, excluded)?;
+        let candidates = self.healthy_candidate_indices(&mut state, excluded)?;
         let selected = self.select_entry_from_candidates(candidates)?;
         Some((selected, Arc::clone(&self.entries[selected].provider)))
     }
@@ -323,7 +323,7 @@ impl ProviderPool {
         });
         self.recover_cooling_entries(&mut state);
 
-        let healthy = self.healthy_or_cooling_fallback_indices(&mut state, excluded)?;
+        let healthy = self.healthy_candidate_indices(&mut state, excluded)?;
         let max_priority = healthy
             .iter()
             .map(|idx| self.entries[*idx].priority)
@@ -346,7 +346,7 @@ impl ProviderPool {
         });
         self.recover_cooling_entries(&mut state);
 
-        let healthy = self.healthy_or_cooling_fallback_indices(&mut state, excluded)?;
+        let healthy = self.healthy_candidate_indices(&mut state, excluded)?;
         let selected = healthy
             .iter()
             .copied()
@@ -396,7 +396,11 @@ impl ProviderPool {
         }
     }
 
-    fn healthy_or_cooling_fallback_indices(
+    /// Healthy 条目索引（排除 `excluded`）；没有健康条目时返回 `None`。
+    ///
+    /// 注意：这里**不**做"临时解除冷却"的降级保底——复用限速中的后端只会
+    /// 继续撞限流，所以宁可返回 `None` 让调用方走别的路径。
+    fn healthy_candidate_indices(
         &self,
         state: &mut PoolState,
         excluded: &[usize],

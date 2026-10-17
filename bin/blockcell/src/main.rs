@@ -867,9 +867,15 @@ async fn main() -> anyhow::Result<()> {
 
     // 使用配置中的日志参数初始化日志系统
     // 默认：info 等级，控制台不输出，文件不输出
+    // 全局 `-v/--verbose` 强制 debug 等级（覆盖配置）
+    let log_level = if cli.verbose {
+        "debug"
+    } else {
+        config.log.level.as_str()
+    };
     if let Err(e) = logging::init_logging(
         &logs_dir,
-        &config.log.level,
+        log_level,
         config.log.console_enabled,
         config.log.file_enabled,
     ) {

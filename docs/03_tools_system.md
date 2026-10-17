@@ -82,7 +82,10 @@ AI: 调用 list_dir → 找到所有 .log 文件 → 调用 file_ops compress
 
 **`web_search`** — 网页搜索
 ```
-后端：DuckDuckGo（无需 API Key）
+后端：Brave Search API 与 Baidu AI Search API（均需配置 API Key）
+      中文查询优先 Baidu，非中文优先 Brave，失败时自动回退另一后端
+配置：tools.web.search.apiKey（Brave）
+      tools.web.search.baiduApiKey 或环境变量 BAIDU_API_KEY（Baidu）
 返回：标题、摘要、URL
 ```
 
@@ -121,7 +124,7 @@ AI: 调用 web_search "bitcoin price today" → web_fetch 结果页面
 ```
 支持：任意 shell 命令
 安全：工作目录外需要用户确认
-超时：默认 30 秒
+超时：默认 60 秒（tools.exec.timeout 可调）
 ```
 
 **实际例子：**
