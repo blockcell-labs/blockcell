@@ -39,16 +39,22 @@ impl AgentEventListener for WsToolEventListener {
                 tool_name,
                 call_id,
                 arguments,
-            } => serde_json::json!({
-                "type": "tool_call_start",
-                "channel": ctx.channel,
-                "agent_id": ctx.agent_id,
-                "chat_id": ctx.chat_id,
-                "task_id": "",
-                "tool": tool_name,
-                "call_id": call_id,
-                "params": arguments,
-            }),
+            } => {
+                // 凭据类参数（password/api_key/Authorization 头）不能明文进
+                // dashboard 事件流；与 storage audit 同口径掩码。
+                let mut masked = arguments.clone();
+                blockcell_core::config::mask_secret_values(&mut masked);
+                serde_json::json!({
+                    "type": "tool_call_start",
+                    "channel": ctx.channel,
+                    "agent_id": ctx.agent_id,
+                    "chat_id": ctx.chat_id,
+                    "task_id": "",
+                    "tool": tool_name,
+                    "call_id": call_id,
+                    "params": masked,
+                })
+            }
             AgentEvent::ToolResult {
                 tool_name,
                 call_id,

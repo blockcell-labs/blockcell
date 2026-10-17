@@ -714,6 +714,9 @@ impl ContextBuilder {
             skill.prompt_md.hash(&mut hasher);
             skill.inject_prompt_md.hash(&mut hasher);
             skill.fallback_message.hash(&mut hasher);
+            // learned 影响渲染的信任级别（LearnedHint 围栏 vs 系统指令），
+            // 缺失会使 learned=false→true 翻转时命中旧快照、绕过围栏。
+            skill.learned.hash(&mut hasher);
         }
         let fingerprint = hasher.finish();
         let mut cache = self

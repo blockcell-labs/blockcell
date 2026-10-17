@@ -247,7 +247,18 @@ impl PathPolicy {
     fn best_match_len(&self, resolved: &Path, op: PathOp, action: PolicyAction) -> Option<usize> {
         let mut best: Option<usize> = None;
         for rule in &self.config.rules {
-            if rule.action != action || !rule.ops.contains(&op) {
+            if rule.action != action {
+                continue;
+            }
+            // PathOp::Exec 兼具读写能力：只声明 read/write 的 deny 规则也必须
+            // 拦截 exec 提取出的路径，否则 `exec "cat > <deny-dir>/f"` 可绕过。
+            // allow/confirm 方向不扩展——用户声明 write 不等于授权 exec。
+            let op_matches = rule.ops.contains(&op)
+                || (action == PolicyAction::Deny
+                    && op == PathOp::Exec
+                    && (rule.ops.contains(&PathOp::Read)
+                        || rule.ops.contains(&PathOp::Write)));
+            if !op_matches {
                 continue;
             }
             for pattern in &rule.paths {
@@ -477,6 +488,37 @@ mod tests {
         );
         let ssh_key = home().join(".ssh").join("id_rsa");
         assert_eq!(policy.evaluate(&ssh_key, PathOp::Read), PolicyAction::Deny);
+    }
+
+    #[test]
+    fn test_read_write_deny_rule_also_covers_exec() {
+        // exec 兼具读写能力：仅声明 read/write 的 deny 规则必须拦截 exec 路径。
+        let policy = make_policy(
+            vec![PathRule {
+                name: "deny-secrets".to_string(),
+                action: PolicyAction::Deny,
+                ops: vec![PathOp::Read, PathOp::Write],
+                paths: vec!["~/.secrets".to_string()],
+            }],
+            PolicyAction::Confirm,
+        );
+        let target = home().join(".secrets").join("key.pem");
+        assert_eq!(policy.evaluate(&target, PathOp::Exec), PolicyAction::Deny);
+
+        // 反向不成立：confirm/allow 规则不扩展匹配 exec。
+        let policy = make_policy(
+            vec![PathRule {
+                name: "confirm-work".to_string(),
+                action: PolicyAction::Confirm,
+                ops: vec![PathOp::Write],
+                paths: vec!["~/work".to_string()],
+            }],
+            PolicyAction::Allow,
+        );
+        assert_eq!(
+            policy.evaluate(&home().join("work").join("f"), PathOp::Exec),
+            PolicyAction::Allow
+        );
     }
 
     #[test]

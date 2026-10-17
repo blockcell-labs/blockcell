@@ -104,13 +104,26 @@ impl EvolutionWorker {
                 }
                 _ = self.wakeup.notified() => {
                     debug!(worker_id = %self.worker_id, "Woken up by notify");
-                    self.tick().await;
+                    self.tick_guarded().await;
                 }
                 _ = interval.tick() => {
                     debug!(worker_id = %self.worker_id, "Poll tick");
-                    self.tick().await;
+                    self.tick_guarded().await;
                 }
             }
+        }
+    }
+
+    /// Run one tick with panic isolation: a panicking step must not silently
+    /// kill the worker task (the spawn site has no supervisor to restart it).
+    async fn tick_guarded(&self) {
+        use futures::FutureExt;
+        if std::panic::AssertUnwindSafe(self.tick())
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            error!(worker_id = %self.worker_id, "EvolutionWorker tick panicked; continuing");
         }
     }
 

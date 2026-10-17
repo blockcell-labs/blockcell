@@ -656,27 +656,24 @@ impl EvolutionService {
         evolution_id: &str,
         llm_provider: &dyn LLMProvider,
     ) -> Result<SingleEvolutionResult> {
-        // P2-6: 获取 pipeline 锁，防止同一 evolution 并发执行
-        {
+        // P2-6: 获取 pipeline 锁，防止同一 evolution 并发执行。
+        // RAII guard：future 被取消（select/timeout/abort）或 inner panic 时
+        // Drop 兜底释放，不会留下永久 AlreadyRunning 的泄漏锁。
+        let _guard = {
             let mut locks = self.pipeline_locks.lock().await;
             if locks.contains(evolution_id) {
                 info!(evolution_id = %evolution_id, "🧠 [pipeline] Already running, skipping");
                 return Ok(SingleEvolutionResult::AlreadyRunning);
             }
             locks.insert(evolution_id.to_string());
-        }
+            crate::core_evolution::PipelineLockGuard::new(
+                Arc::clone(&self.pipeline_locks),
+                evolution_id.to_string(),
+            )
+        };
 
-        let result = self
-            .run_single_evolution_inner(evolution_id, llm_provider)
-            .await;
-
-        // 释放 pipeline 锁（无论 inner 成功或失败都必须释放）
-        {
-            let mut locks = self.pipeline_locks.lock().await;
-            locks.remove(evolution_id);
-        }
-
-        result
+        self.run_single_evolution_inner(evolution_id, llm_provider)
+            .await
     }
 
     /// pipeline 内部实现（被 run_single_evolution 包装以管理锁）

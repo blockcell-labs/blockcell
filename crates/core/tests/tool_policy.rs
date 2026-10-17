@@ -109,6 +109,45 @@ fn path_glob_expands_tilde_in_policy_and_arguments() {
 }
 
 #[test]
+fn path_glob_normalizes_dotdot_and_checks_all_path_args() {
+    let mut allow_work = rule("allow-work", "write_file", ToolPolicyDecision::Allow);
+    allow_work.when = Some(ToolPolicyCondition {
+        path_glob: Some("/tmp/work/*".to_string()),
+        ..Default::default()
+    });
+    // 默认 deny：allow 规则不命中即 fail-closed
+    let policy = ToolPolicy::from_config(ToolPolicyConfig {
+        default_decision: ToolPolicyDecision::Deny,
+        rules: vec![allow_work],
+        ..Default::default()
+    });
+
+    // `..` 穿越出 allow 前缀 → 规范化后不命中 → deny
+    let eval = policy.evaluate(&ctx(
+        "write_file",
+        &serde_json::json!({"path": "/tmp/work/../../etc/passwd"}),
+        "cli",
+    ));
+    assert_eq!(eval.decision, ToolPolicyDecision::Deny);
+
+    // 第二个路径参数越权：此前只检查第一个存在的路径参数
+    let eval = policy.evaluate(&ctx(
+        "write_file",
+        &serde_json::json!({"path": "/tmp/work/ok.txt", "output_path": "/etc/evil"}),
+        "cli",
+    ));
+    assert_eq!(eval.decision, ToolPolicyDecision::Deny);
+
+    // 正常路径仍放行
+    let eval = policy.evaluate(&ctx(
+        "write_file",
+        &serde_json::json!({"path": "/tmp/work/ok.txt"}),
+        "cli",
+    ));
+    assert_eq!(eval.decision, ToolPolicyDecision::Allow);
+}
+
+#[test]
 fn simulation_mode_allows_matching_deny_rules() {
     let policy = ToolPolicy::from_config(ToolPolicyConfig {
         simulation_mode: true,

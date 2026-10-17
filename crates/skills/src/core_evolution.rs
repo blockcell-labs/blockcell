@@ -195,9 +195,18 @@ pub struct CoreEvolution {
     pipeline_locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
-struct PipelineLockGuard {
+pub(crate) struct PipelineLockGuard {
     locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     evolution_id: String,
+}
+
+impl PipelineLockGuard {
+    pub(crate) fn new(
+        locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+        evolution_id: String,
+    ) -> Self {
+        Self { locks, evolution_id }
+    }
 }
 
 impl Drop for PipelineLockGuard {

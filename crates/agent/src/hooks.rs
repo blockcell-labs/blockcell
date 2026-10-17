@@ -171,33 +171,49 @@ impl HookManager {
     }
 
     fn expand_command(&self, command: &str, ctx: &HookContext) -> String {
-        let mut expanded = command.to_string();
-        let replacements = [
-            ("{tool_name}", ctx.tool_name.as_deref().unwrap_or_default()),
-            ("{session_id}", ctx.session_id.as_str()),
-            ("{cwd}", ctx.cwd.as_str()),
-            ("{event}", ctx.event.as_str()),
+        // 单遍替换：每个 {token} 至多展开一次，已插入的值不再被后续替换扫描——
+        // 否则 file_path="x {command} y" 会在 {command} 替换时被二次展开并脱离
+        // shell_quote 的引号保护（重入展开 → 间接命令注入）。
+        let mut replacements: Vec<(&'static str, String)> = vec![
+            ("{tool_name}", ctx.tool_name.clone().unwrap_or_default()),
+            ("{session_id}", ctx.session_id.clone()),
+            ("{cwd}", ctx.cwd.clone()),
+            ("{event}", ctx.event.as_str().to_string()),
         ];
-
-        for (token, value) in replacements {
-            expanded = expanded.replace(token, &shell_quote(value));
+        let file_path = ctx.tool_args.get("file_path").and_then(Value::as_str);
+        let path = ctx.tool_args.get("path").and_then(Value::as_str);
+        // {file_path} 回退到 path（file_path 优先，与顺序替换语义一致）
+        if let Some(fp) = file_path.or(path) {
+            replacements.push(("{file_path}", fp.to_string()));
         }
-
-        if let Some(file_path) = ctx.tool_args.get("file_path").and_then(Value::as_str) {
-            expanded = expanded.replace("{file_path}", &shell_quote(file_path));
-        }
-        if let Some(path) = ctx.tool_args.get("path").and_then(Value::as_str) {
-            expanded = expanded.replace("{path}", &shell_quote(path));
-            expanded = expanded.replace("{file_path}", &shell_quote(path));
+        if let Some(p) = path {
+            replacements.push(("{path}", p.to_string()));
         }
         if let Some(command_value) = ctx.tool_args.get("command").and_then(Value::as_str) {
-            expanded = expanded.replace("{command}", &shell_quote(command_value));
+            replacements.push(("{command}", command_value.to_string()));
         }
         if let Some(result) = ctx.result.as_deref() {
-            let truncated = truncate_chars(result, 1000);
-            expanded = expanded.replace("{result}", &shell_quote(&truncated));
+            replacements.push(("{result}", truncate_chars(result, 1000)));
         }
 
+        let mut expanded = String::with_capacity(command.len());
+        let mut rest = command;
+        while let Some(start) = rest.find('{') {
+            let Some(end_rel) = rest[start..].find('}') else {
+                break;
+            };
+            let end = start + end_rel + 1;
+            let token = &rest[start..end];
+            match replacements.iter().find(|(t, _)| *t == token) {
+                Some((_, value)) => {
+                    expanded.push_str(&rest[..start]);
+                    expanded.push_str(&shell_quote(value));
+                }
+                None => expanded.push_str(&rest[..end]),
+            }
+            rest = &rest[end..];
+        }
+        expanded.push_str(rest);
         expanded
     }
 
@@ -456,6 +472,26 @@ hooks:
         assert!(expanded.contains("cmd='echo '\\''hello world'\\'''"));
         assert!(expanded.contains("file='/tmp/a b.py'"));
         assert!(expanded.contains("result=ok"));
+    }
+
+    #[test]
+    fn expansion_does_not_reexpand_tokens_inside_inserted_values() {
+        // 回归：file_path 值内含字面 {command} 时，后续替换不得把它二次展开——
+        // 否则插入值会脱离 shell_quote 引号保护造成间接命令注入。
+        let manager = HookManager::new(Vec::new());
+        let ctx = HookContext {
+            event: HookEvent::PostToolUse,
+            tool_name: Some("write_file".to_string()),
+            tool_args: json!({
+                "file_path": "x {command} y",
+                "command": "rm -rf /"
+            }),
+            ..HookContext::default()
+        };
+
+        let expanded = manager.expand_command_for_test("f={file_path}", &ctx);
+        assert_eq!(expanded, "f='x {command} y'");
+        assert!(!expanded.contains("rm -rf"));
     }
 
     #[tokio::test]

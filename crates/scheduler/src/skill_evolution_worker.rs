@@ -119,13 +119,25 @@ impl SkillEvolutionWorker {
                 }
                 _ = self.wakeup.notified() => {
                     debug!(worker_id = %self.worker_id, "SkillEvolutionWorker woken up");
-                    self.tick().await;
+                    self.tick_guarded().await;
                 }
                 _ = interval.tick() => {
                     debug!(worker_id = %self.worker_id, "SkillEvolutionWorker poll tick");
-                    self.tick().await;
+                    self.tick_guarded().await;
                 }
             }
+        }
+    }
+
+    /// 带 panic 隔离的 tick：单步 panic 不能静默杀死 worker 任务（启动点无监督者重启）。
+    async fn tick_guarded(&self) {
+        use futures::FutureExt;
+        if std::panic::AssertUnwindSafe(self.tick())
+            .catch_unwind()
+            .await
+            .is_err()
+        {
+            error!(worker_id = %self.worker_id, "SkillEvolutionWorker tick panicked; continuing");
         }
     }
 

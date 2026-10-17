@@ -402,14 +402,19 @@ impl ToolPolicy {
         }
 
         if let Some(path_glob) = &rule.path_glob {
-            let Some(path) = PATH_ARG_KEYS
+            // 所有已提供的路径参数都必须匹配，否则 `path`（无害）+`output_path`（越权）
+            // 的传参可借第一个参数骗过检查。
+            let paths: Vec<&str> = PATH_ARG_KEYS
                 .iter()
-                .find_map(|key| ctx.tool_args.get(*key).and_then(|value| value.as_str()))
-            else {
+                .filter_map(|key| ctx.tool_args.get(*key).and_then(|value| value.as_str()))
+                .collect();
+            if paths.is_empty() {
                 return false;
-            };
-            let expanded_path = expand_tilde(path);
-            if !path_glob.matches(&expanded_path) {
+            }
+            if !paths
+                .iter()
+                .all(|path| path_glob.matches(&normalize_path_lexically(&expand_tilde(path))))
+            {
                 return false;
             }
         }
@@ -437,4 +442,22 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// Lexically resolve `.`/`..` so `~/work/../../.ssh/x` cannot glob-match an
+/// allow rule meant for `~/work/*`. The target may not exist, so realpath is
+/// not usable here.
+fn normalize_path_lexically(path: &str) -> String {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
