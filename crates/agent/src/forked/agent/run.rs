@@ -268,8 +268,7 @@ pub async fn run_forked_agent(
 
         // 提取用量（兼容 Anthropic/OpenAI/Gemini/Ollama 归一化后的 prompt_tokens/completion_tokens 与 input_tokens/output_tokens）
         if !response.usage.is_null() {
-            let (input, output, cache_read, cache_creation) =
-                extract_forked_usage(&response.usage);
+            let (input, output, cache_read, cache_creation) = extract_forked_usage(&response.usage);
             total_usage.accumulate(input, output, cache_read, cache_creation);
         }
 
@@ -890,10 +889,7 @@ pub(crate) fn extract_forked_usage(usage: &serde_json::Value) -> (u64, u64, u64,
             "candidatesTokenCount",
         ],
     );
-    let cache_read = read_u64(
-        usage,
-        &["cache_read_input_tokens", "cacheReadInputTokens"],
-    );
+    let cache_read = read_u64(usage, &["cache_read_input_tokens", "cacheReadInputTokens"]);
     let cache_creation = read_u64(
         usage,
         &["cache_creation_input_tokens", "cacheCreationInputTokens"],
@@ -947,7 +943,11 @@ mod usage_tests {
 
         let built = super::build_initial_forked_messages(&cache_safe, &prompt_messages, None);
         let system_messages: Vec<_> = built.iter().filter(|m| m.role == "system").collect();
-        assert_eq!(system_messages.len(), 1, "must not duplicate system message");
+        assert_eq!(
+            system_messages.len(),
+            1,
+            "must not duplicate system message"
+        );
         assert_eq!(
             built[0].content.as_str(),
             Some("frozen parent system prompt with skill cards")

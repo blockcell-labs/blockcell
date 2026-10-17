@@ -399,6 +399,41 @@ async fn openssl_x509_summary(pem: &[u8]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+async fn run_openssl_s_client(
+    host: &str,
+    port: u64,
+    timeout_secs: u64,
+) -> Result<std::process::Output> {
+    if host.starts_with('-') {
+        return Err(Error::Tool("Invalid host for ssl_check".to_string()));
+    }
+    let child = tokio::process::Command::new("openssl")
+        .arg("s_client")
+        .arg("-connect")
+        .arg(format!("{}:{}", host, port))
+        .arg("-servername")
+        .arg(host)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| Error::Tool(format!("openssl failed: {}", e)))?;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| {
+        Error::Tool(format!(
+            "openssl s_client timed out after {}s connecting to {}:{}",
+            timeout_secs, host, port
+        ))
+    })?
+    .map_err(|e| Error::Tool(format!("openssl failed: {}", e)))
+}
+
 async fn action_ssl_check(params: &Value) -> Result<Value> {
     let host = params
         .get("host")
@@ -409,17 +444,7 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
 
     // Invoke openssl directly (no shell): host/port are caller supplied and must
     // never be interpreted as shell syntax.
-    let s_client = tokio::process::Command::new("openssl")
-        .arg("s_client")
-        .arg("-connect")
-        .arg(format!("{}:{}", host, port))
-        .arg("-servername")
-        .arg(host)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| Error::Tool(format!("openssl failed: {}", e)))?;
+    let s_client = run_openssl_s_client(host, port, timeout).await?;
 
     let x509_summary = openssl_x509_summary(&s_client.stdout).await?;
     let stdout = String::from_utf8_lossy(&x509_summary).to_string();
@@ -476,30 +501,17 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
         }
     }
 
-    // Also check TLS version (same direct-invocation rule as above)
-    if let Ok(tls_output) = tokio::process::Command::new("openssl")
-        .arg("s_client")
-        .arg("-connect")
-        .arg(format!("{}:{}", host, port))
-        .arg("-servername")
-        .arg(host)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-    {
-        let tls_stdout = String::from_utf8_lossy(&tls_output.stdout);
-        for line in tls_stdout.lines() {
-            let line = line.trim();
-            if line.contains("Protocol") {
-                result["tls_version"] = json!(line.split(':').next_back().unwrap_or("").trim());
-            } else if line.contains("Cipher") && !line.contains("Server") {
-                result["cipher"] = json!(line.split(':').next_back().unwrap_or("").trim());
-            }
+    // Also check TLS version from the same s_client output
+    let tls_stdout = String::from_utf8_lossy(&s_client.stdout);
+    for line in tls_stdout.lines() {
+        let line = line.trim();
+        if line.contains("Protocol") {
+            result["tls_version"] = json!(line.split(':').next_back().unwrap_or("").trim());
+        } else if line.contains("Cipher") && !line.contains("Server") {
+            result["cipher"] = json!(line.split(':').next_back().unwrap_or("").trim());
         }
     }
 
-    let _ = timeout; // used in concept, openssl has its own timeout
     Ok(result)
 }
 

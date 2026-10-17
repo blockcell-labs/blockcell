@@ -603,9 +603,9 @@ impl ForkedAgentParamsBuilder {
         // default let an unconfigured fork execute any tool the executor supported —
         // including ones never advertised in its schema list.
         let can_use_tool = self.can_use_tool.unwrap_or_else(|| {
-            crate::forked::create_allowlist_can_use_tool(
-                crate::forked::tool_names_from_schemas(&tool_schemas),
-            )
+            crate::forked::create_allowlist_can_use_tool(crate::forked::tool_names_from_schemas(
+                &tool_schemas,
+            ))
         });
 
         Ok(ForkedAgentParams {

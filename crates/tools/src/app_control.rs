@@ -756,10 +756,101 @@ end tell"#,
     }))
 }
 
+/// Parse a single UI path segment (e.g. `button "Run"`, `text field 1`) into a safe
+/// AppleScript element specifier (`<role> <index>` or `<role> "<escaped>"`).
+///
+/// Rejects arbitrary AppleScript expressions (e.g. `(do shell script ...)`, multiline
+/// statements, or unquoted identifiers after the role) since the specifier is spliced
+/// into an unquoted `set targetEl to <specifier>` context.
+fn format_ui_element_segment(raw: &str) -> Result<String> {
+    let part = raw.trim();
+    if part.is_empty() {
+        return Err(Error::Validation(
+            "UI path segment cannot be empty".to_string(),
+        ));
+    }
+    if part.chars().any(|c| c.is_control()) {
+        return Err(Error::Validation(
+            "UI path segment must not contain control characters".to_string(),
+        ));
+    }
+
+    let (role_raw, selector_part) = if let Some(quote_idx) = part.find('"') {
+        if !part.ends_with('"') || quote_idx == 0 {
+            return Err(Error::Validation(format!(
+                "Invalid quoted UI element segment: '{}'",
+                part
+            )));
+        }
+        let role = part[..quote_idx].trim();
+        let inner = &part[quote_idx + 1..part.len() - 1];
+        (role, format!("\"{}\"", escape_applescript(inner)))
+    } else {
+        let (role, index_str) = part.rsplit_once(char::is_whitespace).ok_or_else(|| {
+            Error::Validation(format!(
+                "UI path segment '{}' must end with a numeric index or quoted name",
+                part
+            ))
+        })?;
+        let index: u32 = index_str.trim().parse().map_err(|_| {
+            Error::Validation(format!(
+                "Invalid UI element index '{}' in segment '{}'",
+                index_str.trim(),
+                part
+            ))
+        })?;
+        if index == 0 {
+            return Err(Error::Validation(
+                "UI element index in AppleScript is 1-based and must be >= 1".to_string(),
+            ));
+        }
+        (role.trim(), index.to_string())
+    };
+
+    let role_tokens: Vec<&str> = role_raw.split_whitespace().collect();
+    if role_tokens.is_empty()
+        || !role_tokens
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_alphabetic()))
+    {
+        return Err(Error::Validation(format!(
+            "Invalid UI element role '{}' in segment '{}'",
+            role_raw, part
+        )));
+    }
+
+    let normalized_role = role_tokens.join(" ");
+    if normalized_role.eq_ignore_ascii_case("do shell script")
+        || normalized_role.eq_ignore_ascii_case("run script")
+    {
+        return Err(Error::Validation(format!(
+            "Disallowed UI element role '{}'",
+            normalized_role
+        )));
+    }
+
+    Ok(format!("{} {}", normalized_role, selector_part))
+}
+
 /// Click a UI element by accessibility path.
 /// Path format: "button \"Run\"", "text field 1", "group 1 > button 2"
 async fn action_click_ui_element(app: &str, ui_path: &str) -> Result<Value> {
     info!(app = %app, ui_path = %ui_path, "🖥️ App: clicking UI element");
+
+    // Parse and validate the UI path before touching the target application.
+    // "group 1 > button 2" → "button 2 of group 1 of window 1"
+    let parts: Vec<&str> = ui_path.split('>').map(|s| s.trim()).collect();
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Err(Error::Validation("UI path cannot be empty".to_string()));
+    }
+    let mut element_ref = String::new();
+    for (i, part) in parts.iter().rev().enumerate() {
+        if i > 0 {
+            element_ref.push_str(" of ");
+        }
+        element_ref.push_str(&format_ui_element_segment(part)?);
+    }
+    element_ref.push_str(" of window 1");
 
     // Activate the app first
     let escaped_app = escape_applescript(app);
@@ -772,22 +863,6 @@ delay 0.2"#,
 
     let process_name = resolve_process_name(app).await?;
     let escaped_process = escape_applescript(&process_name);
-
-    // Parse the path: "group 1 > button 2" → nested tell blocks
-    let parts: Vec<&str> = ui_path.split('>').map(|s| s.trim()).collect();
-
-    // Build nested element reference
-    // e.g. "group 1 > button 2" → "button 2 of group 1 of window 1"
-    let mut element_ref = String::new();
-    for (i, part) in parts.iter().rev().enumerate() {
-        if i > 0 {
-            element_ref.push_str(" of ");
-        }
-        // ui_path is caller supplied: escape before splicing into AppleScript so it
-        // cannot break out of the element reference (e.g. `(do shell script "...")`).
-        element_ref.push_str(&escape_applescript(part));
-    }
-    element_ref.push_str(" of window 1");
 
     let script = format!(
         r#"tell application "System Events"
@@ -992,5 +1067,30 @@ mod tests {
     fn test_escape_applescript() {
         assert_eq!(escape_applescript(r#"hello "world""#), r#"hello \"world\""#);
         assert_eq!(escape_applescript(r#"back\slash"#), r#"back\\slash"#);
+    }
+
+    #[test]
+    fn test_format_ui_element_segment_valid_and_rejects_injection() {
+        assert_eq!(format_ui_element_segment("button 1").unwrap(), "button 1");
+        assert_eq!(
+            format_ui_element_segment("text field 2").unwrap(),
+            "text field 2"
+        );
+        assert_eq!(
+            format_ui_element_segment(r#"button "Run""#).unwrap(),
+            r#"button "Run""#
+        );
+        assert_eq!(
+            format_ui_element_segment(r#"menu item "Say "Hi"""#).unwrap(),
+            r#"menu item "Say \"Hi\"""#
+        );
+
+        // Reject AppleScript injection payloads in unquoted context
+        assert!(format_ui_element_segment(r#"(do shell script "id")"#).is_err());
+        assert!(format_ui_element_segment(r#"do shell script "id""#).is_err());
+        assert!(format_ui_element_segment("button 1\ndo shell script \"id\"").is_err());
+        assert!(format_ui_element_segment("button 1 of window 1").is_err());
+        assert!(format_ui_element_segment("button 0").is_err());
+        assert!(format_ui_element_segment("button").is_err());
     }
 }

@@ -343,12 +343,13 @@ impl AuditLogger {
         // Cross-process exclusion: the process-local mutex above cannot stop another
         // blockcell process (gateway + CLI) from appending to the same log with a stale
         // `prev_hash`, which silently breaks the hash chain.
-        let _cross_process_guard = crate::file_lock::lock_exclusive(&log_file).map_err(|error| {
-            Error::Storage(format!(
-                "failed to lock audit log {}: {error}",
-                log_file.display()
-            ))
-        })?;
+        let _cross_process_guard =
+            crate::file_lock::lock_exclusive(&log_file).map_err(|error| {
+                Error::Storage(format!(
+                    "failed to lock audit log {}: {error}",
+                    log_file.display()
+                ))
+            })?;
 
         self.recover_prev_hash();
 

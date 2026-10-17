@@ -839,6 +839,7 @@ impl AgentRuntime {
         }
         if is_memory_write_tool {
             self.learning_coordinator.reset_memory();
+            self.context_builder.invalidate_file_memory_snapshots();
         }
 
         // Layer 4: Track file reads for Post-Compact recovery

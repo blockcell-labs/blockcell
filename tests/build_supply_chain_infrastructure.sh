@@ -18,13 +18,25 @@ grep -F 'source-hashes.mjs' "$ROOT/webui/package.json" >/dev/null \
 node "$ROOT/webui/scripts/source-hashes.mjs" --check \
   || fail "committed WebUI dist is stale"
 
+workspace_version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+workspace_rust_version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+workspace_license=$(sed -n 's/^license = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+
+test -n "$workspace_version" || fail "could not read workspace version from Cargo.toml"
+test -n "$workspace_rust_version" || fail "could not read workspace rust-version from Cargo.toml"
+test -n "$workspace_license" || fail "could not read workspace license from Cargo.toml"
+
 metadata=$(cd "$ROOT" && cargo metadata --locked --no-deps --format-version 1)
-printf '%s' "$metadata" | jq -e '
-  [.packages[] | select(.name | startswith("blockcell"))]
-  | length == 10
-    and all(.version == "0.1.7")
-    and all(.rust_version == "1.85")
-    and all(.license == "MIT")
+printf '%s' "$metadata" | jq -e \
+  --arg version "$workspace_version" \
+  --arg rust_version "$workspace_rust_version" \
+  --arg license "$workspace_license" '
+  (.workspace_members | length) as $expected_count
+  | [.packages[] | select(.name | startswith("blockcell"))]
+  | length == $expected_count
+    and all(.version == $version)
+    and all(.rust_version == $rust_version)
+    and all(.license == $license)
     and all(.authors == ["blockcell"])
 ' >/dev/null || fail "BlockCell packages do not inherit workspace metadata"
 

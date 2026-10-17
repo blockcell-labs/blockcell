@@ -121,7 +121,11 @@ impl MediaDownloader for LocalFileDownloader {
             .unwrap_or(&request.chat_id);
         // chat_id / filename are platform supplied: reduce both to safe path
         // components so they cannot escape the media directory.
-        let subdir_name = format!("{}_{}", date_str, crate::security::safe_path_component(id_part));
+        let subdir_name = format!(
+            "{}_{}",
+            date_str,
+            crate::security::safe_path_component(id_part)
+        );
 
         let dest_dir = Path::new(&workspace_dir)
             .join(&request.config.media_download_dir)

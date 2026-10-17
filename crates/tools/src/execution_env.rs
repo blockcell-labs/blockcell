@@ -154,11 +154,17 @@ mod tests {
         // 固定对外字符串（审计与事件依赖它们，改动即破坏兼容）
         assert_eq!(ExecutionEnvironment::InProcess.as_str(), "in-process");
         assert_eq!(ExecutionEnvironment::Local.as_str(), "local");
-        assert_eq!(ExecutionEnvironment::WorkspaceWrite.as_str(), "workspace-write");
+        assert_eq!(
+            ExecutionEnvironment::WorkspaceWrite.as_str(),
+            "workspace-write"
+        );
         assert_eq!(ExecutionEnvironment::Network.as_str(), "network");
         assert_eq!(ExecutionEnvironment::Shell.as_str(), "shell");
         assert_eq!(ExecutionEnvironment::FullAccess.as_str(), "full-access");
-        assert_eq!(ExecutionEnvironment::default(), ExecutionEnvironment::InProcess);
+        assert_eq!(
+            ExecutionEnvironment::default(),
+            ExecutionEnvironment::InProcess
+        );
 
         // as_str / Display / 序列化 / 反序列化 共用同一份字符串，不会漂移
         for environment in [

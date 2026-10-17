@@ -814,13 +814,28 @@ impl AgentRuntime {
                             .iter()
                             .filter(|call| call.id != skill_call.id)
                         {
+                            let skip_reason = "Not executed: activate_skill was called in the same batch; only the skill activation runs.";
                             self.record_unexecuted_tool_call(
                                 other,
                                 &msg,
                                 ToolOutcome::NotStarted,
-                                "Not executed: activate_skill was called in the same batch; only the skill activation runs.",
+                                skip_reason,
                             )
                             .await;
+                            // Keep every assistant tool_use paired with a tool_result in
+                            // persisted history so subsequent LLM turns do not fail validation
+                            // (e.g. Anthropic 400 for an orphan tool_use block).
+                            let mut skipped_result = ChatMessage::tool_result(
+                                &other.id,
+                                &serde_json::json!({
+                                    "error": skip_reason,
+                                    "outcome": "not_started"
+                                })
+                                .to_string(),
+                            );
+                            skipped_result.name = Some(other.name.clone());
+                            current_messages.push(skipped_result.clone());
+                            history.push(skipped_result);
                         }
                     }
 
@@ -887,7 +902,11 @@ impl AgentRuntime {
                     self.dispatch_event(&msg, &persist_session_key, &mut skill_event)
                         .await;
 
-                    let skill_history_seed = history[..history.len().saturating_sub(1)].to_vec();
+                    let assistant_turn_idx = history
+                        .iter()
+                        .rposition(|m| m.role == "assistant")
+                        .unwrap_or_else(|| history.len().saturating_sub(1));
+                    let skill_history_seed = history[..assistant_turn_idx].to_vec();
                     let skill_outcome = self
                         .run_skill_for_turn(
                             &skill_ctx,
@@ -931,7 +950,7 @@ impl AgentRuntime {
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
-                // 只读预取：彼此独立的只读调用并发执行，主循环按原顺序消费结果（P2-2）。
+                                                                           // 只读预取：彼此独立的只读调用并发执行，主循环按原顺序消费结果（P2-2）。
                 let mut prefetched = self
                     .prefetch_read_only_tools(&response.tool_calls, &msg)
                     .await;
@@ -1606,13 +1625,12 @@ impl AgentRuntime {
                         // 使用当前回合结束时的完整 current_messages（并补入本轮最终 assistant 回复），
                         // 确保 Memory/Skill/Combined Review 都能看到本轮完整工具轨迹与最终回答，
                         // 且避免末尾两条连续 user 消息在 Anthropic 转换时被合并导致缓存断点错位。
-                        let mut review_snapshot = if current_messages.len()
-                            >= deferred_review_snapshot.len()
-                        {
-                            current_messages.clone()
-                        } else {
-                            deferred_review_snapshot
-                        };
+                        let mut review_snapshot =
+                            if current_messages.len() >= deferred_review_snapshot.len() {
+                                current_messages.clone()
+                            } else {
+                                deferred_review_snapshot
+                            };
                         if review_snapshot.last().map(|m| m.role.as_str()) != Some("assistant") {
                             let final_assistant = history
                                 .last()

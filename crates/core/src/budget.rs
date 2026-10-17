@@ -232,7 +232,11 @@ impl BudgetTracker {
 
     /// Return true if this tracker's own limit or any ancestor's limit has been reached.
     pub fn is_exhausted(&self) -> bool {
-        self.local_exhausted() || self.parent.as_ref().is_some_and(|parent| parent.is_exhausted())
+        self.local_exhausted()
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_exhausted())
     }
 
     /// Return true when usage has crossed the warning threshold but is not exhausted.

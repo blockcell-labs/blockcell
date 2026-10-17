@@ -49,6 +49,8 @@ struct StagedUpdateMetadata {
     sha256: String,
     #[serde(default)]
     sig: Option<String>,
+    #[serde(default)]
+    min_host_version: Option<String>,
 }
 
 impl UpdateManager {
@@ -240,6 +242,7 @@ impl UpdateManager {
                 url: artifact.url.clone(),
                 sha256: artifact.sha256.clone(),
                 sig: artifact.sig.clone(),
+                min_host_version: manifest.min_host_version.clone(),
             })?;
 
             Ok(staging_path.clone())
@@ -366,7 +369,16 @@ impl UpdateManager {
     }
 
     pub async fn apply(&self, staging_path: &std::path::Path, version: &str) -> Result<()> {
-        info!(version = %version, "Applying update");
+        self.apply_with_options(staging_path, version, false).await
+    }
+
+    pub async fn apply_with_options(
+        &self,
+        staging_path: &std::path::Path,
+        version: &str,
+        allow_downgrade: bool,
+    ) -> Result<()> {
+        info!(version = %version, allow_downgrade = allow_downgrade, "Applying update");
 
         // 暂存文件可能在 download 与 apply 之间被破坏或替换；安装前必须重新建立
         // 文件、元数据和发布签名之间的完整信任链。
@@ -377,6 +389,23 @@ impl UpdateManager {
                 "Staged update does not match persisted verification metadata".to_string(),
             ));
         }
+
+        let current_version = env!("CARGO_PKG_VERSION");
+        if !allow_downgrade && !Self::version_greater(version, current_version) {
+            return Err(Error::Validation(format!(
+                "Refusing to apply version {} over current version {} (not an upgrade; pass --force to allow downgrade/reinstall)",
+                version, current_version
+            )));
+        }
+        if let Some(ref min_version) = metadata.min_host_version {
+            if !allow_downgrade && !Self::version_satisfies(current_version, min_version) {
+                return Err(Error::Validation(format!(
+                    "Current version {} does not meet minimum required host version {} for update {}",
+                    current_version, min_version, version
+                )));
+            }
+        }
+
         Sha256Verifier::verify_file(staging_path, &metadata.sha256)?;
         if self.config.auto_upgrade.require_signature {
             let manifest = metadata.as_manifest();
@@ -563,7 +592,7 @@ impl StagedUpdateMetadata {
                 sha256: self.sha256.clone(),
                 sig: self.sig.clone(),
             }],
-            min_host_version: None,
+            min_host_version: self.min_host_version.clone(),
             notes: String::new(),
         }
     }
@@ -850,6 +879,7 @@ mod tests {
                 url: "https://example.com/blockcell".to_string(),
                 sha256: format!("{:x}", Sha256::digest(b"update")),
                 sig: None,
+                min_host_version: None,
             })
             .unwrap();
 
@@ -878,12 +908,67 @@ mod tests {
                 url: "https://example.com/blockcell".to_string(),
                 sha256: format!("{:x}", Sha256::digest(b"original verified bytes")),
                 sig: None,
+                min_host_version: None,
             })
             .unwrap();
 
         let error = manager.apply(&staged_path, "9.9.9").await.unwrap_err();
 
         assert!(error.to_string().contains("SHA256 mismatch"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_downgrade_or_unsatisfied_min_host_unless_forced() {
+        let temp = TempDir::new().unwrap();
+        let manager = manager(&temp);
+        let staging_dir = temp.path().join("update/staging");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        let old_path = staging_dir.join("blockcell-0.0.1");
+        std::fs::write(&old_path, b"old binary").unwrap();
+        manager
+            .persist_staged_update(&StagedUpdateMetadata {
+                version: "0.0.1".to_string(),
+                file_name: "blockcell-0.0.1".to_string(),
+                channel: "stable".to_string(),
+                os: get_current_platform().0,
+                arch: get_current_platform().1,
+                url: "https://example.com/blockcell".to_string(),
+                sha256: format!("{:x}", Sha256::digest(b"old binary")),
+                sig: None,
+                min_host_version: None,
+            })
+            .unwrap();
+
+        let downgrade_err = manager.apply(&old_path, "0.0.1").await.unwrap_err();
+        assert!(
+            downgrade_err.to_string().contains("Refusing to apply"),
+            "{downgrade_err}"
+        );
+
+        let future_path = staging_dir.join("blockcell-9.9.9");
+        std::fs::write(&future_path, b"future binary").unwrap();
+        manager
+            .persist_staged_update(&StagedUpdateMetadata {
+                version: "9.9.9".to_string(),
+                file_name: "blockcell-9.9.9".to_string(),
+                channel: "stable".to_string(),
+                os: get_current_platform().0,
+                arch: get_current_platform().1,
+                url: "https://example.com/blockcell".to_string(),
+                sha256: format!("{:x}", Sha256::digest(b"future binary")),
+                sig: None,
+                min_host_version: Some("99.0.0".to_string()),
+            })
+            .unwrap();
+
+        let min_host_err = manager.apply(&future_path, "9.9.9").await.unwrap_err();
+        assert!(
+            min_host_err
+                .to_string()
+                .contains("minimum required host version"),
+            "{min_host_err}"
+        );
     }
 
     #[test]

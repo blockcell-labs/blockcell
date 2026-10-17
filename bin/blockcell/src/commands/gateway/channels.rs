@@ -295,8 +295,7 @@ fn mask_secret_channel_fields(payload: &mut serde_json::Value) {
             };
             // An empty value carries no secret; leaving it empty keeps the UI honest.
             if value.as_str().is_some_and(|text| !text.is_empty()) {
-                *value =
-                    serde_json::Value::String(blockcell_core::config::SECRET_MASK.to_string());
+                *value = serde_json::Value::String(blockcell_core::config::SECRET_MASK.to_string());
             }
         }
     }

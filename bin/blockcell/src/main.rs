@@ -642,7 +642,11 @@ enum UpgradeCommands {
     /// Download available update
     Download,
     /// Apply downloaded update
-    Apply,
+    Apply {
+        /// Allow applying a version that is not newer than the current version or bypass min_host_version
+        #[arg(long)]
+        force: bool,
+    },
     /// Rollback to previous version
     Rollback {
         /// Specific version to rollback to
@@ -1071,8 +1075,8 @@ async fn main() -> anyhow::Result<()> {
                     UpgradeCommands::Download => {
                         commands::upgrade::download().await?;
                     }
-                    UpgradeCommands::Apply => {
-                        commands::upgrade::apply().await?;
+                    UpgradeCommands::Apply { force } => {
+                        commands::upgrade::apply(force).await?;
                     }
                     UpgradeCommands::Rollback { to } => {
                         commands::upgrade::rollback(to).await?;

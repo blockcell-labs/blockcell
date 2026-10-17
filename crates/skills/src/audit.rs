@@ -536,6 +536,19 @@ fn check_shell_dangerous_commands(code: &str, violations: &mut Vec<StaticViolati
             "eval" | "exec" => {
                 push_shell_violation("Detected exec-like command execution", violations)
             }
+            "python" | "python3" | "node" | "nodejs" | "perl" | "ruby" | "php" => {
+                let has_inline_eval = tokens[command_index + 1..end].iter().any(|arg| {
+                    matches!(arg.as_str(), "-c" | "-e" | "-r" | "--eval")
+                        || arg.starts_with("-c")
+                        || arg.starts_with("-e")
+                });
+                if has_inline_eval {
+                    push_shell_violation(
+                        "Detected inline interpreter code execution in shell script",
+                        violations,
+                    );
+                }
+            }
             _ => {}
         }
         start = end + 1;
@@ -786,6 +799,21 @@ print(message)
         let code = "#!/bin/sh\nprintf '%s\\n' 'sudo and rm -rf are prohibited'";
         let result = static_audit(&SkillType::LocalScript, code);
         assert!(result.passed, "quoted documentation should not be executed");
+    }
+
+    #[test]
+    fn test_shell_inline_interpreter_one_liners_are_rejected() {
+        for code in [
+            "#!/bin/sh\npython3 -c \"import os; os.system('id')\"",
+            "#!/bin/sh\n/usr/bin/node -e \"require('child_process').execSync('id')\"",
+            "#!/bin/sh\nperl -e 'system(\"id\")'",
+        ] {
+            let result = static_audit(&SkillType::LocalScript, code);
+            assert!(
+                !result.passed,
+                "inline interpreter execution in shell script must be rejected: {code}"
+            );
+        }
     }
 
     #[test]

@@ -927,7 +927,8 @@ mod tests {
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("blockcell-encrypt-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("blockcell-encrypt-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
     }
@@ -946,7 +947,10 @@ mod tests {
         )
         .await
         .expect("encrypt");
-        let enc_path = encrypted["output"].as_str().expect("output path").to_string();
+        let enc_path = encrypted["output"]
+            .as_str()
+            .expect("output path")
+            .to_string();
 
         let raw = std::fs::read(&enc_path).expect("read ciphertext");
         assert!(
@@ -988,7 +992,10 @@ mod tests {
         )
         .await
         .expect("encrypt");
-        let enc_path = encrypted["output"].as_str().expect("output path").to_string();
+        let enc_path = encrypted["output"]
+            .as_str()
+            .expect("output path")
+            .to_string();
 
         let out_path = dir.join("out.txt");
         action_decrypt_file(

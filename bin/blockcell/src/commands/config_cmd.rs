@@ -272,16 +272,15 @@ pub async fn set(key: &str, value: &str) -> anyhow::Result<()> {
     let paths = Paths::new();
     let config_path = paths.config_file();
 
-    // Edit the raw file rather than round-tripping through the typed `Config`: the old
-    // implementation serialized the struct back over the file, silently dropping every
-    // key the struct does not model plus the user's comments (irreversible data loss).
-    // Working on the parsed file also leaves `${ENV}` placeholders in other keys intact
-    // instead of writing expanded secrets back to disk.
+    // Edit the raw JSON5 Value tree rather than round-tripping through the typed `Config`:
+    // the old implementation serialized the struct back over the file, silently dropping
+    // every key the struct does not model and expanding `${ENV}` placeholders into
+    // plaintext secrets on disk. Note: JSON5 comments are still stripped when the Value
+    // tree is re-serialized via `write_json5_pretty`.
     let mut json: Value = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        parse_json5_value_preserving_env(&content).map_err(|e| {
-            anyhow::anyhow!("failed to parse {}: {}", config_path.display(), e)
-        })?
+        parse_json5_value_preserving_env(&content)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", config_path.display(), e))?
     } else {
         serde_json::to_value(Config::default())?
     };

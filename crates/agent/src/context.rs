@@ -425,7 +425,6 @@ impl Clone for ContextBuilder {
 }
 
 impl ContextBuilder {
-
     pub fn prompt_registry(&self) -> &PromptRegistry {
         &self.prompt_registry
     }
@@ -501,6 +500,19 @@ impl ContextBuilder {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Some(injector.clone());
         self.memory_injector = Some(injector);
+        // Clear cached file-memory snapshots so subsequent retrievals see the
+        // newly consolidated or updated canonical USER.md / MEMORY.md files.
+        self.invalidate_file_memory_snapshots();
+    }
+
+    /// Invalidate cached `USER.md` / `MEMORY.md` snapshots across sessions so the
+    /// next turn reloads fresh canonical memory from disk.
+    pub fn invalidate_file_memory_snapshots(&self) {
+        self.session_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .file_memory_snapshots
+            .clear();
     }
 
     /// Get the memory injector (for checking if initialized).
@@ -616,12 +628,14 @@ impl ContextBuilder {
         }
     }
 
-    /// Re-scan skill directories and pick up newly created skills.
+    /// Re-scan skill directories and pick up newly created, modified, or removed skills.
     /// Returns the names of newly discovered skills.
     pub fn reload_skills(&mut self) -> Vec<String> {
+        let mut reloaded_ok = false;
         let new_skills = if let Some(ref mut manager) = self.skill_manager {
             match manager.reload_skills(&self.paths) {
                 Ok(new_skills) => {
+                    reloaded_ok = true;
                     *self
                         .shared_skill_manager
                         .write()
@@ -636,7 +650,10 @@ impl ContextBuilder {
         } else {
             vec![]
         };
-        if !new_skills.is_empty() {
+        if reloaded_ok {
+            // Unconditionally refresh the skill index summary and clear frozen system
+            // prompt snapshots so skill edits and deletions (where `new_skills` is empty)
+            // are also immediately visible.
             self.refresh_skill_index_summary();
             self.session_cache
                 .lock()
@@ -2241,6 +2258,28 @@ description: deploy demo
         assert!(same_prompt.contains("Previously provided memory remains valid"));
         assert!(!same_prompt.contains("Updated durable memory."));
         assert!(next_prompt.contains("Updated durable memory."));
+
+        builder.invalidate_file_memory_snapshots();
+        let after_invalidation = builder.build_messages_for_session_mode_with_channel(
+            "session-a",
+            &[],
+            "durable memory",
+            &[],
+            InteractionMode::General,
+            None,
+            &HashSet::new(),
+            &HashSet::new(),
+            "cli",
+            false,
+            &[],
+            &[],
+        );
+        let invalidated_prompt =
+            test_chat_message_text(&after_invalidation[after_invalidation.len() - 2]);
+        assert!(
+            invalidated_prompt.contains("Updated durable memory."),
+            "explicit invalidation must refresh frozen file memory for the session"
+        );
     }
 
     #[test]

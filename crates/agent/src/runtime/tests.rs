@@ -7247,7 +7247,7 @@ fn fork_for_message_task_shares_caches_and_capabilities_while_isolating_turn_sta
         notified: AtomicUsize::new(0),
     });
     parent.set_skill_evolution_worker(
-        skill_evo_notifier.clone() as Arc<dyn crate::capability_adapter::EvolutionNotifier>,
+        skill_evo_notifier.clone() as Arc<dyn crate::capability_adapter::EvolutionNotifier>
     );
     parent.current_turn_id = Some("stale-parent-turn".to_string());
     parent.current_step = Some(9);
@@ -7420,7 +7420,11 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
     {
         let (s1, tx1) = SteeringChannel::new(4);
         let mut msg1 = parent.fork_for_message_task(s1, tx1, parent.abort_token.child());
-        write_skill_md("skill_via_manage", "created by skill_manage", "Step 1: run manage");
+        write_skill_md(
+            "skill_via_manage",
+            "created by skill_manage",
+            "Step 1: run manage",
+        );
         let added = msg1.context_builder.reload_skills();
         assert!(added.contains(&"skill_via_manage".to_string()));
     }
@@ -7452,7 +7456,8 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
         let (s1, tx1) = SteeringChannel::new(4);
         let msg1 = parent.fork_for_message_task(s1, tx1, parent.abort_token.child());
         let arc = msg1.context_builder.skill_index_summary_arc();
-        *arc.write().unwrap() = Some("- skill_via_background_review: learned in review".to_string());
+        *arc.write().unwrap() =
+            Some("- skill_via_background_review: learned in review".to_string());
     }
     {
         let (s2, tx2) = SteeringChannel::new(4);
@@ -7468,22 +7473,45 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
     }
 
     // 路径 3: 技能自进化部署（invalidate_prompt_snapshot + 更新 SKILL.md）→ 下一条消息 reload 后可见最新内容
-    write_skill_md("skill_via_manage", "evolved description v2", "Step 1: evolved body v2");
+    write_skill_md(
+        "skill_via_manage",
+        "evolved description v2",
+        "Step 1: evolved body v2",
+    );
     blockcell_skills::SkillManager::invalidate_prompt_snapshot(&parent.paths)
         .expect("invalidate prompt snapshot");
     {
         let (s3, tx3) = SteeringChannel::new(4);
         let mut msg3 = parent.fork_for_message_task(s3, tx3, parent.abort_token.child());
-        let _ = msg3.context_builder.reload_skills();
+        let added = msg3.context_builder.reload_skills();
+        assert!(
+            added.is_empty(),
+            "modifying an existing skill produces no new skill names"
+        );
         let active = msg3
             .context_builder
             .resolve_active_skill_by_name("skill_via_manage", &HashSet::new())
             .expect("resolve evolved skill");
         assert!(active.prompt_md.contains("evolved body v2"));
+        let summary = msg3
+            .context_builder
+            .skill_index_summary_arc()
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            summary.contains("evolved description v2"),
+            "modifying an existing skill must still refresh skill_index_summary"
+        );
     }
 
     // 路径 4: 用户手工在磁盘新增技能文件 → 下一条消息启动 reload_skills() 后可见并回写共享槽
-    write_skill_md("skill_via_manual_edit", "manually added by user", "Manual instructions");
+    write_skill_md(
+        "skill_via_manual_edit",
+        "manually added by user",
+        "Manual instructions",
+    );
     {
         let (s4, tx4) = SteeringChannel::new(4);
         let mut msg4 = parent.fork_for_message_task(s4, tx4, parent.abort_token.child());

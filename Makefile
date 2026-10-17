@@ -36,6 +36,7 @@ webui-dist:
 		|| (echo "webui dist is stale — rebuilding" && cd webui && npm run build)
 
 test-rust: webui-dist
+	cargo fmt --all --check
 	cargo test --workspace
 
 # Harness self-tests only: unittest discovery does not descend into the

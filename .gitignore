@@ -95,8 +95,13 @@ Thumbs.db
 *.log
 *.bak
 
-# coding-eval 运行报告（由 runner.py 默认写入，不应提交）
+# coding-eval 运行报告（由 runner.py 默认写入，不应提交）与 Python 字节码缓存
 tests/coding_eval/latest-report.json
+__pycache__/
+*.py[cod]
+
+# 本地全仓审查报告目录
+/review-2026-10-16/
 
 # Added by code-review-graph
 .code-review-graph/

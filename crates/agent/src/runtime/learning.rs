@@ -603,7 +603,21 @@ impl super::AgentRuntime {
         }
         self.learning_coordinator
             .take_boundary_job(session_key, boundary)
-            .expect("boundary job was just enqueued")
+            .unwrap_or_else(|| {
+                let mut fallback = LearningBoundaryJob::new(
+                    session_key,
+                    boundary,
+                    history_snapshot,
+                    LearningOutputRequest::SessionSummary,
+                );
+                fallback.requested_outputs = vec![
+                    LearningOutputRequest::SessionSummary,
+                    LearningOutputRequest::DurableMemory,
+                    LearningOutputRequest::UserPreferences,
+                    LearningOutputRequest::SkillCandidate,
+                ];
+                fallback
+            })
     }
 
     fn attach_boundary_job(
@@ -1132,10 +1146,7 @@ mod tests {
     fn resolve_review_tool_schemas_falls_back_when_parent_has_no_tools() {
         let resolved =
             super::super::AgentRuntime::resolve_review_tool_schemas(&ReviewMode::Skill, &[]);
-        assert_eq!(
-            resolved,
-            crate::forked::build_skill_review_tool_schemas()
-        );
+        assert_eq!(resolved, crate::forked::build_skill_review_tool_schemas());
     }
 
     #[test]

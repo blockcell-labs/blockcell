@@ -83,7 +83,7 @@ pub async fn download() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn apply() -> anyhow::Result<()> {
+pub async fn apply(force: bool) -> anyhow::Result<()> {
     let paths = Paths::new();
     let config = Config::load_or_default(&paths)?;
     let manager = UpdateManager::new(config, paths);
@@ -92,7 +92,9 @@ pub async fn apply() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No downloaded update is ready to apply"))?;
 
     println!("Applying version {}...", staged.version);
-    manager.apply(&staged.path, &staged.version).await?;
+    manager
+        .apply_with_options(&staged.path, &staged.version, force)
+        .await?;
     println!("Update applied successfully. Restart blockcell to use the new version.");
     Ok(())
 }

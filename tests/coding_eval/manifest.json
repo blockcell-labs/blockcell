@@ -7,7 +7,7 @@
     {"id":"bugfix-04-parse-bool","category":"bugfix","prompt":"修复 parse_bool 的大小写、空白和非法值处理。完成后运行测试。","fixture":"tasks/bugfix-04-parse-bool/repo","acceptance":"tasks/bugfix-04-parse-bool/verify.py"},
     {"id":"bugfix-05-chunks","category":"bugfix","prompt":"修复 chunks 在非法 size 和尾块场景的行为。完成后运行测试。","fixture":"tasks/bugfix-05-chunks/repo","acceptance":"tasks/bugfix-05-chunks/verify.py"},
     {"id":"bugfix-06-csv-average","category":"bugfix","prompt":"修复 CSV 平均值计算对表头、空行和非法数字的处理。完成后运行测试。","fixture":"tasks/bugfix-06-csv-average/repo","acceptance":"tasks/bugfix-06-csv-average/verify.py"},
-    {"id":"feature-01-batch","category":"feature","prompt":"新增 batched(iterable, size) API，并补齐边界行为。完成后运行测试。","fixture":"tasks/feature-01-batch/repo","acceptance":"tasks/feature-01-batch/verify.py"},
+    {"id":"feature-01-batch","category":"feature","prompt":"新增 batched(iterable, size) 生成器/迭代器 API（每批产出一个 tuple，size <= 0 时抛 ValueError），并补齐边界行为。完成后运行测试。","fixture":"tasks/feature-01-batch/repo","acceptance":"tasks/feature-01-batch/verify.py"},
     {"id":"feature-02-cli-upper","category":"feature","prompt":"为现有 CLI 新增 --upper 选项，不影响默认输出。完成后运行测试。","fixture":"tasks/feature-02-cli-upper/repo","acceptance":"tasks/feature-02-cli-upper/verify.py"},
     {"id":"feature-03-ttl-cache","category":"feature","prompt":"实现 TTLCache，支持 set/get、过期清理和可注入时钟。完成后运行测试。","fixture":"tasks/feature-03-ttl-cache/repo","acceptance":"tasks/feature-03-ttl-cache/verify.py"},
     {"id":"feature-04-jsonl","category":"feature","prompt":"新增 read_jsonl，逐行解析并在错误中报告行号。完成后运行测试。","fixture":"tasks/feature-04-jsonl/repo","acceptance":"tasks/feature-04-jsonl/verify.py"},

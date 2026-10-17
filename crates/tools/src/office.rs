@@ -26,7 +26,8 @@ fn read_zip_entry(entry: &mut impl Read, name: &str) -> Result<String> {
             name, MAX_OOXML_ENTRY_BYTES
         )));
     }
-    String::from_utf8(buffer).map_err(|e| Error::Tool(format!("{} is not valid UTF-8: {}", name, e)))
+    String::from_utf8(buffer)
+        .map_err(|e| Error::Tool(format!("{} is not valid UTF-8: {}", name, e)))
 }
 
 /// Read an Excel file (.xlsx, .xls) and return its content as text.

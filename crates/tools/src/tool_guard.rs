@@ -39,6 +39,9 @@ static DANGEROUS_EXEC_RM_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("dangerous exec rm regex is valid")
 });
 
+static DANGEROUS_EXEC_KILL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bkill\s+\S").expect("dangerous exec kill regex is valid"));
+
 pub fn is_dangerous_exec_command(command: &str) -> bool {
     let c = command.to_lowercase();
     let c = c.trim();
@@ -56,20 +59,22 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
         let rm_re = &*DANGEROUS_EXEC_RM_RE;
         for caps in rm_re.captures_iter(c) {
             let suffix = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let has_recursive = suffix.contains(" -r")
-                || suffix.contains(" -rf")
-                || suffix.contains(" -fr")
-                || suffix.starts_with("-r")
-                || suffix.starts_with("-rf")
-                || suffix.starts_with("-fr");
-            let has_force = suffix.contains(" -f")
-                || suffix.contains(" -rf")
-                || suffix.contains(" -fr")
-                || suffix.starts_with("-f")
-                || suffix.starts_with("-rf")
-                || suffix.starts_with("-fr");
-            let has_target = suffix
-                .split_whitespace()
+            let tokens: Vec<&str> = suffix.split_whitespace().collect();
+            let has_recursive = tokens.iter().any(|token| {
+                *token == "--recursive"
+                    || token.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-')
+                            && flags.chars().any(|flag| flag == 'r' || flag == 'R')
+                    })
+            });
+            let has_force = tokens.iter().any(|token| {
+                *token == "--force"
+                    || token.strip_prefix('-').is_some_and(|flags| {
+                        !flags.starts_with('-') && flags.chars().any(|flag| flag == 'f')
+                    })
+            });
+            let has_target = tokens
+                .iter()
                 .any(|token| !token.starts_with('-') && !token.is_empty());
             if has_target && (has_recursive || has_force) {
                 return true;
@@ -80,8 +85,11 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
         }
     }
 
+    if DANGEROUS_EXEC_KILL_RE.is_match(c) {
+        return true;
+    }
+
     let dangerous = [
-        "kill ",
         "pkill",
         "killall",
         "taskkill",
@@ -387,6 +395,16 @@ mod tests {
         );
         assert!(dangerous_operation_items("exec", &json!({"command": "ls"})).is_empty());
         assert!(dangerous_operation_items("shell", &json!({"command": "ls"})).is_empty());
+        assert!(!dangerous_operation_items(
+            "exec",
+            &json!({"command": "rm --recursive --force ~/Documents"})
+        )
+        .is_empty());
+        assert!(
+            dangerous_operation_items("exec", &json!({"command": "npm run skill test"})).is_empty(),
+            "'skill ' must not false-positive as 'kill '"
+        );
+        assert!(!dangerous_operation_items("exec", &json!({"command": "kill -9 1234"})).is_empty());
         assert_eq!(
             dangerous_operation_items(
                 "file_ops",

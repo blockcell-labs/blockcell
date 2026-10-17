@@ -206,6 +206,10 @@ fn child_reports_its_own_exhaustion_separately_from_parent() {
     let error = child
         .check_budget()
         .expect_err("child budget should be exhausted");
-    assert!(error.message.contains("tokens: 100/100"), "{}", error.message);
+    assert!(
+        error.message.contains("tokens: 100/100"),
+        "{}",
+        error.message
+    );
     assert!(parent.is_exhausted());
 }

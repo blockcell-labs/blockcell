@@ -158,6 +158,9 @@ def run_task(
         except subprocess.TimeoutExpired as error:
             timed_out = True
             agent_output = (error.stdout or "")[-20_000:]
+        except OSError as error:
+            agent_exit_code = -1
+            agent_output = f"OSError launching agent command: {error}"
 
     acceptance = ROOT / task["acceptance"]
     # The workspace is agent-controlled, so the acceptance must not be able to

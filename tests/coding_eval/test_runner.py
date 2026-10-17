@@ -203,6 +203,21 @@ class CodingEvalRunnerTests(unittest.TestCase):
             ["agent", "--prompt", task["prompt"], "--workspace", "/tmp/ws", "--task", "t1"],
         )
 
+    def test_run_task_isolates_oserror_when_agent_binary_is_missing(self):
+        tasks = runner.load_manifest(ROOT / "manifest.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = runner.run_task(
+                tasks[0],
+                pathlib.Path(tmp),
+                agent_command="/nonexistent-blockcell-eval-binary --workspace {workspace}",
+                timeout=10,
+                max_tool_calls=10,
+            )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["agent_exit_code"], -1)
+        self.assertIn("OSError launching agent command", result["agent_output_tail"])
+
 
 if __name__ == "__main__":
     unittest.main()

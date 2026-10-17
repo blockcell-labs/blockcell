@@ -186,6 +186,34 @@ pub struct CoreEvolution {
     llm_provider: Option<Arc<dyn LLMProvider>>,
     /// LLM call timeout in seconds
     llm_timeout_secs: u64,
+    /// Serialize `request_capability` check-then-act so concurrent requests for the
+    /// same capability cannot bypass idempotency or collide on record filenames.
+    request_lock: tokio::sync::Mutex<()>,
+    /// Per-record active pipeline set so concurrent callers (`EvolutionWorker`,
+    /// `run_one_pending_evolution`, `run_pending_evolutions`) never double-run the
+    /// same `evolution_id`.
+    pipeline_locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+struct PipelineLockGuard {
+    locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    evolution_id: String,
+}
+
+impl Drop for PipelineLockGuard {
+    fn drop(&mut self) {
+        if let Ok(mut locks) = self.locks.try_lock() {
+            locks.remove(&self.evolution_id);
+        } else {
+            let locks = Arc::clone(&self.locks);
+            let evolution_id = std::mem::take(&mut self.evolution_id);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    locks.lock().await.remove(&evolution_id);
+                });
+            }
+        }
+    }
 }
 
 mod generation;
@@ -254,7 +282,21 @@ impl CoreEvolution {
             max_retries: 3,
             llm_provider: None,
             llm_timeout_secs,
+            request_lock: tokio::sync::Mutex::new(()),
+            pipeline_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    async fn try_acquire_pipeline_lock(&self, evolution_id: &str) -> Option<PipelineLockGuard> {
+        let mut locks = self.pipeline_locks.lock().await;
+        if locks.contains(evolution_id) {
+            return None;
+        }
+        locks.insert(evolution_id.to_string());
+        Some(PipelineLockGuard {
+            locks: Arc::clone(&self.pipeline_locks),
+            evolution_id: evolution_id.to_string(),
+        })
     }
 
     /// Get a reference to the capability version manager.
@@ -373,6 +415,13 @@ impl CoreEvolution {
     ///
     /// Returns `Ok(step_output_json)` on success, `Err` on failure.
     pub async fn run_step(&self, evolution_id: &str, step: EvolutionStep) -> Result<String> {
+        let Some(_pipeline_guard) = self.try_acquire_pipeline_lock(evolution_id).await else {
+            return Err(Error::Evolution(format!(
+                "Core evolution '{}' is already running in another task",
+                evolution_id
+            )));
+        };
+
         // For BuildPrompt, ensure the CoreEvolutionRecord exists.
         // If the record doesn't exist yet, create it.
         if step == EvolutionStep::BuildPrompt && self.load_record(evolution_id).is_err() {
@@ -689,6 +738,7 @@ impl CoreEvolution {
         description: &str,
         provider_kind: ProviderKind,
     ) -> Result<String> {
+        let _request_guard = self.request_lock.lock().await;
         self.ensure_artifact_name_available(capability_id).await?;
         // Idempotency: return existing active record if present
         if let Some(existing_id) = self.find_active_record(capability_id)? {
@@ -711,10 +761,12 @@ impl CoreEvolution {
         let consecutive_failures = self.count_consecutive_failures(capability_id)?;
         if consecutive_failures >= MAX_AUTO_FAILURES {
             // Auto-block: create a Blocked record
+            let seq = CORE_RECORD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let block_id = format!(
-                "core_evo_{}_{}",
+                "core_evo_{}_{}_{}",
                 capability_id.replace('.', "_"),
-                chrono::Utc::now().timestamp()
+                chrono::Utc::now().timestamp(),
+                seq
             );
             let block_record = CoreEvolutionRecord {
                 id: block_id.clone(),
@@ -747,10 +799,12 @@ impl CoreEvolution {
             )));
         }
 
+        let seq = CORE_RECORD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let evolution_id = format!(
-            "core_evo_{}_{}",
+            "core_evo_{}_{}_{}",
             capability_id.replace('.', "_"),
-            chrono::Utc::now().timestamp()
+            chrono::Utc::now().timestamp(),
+            seq
         );
 
         let record = CoreEvolutionRecord {
@@ -792,6 +846,14 @@ impl CoreEvolution {
         evolution_id: &str,
         llm_provider: &dyn LLMProvider,
     ) -> Result<bool> {
+        let Some(_pipeline_guard) = self.try_acquire_pipeline_lock(evolution_id).await else {
+            info!(
+                evolution_id = %evolution_id,
+                "🧬 [核心进化] 进化任务已在其他协程运行中，跳过重复执行"
+            );
+            return Ok(false);
+        };
+
         let mut record = self.load_record(evolution_id)?;
 
         info!(
@@ -1548,5 +1610,38 @@ mod tests {
         assert!(registry.get_executor(&record.capability_id).is_none());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn per_record_pipeline_lock_prevents_concurrent_double_execution() {
+        let dir = std::env::temp_dir().join(format!(
+            "test_core_evo_pipeline_lock_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let registry = crate::capability_provider::new_registry_handle(dir.clone());
+        let evo = CoreEvolution::new(dir.clone(), registry, 300);
+
+        let guard = evo
+            .try_acquire_pipeline_lock("evo-1")
+            .await
+            .expect("first lock acquisition must succeed");
+        assert!(
+            evo.try_acquire_pipeline_lock("evo-1").await.is_none(),
+            "concurrent acquisition for the same evolution_id must be rejected"
+        );
+        assert!(
+            evo.run_step("evo-1", EvolutionStep::BuildPrompt)
+                .await
+                .is_err(),
+            "run_step must refuse when evolution_id is already locked"
+        );
+        drop(guard);
+        assert!(
+            evo.try_acquire_pipeline_lock("evo-1").await.is_some(),
+            "lock must be released when guard is dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -283,38 +283,88 @@ const COMBINED_REVIEW_ROSTER: &[&str] = &[
 /// 由 `roster_and_schemas_agree` 测试逐模式断言。
 type SchemaSlot = (&'static str, fn() -> serde_json::Value);
 
-const FLUSH_SCHEMA_ORDER: &[SchemaSlot] =
-    &[("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value)];
+const FLUSH_SCHEMA_ORDER: &[SchemaSlot] = &[(
+    "memory_manage",
+    build_memory_manage_schema as fn() -> serde_json::Value,
+)];
 
 const SKILL_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
-    ("skill_manage", build_skill_manage_schema as fn() -> serde_json::Value),
-    ("list_skills", build_list_skills_schema as fn() -> serde_json::Value),
-    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    (
+        "skill_manage",
+        build_skill_manage_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "list_skills",
+        build_list_skills_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "read_file",
+        build_read_file_schema as fn() -> serde_json::Value,
+    ),
     ("grep", build_grep_schema as fn() -> serde_json::Value),
     ("glob", build_glob_schema as fn() -> serde_json::Value),
-    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+    (
+        "list_dir",
+        build_list_dir_schema as fn() -> serde_json::Value,
+    ),
 ];
 
 const MEMORY_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
-    ("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value),
-    ("memory_query", build_memory_query_schema as fn() -> serde_json::Value),
-    ("memory_search", build_memory_search_schema as fn() -> serde_json::Value),
-    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    (
+        "memory_manage",
+        build_memory_manage_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "memory_query",
+        build_memory_query_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "memory_search",
+        build_memory_search_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "read_file",
+        build_read_file_schema as fn() -> serde_json::Value,
+    ),
     ("grep", build_grep_schema as fn() -> serde_json::Value),
     ("glob", build_glob_schema as fn() -> serde_json::Value),
-    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+    (
+        "list_dir",
+        build_list_dir_schema as fn() -> serde_json::Value,
+    ),
 ];
 
 const COMBINED_REVIEW_SCHEMA_ORDER: &[SchemaSlot] = &[
-    ("skill_manage", build_skill_manage_schema as fn() -> serde_json::Value),
-    ("list_skills", build_list_skills_schema as fn() -> serde_json::Value),
-    ("memory_manage", build_memory_manage_schema as fn() -> serde_json::Value),
-    ("memory_query", build_memory_query_schema as fn() -> serde_json::Value),
-    ("memory_search", build_memory_search_schema as fn() -> serde_json::Value),
-    ("read_file", build_read_file_schema as fn() -> serde_json::Value),
+    (
+        "skill_manage",
+        build_skill_manage_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "list_skills",
+        build_list_skills_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "memory_manage",
+        build_memory_manage_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "memory_query",
+        build_memory_query_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "memory_search",
+        build_memory_search_schema as fn() -> serde_json::Value,
+    ),
+    (
+        "read_file",
+        build_read_file_schema as fn() -> serde_json::Value,
+    ),
     ("grep", build_grep_schema as fn() -> serde_json::Value),
     ("glob", build_glob_schema as fn() -> serde_json::Value),
-    ("list_dir", build_list_dir_schema as fn() -> serde_json::Value),
+    (
+        "list_dir",
+        build_list_dir_schema as fn() -> serde_json::Value,
+    ),
 ];
 
 /// 执行期判定：`name` 是否在 `mode` 的名单内。
@@ -1408,7 +1458,10 @@ mod tests {
             guard("read_file", &json!({})),
             ToolPermission::Allow
         ));
-        assert!(matches!(guard("list_dir", &json!({})), ToolPermission::Allow));
+        assert!(matches!(
+            guard("list_dir", &json!({})),
+            ToolPermission::Allow
+        ));
         match guard("exec", &json!({})) {
             ToolPermission::Deny { message } => assert!(message.contains("read_file")),
             other => panic!("expected deny, got {:?}", other),

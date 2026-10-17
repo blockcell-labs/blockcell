@@ -76,7 +76,10 @@ impl AgentRuntime {
             }
         });
 
-        futures::future::join_all(futures).await.into_iter().collect()
+        futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect()
     }
 
     /// 是否可安全预取：白名单 + 幂等安全 + 未被禁用 + Policy 明确 Allow +
