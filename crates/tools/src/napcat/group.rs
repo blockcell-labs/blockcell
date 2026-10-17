@@ -776,6 +776,7 @@ impl Tool for NapcatSetGroupCardTool {
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         check_channel(&ctx)?;
+        check_admin_permission(&ctx, "napcat_set_group_card", &params)?;
 
         let group_id = params.get("group_id").and_then(|v| v.as_str()).unwrap();
         let user_id = params.get("user_id").and_then(|v| v.as_str()).unwrap();

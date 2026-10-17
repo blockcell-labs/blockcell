@@ -65,6 +65,7 @@ pub use message::*;
 pub use outbound::{send_media_message, send_message};
 pub use types::*;
 pub use websocket::{
-    call_api_via_ws, call_stream_api_via_ws, get_sender, init_sender, is_ws_api_available,
-    is_ws_mode, is_ws_stream_available, send_via_ws, send_via_ws_with_self_id,
+    call_api_via_ws, call_stream_api_via_ws, call_stream_api_via_ws_limited, get_sender,
+    init_sender, is_ws_api_available, is_ws_mode, is_ws_stream_available, send_via_ws,
+    send_via_ws_with_self_id,
 };

@@ -383,7 +383,8 @@ impl Tool for WebFetchTool {
         let max_chars = params
             .get("maxChars")
             .and_then(|v| v.as_u64())
-            .unwrap_or(50000) as usize;
+            .unwrap_or(50000)
+            .min(1_000_000) as usize;
 
         match extract_mode {
             "raw" => fetch_raw(url, max_chars).await,

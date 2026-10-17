@@ -131,9 +131,10 @@ impl Tool for ToggleManageTool {
 
                 // Write back
                 let content = serde_json::to_string_pretty(&store).unwrap_or_default();
-                std::fs::write(&toggles_path, &content).map_err(|e| {
-                    blockcell_core::Error::Config(format!("Failed to write toggles: {}", e))
-                })?;
+                blockcell_core::file_store::atomic_write(&toggles_path, content.as_bytes())
+                    .map_err(|e| {
+                        blockcell_core::Error::Config(format!("Failed to write toggles: {}", e))
+                    })?;
 
                 let status_str = if enabled { "enabled" } else { "disabled" };
                 Ok(json!({

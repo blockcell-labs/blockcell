@@ -42,7 +42,7 @@ impl Tool for EncryptTool {
             "exclude_chars".into(),
             json!({"type": "string", "description": "(generate_password) Characters to exclude"}),
         );
-        props.insert("count".into(), json!({"type": "integer", "description": "(generate_password) Number of passwords to generate. Default: 1"}));
+        props.insert("count".into(), json!({"type": "integer", "description": "(generate_password) Number of passwords to generate. Default: 1. Max: 100"}));
         props.insert("hash_algorithm".into(), json!({"type": "string", "enum": ["sha256", "sha512"], "description": "(hash_file/hash_text/checksum_verify) Hash algorithm. Default: sha256"}));
         props.insert(
             "text".into(),
@@ -329,6 +329,9 @@ fn action_generate_password(params: &Value) -> Result<Value> {
     }
     if length > 1024 {
         return Err(Error::Tool("Password length must be at most 1024".into()));
+    }
+    if count > 100 {
+        return Err(Error::Tool("Password count must be at most 100".into()));
     }
 
     let base_chars: Vec<char> = match charset_name {
@@ -842,6 +845,19 @@ mod tests {
         let pw = result["password"].as_str().unwrap();
         assert_eq!(pw.len(), 20);
         assert!(pw.chars().all(|c| c.is_alphanumeric()));
+    }
+
+    #[test]
+    fn test_generate_password_count_capped() {
+        // Unbounded `count` used to allow count=1e9 → hang/OOM.
+        assert!(
+            action_generate_password(&json!({"action": "generate_password", "count": 1000}))
+                .is_err()
+        );
+        assert!(
+            action_generate_password(&json!({"action": "generate_password", "count": 100}))
+                .is_ok()
+        );
     }
 
     #[test]

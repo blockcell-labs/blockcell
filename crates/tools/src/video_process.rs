@@ -264,7 +264,7 @@ impl VideoProcessTool {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !output.status.success() {
             let err_msg = if stderr.len() > 1000 {
-                format!("{}...", &stderr[stderr.len() - 1000..])
+                format!("{}...", tail_bytes(&stderr, 1000))
             } else {
                 stderr
             };
@@ -791,9 +791,36 @@ fn resolve_path(ctx: &ToolContext, path: &str) -> String {
     }
 }
 
+/// Keep the last `max_bytes` of `s`, advancing to the next UTF-8 char boundary
+/// so the slice never panics on multi-byte characters.
+fn tail_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len() - max_bytes;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tail_bytes_respects_char_boundary() {
+        // "中" spans bytes 2..5; a byte-level cut at start=3 would panic,
+        // the boundary advance lands on 5 and returns "bb".
+        let s = "aa中bb";
+        assert_eq!(tail_bytes(s, 4), "bb");
+        // A tail made entirely of a multi-byte char yields an empty slice,
+        // never a panic.
+        let s = format!("{}中", "a".repeat(999));
+        assert_eq!(tail_bytes(&s, 2), "");
+        let s = "ascii only";
+        assert_eq!(tail_bytes(s, 100), s);
+    }
 
     #[test]
     fn test_schema() {

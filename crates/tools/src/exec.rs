@@ -90,9 +90,9 @@ fn is_root_like_target(target: &str) -> bool {
     let t = target.trim_matches(['"', '\'', '`', ')', ';', '|', '&']);
     matches!(
         t,
-        "/" | "//" | "/*" | "*" | "~" | "~/" | "~/*" | "$HOME" | "$HOME/" | "$HOME/*" | "." | "./"
-            | "./*"
-    )
+        "/" | "//" | "/./" | "/*" | "*" | "~" | "~/" | "~/*" | "$HOME" | "$HOME/" | "$HOME/*"
+            | "." | "./" | "./*" | ".."
+    ) || t.ends_with("/..")
 }
 
 /// Detect `rm` invocations that combine a recursive flag with a root-like
@@ -357,6 +357,15 @@ mod tests {
             "rm -rf *",
             "/bin/rm -rf /",
             "echo hi && rm -rf /",
+            // root-equivalent spellings: `//`, `/./` resolve to `/`;
+            // a `..` tail climbs to a parent (e.g. `/tmp/..` → `/`)
+            "rm -rf //",
+            "rm -rf /./",
+            "rm -rf /tmp/..",
+            "rm -rf ..",
+            "rm -rf ~/..",
+            "rm -rf $HOME/..",
+            "rm -rf ../..",
         ] {
             assert!(
                 tool.validate(&json!({ "command": cmd })).is_err(),

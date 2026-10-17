@@ -383,7 +383,7 @@ pub async fn call_api(
 ///
 /// The complete file data on success, or an error.
 pub async fn call_stream_api(
-    _config: &NapCatConfig,
+    config: &NapCatConfig,
     _account_id: Option<&str>,
     url: &str,
     thread_count: Option<i32>,
@@ -397,7 +397,8 @@ pub async fn call_stream_api(
             "WebSocket stream caller is not available".to_string(),
         ));
     }
-    blockcell_channels::napcat::call_stream_api_via_ws(request)
+    let max_bytes = usize::try_from(config.max_auto_download_size).unwrap_or(usize::MAX);
+    blockcell_channels::napcat::call_stream_api_via_ws_limited(request, max_bytes)
         .await
         .map_err(|e| Error::Channel(format!("WebSocket stream API call failed: {}", e)))
 }

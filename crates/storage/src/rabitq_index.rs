@@ -45,6 +45,8 @@ impl RabitqIndex {
         ensure_parent_dirs(&layout)?;
 
         let conn = Connection::open(&layout.db_path).map_err(map_sqlite_error)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .map_err(map_sqlite_error)?;
         init_schema(&conn, &layout.table_name)?;
 
         let dimensions = load_dimensions(&conn, &layout.table_name)?;
