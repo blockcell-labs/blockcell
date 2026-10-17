@@ -3,7 +3,7 @@ use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
 use tracing::info;
 
-use crate::{Tool, ToolContext, ToolSchema};
+use crate::{escape_python_string, Tool, ToolContext, ToolSchema};
 
 /// Tool for generating charts and data visualizations.
 ///
@@ -337,7 +337,10 @@ fn generate_matplotlib_script(
     let colors_setup = if let Some(arr) = colors_json.as_array() {
         let c: Vec<String> = arr
             .iter()
-            .filter_map(|v| v.as_str().map(|s| format!("'{}'", s)))
+            .filter_map(|v| {
+                v.as_str()
+                    .map(|s| format!("'{}'", escape_python_string(s)))
+            })
             .collect();
         format!("colors = [{}]", c.join(", "))
     } else {
@@ -492,16 +495,16 @@ plt.savefig({output_path}, dpi=150, bbox_inches='tight')
 plt.close()
 print('OK')
 "#,
-        theme = theme,
+        theme = escape_python_string(theme),
         font_size = font_size,
         data_json = data_json.replace('\\', "\\\\").replace('\'', "\\'"),
         colors_setup = colors_setup,
         width = width,
         height = height,
         chart_code = chart_code,
-        title = title.replace('\'', "\\'"),
-        x_label = x_label.replace('\'', "\\'"),
-        y_label = y_label.replace('\'', "\\'"),
+        title = escape_python_string(title),
+        x_label = escape_python_string(x_label),
+        y_label = escape_python_string(y_label),
         grid = if grid { "True" } else { "False" },
         output_path = quote_python_str(output_path),
     ))
@@ -527,7 +530,10 @@ fn generate_plotly_script(
     let colors_setup = if let Some(arr) = colors_json.as_array() {
         let c: Vec<String> = arr
             .iter()
-            .filter_map(|v| v.as_str().map(|s| format!("'{}'", s)))
+            .filter_map(|v| {
+                v.as_str()
+                    .map(|s| format!("'{}'", escape_python_string(s)))
+            })
             .collect();
         format!("colors = [{}]", c.join(", "))
     } else {
@@ -726,6 +732,38 @@ mod tests {
         assert_eq!(quote_python_str("hello"), "'hello'");
         assert_eq!(quote_python_str("it's"), "'it\\'s'");
         assert_eq!(quote_python_str("a\\b"), "'a\\\\b'");
+    }
+
+    #[test]
+    fn test_style_fields_cannot_break_out_of_python_literals() {
+        let data = json!({"labels": ["A"], "values": [1]});
+        let style = json!({
+            "theme": "x'); import os; os.system('id') #",
+            "colors": ["r']; import os; os.system('id'); y=['"]
+        });
+        let script = generate_matplotlib_script(
+            "bar",
+            &data,
+            "t'); import os #",
+            "x",
+            "y",
+            &style,
+            "/tmp/t.png",
+            "png",
+        )
+        .unwrap();
+        assert!(script.contains("x\\');"));
+        assert!(script.contains("'r\\'];"));
+        assert!(script.contains("'t\\');"));
+    }
+
+    #[test]
+    fn test_plotly_colors_cannot_break_out_of_python_literals() {
+        let data = json!({"labels": ["A"], "values": [1]});
+        let style = json!({"colors": ["r']; import os #"]});
+        let script =
+            generate_plotly_script("bar", &data, "", "", "", &style, "/tmp/t.html").unwrap();
+        assert!(script.contains("'r\\'];"));
     }
 
     #[test]
