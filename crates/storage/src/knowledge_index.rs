@@ -238,27 +238,60 @@ impl KnowledgeIndex {
                 .map(|(_, relevance)| *relevance)
                 .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
         };
+        // superseded / forgotten 过滤限定到本次候选集（≤500），
+        // 不再每次搜索都全量加载两张表。注意不能下推为 WHERE 子句：
+        // 被取代条目仍参与 best_cjk_relevance 锚点计算（压严部分匹配的
+        // 放行门槛），先行排除会改变 CJK 分支的相关性语义。
         let mut superseded = HashSet::new();
-        let mut superseded_stmt = conn
-            .prepare("SELECT supersedes FROM knowledge_entries WHERE supersedes IS NOT NULL")
-            .map_err(map_sqlite_error)?;
-        let superseded_rows = superseded_stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(map_sqlite_error)?;
-        for id in superseded_rows {
-            superseded.insert(id.map_err(map_sqlite_error)?);
+        if !candidates.is_empty() {
+            let placeholders = candidates
+                .iter()
+                .enumerate()
+                .map(|(offset, _)| format!("?{}", offset + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT supersedes FROM knowledge_entries WHERE supersedes IN ({placeholders})"
+            );
+            let params = candidates
+                .iter()
+                .map(|(entry, _)| entry.id.clone())
+                .collect::<Vec<_>>();
+            let mut stmt = conn.prepare(&sql).map_err(map_sqlite_error)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(map_sqlite_error)?;
+            for id in rows {
+                superseded.insert(id.map_err(map_sqlite_error)?);
+            }
         }
         let mut forgotten = HashSet::new();
-        let mut forgotten_stmt = conn
-            .prepare("SELECT dedup_key FROM forgotten")
-            .map_err(map_sqlite_error)?;
-        let forgotten_rows = forgotten_stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(map_sqlite_error)?;
-        for key in forgotten_rows {
-            forgotten.insert(key.map_err(map_sqlite_error)?);
+        if !candidates.is_empty() {
+            let placeholders = candidates
+                .iter()
+                .enumerate()
+                .map(|(offset, _)| format!("?{}", offset + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT dedup_key FROM forgotten WHERE dedup_key IN ({placeholders})"
+            );
+            let params = candidates
+                .iter()
+                .map(|(entry, _)| entry.content_hash.clone())
+                .collect::<Vec<_>>();
+            let mut stmt = conn.prepare(&sql).map_err(map_sqlite_error)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(map_sqlite_error)?;
+            for key in rows {
+                forgotten.insert(key.map_err(map_sqlite_error)?);
+            }
         }
-
         let mut by_hash: HashMap<String, (KnowledgeIndexEntry, f64)> = HashMap::new();
         for (entry, relevance) in candidates {
             if best_cjk_relevance.is_some_and(|best| relevance > best) {
@@ -366,6 +399,7 @@ impl KnowledgeIndex {
             );
             CREATE INDEX IF NOT EXISTS idx_knowledge_file ON knowledge_entries(file);
             CREATE INDEX IF NOT EXISTS idx_knowledge_hash ON knowledge_entries(content_hash);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_supersedes ON knowledge_entries(supersedes);
             CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
                 content,
                 file,

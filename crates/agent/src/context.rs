@@ -169,6 +169,9 @@ struct SessionContextCache {
     injected_retrieval_items: HashMap<String, HashSet<u64>>,
     project_environment_snapshots: HashMap<String, ProjectEnvironmentSnapshot>,
     project_command_cache: HashMap<String, Vec<String>>,
+    /// skills 目录树指纹（跨克隆共享）：reload_skills 据此跳过无变化的全量重扫。
+    /// None = 尚未计算过（首次必然执行完整 reload）。
+    skills_fingerprint: Option<u64>,
     recency: VecDeque<String>,
     capacity: usize,
 }
@@ -196,6 +199,7 @@ impl SessionContextCache {
             injected_retrieval_items: HashMap::new(),
             project_environment_snapshots: HashMap::new(),
             project_command_cache: HashMap::new(),
+            skills_fingerprint: None,
             recency: VecDeque::new(),
             capacity: capacity.max(1),
         }
@@ -628,9 +632,79 @@ impl ContextBuilder {
         }
     }
 
+    /// 计算技能目录树指纹（相对路径 + mtime + 长度），覆盖 reload 实际扫描的
+    /// builtin 与 workspace 两个根目录。目录遍历远比全量解析 + SkillIndex
+    /// 重建便宜，用于 reload_skills 快速跳过无变化的重扫。
+    /// 排除 `.skills_prompt_snapshot.json`：该文件由 reload 自身写入，
+    /// 计入指纹会导致每次 reload 后指纹必然变化、门控永远失效。
+    fn skills_tree_fingerprint(paths: &Paths) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        const PROMPT_SNAPSHOT_FILE: &str = ".skills_prompt_snapshot.json";
+        let mut entries = Vec::new();
+        for root in [paths.builtin_skills_dir(), paths.skills_dir()] {
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                if let Ok(read_dir) = std::fs::read_dir(&dir) {
+                    for entry in read_dir.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            stack.push(path);
+                            continue;
+                        }
+                        let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+                        if rel == std::path::Path::new(PROMPT_SNAPSHOT_FILE) {
+                            continue;
+                        }
+                        let (mtime_ns, len) = entry
+                            .metadata()
+                            .map(|m| {
+                                (
+                                    m.modified()
+                                        .ok()
+                                        .and_then(|t| {
+                                            t.duration_since(std::time::UNIX_EPOCH).ok()
+                                        })
+                                        .map(|d| d.as_nanos())
+                                        .unwrap_or(0),
+                                    m.len(),
+                                )
+                            })
+                            .unwrap_or((0, 0));
+                        entries.push((root.clone(), rel, mtime_ns, len));
+                    }
+                }
+            }
+        }
+        entries.sort();
+        let mut hasher = DefaultHasher::new();
+        for (root, rel, mtime_ns, len) in &entries {
+            root.hash(&mut hasher);
+            rel.hash(&mut hasher);
+            mtime_ns.hash(&mut hasher);
+            len.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Re-scan skill directories and pick up newly created, modified, or removed skills.
     /// Returns the names of newly discovered skills.
     pub fn reload_skills(&mut self) -> Vec<String> {
+        // 目录树无变化时整体跳过：此前每条消息/tick 都全量解析技能目录、
+        // 重建 SkillIndex 并清空所有会话的 frozen prompt 快照，开销与缓存
+        // 命中率损失随技能数线性增长。
+        let fingerprint = Self::skills_tree_fingerprint(&self.paths);
+        {
+            let cache = self
+                .session_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.skill_manager.is_some()
+                && cache.skills_fingerprint == Some(fingerprint)
+            {
+                return Vec::new();
+            }
+        }
         let mut reloaded_ok = false;
         let new_skills = if let Some(ref mut manager) = self.skill_manager {
             match manager.reload_skills(&self.paths) {
@@ -655,11 +729,12 @@ impl ContextBuilder {
             // prompt snapshots so skill edits and deletions (where `new_skills` is empty)
             // are also immediately visible.
             self.refresh_skill_index_summary();
-            self.session_cache
+            let mut cache = self
+                .session_cache
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .system_prompt_snapshots
-                .clear();
+                .unwrap_or_else(|e| e.into_inner());
+            cache.skills_fingerprint = Some(fingerprint);
+            cache.system_prompt_snapshots.clear();
         }
         new_skills
     }
@@ -2622,4 +2697,113 @@ fn agent_scoped_prompt_section_overrides_global_and_invalidates_frozen_prompt() 
     let ops = builder.frozen_system_prompt("s", InteractionMode::Chat, None, &[], &[]);
     assert!(ops.contains("You are the ops agent."), "{ops}");
     assert!(!ops.contains("You are blockcell"));
+}
+
+#[test]
+fn reload_skills_skips_unchanged_tree_and_invalidates_snapshots_on_change() {
+    let base = std::env::temp_dir().join(format!(
+        "blockcell-reload-skills-gate-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let paths = Paths::with_base(base);
+    paths.ensure_dirs().expect("ensure dirs");
+    let skill_dir = paths.skills_dir().join("gate_skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "prompt body").expect("write skill");
+
+    let mut builder = ContextBuilder::new(paths, Config::default());
+    let seed_snapshot = |builder: &ContextBuilder| {
+        builder
+            .session_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_prompt_snapshots
+            .insert(
+                "s".to_string(),
+                FrozenSystemPromptSnapshot {
+                    fingerprint: 1,
+                    prompt: "p".to_string(),
+                },
+            );
+    };
+
+    // 首次 reload 真正执行：frozen 快照被清、目录指纹被记录
+    seed_snapshot(&builder);
+    let _ = builder.reload_skills();
+    {
+        let cache = builder
+            .session_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(cache.system_prompt_snapshots.is_empty());
+        assert!(cache.skills_fingerprint.is_some());
+    }
+
+    // 目录树无变化：整体跳过 reload——快照必须保留
+    seed_snapshot(&builder);
+    let new_skills = builder.reload_skills();
+    assert!(new_skills.is_empty());
+    assert_eq!(
+        builder
+            .session_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_prompt_snapshots
+            .len(),
+        1,
+        "unchanged tree must skip reload and keep frozen snapshots"
+    );
+
+    // 目录树变化：重新加载并再次清空快照
+    std::fs::write(skill_dir.join("extra.txt"), "changed").expect("mutate skill dir");
+    let _ = builder.reload_skills();
+    assert!(builder
+        .session_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .system_prompt_snapshots
+        .is_empty());
+}
+
+#[test]
+fn reload_skills_fingerprint_is_shared_across_clones() {
+    let base = std::env::temp_dir().join(format!(
+        "blockcell-reload-skills-clone-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let paths = Paths::with_base(base);
+    paths.ensure_dirs().expect("ensure dirs");
+    let skill_dir = paths.skills_dir().join("clone_skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "prompt body").expect("write skill");
+
+    let mut builder = ContextBuilder::new(paths, Config::default());
+    let _ = builder.reload_skills();
+
+    // 克隆共享 session_cache 中的指纹：无变化时 clone 的 reload 也必须跳过
+    let mut clone = builder.clone();
+    clone
+        .session_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .system_prompt_snapshots
+        .insert(
+            "s".to_string(),
+            FrozenSystemPromptSnapshot {
+                fingerprint: 1,
+                prompt: "p".to_string(),
+            },
+        );
+    let new_skills = clone.reload_skills();
+    assert!(new_skills.is_empty());
+    assert_eq!(
+        clone
+            .session_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_prompt_snapshots
+            .len(),
+        1,
+        "clone must share the fingerprint decision and skip reload"
+    );
 }

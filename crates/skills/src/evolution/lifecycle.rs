@@ -104,11 +104,15 @@ impl SkillEvolution {
     /// 触发技能进化
     pub async fn trigger_evolution(&self, context: EvolutionContext) -> Result<String> {
         validate_skill_name(&context.skill_name)?;
-        // Use milliseconds + random suffix to guarantee uniqueness even within the same second
+        // Milliseconds alone can collide for two triggers of the same skill within
+        // one tick (both would write the same record file). Append a process-local
+        // sequence suffix, matching core_evolution's id scheme.
+        let seq = RECORD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let evolution_id = format!(
-            "evo_{}_{:x}",
+            "evo_{}_{:x}_{}",
             context.skill_name,
-            chrono::Utc::now().timestamp_millis()
+            chrono::Utc::now().timestamp_millis(),
+            seq
         );
 
         info!(

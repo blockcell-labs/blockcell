@@ -2285,6 +2285,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_trigger_evolution_ids_unique_within_same_millisecond() {
+        // 同一毫秒内连续触发同一技能，序号后缀保证 id 与磁盘记录不互相覆盖。
+        let (root, skills_dir) = setup_test_dirs("evolution_id_uniq");
+        let service = EvolutionService::new(skills_dir, EvolutionServiceConfig::default());
+        let id_a = service
+            .evolution
+            .trigger_evolution(test_context("skill_dup"))
+            .await
+            .expect("first trigger");
+        let id_b = service
+            .evolution
+            .trigger_evolution(test_context("skill_dup"))
+            .await
+            .expect("second trigger");
+        assert_ne!(id_a, id_b);
+        assert_eq!(service.evolution.load_record(&id_a).unwrap().id, id_a);
+        assert_eq!(service.evolution.load_record(&id_b).unwrap().id, id_b);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn test_report_error_reads_disk_state_when_active_memory_is_empty() {
         let (root, skills_dir) = setup_test_dirs("report_error_reconcile");
         let service = EvolutionService::new(skills_dir, EvolutionServiceConfig::default());

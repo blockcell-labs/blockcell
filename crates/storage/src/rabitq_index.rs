@@ -17,6 +17,9 @@ struct IndexState {
     cached_index: Option<IvfRabitqIndex>,
     dimensions: Option<usize>,
     dirty: bool,
+    /// 写入世代：每次 mark_dirty 递增。rebuild 前后比较世代可区分
+    /// "进入重建时的脏标记"与"训练期间的新写入"，避免把不完整索引误标为 clean。
+    write_epoch: u64,
 }
 
 struct StorageLayout {
@@ -67,6 +70,7 @@ impl RabitqIndex {
                 cached_index: None,
                 dimensions,
                 dirty,
+                write_epoch: 0,
             }),
         })
     }
@@ -94,13 +98,19 @@ impl RabitqIndex {
             .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
         state.dirty = true;
         state.cached_index = None;
+        state.write_epoch = state.write_epoch.wrapping_add(1);
         Ok(())
     }
 
+    /// 提交重建结果。`epoch` 为重建开始前捕获的写入世代：
+    /// 若训练期间有新写入（write_epoch 递增），索引不完整——仍装入缓存
+    /// （好过无缓存），但保留 dirty 让下一次 ensure_index_ready 再重建，
+    /// 避免把缺失新向量的索引误标为 clean。
     fn store_clean_index(
         &self,
         index: Option<IvfRabitqIndex>,
         dimensions: Option<usize>,
+        epoch: u64,
     ) -> Result<()> {
         let mut state = self
             .state
@@ -108,7 +118,7 @@ impl RabitqIndex {
             .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
         state.cached_index = index;
         state.dimensions = dimensions;
-        state.dirty = false;
+        state.dirty = state.write_epoch != epoch;
         Ok(())
     }
 
@@ -142,10 +152,11 @@ impl RabitqIndex {
         }
     }
 
-    fn ensure_index_ready(&self, rows: &[StoredVector]) -> Result<bool> {
+    /// `epoch` 必须由调用方在加载 `rows` 快照之前捕获（见 search 中的注释）。
+    fn ensure_index_ready(&self, rows: &[StoredVector], epoch: u64) -> Result<bool> {
         if rows.is_empty() {
             self.clear_index_file_if_exists()?;
-            self.store_clean_index(None, None)?;
+            self.store_clean_index(None, None, epoch)?;
             return Ok(true);
         }
 
@@ -172,7 +183,7 @@ impl RabitqIndex {
         if rows.len() < MIN_TRAIN_SIZE {
             if dirty {
                 self.clear_index_file_if_exists()?;
-                self.store_clean_index(None, Some(dimensions))?;
+                self.store_clean_index(None, Some(dimensions), epoch)?;
             }
             return Ok(true);
         }
@@ -190,7 +201,7 @@ impl RabitqIndex {
                         }
                         Err(_) => {
                             drop(state);
-                            if self.rebuild_index(rows, dimensions).is_ok() {
+                            if self.rebuild_index(rows, dimensions, epoch).is_ok() {
                                 return Ok(false);
                             }
                             return Ok(true);
@@ -198,7 +209,7 @@ impl RabitqIndex {
                     }
                 } else {
                     drop(state);
-                    if self.rebuild_index(rows, dimensions).is_ok() {
+                    if self.rebuild_index(rows, dimensions, epoch).is_ok() {
                         return Ok(false);
                     }
                     return Ok(true);
@@ -207,17 +218,17 @@ impl RabitqIndex {
             return Ok(false);
         }
 
-        if self.rebuild_index(rows, dimensions).is_ok() {
+        if self.rebuild_index(rows, dimensions, epoch).is_ok() {
             Ok(false)
         } else {
             Ok(true)
         }
     }
 
-    fn rebuild_index(&self, rows: &[StoredVector], dimensions: usize) -> Result<()> {
+    fn rebuild_index(&self, rows: &[StoredVector], dimensions: usize, epoch: u64) -> Result<()> {
         if rows.is_empty() {
             self.clear_index_file_if_exists()?;
-            self.store_clean_index(None, None)?;
+            self.store_clean_index(None, None, epoch)?;
             return Ok(());
         }
 
@@ -240,14 +251,7 @@ impl RabitqIndex {
             .save_to_path(&self.layout.index_path)
             .map_err(|error| Error::Storage(format!("RaBitQ index save failed: {}", error)))?;
 
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
-        state.cached_index = Some(index);
-        state.dimensions = Some(dimensions);
-        state.dirty = false;
-        Ok(())
+        self.store_clean_index(Some(index), Some(dimensions), epoch)
     }
 
     fn clear_index_file_if_exists(&self) -> Result<()> {
@@ -280,6 +284,14 @@ impl RabitqIndex {
         });
         hits.truncate(top_k);
         Ok(hits)
+    }
+
+    fn current_write_epoch(&self) -> Result<u64> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
+        Ok(state.write_epoch)
     }
 }
 
@@ -361,6 +373,10 @@ impl VectorIndex for RabitqIndex {
             return Err(Error::Storage("Query vector must not be empty".to_string()));
         }
 
+        // epoch 必须先于 load_rows 捕获：upsert 是先写行后 mark_dirty。
+        // 若先读行再读 epoch，落在两者之间的写入会让"陈旧行快照"配"新 epoch"
+        // 在重建提交时被误标 clean，消费掉本该保留的 dirty 标记。
+        let epoch = self.current_write_epoch()?;
         let mut rows = self.load_rows()?;
         if let Some(filter) = filter {
             rows.retain(|row| filter.matches(&row.meta));
@@ -373,7 +389,7 @@ impl VectorIndex for RabitqIndex {
         if filter.is_some() {
             return self.exact_search(&rows, vector, top_k);
         }
-        let exact_only = self.ensure_index_ready(&rows)?;
+        let exact_only = self.ensure_index_ready(&rows, epoch)?;
         if exact_only {
             return self.exact_search(&rows, vector, top_k);
         }
@@ -439,7 +455,8 @@ impl VectorIndex for RabitqIndex {
         }
 
         self.clear_index_file_if_exists()?;
-        self.store_clean_index(None, None)?;
+        let epoch = self.current_write_epoch()?;
+        self.store_clean_index(None, None, epoch)?;
         Ok(())
     }
 }
@@ -696,6 +713,26 @@ mod tests {
             RabitqIndex::open_or_create(uri.to_str().unwrap(), "memory_vectors").unwrap();
         let hits = reopened.search(&[1000.0, 1000.1, 1000.2], 1, None).unwrap();
         assert_eq!(hits.first().map(|hit| hit.id.as_str()), Some("memory-0"));
+    }
+
+    #[test]
+    fn stale_rebuild_commit_preserves_dirty_flag() {
+        // 重建期间有新写入时，旧 epoch 的提交不能把 dirty 清掉——
+        // 否则不含新向量的索引会被误标为 clean，最新向量对搜索不可见。
+        let dir = TempDir::new().unwrap();
+        let uri = dir.path().join("vectors.rabitq");
+        let index = RabitqIndex::open_or_create(uri.to_str().unwrap(), "memory_vectors").unwrap();
+
+        let epoch = index.current_write_epoch().unwrap();
+        index.store_clean_index(None, None, epoch).unwrap();
+        assert!(!index.state.lock().unwrap().dirty);
+
+        // 模拟训练期间的并发 upsert：mark_dirty 递增 epoch 后，
+        // 用重建前的旧 epoch 提交结果，dirty 必须保留。
+        let epoch = index.current_write_epoch().unwrap();
+        index.mark_dirty().unwrap();
+        index.store_clean_index(None, None, epoch).unwrap();
+        assert!(index.state.lock().unwrap().dirty);
     }
 
     #[test]
