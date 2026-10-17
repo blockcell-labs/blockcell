@@ -65,6 +65,7 @@ fn chinese_fts_recalls_related_canonical_knowledge() {
 
     drop(index);
     let conn = rusqlite::Connection::open(paths.knowledge_index_db()).expect("open raw index db");
+    // user_version=0 模拟版本化之前的旧库——init_schema 仍走一次性嗅探迁移
     conn.execute_batch(
         "DROP TRIGGER knowledge_ai;
          DROP TRIGGER knowledge_ad;
@@ -74,7 +75,8 @@ fn chinese_fts_recalls_related_canonical_knowledge() {
              content, file, anchor,
              content='knowledge_entries', content_rowid='rowid'
          );
-         INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');",
+         INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');
+         PRAGMA user_version=0;",
     )
     .expect("restore legacy knowledge fts");
     drop(conn);

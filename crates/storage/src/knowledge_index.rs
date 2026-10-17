@@ -376,15 +376,26 @@ impl KnowledgeIndex {
     }
 
     fn init_schema(&self) -> Result<()> {
+        const KNOWLEDGE_SCHEMA_VERSION: i64 = 2;
         let conn = self
             .inner
             .lock()
             .map_err(|_| Error::Storage("Knowledge index lock poisoned".to_string()))?;
-        let rebuild_fts = crate::fts::prepare_trigram_fts(
-            &conn,
-            "knowledge_fts",
-            &["knowledge_ai", "knowledge_ad", "knowledge_au"],
-        )?;
+        // 版本戳门控：user_version >= 2 说明 FTS 已由本版本（或更新）创建，
+        // 直接跳过 DDL 子串嗅探——后者对空格/引号变体不匹配会导致每次开库
+        // DROP+重建。user_version < 2 的存量库仍走一次性嗅探迁移。
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(map_sqlite_error)?;
+        let rebuild_fts = if user_version >= KNOWLEDGE_SCHEMA_VERSION {
+            false
+        } else {
+            crate::fts::prepare_trigram_fts(
+                &conn,
+                "knowledge_fts",
+                &["knowledge_ai", "knowledge_ad", "knowledge_au"],
+            )?
+        };
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS knowledge_entries (
                 id TEXT PRIMARY KEY,
@@ -451,6 +462,8 @@ impl KnowledgeIndex {
             )
             .map_err(map_sqlite_error)?;
         }
+        conn.execute_batch(&format!("PRAGMA user_version={KNOWLEDGE_SCHEMA_VERSION}"))
+            .map_err(map_sqlite_error)?;
         Ok(())
     }
 }

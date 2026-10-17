@@ -2227,6 +2227,10 @@ pub struct AgentRuntime {
     /// session cannot leak into another session/user on a shared runtime.
     authorized_dirs:
         Arc<Mutex<HashSet<(String, PathBuf, blockcell_core::path_policy::PathOp)>>>,
+    /// 非交互通道的文本确认消费记录：用户原文的"确认执行"只允许放行**一个**
+    /// 危险操作，而非本回合所有危险操作（逐操作确认在无交互通道的最强近似）。
+    /// 键 = channel + sender + timestamp_ms，按消息去重；跨 clone 共享。
+    consumed_text_confirmations: Arc<Mutex<HashSet<String>>>,
     /// Shared task manager for tracking background subagent tasks.
     task_manager: TaskManager,
     /// Agent id bound to this runtime.
@@ -2428,6 +2432,7 @@ impl AgentRuntime {
             inbound_tx: None,
             confirm_tx: None,
             authorized_dirs: Arc::new(Mutex::new(HashSet::new())),
+            consumed_text_confirmations: Arc::new(Mutex::new(HashSet::new())),
             task_manager: TaskManager::new(),
             agent_id: None,
             memory_store: None,
@@ -2520,6 +2525,7 @@ impl AgentRuntime {
             inbound_tx: self.inbound_tx.clone(),
             confirm_tx: self.confirm_tx.clone(),
             authorized_dirs: Arc::clone(&self.authorized_dirs),
+            consumed_text_confirmations: Arc::clone(&self.consumed_text_confirmations),
             task_manager: self.task_manager.clone(),
             agent_id: self.agent_id.clone(),
             memory_store: self.memory_store.clone(),

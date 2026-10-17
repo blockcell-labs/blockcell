@@ -153,14 +153,21 @@ impl AgentRuntime {
         active_skill_dir: Option<PathBuf>,
         prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolCallOutput {
+        // 预取阶段已触发过 tool/pre-execute：以（可能被 listener 改写后的）
+        // 预取参数为准并跳过重复触发，保证 hook 每次调用只执行一次且
+        // 后续准入检查作用于同一组参数。
+        let pre_execute_done = prefetched.is_some();
         let mut inv = ToolInvocation {
             call: tool_call,
             msg,
-            args: tool_call.arguments.clone(),
+            args: prefetched
+                .as_ref()
+                .map(|prefetched| prefetched.args.clone())
+                .unwrap_or_else(|| tool_call.arguments.clone()),
             policy_confirmed: false,
             dangerous_confirmed: false,
         };
-        if let Err(denied) = self.admit_tool_call(&mut inv).await {
+        if let Err(denied) = self.admit_tool_call(&mut inv, pre_execute_done).await {
             self.record_rejected_tool_call(&inv, &denied).await;
             return ToolCallOutput::rejected(denied);
         }
@@ -198,8 +205,15 @@ impl AgentRuntime {
         }
     }
 
-    async fn admit_tool_call(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
+    async fn admit_tool_call(
+        &mut self,
+        inv: &mut ToolInvocation<'_>,
+        pre_execute_done: bool,
+    ) -> GuardResult {
         for stage in ADMISSION_STAGES {
+            if pre_execute_done && matches!(stage, AdmissionStage::PreExecute) {
+                continue;
+            }
             match stage {
                 AdmissionStage::Toggle => self.guard_disabled_toggles(inv),
                 AdmissionStage::PreExecute => self.dispatch_tool_pre_execute(inv).await,
@@ -300,7 +314,24 @@ impl AgentRuntime {
         msg: &InboundMessage,
     ) -> bool {
         if self.confirm_tx.is_none() {
-            user_explicitly_confirms_dangerous_op(&msg.content)
+            if !user_explicitly_confirms_dangerous_op(&msg.content) {
+                return false;
+            }
+            // 文本确认按消息一次性消费：同一条用户消息最多放行一个危险操作。
+            // 否则"确认执行"四字等价于本回合全部危险操作全权放行。
+            let key = format!(
+                "{}\u{1f}{}\u{1f}{}",
+                msg.channel, msg.sender_id, msg.timestamp_ms
+            );
+            let mut used = self
+                .consumed_text_confirmations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // 防无界增长：超过上限清空（极老键重新可用，与现状一致且不扩大风险面）
+            if used.len() >= 1024 {
+                used.clear();
+            }
+            used.insert(key)
         } else {
             self.confirm_dangerous_operation(tool_name, items, msg)
                 .await

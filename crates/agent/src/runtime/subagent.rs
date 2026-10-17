@@ -293,10 +293,13 @@ pub(crate) async fn deliver_subagent_result_to_origin(
     session_store: Option<&SessionStore>,
     session_key: Option<&str>,
 ) {
-    // 将子agent结果持久化到 SessionStore，使 WebUI 恢复会话时能看到
+    // 将子agent结果持久化到 SessionStore，使 WebUI 恢复会话时能看到。
+    // 带稳定 id：回合结束的 save_with_metadata 整体重写文件时，
+    // 凭 id 把回合期间并发 append 的条目合并回来，避免丢更新。
     if let (Some(store), Some(key)) = (session_store, session_key) {
         use blockcell_core::types::ChatMessage;
-        let msg = ChatMessage::assistant(content);
+        let mut msg = ChatMessage::assistant(content);
+        msg.id = Some(format!("subagent-result:{task_id}"));
         if let Err(e) = store.append(key, &msg) {
             tracing::warn!(error = %e, task_id = %task_id, "Failed to persist subagent result to session store");
         }

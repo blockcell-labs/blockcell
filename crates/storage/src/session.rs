@@ -119,7 +119,11 @@ impl SessionStore {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&path)?;
+        self.read_messages(&path)
+    }
+
+    fn read_messages(&self, path: &std::path::Path) -> Result<Vec<ChatMessage>> {
+        let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut messages = Vec::new();
 
@@ -218,10 +222,46 @@ impl SessionStore {
     ) -> Result<()> {
         let path = self.paths.session_file(session_key);
 
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.exists()) {
             std::fs::create_dir_all(parent)?;
         }
         let _lock = lock_exclusive(&path)?;
+
+        // 合并回合期间并发 append 的磁盘条目（如子代理结果投递）：
+        // 内存快照整体覆盖会丢更新。以消息 id 定位"内存历史最后一条仍存在于
+        // 磁盘的条目"（锚点），仅合并锚点**之后**、且未出现在新历史中的磁盘
+        // 条目——锚点之前被压缩/删除的前缀不复活；无公共锚点（整体重写）时
+        // 不合并，避免整段历史复活。与 append 共用同一把文件锁，读-改-写原子完成。
+        let mut merged = messages.to_vec();
+        if path.exists() {
+            if let Ok(on_disk) = self.read_messages(&path) {
+                let disk_pos: std::collections::HashMap<&str, usize> = on_disk
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| m.id.as_deref().map(|id| (id, i)))
+                    .collect();
+                let anchor = messages.iter().rposition(|m| {
+                    m.id.as_deref().is_some_and(|id| disk_pos.contains_key(id))
+                });
+                if let Some(anchor) = anchor {
+                    let cutoff = messages[anchor]
+                        .id
+                        .as_deref()
+                        .and_then(|id| disk_pos.get(id))
+                        .copied()
+                        .unwrap_or(0);
+                    let incoming: std::collections::HashSet<&str> = messages
+                        .iter()
+                        .filter_map(|m| m.id.as_deref())
+                        .collect();
+                    for msg in on_disk.into_iter().skip(cutoff + 1) {
+                        if msg.id.as_deref().is_some_and(|id| !incoming.contains(id)) {
+                            merged.push(msg);
+                        }
+                    }
+                }
+            }
+        }
 
         let now = chrono::Utc::now().to_rfc3339();
         let created_at = if path.exists() {
@@ -230,7 +270,7 @@ impl SessionStore {
             now.clone()
         };
 
-        self.write_session_file(&path, &created_at, &now, messages, metadata)
+        self.write_session_file(&path, &created_at, &now, &merged, metadata)
     }
 
     /// 从 session 文件第一行读取 created_at 字段。
@@ -692,6 +732,68 @@ mod tests {
         let (_created, updated) = store.load_timestamps(session_key).expect("load timestamps");
         let updated = updated.expect("updated_at present");
         assert_ne!(updated, "2000-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn save_with_metadata_preserves_concurrently_appended_tagged_messages() {
+        let (store, _dir) = test_store();
+        let session_key = "cli:merge-appends";
+
+        // 回合开始时的内存快照
+        store
+            .save(session_key, &[ChatMessage::user("hello")])
+            .expect("seed session");
+
+        // 回合开始时加载内存历史（id 与磁盘一致）
+        let mut incoming = store.load(session_key).expect("load history");
+
+        // 回合期间子代理结果投递：带稳定 id 的 append
+        let mut subagent_msg = ChatMessage::assistant("subagent done");
+        subagent_msg.id = Some("subagent-result:t1".to_string());
+        store
+            .append(session_key, &subagent_msg)
+            .expect("concurrent append");
+
+        // 回合结束：内存快照不含 append，整写时并发 append 必须被合并回来
+        incoming.push(ChatMessage::assistant("turn response"));
+        store
+            .save_with_metadata(session_key, &incoming, &json!({}))
+            .expect("turn-end save");
+
+        let loaded = store.load(session_key).expect("load merged session");
+        let contents: Vec<String> = loaded
+            .iter()
+            .map(|m| m.content.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(contents, vec!["hello", "turn response", "subagent done"]);
+
+        // 压缩场景：内存历史丢弃旧前缀，仅保留尾部——被丢弃的前缀不复活
+        let m1 = ChatMessage::user("a");
+        let m2 = ChatMessage::user("b");
+        store
+            .save(session_key, &[m1, m2.clone()])
+            .expect("seed compaction case");
+        let compacted = vec![ChatMessage::assistant("summary"), m2];
+        store
+            .save_with_metadata(session_key, &compacted, &json!({}))
+            .expect("compaction save");
+        let loaded = store.load(session_key).expect("load compacted");
+        let contents: Vec<String> = loaded
+            .iter()
+            .map(|m| m.content.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(contents, vec!["summary", "b"]);
+
+        // 整体重写（内存历史与磁盘无公共 id）：磁盘条目不复活
+        store
+            .save_with_metadata(session_key, &[ChatMessage::user("fresh")], &json!({}))
+            .expect("rewrite save");
+        let loaded = store.load(session_key).expect("load rewritten");
+        let contents: Vec<String> = loaded
+            .iter()
+            .map(|m| m.content.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(contents, vec!["fresh"]);
     }
 
     #[test]

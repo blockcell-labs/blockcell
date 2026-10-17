@@ -5298,6 +5298,101 @@ async fn prefetch_skips_when_fewer_than_two_eligible_calls() {
 }
 
 #[tokio::test]
+async fn prefetch_honors_pre_execute_reject_and_rewritten_args() {
+    let runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("alpha.txt"), "alpha-content").unwrap();
+    std::fs::write(workspace.join("beta.txt"), "beta-content").unwrap();
+
+    // listener 拒绝所有调用：预取不得执行任何 I/O
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: true,
+            rewrite: serde_json::Value::Null,
+        }));
+    let msg = test_main_session_inbound("cli", "prefetch-hook-reject");
+    let calls = vec![
+        tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+        tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
+    ];
+    assert!(runtime
+        .prefetch_read_only_tools(&calls, &msg)
+        .await
+        .is_empty());
+
+    // listener 改写参数：预取必须执行改写后的参数
+    let runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("beta.txt"), "beta-content").unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: false,
+            rewrite: serde_json::json!({"path": "beta.txt"}),
+        }));
+    let msg = test_main_session_inbound("cli", "prefetch-hook-rewrite");
+    let calls = vec![
+        tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+        tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
+    ];
+    let prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    assert_eq!(prefetched.len(), 2);
+    assert_eq!(
+        prefetched["c1"].args,
+        serde_json::json!({"path": "beta.txt"}),
+        "prefetch must execute listener-rewritten arguments"
+    );
+}
+
+#[tokio::test]
+async fn pipeline_reuses_prefetched_result_without_refiring_pre_execute() {
+    let mut runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("beta.txt"), "beta-content").unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: false,
+            rewrite: serde_json::json!({"path": "beta.txt"}),
+        }));
+    let msg = test_main_session_inbound("cli", "prefetch-hook-once");
+    let calls = vec![
+        tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
+        tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
+    ];
+    let mut prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    let pre = prefetched.remove("c1");
+    let out = runtime
+        .execute_tool_call_prefetched(&calls[0], &msg, None, pre)
+        .await;
+
+    // pre-execute 只在预取阶段触发两次，管线不再重复触发
+    let pre_exec_count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ToolPreExecute { .. }))
+        .count();
+    assert_eq!(pre_exec_count, 2);
+    assert!(
+        out.text.contains("beta-content"),
+        "pipeline must reuse the listener-rewritten prefetched result: {}",
+        out.text
+    );
+}
+
+#[tokio::test]
 async fn prefetch_respects_tool_policy_deny() {
     use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
 
@@ -5930,6 +6025,42 @@ async fn rejected_shell_dangerous_command_reports_shell_tool() {
     assert!(result.contains("dangerous shell command"), "{result}");
     assert!(!result.contains("file_ops"), "{result}");
     assert!(!result.contains("file operation"), "{result}");
+}
+
+#[tokio::test]
+async fn text_confirmation_is_consumed_once_per_message() {
+    // 非交互通道（confirm_tx=None）的文本确认按消息一次性消费：
+    // 同一条"确认执行"最多放行一个危险操作，新消息重新获得一次额度。
+    let mut runtime = test_runtime();
+    let mut msg = test_main_session_inbound("cli", "text-confirm-once");
+    msg.content = "确认执行".to_string();
+    let call = || {
+        tool_call(
+            "exec",
+            serde_json::json!({"command": "pkill -9 blockcell-nonexistent-marker"}),
+        )
+    };
+
+    let first = runtime.execute_tool_call(&call(), &msg, None).await.text;
+    assert!(
+        !first.contains("requires explicit user confirmation"),
+        "{first}"
+    );
+
+    let second = runtime.execute_tool_call(&call(), &msg, None).await.text;
+    assert!(
+        second.contains("requires explicit user confirmation"),
+        "{second}"
+    );
+
+    let mut msg2 = test_main_session_inbound("cli", "text-confirm-once");
+    msg2.content = "确认执行".to_string();
+    msg2.timestamp_ms += 1;
+    let third = runtime.execute_tool_call(&call(), &msg2, None).await.text;
+    assert!(
+        !third.contains("requires explicit user confirmation"),
+        "{third}"
+    );
 }
 
 #[tokio::test]

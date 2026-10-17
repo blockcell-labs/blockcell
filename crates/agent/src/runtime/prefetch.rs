@@ -39,26 +39,60 @@ pub(crate) struct PrefetchedToolResult {
 impl AgentRuntime {
     /// 对一批工具调用做只读预取，返回按 `call_id` 索引的结果。
     ///
-    /// 少于两个可预取调用时不预取（单个调用没有重叠收益，只增加复杂度）。
+    /// 少于两个候选时不预取（单个调用没有重叠收益）。每个候选先触发
+    /// `tool/pre-execute`（与主管线同一事件）：listener 拒绝的调用不预取；
+    /// listener 改写后的参数驱动其余资格检查与实际执行——保证"预取的内容
+    /// 就是准入管线批准的参数"。主管线命中预取结果时跳过重复的 PreExecute
+    /// 阶段，hook 每次调用只触发一次。被 hook/策略拒绝的调用在主管线中
+    /// 仍会走完整准入并再次触发事件——重复触发不可避免，否则无法产生
+    /// 正确的拒绝结果。
     pub(crate) async fn prefetch_read_only_tools(
         &self,
         calls: &[ToolCallRequest],
         msg: &InboundMessage,
     ) -> HashMap<String, PrefetchedToolResult> {
-        let eligible = calls
+        // 先用廉价同步条件筛选候选；少于两个可预取调用时不预取（单个调用没有
+        // 重叠收益）。门控必须在 hook 触发之前：pre-execute 事件每次调用只应
+        // 出现一次，若候选不足就直接返回，避免"预取探一次、管线拒一次"的双发。
+        let candidates: Vec<&ToolCallRequest> = calls
             .iter()
-            .filter(|call| self.prefetch_eligible(call, msg))
-            .take(MAX_PREFETCH)
-            .collect::<Vec<_>>();
-        if eligible.len() < 2 {
+            .filter(|call| self.prefetch_candidate(call))
+            .collect();
+        if candidates.len() < 2 {
             return HashMap::new();
         }
 
-        let futures = eligible.into_iter().map(|call| {
+        let session_key = persist_session_key_for(msg);
+        let mut eligible = Vec::new();
+        for call in candidates {
+            let mut event = AgentEvent::ToolPreExecute {
+                tool_name: call.name.clone(),
+                call_id: call.id.clone(),
+                arguments: call.arguments.clone(),
+            };
+            let decision = self.dispatch_event(msg, &session_key, &mut event).await;
+            let args = match event {
+                AgentEvent::ToolPreExecute { arguments, .. } => arguments,
+                _ => call.arguments.clone(),
+            };
+            if matches!(decision, EventDecision::Reject { .. }) {
+                // 主管线会再次触发事件并按原路径拒绝；不预取被拒绝的调用。
+                continue;
+            }
+            if !self.prefetch_args_allowed(&call.name, &args, msg, &session_key) {
+                continue;
+            }
+            eligible.push((call.id.clone(), call.name.clone(), args));
+            if eligible.len() >= MAX_PREFETCH {
+                break;
+            }
+        }
+        if eligible.is_empty() {
+            return HashMap::new();
+        }
+
+        let futures = eligible.into_iter().map(|(id, name, args)| {
             let ctx = self.build_tool_context(msg, None);
-            let name = call.name.clone();
-            let args = call.arguments.clone();
-            let id = call.id.clone();
             async move {
                 let start = std::time::Instant::now();
                 let result = self
@@ -82,36 +116,43 @@ impl AgentRuntime {
             .collect()
     }
 
-    /// 是否可安全预取：白名单 + 幂等安全 + 未被禁用 + Policy 明确 Allow +
-    /// 所有路径参数都在工作区或已授权目录内（不需要交互确认）。
-    fn prefetch_eligible(&self, call: &ToolCallRequest, msg: &InboundMessage) -> bool {
+    /// 廉价同步前置：白名单 + 未被禁用。
+    fn prefetch_candidate(&self, call: &ToolCallRequest) -> bool {
         if !PREFETCHABLE_TOOLS.contains(&call.name.as_str()) {
             return false;
         }
         let (disabled_tools, disabled_skills) =
             load_disabled_toggles_pair(&self.paths, "tools", "skills");
-        if disabled_tools.contains(&call.name) || disabled_skills.contains(&call.name) {
-            return false;
-        }
-        if self.tool_registry.idempotency(&call.name, &call.arguments) != Idempotency::Safe {
+        !disabled_tools.contains(&call.name) && !disabled_skills.contains(&call.name)
+    }
+
+    /// 针对（可能被 listener 改写后的）参数的资格检查：幂等安全 +
+    /// Policy 明确 Allow + 所有路径参数都在工作区或已授权目录内。
+    fn prefetch_args_allowed(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        msg: &InboundMessage,
+        session_key: &str,
+    ) -> bool {
+        if self.tool_registry.idempotency(tool_name, args) != Idempotency::Safe {
             return false;
         }
         let eval = self.tool_policy.evaluate(&ToolCallContext {
-            tool_name: &call.name,
-            tool_args: &call.arguments,
+            tool_name,
+            tool_args: args,
             channel: &msg.channel,
         });
         if eval.decision != ToolPolicyDecision::Allow {
             return false;
         }
-        let session_key = persist_session_key_for(msg);
-        for access in self.extract_path_accesses(&call.name, &call.arguments) {
+        for access in self.extract_path_accesses(tool_name, args) {
             let resolved = self.resolve_path(&access.path);
             if self.path_policy.evaluate(&resolved, access.op) == PolicyAction::Deny {
                 return false;
             }
             if self.is_path_safe(&resolved)
-                || self.is_path_authorized(&resolved, access.op, &session_key)
+                || self.is_path_authorized(&resolved, access.op, session_key)
             {
                 continue;
             }
