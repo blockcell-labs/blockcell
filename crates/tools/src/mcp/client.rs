@@ -413,3 +413,213 @@ impl Drop for McpClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Minimal stdio MCP server used to exercise the real protocol path.
+    const FAKE_SERVER: &str = r#"
+import json
+import sys
+
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    method = req.get("method")
+    rid = req.get("id")
+    if rid is None:
+        # Notification (notifications/initialized): no response is expected.
+        continue
+    params = req.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fake", "version": "0.0.1"},
+        }})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [{
+            "name": "echo",
+            "description": "echo the provided text",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }]}})
+    elif method == "tools/call":
+        name = params.get("name")
+        if name == "echo":
+            text = (params.get("arguments") or {}).get("text", "")
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"content": [{"type": "text", "text": text}]}})
+        elif name == "boom":
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "isError": True,
+                "content": [{"type": "text", "text": "boom failed"}],
+            }})
+        elif name == "rpc_error":
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32601, "message": "method not found"}})
+        elif name == "exit":
+            sys.exit(0)
+        else:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32602, "message": "unknown tool"}})
+    else:
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32601, "message": "unknown method"}})
+"#;
+
+    fn write_server(tag: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "blockcell_mcp_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create mcp test dir");
+        let path = dir.join("fake_server.py");
+        std::fs::write(&path, body).expect("write fake server");
+        path
+    }
+
+    async fn start_server(tag: &str, body: &str, startup: Duration) -> McpClient {
+        let script = write_server(tag, body);
+        McpClient::start(
+            "fake",
+            "python3",
+            &[script.to_string_lossy().to_string()],
+            &HashMap::new(),
+            None,
+            startup,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("fake MCP server should start")
+    }
+
+    fn expect_start_error(result: blockcell_core::Result<McpClient>) -> blockcell_core::Error {
+        match result {
+            Ok(_) => panic!("expected MCP startup to fail"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_handshake_caches_the_server_tool_list() {
+        let client = start_server("handshake", FAKE_SERVER, Duration::from_secs(10)).await;
+
+        let tools = client.list_tools().await;
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(
+            tools[0].description.as_deref(),
+            Some("echo the provided text")
+        );
+        assert_eq!(tools[0].input_schema["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn call_tool_returns_the_text_content() {
+        let client = start_server("call", FAKE_SERVER, Duration::from_secs(10)).await;
+
+        let result = client
+            .call_tool("echo", serde_json::json!({"text": "hello mcp"}))
+            .await
+            .expect("echo succeeds");
+
+        assert_eq!(result, Value::String("hello mcp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn call_tool_surfaces_an_is_error_payload_as_failure() {
+        let client = start_server("iserror", FAKE_SERVER, Duration::from_secs(10)).await;
+
+        let error = client
+            .call_tool("boom", serde_json::json!({}))
+            .await
+            .expect_err("isError payload must not be reported as success");
+
+        assert!(error.to_string().contains("boom failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_surfaces_a_json_rpc_error() {
+        let client = start_server("rpcerr", FAKE_SERVER, Duration::from_secs(10)).await;
+
+        let error = client
+            .call_tool("rpc_error", serde_json::json!({}))
+            .await
+            .expect_err("JSON-RPC errors must propagate");
+
+        let message = error.to_string();
+        assert!(message.contains("JSON-RPC error -32601"), "{message}");
+        assert!(message.contains("method not found"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_fails_when_the_server_exits_mid_call() {
+        let client = start_server("exit", FAKE_SERVER, Duration::from_secs(10)).await;
+
+        let error = client
+            .call_tool("exit", serde_json::json!({}))
+            .await
+            .expect_err("a closed server must not hang the caller");
+
+        assert!(error.to_string().contains("closed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn start_reports_a_missing_server_binary() {
+        let error = expect_start_error(
+            McpClient::start(
+                "missing",
+                "blockcell-definitely-not-a-real-binary",
+                &[],
+                &HashMap::new(),
+                None,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .await,
+        );
+
+        assert!(error.to_string().contains("failed to spawn"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn start_times_out_when_the_server_never_answers_initialize() {
+        let error = expect_start_error(
+            McpClient::start(
+                "silent",
+                "python3",
+                &[
+                    write_server("silent", "import time\nwhile True:\n    time.sleep(1)\n")
+                        .to_string_lossy()
+                        .to_string(),
+                ],
+                &HashMap::new(),
+                None,
+                Duration::from_millis(500),
+                Duration::from_secs(5),
+            )
+            .await,
+        );
+
+        assert!(error.to_string().contains("startup timed out"), "{error}");
+    }
+}
