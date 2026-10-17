@@ -19,8 +19,8 @@ use crate::ToolContext;
 
 static DANGEROUS_EXEC_DIRECT_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        r"(^|[;&|]\s*|\b(?:sudo|env)\s+)(?:rm|trash|unlink)\b",
-        r"(^|[;&|]\s*|\b(?:sudo|env)\s+)rmdir\b",
+        r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)(?:rm|trash|unlink)\b",
+        r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)rmdir\b",
         r"\bfind\b[\s\S]*\s-delete\b",
         r"\bfind\b[\s\S]*\s-exec\s+rm\b",
         r#"\bsh\s+-c\s+['"][^'"]*\brm\b"#,
@@ -35,7 +35,7 @@ static DANGEROUS_EXEC_DIRECT_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 static DANGEROUS_EXEC_RM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(^|[;&|]\s*|\b(?:sudo|env)\s+)rm\b([^;&|]*)")
+    Regex::new(r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)rm\b([^;&|]*)")
         .expect("dangerous exec rm regex is valid")
 });
 
@@ -414,6 +414,21 @@ mod tests {
             1
         );
         assert!(dangerous_operation_items("read_file", &json!({"path": "a"})).is_empty());
+    }
+
+    #[test]
+    fn dangerous_items_catch_obfuscated_rm() {
+        for cmd in [
+            "\\rm -rf //",
+            "$(rm -rf /)",
+            "`rm -rf ~`",
+            "sudo \\rm -rf /var",
+        ] {
+            assert!(
+                !dangerous_operation_items("exec", &json!({"command": cmd})).is_empty(),
+                "expected `{cmd}` to require confirmation"
+            );
+        }
     }
 
     #[test]

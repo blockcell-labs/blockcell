@@ -101,10 +101,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let mut temp = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
+    let mut open_options = std::fs::OpenOptions::new();
+    open_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.mode(0o600);
+    }
+    let mut temp = open_options.open(&temp_path)?;
     if let Err(error) = (|| {
         temp.write_all(data)?;
         temp.sync_all()?;

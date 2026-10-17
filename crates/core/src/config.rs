@@ -395,6 +395,7 @@ pub fn is_secret_key(key: &str) -> bool {
         "secret",
         "password",
         "passwd",
+        "pass",
         "credential",
         "privatekey",
         "accesskey",
@@ -490,6 +491,15 @@ mod secret_masking_tests {
             json!("socks5://127.0.0.1:7890")
         );
         assert_eq!(value["agents"]["defaults"]["model"], json!("gpt-5"));
+    }
+
+    #[test]
+    fn masks_webui_password_key() {
+        assert!(is_secret_key("webui_pass"));
+        let mut value = json!({"gateway": {"webui_pass": "hunter2", "webui_port": 8080}});
+        mask_secret_values(&mut value);
+        assert_eq!(value["gateway"]["webui_pass"], json!(SECRET_MASK));
+        assert_eq!(value["gateway"]["webui_port"], json!(8080));
     }
 
     #[test]

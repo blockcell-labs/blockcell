@@ -85,10 +85,13 @@ fn normalize_whitespace(command: &str) -> String {
 /// Whether a `rm` target argument refers to the filesystem root, the home
 /// directory, or a top-level glob — i.e. a catastrophic recursive delete.
 fn is_root_like_target(target: &str) -> bool {
-    let t = target.trim_matches(|c| c == '"' || c == '\'');
+    // Strip quoting plus command-substitution/continuation closers so targets
+    // smuggled through `$(rm -rf /)` or backticks still resolve to the root.
+    let t = target.trim_matches(['"', '\'', '`', ')', ';', '|', '&']);
     matches!(
         t,
-        "/" | "/*" | "*" | "~" | "~/" | "~/*" | "$HOME" | "$HOME/" | "$HOME/*" | "." | "./" | "./*"
+        "/" | "//" | "/*" | "*" | "~" | "~/" | "~/*" | "$HOME" | "$HOME/" | "$HOME/*" | "." | "./"
+            | "./*"
     )
 }
 
@@ -99,7 +102,13 @@ fn is_dangerous_rm(normalized: &str) -> bool {
     let tokens: Vec<&str> = normalized.split(' ').collect();
     let mut i = 0;
     while i < tokens.len() {
-        let base = tokens[i].rsplit('/').next().unwrap_or(tokens[i]);
+        // Strip shell quoting/escaping/substitution prefixes: `\rm`, `$(rm`,
+        // `` `rm `` and `$(\rm` must all resolve to `rm`.
+        let base = tokens[i]
+            .rsplit('/')
+            .next()
+            .unwrap_or(tokens[i])
+            .trim_start_matches(['\\', '$', '(', '`', '"', '\'']);
         if base != "rm" {
             i += 1;
             continue;
@@ -348,6 +357,26 @@ mod tests {
             "rm -rf *",
             "/bin/rm -rf /",
             "echo hi && rm -rf /",
+        ] {
+            assert!(
+                tool.validate(&json!({ "command": cmd })).is_err(),
+                "expected `{cmd}` to be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_exec_validate_deny_rm_obfuscated() {
+        let tool = ExecTool::default();
+        // Command-name confusion: escaping, command substitution, backticks —
+        // all must still resolve to `rm` and match root-like targets.
+        for cmd in [
+            "\\rm -rf //",
+            "$(rm -rf /)",
+            "`rm -rf /`",
+            "sudo \\rm -rf /",
+            "$(\\rm -rf ~)",
+            "echo hi && $(rm -rf /)",
         ] {
             assert!(
                 tool.validate(&json!({ "command": cmd })).is_err(),

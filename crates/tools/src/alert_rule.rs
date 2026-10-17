@@ -119,7 +119,7 @@ fn save_store(paths: &Paths, store: &AlertStore) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("rules.json");
     let content = serde_json::to_string_pretty(store)?;
-    std::fs::write(&path, content)?;
+    blockcell_core::file_store::atomic_write(&path, content.as_bytes())?;
     Ok(())
 }
 

@@ -78,8 +78,13 @@ impl AbortToken {
         let local_wait = self.notify.notified();
         tokio::pin!(local_wait);
 
-        // Register the notification future before checking the atomic flag so
-        // cancellation cannot race between the check and waiter registration.
+        // Register the waiter before checking the atomic flag so cancellation
+        // cannot race between the check and waiter registration. `notified()`
+        // is lazy — the future only enters the waiter list on first poll — so
+        // `enable()` performs that poll up-front. Without it, a cancel() racing
+        // between the flag check and the first poll would be lost
+        // (`notify_waiters` stores no permit) and this waiter would hang.
+        local_wait.as_mut().enable();
         if self.is_cancelled() {
             return;
         }

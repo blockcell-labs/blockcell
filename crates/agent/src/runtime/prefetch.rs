@@ -104,12 +104,15 @@ impl AgentRuntime {
         if eval.decision != ToolPolicyDecision::Allow {
             return false;
         }
+        let session_key = persist_session_key_for(msg);
         for access in self.extract_path_accesses(&call.name, &call.arguments) {
             let resolved = self.resolve_path(&access.path);
             if self.path_policy.evaluate(&resolved, access.op) == PolicyAction::Deny {
                 return false;
             }
-            if self.is_path_safe(&resolved) || self.is_path_authorized(&resolved, access.op) {
+            if self.is_path_safe(&resolved)
+                || self.is_path_authorized(&resolved, access.op, &session_key)
+            {
                 continue;
             }
             // 需要用户确认的路径不在无交互的预取阶段处理。

@@ -2,7 +2,7 @@
 //!
 //! 包含路径提取、安全校验、用户授权和危险操作确认。
 
-use super::{is_path_within_base, ConfirmRequest};
+use super::{is_path_within_base, persist_session_key_for, ConfirmRequest};
 use blockcell_core::path_policy::{resolve_for_policy, PathOp, PolicyAction};
 use blockcell_core::InboundMessage;
 use std::path::{Component, Path, PathBuf};
@@ -103,6 +103,9 @@ impl super::AgentRuntime {
                 push_path(&mut accesses, args, "path", PathOp::Read);
                 push_path(&mut accesses, args, "output_path", PathOp::Write);
             }
+            "app_control" => {
+                push_path(&mut accesses, args, "screenshot_path", PathOp::Write);
+            }
             "message" => {
                 push_paths(&mut accesses, args, "media", PathOp::Read);
             }
@@ -174,10 +177,18 @@ impl super::AgentRuntime {
         is_path_within_base(&self.paths.workspace(), resolved)
     }
 
-    /// Check whether a resolved path falls within an already-authorized directory.
+    /// Check whether a resolved path falls within a directory authorized in
+    /// `session_key`. Authorizations are scoped to the session that granted
+    /// them: the runtime is shared across sessions (and users, in gateway
+    /// mode), so an entry from one session must not leak into another.
     /// Optimized (#12): walk ancestors with O(1) HashSet lookups instead of O(n) iteration.
     /// `authorized_dirs` stores already-canonicalized paths, so no re-canonicalization needed.
-    pub(super) fn is_path_authorized(&self, resolved: &std::path::Path, op: PathOp) -> bool {
+    pub(super) fn is_path_authorized(
+        &self,
+        resolved: &std::path::Path,
+        op: PathOp,
+        session_key: &str,
+    ) -> bool {
         let authorized_dirs = self
             .authorized_dirs
             .lock()
@@ -185,10 +196,11 @@ impl super::AgentRuntime {
         if authorized_dirs.is_empty() {
             return false;
         }
+        let session_key = session_key.to_string();
         let rp = resolve_for_policy(resolved);
         let mut current = rp.as_path();
         loop {
-            if authorized_dirs.contains(&(current.to_path_buf(), op)) {
+            if authorized_dirs.contains(&(session_key.clone(), current.to_path_buf(), op)) {
                 return true;
             }
             match current.parent() {
@@ -198,8 +210,14 @@ impl super::AgentRuntime {
         }
     }
 
-    /// Record a directory as authorized so future accesses within it are auto-approved.
-    pub(super) fn authorize_directory(&mut self, resolved: &std::path::Path, op: PathOp) {
+    /// Record a directory as authorized for `session_key` so future accesses
+    /// within it are auto-approved for that session only.
+    pub(super) fn authorize_directory(
+        &mut self,
+        resolved: &std::path::Path,
+        op: PathOp,
+        session_key: &str,
+    ) {
         // If the path is a directory, authorize it directly.
         // If it's a file, authorize its parent directory.
         let dir = if resolved.is_dir() {
@@ -211,13 +229,20 @@ impl super::AgentRuntime {
                 .unwrap_or_else(|| resolved.to_path_buf())
         };
         let dir = resolve_for_policy(&dir);
-        let inserted = self
+        let mut authorized_dirs = self
             .authorized_dirs
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert((dir.clone(), op));
+            .unwrap_or_else(|e| e.into_inner());
+        let inserted = authorized_dirs.insert((session_key.to_string(), dir.clone(), op));
         if inserted {
             info!(dir = %dir.display(), ?op, "Directory authorized for future access");
+        }
+        // Entries accumulate across sessions on a shared runtime; once the set
+        // exceeds the bound, keep only the current session's authorizations —
+        // fail-closed, so stale entries require re-confirmation.
+        const MAX_AUTHORIZED_DIRS: usize = 256;
+        if authorized_dirs.len() > MAX_AUTHORIZED_DIRS {
+            authorized_dirs.retain(|(key, _, _)| key == session_key);
         }
     }
 
@@ -274,6 +299,7 @@ impl super::AgentRuntime {
         if path_accesses.is_empty() {
             return true;
         }
+        let session_key = persist_session_key_for(msg);
 
         // Classify each path by policy outcome
         let mut deny_paths: Vec<String> = Vec::new();
@@ -302,7 +328,7 @@ impl super::AgentRuntime {
             }
 
             // 2. Already authorized by user this session → OK
-            if self.is_path_authorized(&resolved, access.op) {
+            if self.is_path_authorized(&resolved, access.op, &session_key) {
                 continue;
             }
 
@@ -317,13 +343,13 @@ impl super::AgentRuntime {
                         "Path access allowed by policy"
                     );
                     if self.path_policy.cache_confirmed_dirs() {
-                        self.authorize_directory(&resolved, access.op);
+                        self.authorize_directory(&resolved, access.op, &session_key);
                     }
                 }
                 PolicyAction::Confirm => {
                     if policy_confirmed {
                         if confirmed_may_cache && self.path_policy.cache_confirmed_dirs() {
-                            self.authorize_directory(&resolved, access.op);
+                            self.authorize_directory(&resolved, access.op, &session_key);
                         }
                     } else {
                         confirm_paths.push(access.clone());
@@ -374,7 +400,7 @@ impl super::AgentRuntime {
                     if allowed && self.path_policy.cache_confirmed_dirs() {
                         for access in &confirm_paths {
                             let resolved = self.resolve_path(&access.path);
-                            self.authorize_directory(&resolved, access.op);
+                            self.authorize_directory(&resolved, access.op, &session_key);
                         }
                     }
                     allowed

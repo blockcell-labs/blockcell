@@ -7310,8 +7310,10 @@ fn fork_for_message_task_shares_caches_and_capabilities_while_isolating_turn_sta
 
     // 4. authorized_dirs 跨消息共享（同一目录不重复弹窗）
     let auth_dir = std::env::temp_dir();
-    msg_runtime_1.authorize_directory(&auth_dir, PathOp::Read);
-    assert!(msg_runtime_2.is_path_authorized(&auth_dir, PathOp::Read));
+    msg_runtime_1.authorize_directory(&auth_dir, PathOp::Read, "cli:shared-session");
+    assert!(msg_runtime_2.is_path_authorized(&auth_dir, PathOp::Read, "cli:shared-session"));
+    // 授权不跨会话泄漏：其他 session 仍需确认
+    assert!(!msg_runtime_2.is_path_authorized(&auth_dir, PathOp::Read, "cli:other-session"));
 
     // 5. budget_trackers 跨消息累加
     msg_runtime_1

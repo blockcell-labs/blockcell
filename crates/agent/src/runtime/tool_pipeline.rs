@@ -343,10 +343,17 @@ impl AgentRuntime {
             return Ok(());
         }
         let tool_name = inv.call.name.as_str();
-        let items = dangerous_operation_items(tool_name, &inv.args);
+        let mut items = dangerous_operation_items(tool_name, &inv.args);
         if items.is_empty() {
             return Ok(());
         }
+        // 披露本次调用的执行环境（如 shell sandbox_policy=full-access）：批准
+        // 危险命令会置 dangerous_confirmed 并短路 ExplicitConfirmation 阶段，
+        // 提示若只显示 command 会让用户在不知情的情况下放行提权执行。
+        let environment = self
+            .tool_registry
+            .execution_environment(tool_name, &inv.args);
+        items.insert(0, format!("environment: {}", environment.as_str()));
         let interactive = self.confirm_tx.is_some();
         if self
             .approve_dangerous_operation(tool_name, items, inv.msg)

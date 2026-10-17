@@ -504,15 +504,17 @@ async fn run_openssl_enc(args: &[String], stdin_payload: Option<Vec<u8>>) -> Res
         .spawn()
         .map_err(|e| Error::Tool(format!("openssl not found or failed: {}", e)))?;
 
-    if let Some(payload) = stdin_payload {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&payload)
-                .await
-                .map_err(|e| Error::Tool(format!("failed to write to openssl stdin: {}", e)))?;
-            drop(stdin);
-        }
-    }
+    // Write stdin concurrently with output collection: a sequential write
+    // deadlocks once the payload exceeds the pipe buffer (~64KB), because
+    // openssl blocks writing stdout while we block writing stdin.
+    let stdin_writer = stdin_payload.and_then(|payload| {
+        child.stdin.take().map(|mut stdin| {
+            tokio::spawn(async move {
+                // `stdin` drops with the task, closing the pipe so openssl sees EOF.
+                stdin.write_all(&payload).await
+            })
+        })
+    });
 
     let output = child
         .wait_with_output()
@@ -522,6 +524,13 @@ async fn run_openssl_enc(args: &[String], stdin_payload: Option<Vec<u8>>) -> Res
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::Tool(format!("openssl failed: {}", stderr)));
+    }
+
+    if let Some(writer) = stdin_writer {
+        writer
+            .await
+            .map_err(|e| Error::Tool(format!("openssl stdin writer failed: {}", e)))?
+            .map_err(|e| Error::Tool(format!("failed to write to openssl stdin: {}", e)))?;
     }
 
     Ok(output.stdout)
@@ -709,9 +718,16 @@ fn action_decode(params: &Value) -> Result<Value> {
                 .map_err(|e| Error::Tool(format!("UTF-8 decode error: {}", e)))?
         }
         "hex" => {
+            // Reject up-front: odd length or non-ASCII would panic on
+            // out-of-range / non-boundary slicing.
+            if !text.is_ascii() || text.len() % 2 != 0 {
+                return Err(Error::Tool(
+                    "Hex input must be even-length ASCII".into(),
+                ));
+            }
             let bytes: std::result::Result<Vec<u8>, _> = (0..text.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&text[i..i.min(text.len() - 1) + 2], 16))
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16))
                 .collect();
             let bytes = bytes.map_err(|e| Error::Tool(format!("Hex decode error: {}", e)))?;
             String::from_utf8(bytes)
@@ -863,6 +879,14 @@ mod tests {
 
         let decoded = action_decode(&json!({"text": "4869", "encoding": "hex"})).unwrap();
         assert_eq!(decoded["decoded"].as_str().unwrap(), "Hi");
+    }
+
+    #[test]
+    fn test_decode_hex_rejects_odd_length_and_non_ascii() {
+        // Odd-length or non-ASCII input previously panicked on out-of-range /
+        // non-boundary slicing.
+        assert!(action_decode(&json!({"text": "abc", "encoding": "hex"})).is_err());
+        assert!(action_decode(&json!({"text": "a中4", "encoding": "hex"})).is_err());
     }
 
     #[test]

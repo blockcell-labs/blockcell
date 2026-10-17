@@ -946,7 +946,6 @@ impl AgentRuntime {
                 }
 
                 // Execute each tool call, with dynamic tool supplement for intent misclassification
-                let mut supplemented_tools = false;
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
@@ -1118,17 +1117,36 @@ impl AgentRuntime {
                                         != Some(&tool_call.name)
                                 });
                                 tools.push(schema_val);
-                                supplemented_tools = true;
                                 _schema_cache_dirty = true;
                                 info!(tool = %tool_call.name, "Dynamically supplemented tool with full schema");
+                                // Commit a retry-hint result for this call rather
+                                // than rolling back the whole batch: discarding
+                                // results already produced would re-execute
+                                // non-idempotent tools and duplicate their side
+                                // effects.
+                                let mut retry_msg = ChatMessage::tool_result(
+                                    &tool_call.id,
+                                    &format!(
+                                        "The full parameter schema for `{}` is now available; retry the call with complete arguments.",
+                                        tool_call.name
+                                    ),
+                                );
+                                retry_msg.name = Some(tool_call.name.clone());
+                                tool_results.push(retry_msg);
                                 for skipped in &response.tool_calls[call_index + 1..] {
                                     self.record_unexecuted_tool_call(
                                         skipped,
                                         &msg,
                                         ToolOutcome::NotStarted,
-                                        "Not executed: the batch was restarted after supplementing a tool schema.",
+                                        "Not executed: an earlier tool call needed a schema supplement.",
                                     )
                                     .await;
+                                    let mut skip_msg = ChatMessage::tool_result(
+                                        &skipped.id,
+                                        "Skipped: an earlier tool call needed a schema supplement; retry if still needed.",
+                                    );
+                                    skip_msg.name = Some(skipped.name.clone());
+                                    tool_results.push(skip_msg);
                                 }
                                 break;
                             }
@@ -1195,18 +1213,6 @@ impl AgentRuntime {
                     let mut tool_msg = ChatMessage::tool_result(&tool_call.id, &result);
                     tool_msg.name = Some(tool_call.name.clone());
                     tool_results.push(tool_msg);
-                }
-
-                // If we supplemented tools, roll back the assistant message and tool results
-                // so the LLM retries with the full tool schema available.
-                if supplemented_tools {
-                    // Remove the assistant message we just pushed (last element)
-                    current_messages.pop();
-                    history.pop();
-                    // Do NOT push tool results — the LLM will retry from scratch
-                    self.end_step(&msg, &persist_session_key, step, response.tool_calls.len())
-                        .await;
-                    continue;
                 }
 
                 // Normal path: commit tool results to messages and history,

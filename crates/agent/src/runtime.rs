@@ -2200,7 +2200,10 @@ pub struct AgentRuntime {
     confirm_tx: Option<mpsc::Sender<ConfirmRequest>>,
     /// Directories that the user has already authorized access to.
     /// Files within these directories will not require separate confirmation.
-    authorized_dirs: Arc<Mutex<HashSet<(PathBuf, blockcell_core::path_policy::PathOp)>>>,
+    /// Entries are keyed by session key so an authorization granted in one
+    /// session cannot leak into another session/user on a shared runtime.
+    authorized_dirs:
+        Arc<Mutex<HashSet<(String, PathBuf, blockcell_core::path_policy::PathOp)>>>,
     /// Shared task manager for tracking background subagent tasks.
     task_manager: TaskManager,
     /// Agent id bound to this runtime.

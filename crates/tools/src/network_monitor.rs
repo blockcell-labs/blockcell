@@ -759,19 +759,33 @@ async fn action_bandwidth(params: &Value) -> Result<Value> {
         .map_err(|e| Error::Tool(format!("HTTP client error: {}", e)))?;
 
     let start = std::time::Instant::now();
-    let resp = client
+    let mut resp = client
         .get(url)
         .send()
         .await
         .map_err(|e| Error::Tool(format!("Download failed: {}", e)))?;
 
-    let bytes = resp
-        .bytes()
+    // Read the body in bounded chunks instead of `resp.bytes()`: a
+    // caller-controlled URL may stream an unbounded response, and buffering it
+    // whole is an OOM vector. We only need the byte count for the speed
+    // measurement, so nothing is retained.
+    const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+    let mut total_bytes = 0u64;
+    let mut truncated = false;
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| Error::Tool(format!("Failed to read response: {}", e)))?;
+        .map_err(|e| Error::Tool(format!("Failed to read response: {}", e)))?
+    {
+        total_bytes += chunk.len() as u64;
+        if total_bytes >= MAX_DOWNLOAD_BYTES {
+            truncated = true;
+            break;
+        }
+    }
     let elapsed = start.elapsed();
 
-    let bytes_downloaded = bytes.len() as f64;
+    let bytes_downloaded = total_bytes as f64;
     let seconds = elapsed.as_secs_f64();
     let mbps = if seconds > 0.0 {
         (bytes_downloaded * 8.0) / (seconds * 1_000_000.0)
@@ -780,7 +794,8 @@ async fn action_bandwidth(params: &Value) -> Result<Value> {
     };
 
     Ok(json!({
-        "bytes_downloaded": bytes.len(),
+        "bytes_downloaded": total_bytes,
+        "download_capped": truncated,
         "duration_seconds": format!("{:.2}", seconds),
         "speed_mbps": format!("{:.2}", mbps),
         "speed_mbytes_per_sec": format!("{:.2}", bytes_downloaded / (seconds * 1_000_000.0)),
