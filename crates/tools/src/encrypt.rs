@@ -13,6 +13,10 @@ const SUPPORTED_ALGORITHM: &str = "aes-256-cbc";
 const KEY_MODE_MAGIC: &[u8; 16] = b"BLOCKCELL-IV-V1\n";
 const KEY_MODE_IV_HEX_LEN: usize = 32;
 
+/// Key mode pipes the whole file through openssl stdin/stdout in memory, so cap
+/// the input size instead of letting a multi-GB file exhaust the process.
+const KEY_MODE_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Encryption and security tool.
 ///
 /// Actions:
@@ -180,7 +184,19 @@ async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
             "-iv".to_string(),
             iv_hex.clone(),
         ];
-        let plaintext = std::fs::read(&resolved_path)
+        let file_len = std::fs::metadata(&resolved_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if file_len > KEY_MODE_MAX_FILE_BYTES {
+            return Err(Error::Tool(format!(
+                "file too large for key-mode encryption: {} bytes exceeds {}-byte limit",
+                file_len, KEY_MODE_MAX_FILE_BYTES
+            )));
+        }
+        let path_c = resolved_path.clone();
+        let plaintext = tokio::task::spawn_blocking(move || std::fs::read(path_c))
+            .await
+            .map_err(|e| Error::Tool(format!("Read task failed: {}", e)))?
             .map_err(|e| Error::Tool(format!("Failed to read {}: {}", resolved_path, e)))?;
         let ciphertext = run_openssl_enc(&args, Some(plaintext)).await?;
 
@@ -189,7 +205,10 @@ async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
         payload.extend_from_slice(KEY_MODE_MAGIC);
         payload.extend_from_slice(iv_hex.as_bytes());
         payload.extend_from_slice(&ciphertext);
-        std::fs::write(&resolved_output, payload)
+        let out_c = resolved_output.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(out_c, payload))
+            .await
+            .map_err(|e| Error::Tool(format!("Write task failed: {}", e)))?
             .map_err(|e| Error::Tool(format!("Failed to write {}: {}", resolved_output, e)))?;
     }
 
@@ -269,7 +288,19 @@ async fn action_decrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
             .await
             .map_err(|e| Error::Tool(format!("Decryption failed (wrong password?): {e}")))?;
     } else if let Some(k) = key_hex {
-        let raw = std::fs::read(&resolved_path)
+        let file_len = std::fs::metadata(&resolved_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if file_len > KEY_MODE_MAX_FILE_BYTES {
+            return Err(Error::Tool(format!(
+                "file too large for key-mode decryption: {} bytes exceeds {}-byte limit",
+                file_len, KEY_MODE_MAX_FILE_BYTES
+            )));
+        }
+        let path_c = resolved_path.clone();
+        let raw = tokio::task::spawn_blocking(move || std::fs::read(path_c))
+            .await
+            .map_err(|e| Error::Tool(format!("Read task failed: {}", e)))?
             .map_err(|e| Error::Tool(format!("Failed to read {}: {}", resolved_path, e)))?;
         let header_len = KEY_MODE_MAGIC.len() + KEY_MODE_IV_HEX_LEN;
         if raw.len() < header_len || !raw.starts_with(KEY_MODE_MAGIC) {
@@ -294,7 +325,10 @@ async fn action_decrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
         let plaintext = run_openssl_enc(&args, Some(raw[header_len..].to_vec()))
             .await
             .map_err(|e| Error::Tool(format!("Decryption failed: {e}")))?;
-        std::fs::write(&resolved_output, plaintext)
+        let out_c = resolved_output.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(out_c, plaintext))
+            .await
+            .map_err(|e| Error::Tool(format!("Write task failed: {}", e)))?
             .map_err(|e| Error::Tool(format!("Failed to write {}: {}", resolved_output, e)))?;
     }
 

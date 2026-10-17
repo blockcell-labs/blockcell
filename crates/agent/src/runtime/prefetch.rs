@@ -88,9 +88,9 @@ impl AgentRuntime {
         if !PREFETCHABLE_TOOLS.contains(&call.name.as_str()) {
             return false;
         }
-        if load_disabled_toggles(&self.paths, "tools").contains(&call.name)
-            || load_disabled_toggles(&self.paths, "skills").contains(&call.name)
-        {
+        let (disabled_tools, disabled_skills) =
+            load_disabled_toggles_pair(&self.paths, "tools", "skills");
+        if disabled_tools.contains(&call.name) || disabled_skills.contains(&call.name) {
             return false;
         }
         if self.tool_registry.idempotency(&call.name, &call.arguments) != Idempotency::Safe {

@@ -29,12 +29,16 @@ const PYTHON_PREFERS: [&str; 2] = ["python3", "python"];
 
 /// Check if stderr indicates a Python environment issue that should trigger fallback.
 fn should_fallback(stderr: &str) -> bool {
+    // Only interpreter/environment failures justify retrying with another runner.
+    // "No such file or directory" also appears inside script tracebacks
+    // (FileNotFoundError/OSError), and re-running a script that already produced
+    // side effects would duplicate them. "can't open file" is interpreter-prefixed
+    // (the script file itself is missing), so a retry cannot duplicate side effects.
     stderr.contains("ModuleNotFoundError")
         || stderr.contains("No module named")
         || stderr.contains("command not found")
         || stderr.contains("is not recognized as an internal or external command")
         || stderr.contains("can't open file")
-        || stderr.contains("No such file or directory")
 }
 
 /// Windows 上程序不存在时 cmd.exe 返回的退出码
@@ -801,6 +805,15 @@ mod tests {
         assert!(!should_fallback("SyntaxError: invalid syntax"));
         assert!(!should_fallback("TypeError: 'str' object is not callable"));
         assert!(!should_fallback("ValueError: invalid value"));
+        // A FileNotFoundError raised *inside* a running script must not be
+        // retried with another runner — the script already produced its side
+        // effects before failing.
+        assert!(!should_fallback(
+            "FileNotFoundError: [Errno 2] No such file or directory: 'data.txt'"
+        ));
+        assert!(!should_fallback(
+            "OSError: [Errno 2] No such file or directory"
+        ));
     }
 
     #[test]

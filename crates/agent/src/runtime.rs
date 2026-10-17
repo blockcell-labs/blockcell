@@ -2142,6 +2142,7 @@ fn load_path_policy(config: &Config, paths: &Paths) -> PathPolicy {
 
 /// Read toggles.json and return the set of disabled item names for a category.
 /// Returns an empty set if the file doesn't exist or can't be parsed.
+#[cfg(test)]
 fn load_disabled_toggles(paths: &Paths, category: &str) -> HashSet<String> {
     let path = paths.toggles_file();
     let mut disabled = HashSet::new();

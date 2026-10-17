@@ -761,7 +761,7 @@ impl CapabilityRegistry {
         let registry_file = self.registry_dir.join("evolved_tools.json");
         let descriptors: Vec<&CapabilityDescriptor> = self.descriptors.values().collect();
         let json = serde_json::to_string_pretty(&descriptors)?;
-        std::fs::write(registry_file, json)?;
+        blockcell_core::file_store::atomic_write(&registry_file, json.as_bytes())?;
         debug!("🔌 [能力] 注册表已保存到磁盘");
         Ok(())
     }

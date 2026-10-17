@@ -8,6 +8,10 @@ use blockcell_core::InboundMessage;
 use std::path::{Component, Path, PathBuf};
 use tracing::{info, warn};
 
+/// Maximum time to wait for a user confirmation before denying the operation.
+/// Without a bound, a UI that never answers the oneshot leaves the turn pending forever.
+const CONFIRM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PathAccess {
     pub(super) path: String,
@@ -400,8 +404,8 @@ impl super::AgentRuntime {
                 return false;
             }
 
-            match response_rx.await {
-                Ok(allowed) => {
+            match tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, response_rx).await {
+                Ok(Ok(allowed)) => {
                     if allowed && self.path_policy.cache_confirmed_dirs() {
                         for access in &confirm_paths {
                             let resolved = self.resolve_path(&access.path);
@@ -410,8 +414,12 @@ impl super::AgentRuntime {
                     }
                     allowed
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     warn!("Confirmation channel closed, denying access");
+                    false
+                }
+                Err(_) => {
+                    warn!("Confirmation request timed out, denying access");
                     false
                 }
             }
@@ -457,12 +465,19 @@ impl super::AgentRuntime {
                 );
                 return false;
             }
-            match response_rx.await {
-                Ok(allowed) => allowed,
-                Err(_) => {
+            match tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, response_rx).await {
+                Ok(Ok(allowed)) => allowed,
+                Ok(Err(_)) => {
                     warn!(
                         tool = tool_name,
                         "Dangerous-operation confirmation channel closed, denying"
+                    );
+                    false
+                }
+                Err(_) => {
+                    warn!(
+                        tool = tool_name,
+                        "Dangerous-operation confirmation timed out, denying"
                     );
                     false
                 }

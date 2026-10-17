@@ -267,7 +267,10 @@ async fn action_move(workspace: &Path, params: &Value) -> Result<Value> {
     if !rename_ok {
         // Fallback: copy then delete (cross-device move)
         if src.is_dir() {
-            copy_dir_recursive(&src, &dst)?;
+            let (src_c, dst_c) = (src.clone(), dst.clone());
+            tokio::task::spawn_blocking(move || copy_dir_recursive(&src_c, &dst_c))
+                .await
+                .map_err(|e| Error::Tool(format!("Move task failed: {}", e)))??;
             tokio::fs::remove_dir_all(&src).await?;
         } else {
             tokio::fs::copy(&src, &dst).await?;
@@ -309,9 +312,14 @@ async fn action_copy(workspace: &Path, params: &Value) -> Result<Value> {
     }
 
     if src.is_dir() {
-        copy_dir_recursive(&src, &dst)?;
-        // Count files
-        let count = count_files_recursive(&dst)?;
+        let (src_c, dst_c) = (src.clone(), dst.clone());
+        // Recursive copy + count can walk large trees; keep it off the async worker.
+        let count = tokio::task::spawn_blocking(move || {
+            copy_dir_recursive(&src_c, &dst_c)?;
+            count_files_recursive(&dst_c)
+        })
+        .await
+        .map_err(|e| Error::Tool(format!("Copy task failed: {}", e)))??;
         Ok(json!({
             "status": "copied",
             "from": src.display().to_string(),
@@ -745,7 +753,10 @@ async fn action_file_info(workspace: &Path, params: &Value) -> Result<Value> {
     }
 
     if metadata.is_dir() {
-        let count = count_files_recursive(&path)?;
+        let path_c = path.clone();
+        let count = tokio::task::spawn_blocking(move || count_files_recursive(&path_c))
+            .await
+            .map_err(|e| Error::Tool(format!("File count task failed: {}", e)))??;
         info["total_files"] = json!(count);
     }
 

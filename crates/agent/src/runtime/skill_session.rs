@@ -229,14 +229,14 @@ impl AgentRuntime {
         let tool_executor =
             move |tool_name: &str, params: serde_json::Value| -> Result<serde_json::Value> {
                 // Security gate: block disabled tools/skills in skill scripts
-                let disabled_tools = load_disabled_toggles(&paths, "tools");
+                let (disabled_tools, disabled_skills) =
+                    load_disabled_toggles_pair(&paths, "tools", "skills");
                 if disabled_tools.contains(tool_name) {
                     return Err(blockcell_core::Error::Tool(format!(
                         "Tool '{}' is disabled via toggles",
                         tool_name
                     )));
                 }
-                let disabled_skills = load_disabled_toggles(&paths, "skills");
                 if disabled_skills.contains(tool_name) {
                     return Err(blockcell_core::Error::Tool(format!(
                         "Skill '{}' is disabled via toggles",

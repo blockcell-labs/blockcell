@@ -307,11 +307,13 @@ impl AgentRuntime {
     /// Hard block: reject disabled tools at execution level (not just prompt filtering)
     fn guard_disabled_toggles(&self, inv: &ToolInvocation<'_>) -> GuardResult {
         let name = &inv.call.name;
-        if load_disabled_toggles(&self.paths, "tools").contains(name) {
+        let (disabled_tools, disabled_skills) =
+            load_disabled_toggles_pair(&self.paths, "tools", "skills");
+        if disabled_tools.contains(name) {
             return Err(disabled_tool_result(name));
         }
         // Also block disabled skills invoked as tools (skill scripts registered as tools)
-        if load_disabled_toggles(&self.paths, "skills").contains(name) {
+        if disabled_skills.contains(name) {
             return Err(disabled_skill_result(name));
         }
         Ok(())

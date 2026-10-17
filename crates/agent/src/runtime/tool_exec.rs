@@ -1,4 +1,5 @@
 use super::*;
+use futures::FutureExt;
 
 impl AgentRuntime {
     pub(crate) async fn execute_runtime_tool_call(
@@ -7,12 +8,30 @@ impl AgentRuntime {
         ctx: blockcell_tools::ToolContext,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
-            if manager.has_tool(tool_name) {
-                return manager.handle_tool_call(tool_name, arguments);
+        let fut = async {
+            if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
+                if manager.has_tool(tool_name) {
+                    return manager.handle_tool_call(tool_name, arguments);
+                }
             }
-        }
-        self.tool_registry.execute(tool_name, ctx, arguments).await
+            self.tool_registry.execute(tool_name, ctx, arguments).await
+        };
+        // A panicking tool must not unwind the whole turn; convert it into a
+        // tool error so the model can see and recover from it.
+        std::panic::AssertUnwindSafe(fut)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                tracing::error!(tool = tool_name, panic = %detail, "Tool execution panicked");
+                Err(blockcell_core::Error::Tool(format!(
+                    "tool {tool_name} panicked: {detail}"
+                )))
+            })
     }
 
     /// Layer 1: 在截断前将大型工具结果持久化到磁盘。
