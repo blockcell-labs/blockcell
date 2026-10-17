@@ -253,8 +253,10 @@ impl EvolutionService {
         Ok(())
     }
 
-    fn find_in_progress_record_on_disk(&self, skill_name: &str) -> Option<String> {
-        let records = self.list_all_records().ok()?;
+    /// 扫描 records 目录找出该技能处于进行中状态的 evolution_id。
+    /// 纯同步磁盘 IO；async 路径调用方应包 `spawn_blocking`。
+    fn find_in_progress_record_in_dir(records_dir: &std::path::Path, skill_name: &str) -> Option<String> {
+        let records = Self::load_records_from_dir(records_dir);
         records
             .into_iter()
             .find(|r| r.skill_name == skill_name && Self::is_in_progress_status(&r.status))
@@ -264,7 +266,16 @@ impl EvolutionService {
     /// Reconcile in-memory `active_evolutions` with disk records and return the
     /// canonical in-progress evolution_id (if any) for this skill.
     async fn resolve_in_progress_evolution_id(&self, skill_name: &str) -> Option<String> {
-        let disk_id = self.find_in_progress_record_on_disk(skill_name);
+        let disk_id = {
+            let records_dir = self.records_dir();
+            let skill_name_owned = skill_name.to_string();
+            tokio::task::spawn_blocking(move || {
+                Self::find_in_progress_record_in_dir(&records_dir, &skill_name_owned)
+            })
+            .await
+            .ok()
+            .flatten()
+        };
         let mut active = self.active_evolutions.lock().await;
         match disk_id {
             Some(id) => {
@@ -1267,8 +1278,21 @@ impl EvolutionService {
         let evolution_id = {
             let active = self.active_evolutions.lock().await;
             active.get(skill_name).cloned()
-        }
-        .or_else(|| self.find_in_progress_record_on_disk(skill_name));
+        };
+        let evolution_id = match evolution_id {
+            Some(id) => Some(id),
+            None => {
+                // 磁盘全量扫描属同步 IO，移出 async executor
+                let records_dir = self.records_dir();
+                let skill_name_owned = skill_name.to_string();
+                tokio::task::spawn_blocking(move || {
+                    Self::find_in_progress_record_in_dir(&records_dir, &skill_name_owned)
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+        };
 
         if let Some(evolution_id) = evolution_id {
             {
@@ -1281,10 +1305,19 @@ impl EvolutionService {
                 stats.record_call(&evolution_id, is_error);
             }
 
-            if let Err(e) = self
-                .evolution
-                .record_observation_call(&evolution_id, is_error)
-            {
+            // record_observation_call 是同步 fs 读-改-写（含文件锁），不能阻塞 worker
+            let evolution = self.evolution.clone();
+            let evolution_id_owned = evolution_id.clone();
+            let persist_result = tokio::task::spawn_blocking(move || {
+                evolution.record_observation_call(&evolution_id_owned, is_error)
+            })
+            .await;
+            let persist_error = match persist_result {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(e) => Some(format!("spawn_blocking join error: {e}")),
+            };
+            if let Some(e) = persist_error {
                 warn!(
                     skill = %skill_name,
                     evolution_id = %evolution_id,
@@ -1737,13 +1770,16 @@ impl EvolutionService {
 
     /// 列出所有进化记录（返回 EvolutionRecord 列表）
     pub fn list_all_records(&self) -> Result<Vec<EvolutionRecord>> {
-        let records_dir = self.records_dir();
+        Ok(Self::load_records_from_dir(&self.records_dir()))
+    }
+
+    fn load_records_from_dir(records_dir: &std::path::Path) -> Vec<EvolutionRecord> {
         if !records_dir.exists() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         let mut records = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&records_dir) {
+        if let Ok(entries) = std::fs::read_dir(records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "json") {
@@ -1758,7 +1794,7 @@ impl EvolutionService {
 
         // Sort by created_at descending
         records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        Ok(records)
+        records
     }
 
     /// 清空所有进化记录（磁盘 + 内存）

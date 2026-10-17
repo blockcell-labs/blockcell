@@ -390,26 +390,32 @@ impl EvolutionWorkflowStore {
         )
         .map_err(map_sqlite_error)?;
 
-        // Read incremented attempt to determine backoff
-        // After increment: attempt 1→60s, 2→300s, 3→1800s, 4+→Blocked
-        let attempt: i32 = tx
+        // Read incremented attempt and max_attempts to determine backoff.
+        // After increment: attempt 1→60s, 2→300s, 3→1800s.
+        // attempt >= max_attempts → 'Failed'（终态，可被 retry_workflow 重新拉起），
+        // 不能停留为 RetryScheduled：claim_next 要求 attempt < max_attempts，
+        // 否则该记录永远不可领、也不可恢复，形成死路。
+        let (attempt, max_attempts): (i32, i32) = tx
             .query_row(
-                "SELECT attempt FROM evo_workflows WHERE id = ?1",
+                "SELECT attempt, max_attempts FROM evo_workflows WHERE id = ?1",
                 params![workflow_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(map_sqlite_error)?;
 
-        let (status, backoff_secs): (&str, i64) = match attempt {
-            1 => ("RetryScheduled", 60),
-            2 => ("RetryScheduled", 300),
-            3 => ("RetryScheduled", 1800),
-            _ => ("Blocked", 0),
+        let (status, backoff_secs): (&str, i64) = if attempt >= max_attempts {
+            ("Failed", 0)
+        } else {
+            match attempt {
+                1 => ("RetryScheduled", 60),
+                2 => ("RetryScheduled", 300),
+                _ => ("RetryScheduled", 1800),
+            }
         };
 
-        if status == "Blocked" {
+        if status == "Failed" {
             tx.execute(
-                "UPDATE evo_workflows SET status = 'Blocked', last_error = ?1, updated_at = ?2
+                "UPDATE evo_workflows SET status = 'Failed', last_error = ?1, updated_at = ?2
                  WHERE id = ?3",
                 params![last_error, now_str, workflow_id],
             )
@@ -672,27 +678,32 @@ impl EvolutionWorkflowStore {
             return Ok(false);
         }
 
-        let attempt: i32 = tx
+        let (attempt, max_attempts): (i32, i32) = tx
             .query_row(
-                "SELECT attempt FROM evo_workflows WHERE id = ?1 AND lease_owner = ?2",
+                "SELECT attempt, max_attempts FROM evo_workflows WHERE id = ?1 AND lease_owner = ?2",
                 params![workflow_id, worker_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(map_sqlite_error)?;
 
         // After increment, attempt values are 1,2,3 (pre-increment was 0,1,2).
-        // Backoff schedule: pre-increment 0→60s, 1→300s, 2→1800s, then Blocked.
-        let (status, backoff_secs): (&str, i64) = match attempt {
-            1 => ("RetryScheduled", 60),
-            2 => ("RetryScheduled", 300),
-            3 => ("RetryScheduled", 1800),
-            _ => ("Blocked", 0),
+        // Backoff schedule: pre-increment 0→60s, 1→300s, 2→1800s。
+        // attempt >= max_attempts → 'Failed'：RetryScheduled 在 claim_next 的
+        // attempt < max_attempts 条件下永远不可领，会形成既不可重试又不可见的死路。
+        let (status, backoff_secs): (&str, i64) = if attempt >= max_attempts {
+            ("Failed", 0)
+        } else {
+            match attempt {
+                1 => ("RetryScheduled", 60),
+                2 => ("RetryScheduled", 300),
+                _ => ("RetryScheduled", 1800),
+            }
         };
 
-        if status == "Blocked" {
+        if status == "Failed" {
             tx.execute(
                 "UPDATE evo_workflows
-                 SET status = 'Blocked', last_error = ?1, lease_owner = NULL,
+                 SET status = 'Failed', last_error = ?1, lease_owner = NULL,
                      lease_until = NULL, updated_at = ?2
                  WHERE id = ?3 AND lease_owner = ?4",
                 params![last_error, now_str, workflow_id, worker_id],
@@ -1086,5 +1097,81 @@ mod tests {
 
         assert!(store.insert_step("missing", "BuildPrompt", None).is_err());
         assert!(store.append_event("missing", "cancel", None).is_err());
+    }
+
+    #[test]
+    fn schedule_retry_marks_failed_when_attempts_exhausted() {
+        let (_dir, store) = open_temp_store();
+        let workflow_id = store
+            .enqueue("cap.test", "test capability", "process")
+            .expect("enqueue");
+
+        // 默认 max_attempts=3：第 3 次失败后必须进入终态 Failed，
+        // 不能停留为永远不可领取的 RetryScheduled（attempt < max_attempts 不成立）。
+        for _ in 0..3 {
+            store
+                .schedule_retry(&workflow_id, Some("boom"))
+                .expect("schedule retry");
+        }
+
+        let stored = store
+            .get_workflow(&workflow_id)
+            .expect("get workflow")
+            .expect("workflow exists");
+        assert_eq!(stored.status, "Failed");
+        assert_eq!(stored.attempt, 3);
+
+        // 终态不出现在 claim 集合中
+        assert!(store
+            .claim_next("worker-a", 60, None, None)
+            .expect("claim")
+            .is_none());
+
+        // 但可被 retry_workflow 重新拉起（attempt 归零、回到 Requested）
+        store.retry_workflow(&workflow_id).expect("retry workflow");
+        let stored = store
+            .get_workflow(&workflow_id)
+            .expect("get workflow")
+            .expect("workflow exists");
+        assert_eq!(stored.status, "Requested");
+        assert_eq!(stored.attempt, 0);
+    }
+
+    #[test]
+    fn schedule_retry_if_owned_marks_failed_when_attempts_exhausted() {
+        let (_dir, store) = open_temp_store();
+        let workflow_id = store
+            .enqueue("cap.test", "test capability", "process")
+            .expect("enqueue");
+
+        for round in 0..3 {
+            // 每轮先由 worker 领取，再以持有者身份记录失败
+            let claimed = store
+                .claim_next("worker-a", 0, None, None)
+                .expect("claim")
+                .expect("workflow should be claimable");
+            assert_eq!(claimed.id, workflow_id);
+            assert!(store
+                .schedule_retry_if_owned(&workflow_id, "worker-a", Some("boom"))
+                .expect("schedule owned retry"), "round {round} should update");
+
+            if round < 2 {
+                // 前两次进 RetryScheduled + 退避；测试里直接把 lease_until 拨到过去以便下一轮领取
+                let conn = store.lock_conn().expect("conn");
+                conn.execute(
+                    "UPDATE evo_workflows SET lease_until = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                    params![workflow_id],
+                )
+                .expect("expire backoff for test");
+            }
+        }
+
+        let stored = store
+            .get_workflow(&workflow_id)
+            .expect("get workflow")
+            .expect("workflow exists");
+        assert_eq!(stored.status, "Failed");
+        assert_eq!(stored.attempt, 3);
+        assert!(stored.lease_owner.is_none());
     }
 }

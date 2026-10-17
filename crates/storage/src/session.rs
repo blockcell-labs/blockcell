@@ -304,7 +304,38 @@ impl SessionStore {
         // Append message
         let mut file = OpenOptions::new().append(true).open(&path)?;
         writeln!(file, "{}", serde_json::to_string(message)?)?;
+        drop(file);
 
+        // 刷新 metadata 行的 updated_at：Layer-2 时间压缩把它当作"最后活跃时间"，
+        // 仅追加消息而不更新会导致会话被误判长期空闲。
+        self.touch_metadata_updated_at(&path)?;
+
+        Ok(())
+    }
+
+    fn touch_metadata_updated_at(&self, path: &std::path::Path) -> Result<()> {
+        let content = std::fs::read_to_string(path)?;
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        let now = chrono::Utc::now().to_rfc3339();
+        for line in &mut lines {
+            if let Ok(SessionLine::Metadata {
+                created_at,
+                metadata,
+                ..
+            }) = serde_json::from_str::<SessionLine>(line)
+            {
+                let updated = SessionLine::Metadata {
+                    created_at,
+                    updated_at: now,
+                    metadata,
+                };
+                *line = serde_json::to_string(&updated)?;
+                break;
+            }
+        }
+        let mut bytes = lines.join("\n").into_bytes();
+        bytes.push(b'\n');
+        write_session_bytes_atomically(path, &bytes)?;
         Ok(())
     }
 
@@ -629,6 +660,38 @@ mod tests {
             .load_metadata(session_key)
             .expect("load metadata after save");
         assert_eq!(loaded["skill_state"]["last_skill"], "deep_analysis");
+    }
+
+    #[test]
+    fn append_refreshes_metadata_updated_at() {
+        let (store, _dir) = test_store();
+        let session_key = "cli:append-ts";
+
+        store
+            .append(session_key, &ChatMessage::user("one"))
+            .expect("first append");
+
+        // 把 metadata.updated_at 拨到过去，模拟"最后活跃时间"陈旧
+        let path = store.paths.session_file(session_key);
+        let content = std::fs::read_to_string(&path).expect("read session");
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        let first: Value = serde_json::from_str(&lines[0]).expect("parse metadata line");
+        lines[0] = serde_json::to_string(&json!({
+            "_type": "metadata",
+            "created_at": first["created_at"],
+            "updated_at": "2000-01-01T00:00:00Z",
+            "metadata": {}
+        }))
+        .expect("serialize metadata");
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("rewrite session");
+
+        store
+            .append(session_key, &ChatMessage::user("two"))
+            .expect("second append");
+
+        let (_created, updated) = store.load_timestamps(session_key).expect("load timestamps");
+        let updated = updated.expect("updated_at present");
+        assert_ne!(updated, "2000-01-01T00:00:00Z");
     }
 
     #[test]

@@ -94,7 +94,7 @@ impl MemoryStore {
             .inner
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-        let tx = conn.transaction().map_err(|e| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
             blockcell_core::Error::Storage(format!("Begin reindex intent transaction error: {}", e))
         })?;
         for item in items {

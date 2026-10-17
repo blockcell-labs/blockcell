@@ -12,7 +12,7 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction().map_err(|e| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!(
                     "Begin long-term retirement transaction error: {}",
                     e
@@ -69,7 +69,7 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction().map_err(|e| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!(
                     "Begin soft-delete transaction error: {}",
                     e
@@ -140,7 +140,7 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction().map_err(|e| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!(
                     "Begin batch-delete transaction error: {}",
                     e
@@ -276,7 +276,7 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction().map_err(|e| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!("Begin restore transaction error: {}", e))
             })?;
             let affected = tx
@@ -329,7 +329,7 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction().map_err(|e| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
                 blockcell_core::Error::Storage(format!(
                     "Begin maintenance transaction error: {}",
                     e

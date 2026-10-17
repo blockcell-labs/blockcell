@@ -155,7 +155,7 @@ hooks:
 - Hook 按配置顺序执行。
 - 每条 hook 有独立超时。
 - Hook 失败、超时或返回非 0 exit code，不会阻断 agent 主流程。
-- 工具调用如果被禁用、策略拒绝、路径策略拒绝或危险操作确认拒绝，不会触发 `pre_tool_use` / `post_tool_use`。
+- `pre_tool_use`（`tool/pre-execute`）在策略/路径/危险确认等准入检查**之前**触发——被这些门禁拒绝的调用仍会先发出 `pre_tool_use`，但不会到达 `post_tool_use`（`tool/result`）。被禁用（toggle off）的调用不会进入准入管线，两种事件都不触发。
 - `post_tool_use` 在工具结果产生后触发，因此适合做格式化、审计、通知等副作用。
 
 ---

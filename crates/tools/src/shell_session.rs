@@ -152,11 +152,25 @@ impl ShellSessionManager {
         }
     }
 
-    pub(crate) fn record_stdin_chunk(&self, session_id: &str, chunk: &str) -> String {
+    /// 在同一写锁临界区内完成"拼接预览 → 危险检查 → 追加缓冲"：
+    /// 被拒绝的 chunk 不入账、也不清空既有缓冲——缓冲记录的是已实际写入 shell 的
+    /// 前缀，清掉会让攻击者重发后半截绕过拼接检测（`rm -r` 已过检写盘，再发 `f /`）。
+    pub(crate) fn check_and_record_stdin_chunk(&self, session_id: &str, chunk: &str) -> Result<()> {
         let Ok(mut guard) = self.stdin_buffers.write() else {
-            return chunk.to_string();
+            return Ok(());
         };
         let buf = guard.entry(session_id.to_string()).or_default();
+        let combined = if buf.is_empty() {
+            chunk.to_string()
+        } else {
+            normalize_continued_lines(&format!("{buf}{chunk}"))
+        };
+        if crate::exec::is_dangerous_command(chunk) || crate::exec::is_dangerous_command(&combined)
+        {
+            return Err(Error::PermissionDenied(
+                "Input matches dangerous pattern and is blocked".to_string(),
+            ));
+        }
         buf.push_str(chunk);
         if buf.len() > MAX_STDIN_BUFFER_BYTES {
             let mut cut = buf.len() - MAX_STDIN_BUFFER_BYTES;
@@ -165,7 +179,7 @@ impl ShellSessionManager {
             }
             buf.drain(..cut);
         }
-        normalize_continued_lines(buf)
+        Ok(())
     }
 
     pub(crate) fn clear_stdin_buffer(&self, session_id: &str) {
@@ -588,14 +602,7 @@ impl ShellSessionManager {
     }
 
     pub(crate) async fn write_stdin(&self, session_id: &str, input: &str) -> Result<()> {
-        let combined = self.record_stdin_chunk(session_id, input);
-        if crate::exec::is_dangerous_command(input) || crate::exec::is_dangerous_command(&combined)
-        {
-            self.clear_stdin_buffer(session_id);
-            return Err(Error::PermissionDenied(
-                "Input matches dangerous pattern and is blocked".to_string(),
-            ));
-        }
+        self.check_and_record_stdin_chunk(session_id, input)?;
         let session = self.get(session_id).await?;
         let mut session = session.lock().await;
         session

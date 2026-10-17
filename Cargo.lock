@@ -607,6 +607,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "futures",
  "libc",
  "serde",
  "serde_json",
