@@ -169,7 +169,7 @@ impl AgentRuntime {
             tool_args,
             channel: &msg.channel,
         });
-        self.audit_policy_decision(tool_name, &eval, msg);
+        self.audit_policy_decision(tool_name, &eval, msg).await;
 
         match eval.decision {
             ToolPolicyDecision::Allow => PolicyOutcome::Proceed,
@@ -196,22 +196,40 @@ impl AgentRuntime {
         }
     }
 
-    pub(crate) fn audit_policy_decision(
-        &mut self,
+    pub(crate) async fn audit_policy_decision(
+        &self,
         tool_name: &str,
         eval: &PolicyEvalResult,
         msg: &InboundMessage,
     ) {
-        self.audit_logger.set_session_id(&msg.session_key());
-        if let Err(e) = self.audit_logger.log_permission_decision(
-            tool_name,
-            format!("{:?}", eval.decision),
-            eval.matched_rule.clone(),
-            eval.description.clone(),
-            eval.simulated,
-            &msg.session_key(),
-        ) {
-            warn!(tool = tool_name, error = %e, "Permission-decision audit write failed");
+        let logger = std::sync::Arc::clone(&self.audit_logger);
+        let session_key = msg.session_key();
+        let tool_name_owned = tool_name.to_string();
+        let decision = format!("{:?}", eval.decision);
+        let matched_rule = eval.matched_rule.clone();
+        let description = eval.description.clone();
+        let simulated = eval.simulated;
+        match tokio::task::spawn_blocking(move || {
+            let mut logger = logger.lock().unwrap_or_else(|e| e.into_inner());
+            logger.set_session_id(&session_key);
+            logger.log_permission_decision(
+                &tool_name_owned,
+                decision,
+                matched_rule,
+                description,
+                simulated,
+                &session_key,
+            )
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!(tool = tool_name, error = %e, "Permission-decision audit write failed")
+            }
+            Err(e) => {
+                warn!(tool = tool_name, error = %e, "Permission-decision audit task failed")
+            }
         }
     }
 }

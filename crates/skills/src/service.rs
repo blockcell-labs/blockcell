@@ -1841,19 +1841,42 @@ impl EvolutionService {
     }
 
     fn load_records_from_dir(records_dir: &std::path::Path) -> Vec<EvolutionRecord> {
+        /// 终态记录保留期：超过后随扫描顺手删除，避免 records 目录无界增长。
+        const TERMINAL_RECORD_RETENTION_SECS: i64 = 30 * 24 * 3600;
+        /// save_record 崩溃残留的 .bak/.tmp 文件清理阈值。
+        const STALE_SWAP_FILE_SECS: u64 = 24 * 3600;
+
         if !records_dir.exists() {
             return Vec::new();
         }
 
+        let now = chrono::Utc::now().timestamp();
         let mut records = Vec::new();
         if let Ok(entries) = std::fs::read_dir(records_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
                 if path.extension().is_some_and(|e| e == "json") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<EvolutionRecord>(&content) {
+                            if !Self::is_in_progress_status(&record.status)
+                                && now - record.updated_at > TERMINAL_RECORD_RETENTION_SECS
+                            {
+                                let _ = std::fs::remove_file(&path);
+                                continue;
+                            }
                             records.push(record);
                         }
+                    }
+                } else if name.ends_with(".json.bak") || name.contains(".json.tmp_") {
+                    let stale = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|d| d.as_secs() > STALE_SWAP_FILE_SECS);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
                     }
                 }
             }
@@ -2457,6 +2480,71 @@ mod tests {
             .load_record(&evo_id)
             .expect("load evolution record");
         assert_eq!(record.context.skill_type, SkillType::Python);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_records_gc_removes_old_terminal_records_only() {
+        let (root, _skills_dir) = setup_test_dirs("records_gc");
+        let records_dir = root.join("records");
+        std::fs::create_dir_all(&records_dir).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 31 * 24 * 3600;
+
+        let mk = |id: &str, status: EvolutionStatus, updated_at: i64| EvolutionRecord {
+            id: id.to_string(),
+            skill_name: "s".to_string(),
+            context: EvolutionContext {
+                skill_name: "s".to_string(),
+                current_version: "v1".to_string(),
+                trigger: TriggerReason::ManualRequest {
+                    description: "t".to_string(),
+                },
+                error_stack: None,
+                source_snippet: None,
+                source_path: None,
+                layout: SkillLayout::PromptTool,
+                tool_schemas: vec![],
+                timestamp: now,
+                skill_type: SkillType::Python,
+                staged: false,
+                staging_skills_dir: None,
+            },
+            patch: None,
+            audit: None,
+            contract: None,
+            shadow_test: None,
+            observation: None,
+            observation_total_calls: 0,
+            observation_error_calls: 0,
+            rollout: None,
+            status,
+            attempt: 1,
+            feedback_history: Vec::new(),
+            created_at: updated_at,
+            updated_at,
+        };
+        let write = |record: &EvolutionRecord| {
+            std::fs::write(
+                records_dir.join(format!("{}.json", record.id)),
+                serde_json::to_string(record).unwrap(),
+            )
+            .unwrap();
+        };
+        write(&mk("old_terminal", EvolutionStatus::Completed, old));
+        write(&mk("fresh_terminal", EvolutionStatus::Failed, now));
+        write(&mk("old_inflight", EvolutionStatus::Triggered, old));
+
+        let records =
+            EvolutionService::load_records_from_dir(&records_dir);
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        // 终态且超过保留期：文件被删除且不再出现在列表。
+        assert!(!ids.contains(&"old_terminal"));
+        assert!(!records_dir.join("old_terminal.json").exists());
+        // 终态但在保留期内，以及进行中的旧记录都保留。
+        assert!(ids.contains(&"fresh_terminal"));
+        assert!(ids.contains(&"old_inflight"));
 
         let _ = std::fs::remove_dir_all(root);
     }

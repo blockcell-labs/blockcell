@@ -2645,6 +2645,23 @@ fn repeated_learned_skill_corrections_disable_skill_toggle() {
 }
 
 #[test]
+fn toggles_cache_invalidates_on_file_change() {
+    let paths = Paths::with_base(
+        std::env::temp_dir().join(format!("blockcell-toggles-cache-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(paths.workspace()).unwrap();
+    let toggles = paths.toggles_file();
+    std::fs::write(&toggles, r#"{"skills":{"alpha":false},"tools":{}}"#).unwrap();
+    assert!(load_disabled_toggles(&paths, "skills").contains("alpha"));
+
+    // 改写文件后 mtime/len 变化，缓存必须失效并读到新值（不同长度保证 stat 可区分）。
+    std::fs::write(&toggles, r#"{"skills":{"beta":false},"tools":{}}"#).unwrap();
+    let disabled = load_disabled_toggles(&paths, "skills");
+    assert!(disabled.contains("beta"));
+    assert!(!disabled.contains("alpha"));
+}
+
+#[test]
 fn test_continued_skill_name_prefers_metadata_and_falls_back_to_history() {
     let mut history = Vec::new();
     persist_prompt_skill_history(

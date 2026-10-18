@@ -2168,16 +2168,40 @@ fn load_path_policy(config: &Config, paths: &Paths) -> PathPolicy {
     PathPolicy::load(&policy_path)
 }
 
+type TogglesCache = HashMap<PathBuf, (std::time::SystemTime, u64, serde_json::Value)>;
+
+/// Cached parsed toggles.json keyed by file mtime+len: per-call sites on the tool
+/// hot path only pay a `stat` syscall unless the file actually changed.
+fn cached_toggles_json(path: &Path) -> Option<serde_json::Value> {
+    static CACHE: LazyLock<Mutex<TogglesCache>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let len = meta.len();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, l, v)) = cache.get(path) {
+        if *t == mtime && *l == len {
+            return Some(v.clone());
+        }
+    }
+    let val = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(path).ok()?,
+    )
+    .ok()?;
+    if cache.len() >= 16 {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), (mtime, len, val.clone()));
+    Some(val)
+}
+
 /// Read toggles.json and return the set of disabled item names for a category.
 /// Returns an empty set if the file doesn't exist or can't be parsed.
 #[cfg(test)]
 fn load_disabled_toggles(paths: &Paths, category: &str) -> HashSet<String> {
-    let path = paths.toggles_file();
     let mut disabled = HashSet::new();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            collect_disabled(&val, category, &mut disabled);
-        }
+    if let Some(val) = cached_toggles_json(&paths.toggles_file()) {
+        collect_disabled(&val, category, &mut disabled);
     }
     disabled
 }
@@ -2200,14 +2224,11 @@ fn load_disabled_toggles_pair(
     category_a: &str,
     category_b: &str,
 ) -> (HashSet<String>, HashSet<String>) {
-    let path = paths.toggles_file();
     let mut a = HashSet::new();
     let mut b = HashSet::new();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            collect_disabled(&val, category_a, &mut a);
-            collect_disabled(&val, category_b, &mut b);
-        }
+    if let Some(val) = cached_toggles_json(&paths.toggles_file()) {
+        collect_disabled(&val, category_a, &mut a);
+        collect_disabled(&val, category_b, &mut b);
     }
     (a, b)
 }
@@ -2223,7 +2244,7 @@ pub struct AgentRuntime {
     pre_step_policies: crate::runtime_kernel::WaterfallChain<pre_step::PreStepState>,
     tool_registry: ToolRegistry,
     session_store: SessionStore,
-    audit_logger: AuditLogger,
+    audit_logger: Arc<Mutex<AuditLogger>>,
     outbound_tx: Option<mpsc::Sender<OutboundMessage>>,
     inbound_tx: Option<mpsc::Sender<InboundMessage>>,
     confirm_tx: Option<mpsc::Sender<ConfirmRequest>>,
@@ -2348,7 +2369,7 @@ impl AgentRuntime {
         }
 
         let session_store = SessionStore::new(paths.clone());
-        let audit_logger = AuditLogger::new(paths.clone());
+        let audit_logger = Arc::new(Mutex::new(AuditLogger::new(paths.clone())));
         let channel_contacts = blockcell_storage::ChannelContacts::new(paths.clone());
         let path_policy = load_path_policy(&config, &paths);
         let tool_policy = ToolPolicy::load(&paths.base.join("tool_policy.yaml"));
@@ -2526,7 +2547,7 @@ impl AgentRuntime {
             pre_step_policies: self.pre_step_policies.clone(),
             tool_registry: self.tool_registry.clone(),
             session_store: SessionStore::new(self.paths.clone()),
-            audit_logger: AuditLogger::new(self.paths.clone()),
+            audit_logger: Arc::new(Mutex::new(AuditLogger::new(self.paths.clone()))),
             outbound_tx: self.outbound_tx.clone(),
             inbound_tx: self.inbound_tx.clone(),
             confirm_tx: self.confirm_tx.clone(),

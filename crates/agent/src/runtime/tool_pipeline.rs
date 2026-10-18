@@ -258,7 +258,8 @@ impl AgentRuntime {
             .ok()
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::json!({ "error": result_text }));
-        self.audit_tool_call(call, args, result.clone(), msg, outcome, 0);
+        self.audit_tool_call(call, args, result.clone(), msg, outcome, 0)
+            .await;
         self.dispatch_event(
             msg,
             &persist_session_key_for(msg),
@@ -275,8 +276,8 @@ impl AgentRuntime {
     }
 
     /// 审计记录以回合 id 作为 trace_id，并携带 call_id 与执行结论，与 Session Event Log 对齐。
-    fn audit_tool_call(
-        &mut self,
+    async fn audit_tool_call(
+        &self,
         call: &ToolCallRequest,
         args: &serde_json::Value,
         result: serde_json::Value,
@@ -287,22 +288,35 @@ impl AgentRuntime {
         let session_key = msg.session_key();
         // 与 `tool/call` 事件同名对齐：审计同样记录本次调用声明的执行环境。
         let environment = self.tool_registry.execution_environment(&call.name, args);
-        self.audit_logger.set_session_id(&session_key);
-        if let Err(e) = self
-            .audit_logger
-            .log_tool_call_audit(blockcell_storage::ToolCallAudit {
-                tool_name: &call.name,
-                params: args.clone(),
+        // 写盘 + 双锁（AUDIT_WRITE_LOCK + fs2 advisory）可能耗时数 ms，移入
+        // spawn_blocking 避免阻塞 async worker；调用点串行 await，哈希链顺序不变。
+        let logger = std::sync::Arc::clone(&self.audit_logger);
+        let tool_name = call.name.clone();
+        let params = args.clone();
+        let trace_id = self.current_turn_id.clone();
+        let call_id = call.id.clone();
+        let outcome_str = outcome.as_str();
+        let env_str = environment.as_str();
+        match tokio::task::spawn_blocking(move || {
+            let mut logger = logger.lock().unwrap_or_else(|e| e.into_inner());
+            logger.set_session_id(&session_key);
+            logger.log_tool_call_audit(blockcell_storage::ToolCallAudit {
+                tool_name: &tool_name,
+                params,
                 result,
                 session_key: &session_key,
-                trace_id: self.current_turn_id.clone(),
+                trace_id,
                 duration_ms: Some(duration_ms),
-                call_id: Some(call.id.clone()),
-                outcome: Some(outcome.as_str()),
-                environment: Some(environment.as_str()),
+                call_id: Some(call_id),
+                outcome: Some(outcome_str),
+                environment: Some(env_str),
             })
+        })
+        .await
         {
-            warn!(tool = %call.name, error = %e, "Tool-call audit write failed");
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(tool = %call.name, error = %e, "Tool-call audit write failed"),
+            Err(e) => warn!(tool = %call.name, error = %e, "Tool-call audit task failed"),
         }
     }
 
@@ -872,7 +886,8 @@ impl AgentRuntime {
             msg,
             outcome.outcome,
             outcome.duration_ms,
-        );
+        )
+        .await;
 
         // Skill Nudge: 两个独立计数器 (Skill + Memory)
         // 与 Hermes 一致: 只有 skill_manage 写操作重置 Skill 计数器 (view/list_skills 等只读操作不重置)

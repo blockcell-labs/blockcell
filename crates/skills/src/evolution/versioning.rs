@@ -484,20 +484,7 @@ impl SkillEvolution {
 
         // 先写入临时文件
         std::fs::write(&temp_file, &json)?;
-        // Atomically replace the record file.
-        // On Windows, rename over existing file fails, so we use a backup-based approach:
-        // 1. Rename existing file to .bak (preserves data if next step fails)
-        // 2. Rename temp file to target
-        // 3. Remove .bak backup
-        // If step 2 fails, the .bak file can be restored; no data loss.
-        if record_file.exists() {
-            let backup_path = record_file.with_extension("json.bak");
-            let _ = std::fs::rename(&record_file, &backup_path);
-            std::fs::rename(&temp_file, &record_file)?;
-            let _ = std::fs::remove_file(&backup_path);
-        } else {
-            std::fs::rename(&temp_file, &record_file)?;
-        }
+        swap_record_file(&temp_file, &record_file)?;
 
         Ok(())
     }
@@ -514,5 +501,72 @@ impl SkillEvolution {
         let record = serde_json::from_str(&json)?;
 
         Ok(record)
+    }
+}
+
+/// Atomically replace `record_file` with `temp_file`.
+/// On Windows, rename over an existing file fails, so we use a backup-based
+/// approach: rename existing → `.bak`, rename temp → target, remove `.bak`.
+/// If the temp→target rename fails, the `.bak` is restored so the original
+/// record is never lost.
+fn swap_record_file(temp_file: &Path, record_file: &Path) -> std::io::Result<()> {
+    if !record_file.exists() {
+        return std::fs::rename(temp_file, record_file);
+    }
+    let backup_path = record_file.with_extension("json.bak");
+    let _ = std::fs::rename(record_file, &backup_path);
+    match std::fs::rename(temp_file, record_file) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup_path);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::rename(&backup_path, record_file);
+            let _ = std::fs::remove_file(temp_file);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod swap_record_file_tests {
+    use super::swap_record_file;
+
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "blockcell_swap_record_{}_{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn swap_restores_original_when_temp_rename_fails() {
+        let dir = test_dir("restore");
+        let record = dir.join("ev1.json");
+        std::fs::write(&record, "original").unwrap();
+        // Nonexistent temp makes temp→target rename fail after .bak was created.
+        let missing_temp = dir.join("ev1.json.tmp_missing");
+
+        let err = swap_record_file(&missing_temp, &record).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        // Original content is restored from .bak, and no stale .bak remains.
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), "original");
+        assert!(!record.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn swap_replaces_existing_and_cleans_backup() {
+        let dir = test_dir("replace");
+        let record = dir.join("ev1.json");
+        std::fs::write(&record, "old").unwrap();
+        let temp = dir.join("ev1.json.tmp_x");
+        std::fs::write(&temp, "new").unwrap();
+
+        swap_record_file(&temp, &record).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), "new");
+        assert!(!record.with_extension("json.bak").exists());
     }
 }
