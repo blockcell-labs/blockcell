@@ -319,10 +319,10 @@ fn check_admin_permission(ctx: &ToolContext, tool_name: &str, params: &Value) ->
 
     let group_id = params.get("group_id").and_then(|v| v.as_str());
 
-    // TODO: sender_role should be extracted from message metadata and passed through ToolContext
-    // Currently not available in ToolContext. Future improvement: add sender_role field to ToolContext
-    // For now, role-based permission checks will use default "member" role
-    let sender_role: Option<&str> = Some("member");
+    // sender_role is forwarded through ToolContext from the inbound message
+    // metadata ("sender_role" set by the napcat channel for group events).
+    // When absent, check_role defaults to "member" (fail-closed).
+    let sender_role: Option<&str> = ctx.sender_role.as_deref();
 
     tracing::debug!(
         tool = tool_name,
@@ -1073,4 +1073,96 @@ pub fn register_group_tools(registry: &mut crate::ToolRegistry) {
     registry.register(std::sync::Arc::new(NapcatSetGroupNameTool));
     registry.register(std::sync::Arc::new(NapcatSetGroupSpecialTitleTool));
     registry.register(std::sync::Arc::new(NapcatSetGroupLeaveTool));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockcell_core::config::channels::ToolPermissionOverride;
+    use std::path::PathBuf;
+
+    fn ctx_with_role(sender_role: Option<&str>) -> ToolContext {
+        let mut config = blockcell_core::Config::default();
+        config
+            .channels
+            .napcat
+            .admin_permissions
+            .default_policy = "allow".to_string();
+        config
+            .channels
+            .napcat
+            .admin_permissions
+            .tool_overrides
+            .insert(
+                "napcat_set_group_kick".to_string(),
+                ToolPermissionOverride {
+                    allowed_admins: None,
+                    allowed_groups: None,
+                    default_policy: None,
+                    require_confirmation: false,
+                    require_role: Some("admin".to_string()),
+                },
+            );
+        ToolContext {
+            workspace: PathBuf::from("/tmp/workspace"),
+            base: PathBuf::from("/tmp/blockcell"),
+            builtin_skills_dir: None,
+            active_skill_dir: None,
+            session_key: "napcat:g1".to_string(),
+            channel: "napcat".to_string(),
+            account_id: None,
+            sender_id: Some("u1".to_string()),
+            sender_role: sender_role.map(str::to_string),
+            chat_id: "g1".to_string(),
+            config,
+            permissions: blockcell_core::types::PermissionSet::new(),
+            task_manager: None,
+            memory_store: None,
+            memory_file_store: None,
+            ghost_memory_lifecycle: None,
+            skill_file_store: None,
+            session_search: None,
+            outbound_tx: None,
+            spawn_handle: None,
+            capability_registry: None,
+            core_evolution: None,
+            event_emitter: None,
+            channel_contacts_file: None,
+            response_cache: None,
+            runtime_handle: None,
+            agent_identity: None,
+            skill_mutex: None,
+            agent_type_registry: None,
+            evolution_workflow_store: None,
+        }
+    }
+
+    /// sender_role 经 ToolContext 透传：admin/owner 通过，member/缺省被拒。
+    #[test]
+    fn check_admin_permission_uses_context_sender_role() {
+        let params = json!({"group_id": "g1"});
+
+        let admin = ctx_with_role(Some("admin"));
+        assert!(
+            check_admin_permission(&admin, "napcat_set_group_kick", &params).is_ok(),
+            "admin role must pass an admin-gated tool"
+        );
+        let owner = ctx_with_role(Some("owner"));
+        assert!(
+            check_admin_permission(&owner, "napcat_set_group_kick", &params).is_ok(),
+            "owner role must pass an admin-gated tool"
+        );
+
+        let member = ctx_with_role(Some("member"));
+        let err = check_admin_permission(&member, "napcat_set_group_kick", &params)
+            .expect_err("member must be denied");
+        assert!(err.to_string().contains("admin"), "{err}");
+
+        // 渠道未提供角色（如私聊/旧事件）时 fail-closed 按 member 处理
+        let unknown = ctx_with_role(None);
+        assert!(
+            check_admin_permission(&unknown, "napcat_set_group_kick", &params).is_err(),
+            "missing role must fail closed"
+        );
+    }
 }

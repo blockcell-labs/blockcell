@@ -976,6 +976,7 @@ mod tests {
             channel: "cli".to_string(),
             account_id: None,
             sender_id: Some("user".to_string()),
+            sender_role: None,
             chat_id: "test".to_string(),
             config: blockcell_core::Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),

@@ -361,6 +361,23 @@ fn preserve_unchanged_env_placeholders(previous: &Value, next: &mut Value) {
     }
 }
 
+/// Deep-merge keys that exist in the on-disk config but are unknown to the
+/// `Config` schema back into the serialized output, so a whole-file `save`
+/// does not silently drop user-defined fields (JSON5 comments are still lost —
+/// the serializer does not preserve them).
+fn merge_unknown_keys(previous: &Value, next: &mut Value) {
+    if let (Value::Object(previous), Value::Object(next)) = (previous, next) {
+        for (key, previous_value) in previous {
+            match next.get_mut(key) {
+                Some(next_value) => merge_unknown_keys(previous_value, next_value),
+                None => {
+                    next.insert(key.clone(), previous_value.clone());
+                }
+            }
+        }
+    }
+}
+
 pub fn stringify_json5_pretty<T>(value: &T) -> Result<String>
 where
     T: Serialize,
@@ -786,6 +803,7 @@ impl Config {
         if let Ok(raw) = std::fs::read_to_string(path) {
             if let Ok(previous) = parse_json5_value_preserving_env(&raw) {
                 preserve_unchanged_env_placeholders(&previous, &mut next);
+                merge_unknown_keys(&previous, &mut next);
             }
         }
         write_json5_pretty(path, &next)
@@ -1308,6 +1326,34 @@ mod tests {
         unsafe {
             std::env::remove_var("BLOCKCELL_TEST_SAVE_KEY");
         }
+    }
+
+    #[test]
+    fn test_config_save_preserves_unknown_keys() {
+        let path = temp_config_path("unknown-keys-config.json5");
+        fs::write(
+            &path,
+            r#"{
+  agents: { defaults: { model: "old-model", myCustomField: "keep-me" } },
+  unknownTopLevel: { nested: 42 },
+}"#,
+        )
+        .expect("write config with unknown keys");
+
+        let mut config = Config::load(&path).expect("load config");
+        config.agents.defaults.model = "new-model".to_string();
+        config.save(&path).expect("save updated config");
+
+        let saved = fs::read_to_string(&path).expect("read saved config");
+        assert!(saved.contains("new-model"));
+        assert!(
+            saved.contains("myCustomField") && saved.contains("keep-me"),
+            "unknown nested key must survive a full-file save: {saved}"
+        );
+        assert!(
+            saved.contains("unknownTopLevel") && saved.contains("42"),
+            "unknown top-level key must survive a full-file save: {saved}"
+        );
     }
 
     #[test]

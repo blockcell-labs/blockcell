@@ -514,6 +514,10 @@ pub struct ToolContext {
     /// The user ID who triggered this tool call (sender of the message).
     /// Used for permission checks in admin tools.
     pub sender_id: Option<String>,
+    /// The sender's role in the chat (e.g. "owner"/"admin"/"member" for group
+    /// channels), forwarded from inbound message metadata when the channel
+    /// provides it.
+    pub sender_role: Option<String>,
     pub chat_id: String,
     pub config: Config,
     pub permissions: PermissionSet,

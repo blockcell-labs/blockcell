@@ -347,6 +347,10 @@ impl AgentRuntime {
             .unwrap_or(false);
         // 使用 persist_session_key 构建上下文：cron delivery 下 file memory snapshot
         // 应基于目标会话而非来源会话
+        // 先异步预取项目环境探测（git 子进程），避免同步构建阻塞 executor
+        self.context_builder
+            .prefetch_project_environment(&persist_session_key)
+            .await;
         let mut messages = self
             .context_builder
             .build_messages_for_session_mode_with_channel(

@@ -1203,29 +1203,68 @@ impl CoreEvolution {
             },
         });
 
-        // Check 3: Generated artifacts are not executed during validation. Syntax checks
-        // happen in compile_artifact; executing untrusted generated code on the host would
-        // turn validation into an arbitrary-command boundary.
-        match record.provider_kind {
-            ProviderKind::Process | ProviderKind::BuiltIn => {
-                checks.push(ValidationCheck {
-                    name: "non_executing_validation".to_string(),
-                    passed: true,
-                    message: "Shell syntax validated without executing generated code".to_string(),
-                });
-            }
-            _ => {
-                // For other types, basic file check is sufficient
-                checks.push(ValidationCheck {
-                    name: "type_check".to_string(),
-                    passed: true,
-                    message: format!(
-                        "Provider kind {:?} — basic validation passed",
-                        record.provider_kind
-                    ),
-                });
-            }
-        }
+        // Check 3: non-executing integrity checks. Generated code is never
+        // executed during validation — that would turn validation into an
+        // arbitrary-command boundary. Instead verify the artifact is the file
+        // compile_artifact actually produced: inside artifacts_dir, expected
+        // extension for the provider kind, and valid UTF-8 text.
+        let artifact = Path::new(artifact_path);
+        let within_dir = artifact
+            .canonicalize()
+            .map(|canonical| {
+                self.artifacts_dir
+                    .canonicalize()
+                    .map(|root| canonical.starts_with(root))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        checks.push(ValidationCheck {
+            name: "path_within_artifacts_dir".to_string(),
+            passed: within_dir,
+            message: if within_dir {
+                "Artifact is inside the artifacts directory".to_string()
+            } else {
+                format!("Artifact escapes artifacts dir: {}", artifact_path)
+            },
+        });
+
+        let expected_ext = match record.provider_kind {
+            ProviderKind::Process | ProviderKind::BuiltIn => "sh",
+            ProviderKind::ExternalApi => "py",
+            ProviderKind::RhaiScript => "rhai",
+        };
+        let ext_ok = artifact
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext == expected_ext)
+            .unwrap_or(false);
+        checks.push(ValidationCheck {
+            name: "expected_extension".to_string(),
+            passed: ext_ok,
+            message: if ext_ok {
+                format!("Artifact extension matches provider kind {:?}", record.provider_kind)
+            } else {
+                format!(
+                    "Expected .{} artifact for {:?}, got {}",
+                    expected_ext,
+                    record.provider_kind,
+                    artifact_path
+                )
+            },
+        });
+
+        let utf8_ok = std::fs::read(artifact)
+            .map(|bytes| String::from_utf8(bytes).is_ok())
+            .unwrap_or(false);
+        checks.push(ValidationCheck {
+            name: "utf8_content".to_string(),
+            passed: utf8_ok,
+            message: if utf8_ok {
+                "Artifact is valid UTF-8 text".to_string()
+            } else {
+                "Artifact is not valid UTF-8".to_string()
+            },
+        });
 
         let all_passed = checks.iter().all(|c| c.passed);
         Ok(ValidationResult {
@@ -1749,6 +1788,97 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not allowed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn validate_artifact_enforces_path_extension_and_utf8() {
+        let dir = std::env::temp_dir().join(format!(
+            "test_core_evo_validate_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = crate::capability_provider::new_registry_handle(dir.clone());
+        let evo = CoreEvolution::new(dir.clone(), registry, 300);
+        let artifacts = dir.join("tool_artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let record_for = |artifact: std::path::PathBuf| CoreEvolutionRecord {
+            id: "evo-val".to_string(),
+            capability_id: "test.cap".to_string(),
+            description: "d".to_string(),
+            provider_kind: ProviderKind::Process,
+            status: CoreEvolutionStatus::Compiled,
+            attempt: 0,
+            max_attempts: 3,
+            source_code: None,
+            artifact_path: Some(artifact.to_string_lossy().to_string()),
+            compile_output: None,
+            validation: None,
+            feedback_history: Vec::new(),
+            input_schema: None,
+            output_schema: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        // 扩展名与 provider_kind 不匹配 → 拒绝
+        let wrong_ext = artifacts.join("cap.py");
+        std::fs::write(&wrong_ext, b"echo hi\n").unwrap();
+        let result = evo
+            .validate_artifact(&record_for(wrong_ext))
+            .await
+            .expect("validate runs");
+        assert!(!result.passed, "wrong extension must fail");
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "expected_extension" && !c.passed),
+            "{:?}",
+            result.checks
+        );
+
+        // 产物越出 artifacts_dir → 拒绝（防 artifact_path 被篡改指向任意文件）
+        let outside = dir.join("evil.sh");
+        std::fs::write(&outside, b"echo hi\n").unwrap();
+        let result = evo
+            .validate_artifact(&record_for(outside))
+            .await
+            .expect("validate runs");
+        assert!(!result.passed, "artifact outside artifacts_dir must fail");
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "path_within_artifacts_dir" && !c.passed),
+            "{:?}",
+            result.checks
+        );
+
+        // 非 UTF-8 二进制 → 拒绝
+        let binary = artifacts.join("cap.sh");
+        std::fs::write(&binary, b"\xff\xfe\x00\x01").unwrap();
+        let result = evo
+            .validate_artifact(&record_for(binary))
+            .await
+            .expect("validate runs");
+        assert!(!result.passed, "non-UTF8 artifact must fail");
+
+        // 合规 .sh → 全部通过
+        let good = artifacts.join("cap2.sh");
+        std::fs::write(&good, b"#!/bin/bash\necho ok\n").unwrap();
+        let result = evo
+            .validate_artifact(&record_for(good))
+            .await
+            .expect("validate runs");
+        assert!(result.passed, "{:?}", result.checks);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
 }

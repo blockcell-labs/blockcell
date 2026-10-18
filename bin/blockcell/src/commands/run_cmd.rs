@@ -91,6 +91,7 @@ pub async fn tool(tool_name: &str, params_json: &str, agent: Option<&str>) -> an
         channel: String::new(),
         account_id: None,
         sender_id: None, // CLI tool execution has no sender
+        sender_role: None,
         chat_id: String::new(),
         permissions: blockcell_core::types::PermissionSet::new(),
         outbound_tx: None,

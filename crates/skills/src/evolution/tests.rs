@@ -495,3 +495,62 @@ async fn rollback_of_a_staged_import_without_a_baseline_removes_the_skill_dir() 
     let reloaded = engine.load_record(id).expect("reload record");
     assert_eq!(reloaded.status, EvolutionStatus::RolledBack);
 }
+
+/// 成功路径：CompilePassed + audit + contract 全绿的记录部署后进入 Observing，
+/// 新版本落盘；随后 rollback 恢复 baseline 内容。
+#[tokio::test]
+async fn deploy_and_observe_then_rollback_restores_the_baseline() {
+    let id = "evo_deploy_ok";
+    let mut record = record_for(id, SkillLayout::PromptTool, SkillType::PromptOnly, false);
+    record.status = EvolutionStatus::CompilePassed;
+    record.audit = Some(AuditResult {
+        passed: true,
+        issues: vec![],
+        audited_at: chrono::Utc::now().timestamp(),
+    });
+    record.contract = Some(ContractResult {
+        passed: true,
+        issues: vec![],
+        checked_at: chrono::Utc::now().timestamp(),
+    });
+    let new_skill_md = well_formed_skill_md();
+    record.patch = Some(patch_with(&new_skill_md));
+
+    let root = evo_root("deploy_ok");
+    let skills_dir = root.join("skills");
+    // 非 staged：主 skills_dir/<skill> 必须存在，ensure_baseline 才有 baseline 可拍
+    let main_dir = skills_dir.join(&record.skill_name);
+    std::fs::create_dir_all(&main_dir).expect("create skill dir");
+    std::fs::write(main_dir.join("SKILL.md"), "# old version\n").expect("write baseline");
+
+    let engine = SkillEvolution::new(skills_dir.clone(), 5);
+    engine.save_record(&record).expect("save record");
+
+    engine
+        .deploy_and_observe(id)
+        .await
+        .expect("deploy succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(main_dir.join("SKILL.md")).expect("read deployed SKILL.md"),
+        new_skill_md,
+        "deployed SKILL.md must contain the new patch content"
+    );
+    let reloaded = engine.load_record(id).expect("reload record");
+    assert_eq!(reloaded.status, EvolutionStatus::Observing);
+    assert!(reloaded.observation.is_some());
+
+    // 非 staged 回滚：restore_previous_version 恢复 baseline
+    engine
+        .rollback(id, "error rate above threshold")
+        .await
+        .expect("rollback runs");
+
+    assert_eq!(
+        std::fs::read_to_string(main_dir.join("SKILL.md")).expect("read restored SKILL.md"),
+        "# old version\n",
+        "rollback must restore the baseline SKILL.md"
+    );
+    let reloaded = engine.load_record(id).expect("reload record");
+    assert_eq!(reloaded.status, EvolutionStatus::RolledBack);
+}

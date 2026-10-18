@@ -723,6 +723,7 @@ fn review_tool_context_with_stores(
         channel: "ghost".to_string(),
         account_id: None,
         sender_id: None,
+        sender_role: None,
         chat_id: "ghost_background_review".to_string(),
         config: config.clone(),
         permissions: PermissionSet::new(),

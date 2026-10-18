@@ -330,6 +330,7 @@ mod tests {
             channel: "cli".to_string(),
             account_id: None,
             sender_id: None,
+            sender_role: None,
             chat_id: "nested".to_string(),
             config: blockcell_core::Config::default(),
             permissions: crate::PermissionSet::new(),

@@ -158,7 +158,8 @@ impl AgentRuntime {
         }
         if let Some(environment) = self
             .context_builder
-            .incremental_project_environment(session_key)
+            .incremental_project_environment_async(session_key)
+            .await
         {
             messages.push(ChatMessage::user(&format!(
                 "<runtime-context>\n{environment}\n</runtime-context>"

@@ -883,6 +883,7 @@ mod tests {
             channel: String::new(),
             account_id: None,
             sender_id: None,
+            sender_role: None,
             chat_id: String::new(),
             config: blockcell_core::Config::default(),
             permissions: blockcell_core::types::PermissionSet::new(),

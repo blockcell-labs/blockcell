@@ -169,6 +169,10 @@ struct SessionContextCache {
     injected_retrieval_items: HashMap<String, HashSet<u64>>,
     project_environment_snapshots: HashMap<String, ProjectEnvironmentSnapshot>,
     project_command_cache: HashMap<String, Vec<String>>,
+    /// Rendered project-environment context staged by
+    /// `prefetch_project_environment` for the next synchronous
+    /// `incremental_project_environment` call (consumed once).
+    pending_environment_render: HashMap<String, Option<String>>,
     /// skills 目录树指纹（跨克隆共享）：reload_skills 据此跳过无变化的全量重扫。
     /// None = 尚未计算过（首次必然执行完整 reload）。
     skills_fingerprint: Option<u64>,
@@ -199,6 +203,7 @@ impl SessionContextCache {
             injected_retrieval_items: HashMap::new(),
             project_environment_snapshots: HashMap::new(),
             project_command_cache: HashMap::new(),
+            pending_environment_render: HashMap::new(),
             skills_fingerprint: None,
             recency: VecDeque::new(),
             capacity: capacity.max(1),
@@ -216,6 +221,7 @@ impl SessionContextCache {
                 self.injected_retrieval_items.remove(&evicted);
                 self.project_environment_snapshots.remove(&evicted);
                 self.project_command_cache.remove(&evicted);
+                self.pending_environment_render.remove(&evicted);
             }
         }
     }
@@ -441,19 +447,70 @@ impl ContextBuilder {
         self.candidate_id = candidate_id;
     }
 
+    /// Detects project environment changes for a session. Runs synchronously —
+    /// callers on async paths must use `prefetch_project_environment` or
+    /// `incremental_project_environment_async` so the git subprocesses do not
+    /// block the executor. When a prefetched render is staged for this session
+    /// it is consumed here instead of re-detecting.
     pub(crate) fn incremental_project_environment(&self, session_key: &str) -> Option<String> {
-        let cached_commands = {
+        {
             let mut cache = self
                 .session_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(staged) = cache.pending_environment_render.remove(session_key) {
+                return staged;
+            }
+        }
+        Self::detect_project_environment(&self.session_cache, &self.paths.workspace(), session_key)
+    }
+
+    /// Async variant that runs the blocking detection (git subprocesses, file
+    /// reads) on the blocking thread pool.
+    pub(crate) async fn incremental_project_environment_async(
+        &self,
+        session_key: &str,
+    ) -> Option<String> {
+        let session_cache = self.session_cache.clone();
+        let workspace = self.paths.workspace();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            Self::detect_project_environment(&session_cache, &workspace, &session_key)
+        })
+        .await
+        .unwrap_or(None)
+    }
+
+    /// Async prefetch for the synchronous system-prompt build path: detects on
+    /// the blocking pool and stages the render so the next
+    /// `incremental_project_environment` call for this session consumes it
+    /// instead of spawning git subprocesses on the executor thread.
+    pub(crate) async fn prefetch_project_environment(&self, session_key: &str) {
+        let rendered = self.incremental_project_environment_async(session_key).await;
+        let mut cache = self
+            .session_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cache
+            .pending_environment_render
+            .insert(session_key.to_string(), rendered);
+    }
+
+    fn detect_project_environment(
+        session_cache: &Arc<Mutex<SessionContextCache>>,
+        workspace: &Path,
+        session_key: &str,
+    ) -> Option<String> {
+        let cached_commands = {
+            let mut cache = session_cache
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             cache.touch(session_key);
             cache.project_command_cache.get(session_key).cloned()
         };
         let commands = cached_commands.unwrap_or_else(|| {
-            let detected = detect_project_commands(&self.paths.workspace());
-            let mut cache = self
-                .session_cache
+            let detected = detect_project_commands(workspace);
+            let mut cache = session_cache
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             cache.touch(session_key);
@@ -463,9 +520,8 @@ impl ContextBuilder {
                 .or_insert_with(|| detected.clone())
                 .clone()
         });
-        let snapshot = ProjectEnvironmentSnapshot::detect(&self.paths.workspace(), commands);
-        let mut cache = self
-            .session_cache
+        let snapshot = ProjectEnvironmentSnapshot::detect(workspace, commands);
+        let mut cache = session_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         cache.touch(session_key);

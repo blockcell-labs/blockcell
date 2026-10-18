@@ -31,6 +31,10 @@ impl AgentRuntime {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let session_metadata = self.session_store.load_metadata(session_key)?;
+        // 先异步预取项目环境探测（git 子进程），避免同步构建阻塞 executor
+        self.context_builder
+            .prefetch_project_environment(session_key)
+            .await;
         let messages = self
             .context_builder
             .build_messages_for_session_mode_with_channel(
@@ -292,6 +296,7 @@ impl AgentRuntime {
                     channel: channel.clone(),
                     account_id: None,
                     sender_id: None, // Cron jobs have no sender
+                    sender_role: None,
                     chat_id: chat_id.clone(),
                     config: config.clone(),
                     permissions: blockcell_core::types::PermissionSet::new(),

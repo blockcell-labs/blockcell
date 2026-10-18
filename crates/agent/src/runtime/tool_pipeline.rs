@@ -549,6 +549,11 @@ impl AgentRuntime {
             channel: msg.channel.clone(),
             account_id: msg.account_id.clone(),
             sender_id: Some(msg.sender_id.clone()),
+            sender_role: msg
+                .metadata
+                .get("sender_role")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             chat_id: msg.chat_id.clone(),
             config: self.config.clone(),
             permissions: self.build_tool_permissions(
