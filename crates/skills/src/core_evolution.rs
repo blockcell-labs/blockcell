@@ -450,6 +450,48 @@ impl CoreEvolution {
 
         let mut record = self.load_record(evolution_id)?;
 
+        // 状态机前置校验：步骤只能从"前驱完成态/自身重试态/lease 丢失重跑态"进入。
+        // 此前 run_step 不校验 record.status，可乱序调用（如未编译直接
+        // LoadCapability 使 capability 直接 Active）或重复 GenerateCode 消耗
+        // LLM 额度。与 SkillEvolution 各方法的严格状态前置对齐。
+        let allowed: &[CoreEvolutionStatus] = match step {
+            // 初始态 / BuildPrompt 自身失败遗留态
+            EvolutionStep::BuildPrompt => &[
+                CoreEvolutionStatus::Requested,
+                CoreEvolutionStatus::Generating,
+            ],
+            // BuildPrompt 完成态 / GenerateCode 失败遗留态 / 成功重跑态
+            EvolutionStep::GenerateCode => &[
+                CoreEvolutionStatus::Generating,
+                CoreEvolutionStatus::Generated,
+            ],
+            EvolutionStep::CompileArtifact => &[
+                CoreEvolutionStatus::Generated,
+                CoreEvolutionStatus::Compiling,
+                CoreEvolutionStatus::CompileFailed,
+                CoreEvolutionStatus::Compiled,
+            ],
+            EvolutionStep::ValidateArtifact => &[
+                CoreEvolutionStatus::Compiled,
+                CoreEvolutionStatus::Validating,
+                CoreEvolutionStatus::ValidationFailed,
+                CoreEvolutionStatus::Validated,
+            ],
+            EvolutionStep::LoadCapability => &[
+                CoreEvolutionStatus::Validated,
+                CoreEvolutionStatus::Loading,
+                CoreEvolutionStatus::Active,
+            ],
+            EvolutionStep::Promote => &[CoreEvolutionStatus::Active],
+        };
+        if !allowed.contains(&record.status) {
+            return Err(Error::Evolution(format!(
+                "Step '{}' not allowed in status {:?}",
+                step.name(),
+                record.status
+            )));
+        }
+
         match step {
             EvolutionStep::BuildPrompt => {
                 // Build the generation prompt and store it as step output.
@@ -1405,6 +1447,7 @@ impl CoreEvolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_infer_capability_type() {
@@ -1653,4 +1696,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[tokio::test]
+    async fn run_step_rejects_out_of_order_steps() {
+        // 状态机前置：乱序调用（未编译直接 LoadCapability）与重复步骤必须被拒。
+        let dir = std::env::temp_dir().join(format!(
+            "test_core_evo_stepguard_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let registry = crate::capability_provider::new_registry_handle(dir.clone());
+        let evo = CoreEvolution::new(dir, registry, 300);
+
+        let now = chrono::Utc::now().timestamp();
+        let record = CoreEvolutionRecord {
+            id: "evo-guard".to_string(),
+            capability_id: "test.cap".to_string(),
+            description: "d".to_string(),
+            provider_kind: ProviderKind::Process,
+            status: CoreEvolutionStatus::Requested,
+            attempt: 0,
+            max_attempts: 3,
+            source_code: None,
+            artifact_path: None,
+            compile_output: None,
+            validation: None,
+            feedback_history: Vec::new(),
+            input_schema: None,
+            output_schema: None,
+            created_at: now,
+            updated_at: now,
+        };
+        evo.save_record(&record).unwrap();
+
+        // 未生成代码直接验证/加载 → 拒绝
+        for step in [EvolutionStep::ValidateArtifact, EvolutionStep::LoadCapability] {
+            let err = evo.run_step("evo-guard", step).await.unwrap_err();
+            assert!(err.to_string().contains("not allowed"), "{err}");
+        }
+
+        // BuildPrompt 在 Requested 下允许（prompt 构建为纯计算）
+        let res = evo.run_step("evo-guard", EvolutionStep::BuildPrompt).await;
+        assert!(res.is_ok(), "BuildPrompt should run from Requested: {res:?}");
+
+        // BuildPrompt 完成后 status=Generating，重复 BuildPrompt 仍允许（重试），
+        // 但 LoadCapability 依然拒绝
+        let err = evo
+            .run_step("evo-guard", EvolutionStep::LoadCapability)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not allowed"), "{err}");
+    }
+
 }

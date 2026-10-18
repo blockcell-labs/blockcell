@@ -93,7 +93,22 @@ impl SkillEvolution {
 
         if let Some(meta) = self.extract_yaml_from_response(&patch.explanation) {
             let meta_path = staged_skill_dir.join("meta.yaml");
-            let _ = std::fs::write(meta_path, meta);
+            let meta_issues = validate_meta_yaml(&meta);
+            if meta_issues.is_empty() {
+                if let Err(e) = std::fs::write(&meta_path, &meta) {
+                    warn!(
+                        skill = %record.skill_name,
+                        error = %e,
+                        "Failed to write meta.yaml to staged skill"
+                    );
+                }
+            } else {
+                warn!(
+                    skill = %record.skill_name,
+                    issues = %meta_issues.join("; "),
+                    "Refusing to write invalid meta.yaml from LLM response"
+                );
+            }
         }
 
         // If this is a staged external skill, promote it into the main skills dir now.
@@ -224,7 +239,22 @@ impl SkillEvolution {
 
             if let Some(meta) = self.extract_yaml_from_response(&patch.explanation) {
                 let meta_path = dest_skill_dir.join("meta.yaml");
-                let _ = std::fs::write(meta_path, meta);
+                let meta_issues = validate_meta_yaml(&meta);
+                if meta_issues.is_empty() {
+                    if let Err(e) = std::fs::write(&meta_path, &meta) {
+                        warn!(
+                            skill = %record.skill_name,
+                            error = %e,
+                            "Failed to write meta.yaml to promoted skill"
+                        );
+                    }
+                } else {
+                    warn!(
+                        skill = %record.skill_name,
+                        issues = %meta_issues.join("; "),
+                        "Refusing to write invalid meta.yaml from LLM response"
+                    );
+                }
             }
 
             info!(

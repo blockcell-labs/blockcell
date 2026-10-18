@@ -154,6 +154,7 @@ fn record_for(
         },
         patch: None,
         audit: None,
+        contract: None,
         shadow_test: None,
         observation: None,
         observation_total_calls: 0,
@@ -284,10 +285,10 @@ fn contract_check_uses_patch_content_for_hybrid_prompt_only_skills() {
     assert!(passed, "{error:?}");
 }
 
-/// Characterisation test: for LocalScript the SKILL.md check is a soft check —
-/// a missing SKILL.md is skipped rather than reported (see review P2-4).
+/// SKILL.md 对 LocalScript 同样是硬检查：文件缺失应使契约检查失败
+///（此前为软检查，缺失静默跳过——review m5b P2）。
 #[test]
-fn contract_check_soft_skips_skill_md_for_local_scripts() {
+fn contract_check_fails_when_skill_md_missing_for_local_script() {
     let id = "evo_contract_local";
     let mut record = record_for(id, SkillLayout::LocalScript, SkillType::LocalScript, false);
     record.patch = Some(patch_with("#!/bin/sh\necho hi\n"));
@@ -303,9 +304,64 @@ fn contract_check_soft_skips_skill_md_for_local_scripts() {
 
     let (passed, error) = engine.contract_check(id).expect("contract check runs");
 
+    assert!(!passed, "missing SKILL.md must fail the contract check");
     assert!(
-        passed,
-        "LocalScript SKILL.md is only a soft check today: {error:?}"
+        error.as_deref().unwrap_or_default().contains("SKILL.md"),
+        "{error:?}"
+    );
+}
+
+/// 契约检查结果持久化：contract_check 写入 record.contract，
+/// deploy_and_observe 对无记录通过的记录拒绝部署（fail-closed）。
+#[tokio::test]
+async fn contract_result_persists_and_deploy_requires_it() {
+    let id = "evo_contract_persist";
+    let skill_dir_body = "# Title\n\n## Shared\nshared section with enough content to pass the minimum length requirement for contract checks\n\n## Prompt\nprompt section text\n";
+    let mut record = record_for(id, SkillLayout::PromptTool, SkillType::PromptOnly, false);
+    record.patch = Some(patch_with(skill_dir_body));
+    record.status = EvolutionStatus::CompilePassed;
+    record.audit = Some(AuditResult {
+        passed: true,
+        issues: vec![],
+        audited_at: chrono::Utc::now().timestamp(),
+    });
+    let engine = engine_with("contract_persist", &record);
+
+    // 契约未跑 → deploy fail-closed
+    let err = engine
+        .deploy_and_observe(id)
+        .await
+        .expect_err("deploy without contract must fail");
+    assert!(err.to_string().contains("Contract"), "{err}");
+
+    // 跑契约 → 结果落盘
+    let (passed, _) = engine.contract_check(id).expect("contract check runs");
+    assert!(passed);
+    let loaded = engine.load_record(id).expect("reload record");
+    assert_eq!(
+        loaded.contract.as_ref().map(|c| c.passed),
+        Some(true),
+        "contract result must persist to the record"
+    );
+}
+
+/// meta.yaml 白名单强制：LLM 生成的 meta 含未知字段或非法 YAML 时契约失败。
+#[test]
+fn contract_check_rejects_meta_with_unknown_fields() {
+    let id = "evo_contract_meta";
+    let mut record = record_for(id, SkillLayout::PromptTool, SkillType::PromptOnly, false);
+    let mut patch = patch_with("# Title\n\n## Shared\nx\n\n## Prompt\ny\n");
+    patch.explanation = "```yaml\nname: skill\ndescription: d\nrouting: legacy-field\n```\n".to_string();
+    record.patch = Some(patch);
+    record.status = EvolutionStatus::CompilePassed;
+    let engine = engine_with("contract_meta", &record);
+
+    let (passed, error) = engine.contract_check(id).expect("contract check runs");
+
+    assert!(!passed, "unknown meta field must fail: {error:?}");
+    assert!(
+        error.as_deref().unwrap_or_default().contains("routing"),
+        "{error:?}"
     );
 }
 

@@ -151,6 +151,12 @@ impl SkillEvolution {
         if record.audit.as_ref().map(|a| !a.passed).unwrap_or(true) {
             return Err(Error::Evolution("Audit not passed".to_string()));
         }
+        // 契约检查是 BLOCKCELL.md 固定流程的强制环节：结果持久化在 record 上，
+        // 无记录的通过结果（如升级前遗留的 CompilePassed 记录）一律拒绝，
+        // 由调用方先跑 contract_check 补写。
+        if record.contract.as_ref().map(|c| !c.passed).unwrap_or(true) {
+            return Err(Error::Evolution("Contract check not passed".to_string()));
+        }
 
         info!(evolution_id = %evolution_id, "Deploying and starting observation");
         info!(
@@ -230,10 +236,10 @@ impl SkillEvolution {
     /// 而非磁盘旧文件。对于 meta.yaml，检查从 LLM response 提取的 yaml。
     /// Returns (passed, Option<error_description>).
     pub fn contract_check(&self, evolution_id: &str) -> Result<(bool, Option<String>)> {
-        let record = self.load_record(evolution_id)?;
+        let mut record = self.load_record(evolution_id)?;
         let patch = record
             .patch
-            .as_ref()
+            .clone()
             .ok_or_else(|| Error::Evolution("No patch for contract check".to_string()))?;
 
         let skill_root = self.skill_root_dir_for_record(&record);
@@ -241,15 +247,14 @@ impl SkillEvolution {
 
         let mut issues: Vec<String> = Vec::new();
 
-        // meta.yaml 检查：优先检查从 LLM response 提取的 yaml（新内容），若无则检查磁盘旧文件
+        // meta.yaml 检查：LLM response 提取的 yaml（新内容）做严格校验——
+        // 必须是合法 YAML mapping 且顶层字段在白名单内（trigger_rules_prompt
+        // 宣称"禁止 legacy routing/formatting 字段"，此处实际强制）；
+        // 无新 meta 时回退检查磁盘旧文件的必备字段。
         let extracted_meta = self.extract_yaml_from_response(&patch.explanation);
-        let meta_content = if let Some(ref meta) = extracted_meta {
-            Some(meta.clone())
-        } else {
-            let meta_path = skill_dir.join("meta.yaml");
-            std::fs::read_to_string(&meta_path).ok()
-        };
-        if let Some(content) = meta_content {
+        if let Some(ref meta) = extracted_meta {
+            issues.extend(validate_meta_yaml(meta));
+        } else if let Ok(content) = std::fs::read_to_string(skill_dir.join("meta.yaml")) {
             if !content.contains("name:") && !content.contains("name :") {
                 issues.push("meta.yaml: missing required 'name' field".to_string());
             }
@@ -277,13 +282,7 @@ impl SkillEvolution {
                     issues.push(
                         "SKILL.md: file is missing (required for PromptTool skills)".to_string(),
                     );
-                    let passed = issues.is_empty();
-                    let error = if passed {
-                        None
-                    } else {
-                        Some(issues.join("\n"))
-                    };
-                    return Ok((passed, error));
+                    return self.finish_contract_check(&mut record, issues);
                 };
 
                 if content.trim().len() < 100 {
@@ -302,7 +301,9 @@ impl SkillEvolution {
                     issues.push("SKILL.md: missing '## Prompt' section".to_string());
                 }
             }
-            SkillLayout::LocalScript => {
+            // SKILL.md 对所有 layout 均为必查项：LocalScript/RhaiOrchestration 此前
+            // 文件缺失即静默跳过（软检查），与其他布局不一致且允许缺文件的技能部署。
+            SkillLayout::LocalScript | SkillLayout::RhaiOrchestration => {
                 if let Some(content) = skill_md_content.as_ref() {
                     if !content.contains("## Shared") && !content.contains("## Shared {#shared}") {
                         issues.push("SKILL.md: missing '## Shared' section".to_string());
@@ -310,19 +311,15 @@ impl SkillEvolution {
                     if !content.contains("## Prompt") && !content.contains("## Prompt {#prompt}") {
                         issues.push("SKILL.md: missing '## Prompt' section".to_string());
                     }
+                } else {
+                    issues.push("SKILL.md: file is missing".to_string());
                 }
             }
             SkillLayout::Hybrid => {
                 let Some(content) = skill_md_content.as_ref() else {
                     issues
                         .push("SKILL.md: file is missing (required for Hybrid skills)".to_string());
-                    let passed = issues.is_empty();
-                    let error = if passed {
-                        None
-                    } else {
-                        Some(issues.join("\n"))
-                    };
-                    return Ok((passed, error));
+                    return self.finish_contract_check(&mut record, issues);
                 };
 
                 if !content.contains("## Shared") && !content.contains("## Shared {#shared}") {
@@ -330,16 +327,6 @@ impl SkillEvolution {
                 }
                 if !content.contains("## Prompt") && !content.contains("## Prompt {#prompt}") {
                     issues.push("SKILL.md: missing '## Prompt' section".to_string());
-                }
-            }
-            SkillLayout::RhaiOrchestration => {
-                if let Some(content) = skill_md_content.as_ref() {
-                    if !content.contains("## Shared") && !content.contains("## Shared {#shared}") {
-                        issues.push("SKILL.md: missing '## Shared' section".to_string());
-                    }
-                    if !content.contains("## Prompt") && !content.contains("## Prompt {#prompt}") {
-                        issues.push("SKILL.md: missing '## Prompt' section".to_string());
-                    }
                 }
             }
         }
@@ -376,6 +363,17 @@ impl SkillEvolution {
             }
         }
 
+        self.finish_contract_check(&mut record, issues)
+    }
+
+    /// 将契约检查结果持久化到 record 并返回 (passed, error)。
+    /// 持久化使 `deploy_and_observe` 能独立校验契约已过——防止不经 service
+    /// 编排次序的调用方/resume 路径跳过 contract_check 直接部署。
+    fn finish_contract_check(
+        &self,
+        record: &mut EvolutionRecord,
+        issues: Vec<String>,
+    ) -> Result<(bool, Option<String>)> {
         let passed = issues.is_empty();
         let error = if passed {
             None
@@ -383,11 +381,19 @@ impl SkillEvolution {
             Some(issues.join("\n"))
         };
 
+        record.contract = Some(ContractResult {
+            passed,
+            issues: issues.clone(),
+            checked_at: chrono::Utc::now().timestamp(),
+        });
+        record.updated_at = chrono::Utc::now().timestamp();
+        self.save_record(record)?;
+
         if passed {
-            info!(evolution_id = %evolution_id, "📋 [contract] Contract check passed");
+            info!(evolution_id = %record.id, "📋 [contract] Contract check passed");
         } else {
             warn!(
-                evolution_id = %evolution_id,
+                evolution_id = %record.id,
                 issues = issues.len(),
                 "📋 [contract] Contract check found {} issue(s)",
                 issues.len()

@@ -683,6 +683,43 @@ impl EvolutionService {
             )
         };
 
+        // 跨进程互斥：pipeline_locks 仅进程内。gateway/CLI 双实例会各自
+        // adopt_orphaned_records 采纳同一磁盘记录并驱动同一 evolution
+        // （双份 LLM 成本、重复建版本、观察窗口双开）。fs2 advisory lock
+        // 覆盖同记录目录；对进程死亡自动释放。获取失败视为已有实例在跑。
+        let records_root = self.evolution.records_dir();
+        let _file_guard = {
+            let evolution_id_owned = evolution_id.to_string();
+            let root = records_root.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::file_owner_lock::FileOwnerLock::acquire(
+                    &root,
+                    "pipeline",
+                    &evolution_id_owned,
+                )
+            })
+            .await
+            {
+                Ok(Ok(guard)) => Some(guard),
+                Ok(Err(e)) => {
+                    warn!(
+                        evolution_id = %evolution_id,
+                        error = %e,
+                        "🧠 [pipeline] Cross-process lock busy or unavailable, skipping"
+                    );
+                    return Ok(SingleEvolutionResult::AlreadyRunning);
+                }
+                Err(e) => {
+                    warn!(
+                        evolution_id = %evolution_id,
+                        error = %e,
+                        "🧠 [pipeline] Lock task join failed, skipping"
+                    );
+                    return Ok(SingleEvolutionResult::AlreadyRunning);
+                }
+            }
+        };
+
         self.run_single_evolution_inner(evolution_id, llm_provider)
             .await
     }

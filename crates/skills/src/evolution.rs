@@ -239,6 +239,15 @@ pub struct AuditResult {
     pub audited_at: i64,
 }
 
+/// 契约检查结果（contract_check 持久化到 record）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractResult {
+    pub passed: bool,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    pub checked_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditIssue {
     pub severity: String, // "error", "warning", "info"
@@ -338,6 +347,11 @@ pub struct EvolutionRecord {
     pub context: EvolutionContext,
     pub patch: Option<GeneratedPatch>,
     pub audit: Option<AuditResult>,
+    /// 契约检查（contract_check）结果，与 audit 同口径持久化。
+    /// deploy_and_observe 要求该字段存在且 passed=true——防止不经 service
+    /// 编排次序的调用方/resume 路径跳过契约检查直接部署。
+    #[serde(default)]
+    pub contract: Option<ContractResult>,
     pub shadow_test: Option<ShadowTestResult>,
     /// 观察窗口（部署后的错误率监控）
     pub observation: Option<ObservationWindow>,
@@ -424,3 +438,59 @@ pub trait LLMProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests;
+/// meta.yaml 严格校验：必须是合法 YAML mapping，顶层字段限于 SkillMeta
+/// 白名单（含 OpenClaw 兼容字段），且 name/description 非空。
+/// 对应 trigger_rules_prompt 宣称的"禁止 legacy routing/formatting 字段"——
+/// 此处从"prompt 约束"变为"代码强制"。
+const META_ALLOWED_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "requires",
+    "permissions",
+    "always",
+    "tools",
+    "capabilities",
+    "output_format",
+    "fallback",
+    "learned",
+    "emoji",
+    "os",
+    "user_invocable",
+    "disable_model_invocation",
+    "commands",
+    "install",
+];
+
+pub(crate) fn validate_meta_yaml(meta: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    match serde_yaml::from_str::<serde_yaml::Value>(meta) {
+        Ok(serde_yaml::Value::Mapping(map)) => {
+            for key in map.keys() {
+                match key.as_str() {
+                    Some(k) if META_ALLOWED_KEYS.contains(&k) => {}
+                    Some(k) => issues.push(format!(
+                        "meta.yaml: unknown field '{k}' (legacy routing/formatting fields are not allowed)"
+                    )),
+                    None => issues.push("meta.yaml: non-string top-level key".to_string()),
+                }
+            }
+            if map
+                .get(serde_yaml::Value::from("name"))
+                .and_then(|v| v.as_str())
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                issues.push("meta.yaml: missing required 'name' field".to_string());
+            }
+            if map
+                .get(serde_yaml::Value::from("description"))
+                .and_then(|v| v.as_str())
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                issues.push("meta.yaml: missing required 'description' field".to_string());
+            }
+        }
+        Ok(_) => issues.push("meta.yaml: top level must be a mapping".to_string()),
+        Err(e) => issues.push(format!("meta.yaml: invalid YAML: {e}")),
+    }
+    issues
+}
