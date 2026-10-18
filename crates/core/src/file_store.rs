@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_lock_recovers_dead_holder() {
+    fn exclusive_lock_acquires_despite_stale_token_contents() {
         let path = temp_path("stale.lock");
         std::fs::write(&path, "4294967295:1:stale-token").expect("write stale lock");
 

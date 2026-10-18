@@ -134,3 +134,22 @@ fn standalone_mcp_save_atomically_replaces_the_target_inode() {
         .contains("old"));
     let _ = fs::remove_dir_all(base);
 }
+
+#[test]
+fn mcp_server_with_empty_command_is_rejected() {
+    let base = unique_temp_base("blockcell-core-mcp-empty-cmd");
+    let paths = Paths::with_base(base.clone());
+    fs::create_dir_all(paths.mcp_dir()).expect("create mcp.d");
+
+    fs::write(
+        paths.mcp_dir().join("bad.json"),
+        r#"{"name": "bad", "command": "  "}"#,
+    )
+    .expect("write empty-command server file");
+
+    let err = blockcell_core::mcp_config::McpResolvedConfig::load_merged(&paths)
+        .expect_err("empty command must be rejected");
+    assert!(err.to_string().contains("command cannot be empty"));
+
+    let _ = fs::remove_dir_all(base);
+}

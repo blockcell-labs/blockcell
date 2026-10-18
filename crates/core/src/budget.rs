@@ -284,6 +284,7 @@ impl BudgetTracker {
     }
 
     /// Reset all accumulated usage.
+    /// 仅重置本 tracker 的原子量，不沿 parent 链向上重置。
     pub fn reset(&self) {
         self.input_tokens.store(0, Ordering::Relaxed);
         self.output_tokens.store(0, Ordering::Relaxed);

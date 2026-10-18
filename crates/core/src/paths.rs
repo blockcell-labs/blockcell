@@ -373,7 +373,13 @@ impl Paths {
         // Bootstrap BLOCKCELL.md with default template if it does not exist
         let blockcell_md = self.blockcell_md();
         if !blockcell_md.exists() {
-            let _ = std::fs::write(&blockcell_md, DEFAULT_BLOCKCELL_MD);
+            if let Err(e) = std::fs::write(&blockcell_md, DEFAULT_BLOCKCELL_MD) {
+                tracing::warn!(
+                    path = %blockcell_md.display(),
+                    error = %e,
+                    "Failed to bootstrap BLOCKCELL.md default template"
+                );
+            }
         }
         Ok(())
     }

@@ -163,6 +163,12 @@ impl McpFileServerConfig {
         if name.is_empty() {
             return Err(Error::Config("MCP server name cannot be empty".to_string()));
         }
+        if self.command.trim().is_empty() {
+            return Err(Error::Config(format!(
+                "MCP server '{}' command cannot be empty",
+                name
+            )));
+        }
         Ok((
             name,
             McpServerDefinition {
@@ -224,6 +230,13 @@ impl McpResolvedConfig {
                 let file_cfg: McpFileServerConfig = serde_json::from_str(&content)
                     .map_err(|e| Error::Config(format!("Parse error in MCP server file {}:{} — {}\n  Hint: each file must have a \"command\" field (e.g. \"command\": \"uvx\")", path.display(), e.line(), e)))?;
                 let (name, def) = file_cfg.into_parts()?;
+                if servers.contains_key(&name) {
+                    tracing::warn!(
+                        server = %name,
+                        file = %path.display(),
+                        "mcp.d entry overrides server of the same name from mcp.json"
+                    );
+                }
                 servers.insert(name, def.resolve(&defaults));
             }
         }

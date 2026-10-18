@@ -32,9 +32,7 @@ pub mod upgrade;
 pub use upgrade::*;
 
 /// 多个配置类型共用的布尔默认值助手（保留在父模块，子模块经 `super::` 引用）。
-fn default_true() -> bool {
-    true
-}
+pub(crate) use crate::default_true;
 
 fn default_memory_vector_table() -> String {
     "memory_vectors".to_string()
@@ -290,23 +288,40 @@ fn expand_env_vars_in_text(content: &str) -> String {
 }
 
 fn expand_env_expr(expr: &str) -> String {
-    if let Some((name, default)) = expr.split_once(":-") {
+    let raw = if let Some((name, default)) = expr.split_once(":-") {
         let name = name.trim();
         if name.is_empty() {
             return String::new();
         }
-        return std::env::var(name)
+        std::env::var(name)
             .ok()
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| default.to_string());
-    }
+            .unwrap_or_else(|| default.to_string())
+    } else {
+        let name = expr.trim();
+        if name.is_empty() {
+            return String::new();
+        }
+        std::env::var(name).unwrap_or_default()
+    };
+    escape_env_value(&raw)
+}
 
-    let name = expr.trim();
-    if name.is_empty() {
-        return String::new();
+/// ${ENV} 在 JSON5 解析前做文本替换——值中的 `"` 可闭合外层引号注入任意 JSON 键。
+/// 转义 `\` 与 `"`：引号内用法仍是合法字符串字面量；纯数字/布尔等 unquoted
+/// 用法不受影响；含结构字符的 unquoted 值将解析报错而非静默注入。
+fn escape_env_value(raw: &str) -> String {
+    if !raw.contains(['\\', '"']) {
+        return raw.to_string();
     }
-
-    std::env::var(name).unwrap_or_default()
+    let mut out = String::with_capacity(raw.len() + 8);
+    for ch in raw.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub fn parse_json5_str<T>(content: &str) -> Result<T>
@@ -766,7 +781,7 @@ impl Config {
             tracing::warn!(
                 value = self.cron_tick_interval_secs,
                 min = MIN_CRON_TICK_INTERVAL_SECS,
-                "cron_tick_interval_secs too small, using minimum value"
+                "cron_tick_interval_secs too small, rejecting config"
             );
             return Err(crate::Error::Config(format!(
                 "cron_tick_interval_secs must be at least {} seconds, got {}",
@@ -777,7 +792,7 @@ impl Config {
             tracing::warn!(
                 value = self.cron_tick_interval_secs,
                 max = MAX_CRON_TICK_INTERVAL_SECS,
-                "cron_tick_interval_secs too large, using maximum value"
+                "cron_tick_interval_secs too large, rejecting config"
             );
             return Err(crate::Error::Config(format!(
                 "cron_tick_interval_secs must be at most {} seconds, got {}",
@@ -1394,6 +1409,37 @@ mod tests {
         unsafe {
             std::env::remove_var("BLOCKCELL_TEST_OPENAI_KEY");
             std::env::remove_var("BLOCKCELL_TEST_MODEL");
+        }
+    }
+
+    #[test]
+    fn env_value_cannot_break_out_of_quotes_to_inject_keys() {
+        let path = temp_config_path("config-env-injection.json5");
+        // SAFETY: single-threaded test; the var is removed at the end.
+        unsafe {
+            std::env::set_var("BLOCKCELL_TEST_EVIL", r#"x", "evil": "1"#);
+        }
+
+        fs::write(
+            &path,
+            r#"{
+  providers: {
+    openai: {
+      apiKey: "${BLOCKCELL_TEST_EVIL}",
+    },
+  },
+}"#,
+        )
+        .expect("write config.json5");
+
+        let cfg = Config::load(&path).expect("load config with escaped env value");
+        let openai = cfg.providers.get("openai").expect("openai provider");
+        // 值中的引号被转义：api_key 是含引号的字面字符串，而非注入的新键。
+        assert_eq!(openai.api_key, r#"x", "evil": "1"#);
+        assert!(cfg.providers.get("evil").is_none());
+
+        unsafe {
+            std::env::remove_var("BLOCKCELL_TEST_EVIL");
         }
     }
 

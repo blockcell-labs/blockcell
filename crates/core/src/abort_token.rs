@@ -122,49 +122,60 @@ impl Default for AbortToken {
 /// Cleanup 函数类型别名
 type CleanupHandler = Box<dyn FnOnce() + Send>;
 
+/// 注册表内部状态：`generation` 在每次 `run_all` drain 时递增，使旧代
+/// `CleanupHandle` 的 index 不会误触新注册的 handler。
+struct CleanupState {
+    generation: u64,
+    handlers: Vec<CleanupHandler>,
+}
+
 /// Cleanup 函数注册表
-#[allow(clippy::type_complexity)]
 pub struct CleanupRegistry {
-    handlers: Arc<StdMutex<Vec<CleanupHandler>>>,
+    state: Arc<StdMutex<CleanupState>>,
 }
 
 /// Cleanup 注销句柄
-#[allow(clippy::type_complexity)]
 pub struct CleanupHandle {
-    registry: Arc<StdMutex<Vec<CleanupHandler>>>,
+    registry: Arc<StdMutex<CleanupState>>,
     index: usize,
+    generation: u64,
 }
 
 impl CleanupRegistry {
     pub fn new() -> Self {
         Self {
-            handlers: Arc::new(StdMutex::new(Vec::new())),
+            state: Arc::new(StdMutex::new(CleanupState {
+                generation: 0,
+                handlers: Vec::new(),
+            })),
         }
     }
 
     /// 注册 cleanup 函数，返回注销句柄
     pub fn register<F: FnOnce() + Send + 'static>(&self, handler: F) -> CleanupHandle {
-        let mut handlers = match self.handlers.lock() {
+        let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let index = handlers.len();
-        handlers.push(Box::new(handler));
+        let index = state.handlers.len();
+        state.handlers.push(Box::new(handler));
 
         CleanupHandle {
-            registry: self.handlers.clone(),
+            registry: self.state.clone(),
             index,
+            generation: state.generation,
         }
     }
 
     /// 执行所有 cleanup 函数
     pub fn run_all(&self) {
         let handlers: Vec<_> = {
-            let mut handlers = match self.handlers.lock() {
+            let mut state = match self.state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            handlers.drain(..).collect()
+            state.generation += 1;
+            state.handlers.drain(..).collect()
         };
         for handler in handlers {
             handler();
@@ -183,13 +194,19 @@ impl Drop for CleanupHandle {
         // Drop 时执行 cleanup handler
         // Recover from poisoned mutex to avoid panic-during-drop (process abort)
         let handler = {
-            let mut handlers = match self.registry.lock() {
+            let mut state = match self.registry.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            handlers
-                .get_mut(self.index)
-                .map(|handler| std::mem::replace(handler, Box::new(|| {})))
+            // 仅当仍属注册时的同一代才允许按 index 取出——run_all 之后 index 已失效。
+            if state.generation == self.generation {
+                state
+                    .handlers
+                    .get_mut(self.index)
+                    .map(|handler| std::mem::replace(handler, Box::new(|| {})))
+            } else {
+                None
+            }
         };
         if let Some(handler) = handler {
             // Use catch_unwind to prevent panic-during-drop from aborting the process
@@ -322,6 +339,30 @@ mod tests {
             // handle dropped here
         }
 
+        assert_eq!(*counter.lock().unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod cleanup_generation_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn stale_generation_handle_cannot_run_new_handler() {
+        let registry = CleanupRegistry::new();
+        let stale = registry.register(|| {});
+        registry.run_all();
+
+        let counter = Arc::new(StdMutex::new(0));
+        let counter_clone = counter.clone();
+        let fresh = registry.register(move || {
+            *counter_clone.lock().unwrap() += 1;
+        });
+        // 旧代 handle 的 index 已失效——drop 不得误消费新注册的 handler。
+        drop(stale);
+        assert_eq!(*counter.lock().unwrap(), 0);
+        drop(fresh);
         assert_eq!(*counter.lock().unwrap(), 1);
     }
 }

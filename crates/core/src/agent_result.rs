@@ -181,7 +181,7 @@ impl AgentResult {
                 .replace('\t', "\\t")
                 .replace('\r', "\\r");
             format!(
-                r#"{{"status":"error","content":"serialization failed: {}"}}"#,
+                r#"{{"status":"Failed","content":"serialization failed: {}"}}"#,
                 safe_error
             )
         })

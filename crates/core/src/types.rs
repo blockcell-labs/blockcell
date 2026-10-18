@@ -54,6 +54,11 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            if name.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "tool call missing function.name",
+                ));
+            }
             let arguments = match func.get("arguments") {
                 Some(serde_json::Value::String(s)) => {
                     serde_json::from_str(s).unwrap_or_else(|e| {
@@ -83,6 +88,9 @@ impl<'de> Deserialize<'de> for ToolCallRequest {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        if name.is_empty() {
+            return Err(serde::de::Error::custom("tool call missing name"));
+        }
         let arguments = obj
             .get("arguments")
             .cloned()
@@ -354,4 +362,41 @@ pub fn is_thinking_model(model: &str) -> bool {
     THINKING_MODEL_PREFIXES
         .iter()
         .any(|prefix| lower.contains(prefix))
+}
+
+#[cfg(test)]
+mod tool_call_deserialize_tests {
+    use super::ToolCallRequest;
+
+    #[test]
+    fn missing_name_is_a_deserialize_error_not_silent_default() {
+        let err = serde_json::from_value::<ToolCallRequest>(serde_json::json!({
+            "id": "c1",
+            "arguments": {}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("missing name"));
+    }
+
+    #[test]
+    fn missing_function_name_is_a_deserialize_error() {
+        let err = serde_json::from_value::<ToolCallRequest>(serde_json::json!({
+            "id": "c1",
+            "type": "function",
+            "function": {"arguments": "{}"}
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("missing function.name"));
+    }
+
+    #[test]
+    fn valid_flat_call_still_parses() {
+        let call = serde_json::from_value::<ToolCallRequest>(serde_json::json!({
+            "id": "c1",
+            "name": "exec",
+            "arguments": {"command": "ls"}
+        }))
+        .unwrap();
+        assert_eq!(call.name, "exec");
+    }
 }

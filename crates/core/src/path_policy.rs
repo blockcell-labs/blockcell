@@ -154,6 +154,14 @@ impl PathPolicy {
         match std::fs::read_to_string(policy_file) {
             Ok(content) => match json5::from_str::<PathPolicyFileConfig>(&content) {
                 Ok(config) => {
+                    if config.version != 1 {
+                        warn!(
+                            path = %policy_file.display(),
+                            version = config.version,
+                            "Unsupported path access policy version — using safe defaults"
+                        );
+                        return Self::safe_default();
+                    }
                     info!(
                         path = %policy_file.display(),
                         rules = config.rules.len(),

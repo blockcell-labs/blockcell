@@ -133,6 +133,14 @@ impl ToolPolicy {
 
         match std::fs::read_to_string(policy_file) {
             Ok(content) => match serde_yaml::from_str::<ToolPolicyConfig>(&content) {
+                Ok(config) if config.version != 1 => {
+                    warn!(
+                        path = %policy_file.display(),
+                        version = config.version,
+                        "Unsupported tool policy version; denying all tool calls"
+                    );
+                    Self::fail_closed(true)
+                }
                 Ok(config) => Self::compile(config, true),
                 Err(e) => {
                     warn!(
@@ -345,6 +353,20 @@ impl ToolPolicy {
 
         if let Some(rule) = ask.or(allow) {
             return self.eval_result(rule, ctx.tool_name);
+        }
+
+        if self.simulation_mode {
+            info!(
+                tool = %ctx.tool_name,
+                would_decide = ?self.default_decision,
+                "[SIMULATION] No tool policy rule matched; allowing call"
+            );
+            return PolicyEvalResult {
+                decision: ToolPolicyDecision::Allow,
+                matched_rule: None,
+                description: None,
+                simulated: true,
+            };
         }
 
         PolicyEvalResult {

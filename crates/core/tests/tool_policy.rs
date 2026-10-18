@@ -276,3 +276,42 @@ fn unknown_inherited_group_fails_closed() {
 
     assert_eq!(eval.decision, ToolPolicyDecision::Deny);
 }
+
+#[test]
+fn unsupported_version_fails_closed() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("blockcell-tool-policy-ver-{nonce}"));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("tool_policy.yaml");
+    fs::write(
+        &path,
+        "version: 2\nrules:\n  - name: allow-all\n    tool: '*'\n    decision: allow\n",
+    )
+    .expect("write versioned policy");
+
+    let policy = ToolPolicy::load(&path);
+    let eval = policy.evaluate(&ctx("exec", &serde_json::json!({}), "cli"));
+
+    assert_eq!(eval.decision, ToolPolicyDecision::Deny);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn simulation_mode_covers_unmatched_default_decision() {
+    // 无规则命中时 default_decision=Deny 在模拟模式下同样只应报告、不应真实阻断。
+    let policy = ToolPolicy::from_config(ToolPolicyConfig {
+        simulation_mode: true,
+        default_decision: ToolPolicyDecision::Deny,
+        rules: vec![],
+        ..Default::default()
+    });
+
+    let eval = policy.evaluate(&ctx("exec", &serde_json::json!({}), "cli"));
+
+    assert_eq!(eval.decision, ToolPolicyDecision::Allow);
+    assert!(eval.simulated);
+    assert_eq!(eval.matched_rule, None);
+}

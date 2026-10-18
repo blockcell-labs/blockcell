@@ -442,7 +442,8 @@ pub fn init_logging(
         .with(filter_layer)
         .with(console_layer)
         .with(file_layer)
-        .init();
+        .try_init()
+        .map_err(|e| format!("Global tracing subscriber already initialized: {e}"))?;
 
     let controller = LogController {
         filter_handle,
