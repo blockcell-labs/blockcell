@@ -483,9 +483,17 @@ pub fn cleanup_old_logs(logs_dir: &Path, retention_days: u64) {
 }
 
 /// 清理所有日志文件，返回 (成功删除数, 删除的总大小)
+///
+/// RollingFileAppender 始终持有当日文件的 fd：对它 unlink 会让后续日志写入
+/// 已删除的 inode（静默丢失直到重启/跨日轮转），因此对当日活动文件改为
+/// 原地 truncate——写入偏移处产生空洞但后续日志不丢，跨日轮转后自愈。
+/// 历史轮替文件不被持有，照常删除。
 pub fn clear_all_logs(logs_dir: &Path) -> (usize, u64) {
     let mut count = 0;
     let mut total_size = 0u64;
+
+    // RollingFileAppender 按本地日期命名当日活动文件
+    let active_name = format!("agent.log.{}", chrono::Local::now().format("%Y-%m-%d"));
 
     if let Ok(entries) = std::fs::read_dir(logs_dir) {
         for entry in entries.flatten() {
@@ -497,6 +505,19 @@ pub fn clear_all_logs(logs_dir: &Path) -> (usize, u64) {
             if path.is_file() && is_log_file {
                 // 先获取文件大小
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if file_name == active_name {
+                    // 可能被 appender 持有——原地 truncate，不 unlink
+                    if std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&path)
+                        .is_ok()
+                    {
+                        count += 1;
+                        total_size += size;
+                    }
+                    continue;
+                }
                 // 尝试删除
                 if std::fs::remove_file(&path).is_ok() {
                     count += 1;
@@ -517,11 +538,50 @@ pub fn clear_all_logs(logs_dir: &Path) -> (usize, u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::path::PathBuf;
 
     #[test]
     fn test_logs_dir_path() {
         let dir = PathBuf::from("/tmp/logs");
         assert!(dir.ends_with("logs"));
+    }
+
+    #[test]
+    fn clear_all_logs_truncates_active_file_instead_of_unlinking() {
+        // 模拟 appender：当日活动文件被 fd 持有。unlink 会让之后经该 fd 的
+        // 写入落到已删 inode（静默丢失）；truncate 则保留 fd 与路径的关联。
+        let logs_dir = std::env::temp_dir()
+            .join(format!("blockcell-logging-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let logs_dir = logs_dir.as_path();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let active = logs_dir.join(format!("agent.log.{today}"));
+        let old = logs_dir.join("agent.log.2000-01-01");
+
+        let mut held = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&active)
+            .unwrap();
+        held.write_all(b"line-before-clear\n").unwrap();
+        std::fs::write(&old, b"old line\n").unwrap();
+
+        let (count, _) = super::clear_all_logs(logs_dir);
+        assert_eq!(count, 2);
+
+        // 活动文件仍在但已清空；持 fd 继续写入的内容出现在该路径上（未丢失）
+        assert!(active.exists());
+        held.write_all(b"line-after-clear\n").unwrap();
+        drop(held);
+        let content = std::fs::read(&active).unwrap();
+        assert!(
+            content.windows(b"line-after-clear".len()).any(|w| w == b"line-after-clear"),
+            "writes through the held fd must not be lost: {content:?}"
+        );
+
+        // 历史轮替文件被删除
+        assert!(!old.exists());
     }
 }

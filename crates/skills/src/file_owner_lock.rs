@@ -20,6 +20,15 @@ pub(crate) struct FileOwnerLock {
 
 impl FileOwnerLock {
     pub(crate) fn acquire(root: &Path, namespace: &str, key: &str) -> Result<Self> {
+        Self::acquire_with_timeout(root, namespace, key, Duration::from_secs(10))
+    }
+
+    pub(crate) fn acquire_with_timeout(
+        root: &Path,
+        namespace: &str,
+        key: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         let lock_dir = root.join(".locks");
         fs::create_dir_all(&lock_dir)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -31,7 +40,7 @@ impl FileOwnerLock {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + timeout;
 
         loop {
             match file.try_lock_exclusive() {
@@ -55,5 +64,73 @@ impl FileOwnerLock {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn test_root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "blockcell-fol-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn held_lock_blocks_second_acquire_until_drop() {
+        let root = test_root("mutual-exclusion");
+        let first = FileOwnerLock::acquire_with_timeout(
+            &root,
+            "ns",
+            "key",
+            Duration::from_millis(200),
+        )
+        .expect("first acquire");
+
+        // 同一 key 第二次获取必须在超时后失败（锁是互斥的）
+        let second = FileOwnerLock::acquire_with_timeout(
+            &root,
+            "ns",
+            "key",
+            Duration::from_millis(150),
+        );
+        assert!(second.is_err(), "held lock must reject second acquire");
+
+        // Drop 释放 fd → OS 释放 flock → 可再获取（不存在 stale 锁文件概念）
+        drop(first);
+        FileOwnerLock::acquire_with_timeout(
+            &root,
+            "ns",
+            "key",
+            Duration::from_millis(500),
+        )
+        .expect("acquire after release");
+    }
+
+    #[test]
+    fn different_keys_are_independent() {
+        let root = test_root("independent");
+        let _a = FileOwnerLock::acquire_with_timeout(
+            &root,
+            "ns",
+            "key-a",
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        FileOwnerLock::acquire_with_timeout(
+            &root,
+            "ns",
+            "key-b",
+            Duration::from_millis(100),
+        )
+        .expect("different key must not block");
     }
 }

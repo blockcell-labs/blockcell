@@ -980,23 +980,30 @@ impl GhostLedger {
     /// 为已有数据库添加新列（review lease 语义）
     fn migrate_schema(&self) -> Result<()> {
         let conn = self.lock_conn()?;
-        // 添加 review_owner 和 review_lease_until 列（如果不存在）
-        // SQLite ALTER TABLE ADD COLUMN 在列已存在时会报错，需要逐个尝试
-        for col_sql in [
-            "ALTER TABLE episodes ADD COLUMN review_owner TEXT",
-            "ALTER TABLE episodes ADD COLUMN review_lease_until TEXT",
+        // 用 PRAGMA table_info 判定列存在性，替代错误文案嗅探
+        //（"duplicate column name" 依赖 rusqlite/SQLite 的错误字符串，脆弱且
+        //  会把其他 ALTER 失败误判为已迁移）。
+        let existing: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(episodes)")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .map_err(map_sqlite_error)?;
+        for (column, col_sql) in [
+            (
+                "review_owner",
+                "ALTER TABLE episodes ADD COLUMN review_owner TEXT",
+            ),
+            (
+                "review_lease_until",
+                "ALTER TABLE episodes ADD COLUMN review_lease_until TEXT",
+            ),
         ] {
-            match conn.execute_batch(col_sql) {
-                Ok(()) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("duplicate column name") {
-                        tracing::debug!("ghost ledger migration: column already exists, skipping");
-                    } else {
-                        return Err(map_sqlite_error(e));
-                    }
-                }
+            if existing.contains(column) {
+                continue;
             }
+            conn.execute_batch(col_sql).map_err(map_sqlite_error)?;
         }
         Ok(())
     }
@@ -1262,5 +1269,77 @@ mod tests {
             .claim_reviewable_episodes(10, "new-worker", 600)
             .unwrap();
         assert_eq!(reclaimed.len(), 1);
+    }
+
+    #[test]
+    fn merge_episode_metadata_merges_and_preserves_existing_keys() {
+        let (_dir, db) = test_db();
+        let ledger = GhostLedger::open(&db).unwrap();
+        let episode_id = ledger.insert_episode(sample_episode()).unwrap();
+
+        // 单次 merge：新增键合并、已有键覆盖、未触及键保留
+        assert!(ledger
+            .merge_episode_metadata(
+                &episode_id,
+                &json!({"channel": "ws", "review_note": "first"})
+            )
+            .unwrap());
+        let episode = ledger.get_episode(&episode_id).unwrap().unwrap();
+        assert_eq!(episode.metadata["channel"], json!("ws"));
+        assert_eq!(episode.metadata["review_note"], json!("first"));
+        assert_eq!(episode.metadata["session_id"], json!("sess-1"));
+
+        // 第二次 merge 不清空前次的合并结果
+        assert!(ledger
+            .merge_episode_metadata(&episode_id, &json!({"tag": "v2"}))
+            .unwrap());
+        let episode = ledger.get_episode(&episode_id).unwrap().unwrap();
+        assert_eq!(episode.metadata["review_note"], json!("first"));
+        assert_eq!(episode.metadata["tag"], json!("v2"));
+
+        // 不存在的 episode → Ok(false)，不报错也不创建
+        assert!(!ledger
+            .merge_episode_metadata("missing", &json!({"k": "v"}))
+            .unwrap());
+
+        // 非对象 patch 被拒绝
+        assert!(ledger
+            .merge_episode_metadata(&episode_id, &json!(["not", "object"]))
+            .is_err());
+    }
+
+    #[test]
+    fn migrate_schema_is_idempotent_and_column_aware() {
+        let (_dir, db) = test_db();
+        let ledger = GhostLedger::open(&db).unwrap();
+        // 重复 open 触发重复迁移——列已存在时必须按 table_info 跳过而非
+        // 依赖 "duplicate column name" 错误文案
+        drop(ledger);
+        GhostLedger::open(&db).unwrap();
+
+        // 手动构造缺列的旧库：建表只含原列，再 open 触发迁移补列
+        let (_dir2, db2) = test_db();
+        let conn = rusqlite::Connection::open(&db2).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE episodes (
+                id TEXT PRIMARY KEY,
+                boundary_kind TEXT NOT NULL,
+                subject_key TEXT,
+                status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        drop(conn);
+        let ledger = GhostLedger::open(&db2).unwrap();
+        // 迁移后 lease 列可用：claim 需要 review_owner/review_lease_until
+        ledger.insert_episode(sample_episode()).unwrap();
+        let claimed = ledger
+            .claim_reviewable_episodes(1, "w", 600)
+            .expect("claim after migration");
+        assert_eq!(claimed.len(), 1);
     }
 }

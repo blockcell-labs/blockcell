@@ -100,12 +100,31 @@ pub(crate) async fn run_subagent_task(
     let paths_for_persist = paths.clone();
     let learning_config = config.clone();
     let learning_paths = paths.clone();
-    let mut sub_runtime = match AgentRuntime::new(config, paths, provider_pool, tool_registry) {
-        Ok(r) => r,
-        Err(e) => {
-            task_manager.set_failed(&task_id, &format!("{}", e)).await;
+    // runtime 构建 + 文件存储初始化含同步 IO（sqlite open、知识索引重建、
+    // 目录扫描），移入 blocking 线程池避免阻塞 async worker——并发 spawn
+    // 多个子代理时该路径会重复全量执行。
+    let mut sub_runtime = match tokio::task::spawn_blocking(move || {
+        let mut runtime = AgentRuntime::new(config, paths, provider_pool, tool_registry)?;
+        if let Err(e) = runtime.init_memory_file_store() {
+            tracing::warn!(error = %e, "Failed to initialize subagent file memory store");
+        }
+        if let Err(e) = runtime.init_skill_file_store() {
+            tracing::warn!(error = %e, "Failed to initialize subagent skill file store");
+        }
+        Ok::<AgentRuntime, blockcell_core::Error>(runtime)
+    })
+    .await
+    {
+        Ok(Ok(r)) => r,
+        outcome => {
+            let msg = match outcome {
+                Ok(Err(e)) => format!("{}", e),
+                Err(e) => format!("subagent runtime init task failed: {}", e),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            task_manager.set_failed(&task_id, &msg).await;
             if let Some(reporter) = &reporter {
-                reporter.report(&task_id, false, &e.to_string()).await;
+                reporter.report(&task_id, false, &msg).await;
             }
             return;
         }
@@ -128,12 +147,6 @@ pub(crate) async fn run_subagent_task(
         // can trigger chain cancellation. Without this registration, cancelling
         // a task via TaskManager would not propagate to the subagent runtime.
         task_manager.register_abort_token(&task_id, at);
-    }
-    if let Err(e) = sub_runtime.init_memory_file_store() {
-        tracing::warn!(error = %e, "Failed to initialize subagent file memory store");
-    }
-    if let Err(e) = sub_runtime.init_skill_file_store() {
-        tracing::warn!(error = %e, "Failed to initialize subagent skill file store");
     }
 
     // Create a unique session key for this subagent
