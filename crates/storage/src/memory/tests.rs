@@ -664,13 +664,13 @@ fn test_soft_delete_and_restore() {
 }
 
 #[test]
-fn test_restore_conflict_reports_actionable_error() {
+fn test_restore_conflict_soft_deletes_active_and_restores_target() {
     let (store, _dir) = test_store();
-    let params = || UpsertParams {
+    let params = |content: &str| UpsertParams {
         scope: "short_term".to_string(),
         item_type: "note".to_string(),
         title: None,
-        content: "dup".to_string(),
+        content: content.to_string(),
         summary: None,
         tags: vec![],
         source: "user".to_string(),
@@ -682,21 +682,18 @@ fn test_restore_conflict_reports_actionable_error() {
     };
 
     // A 被软删后，upsert 同 dedup_key 会插入新行 B（A 不参与查重）
-    let a = store.upsert(params()).unwrap();
+    let a = store.upsert(params("original-a")).unwrap();
     assert!(store.soft_delete(&a.id).unwrap());
-    let b = store.upsert(params()).unwrap();
+    let b = store.upsert(params("replacement-b")).unwrap();
     assert_ne!(a.id, b.id);
 
-    // 恢复 A 会撞上"同 dedup_key+session_key 的活动 B"，应得到可操作的错误
-    // 而非裸 UNIQUE constraint failed
-    let err = store.restore(&a.id).unwrap_err().to_string();
-    assert!(err.contains(&b.id), "error should name the conflicting item: {err}");
-    assert!(err.contains("dedup_key"), "{err}");
+    // 恢复 A 时应自动软删除冲突的活动项 B 并恢复 A
+    assert!(store.restore(&a.id).unwrap());
 
-    // 冲突的 B 仍在活动状态，A 仍在回收站（状态未被误改）
     let results = store.query(&QueryParams::default()).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].item.id, b.id);
+    assert_eq!(results[0].item.id, a.id);
+    assert_eq!(results[0].item.content, "original-a");
 }
 
 #[test]

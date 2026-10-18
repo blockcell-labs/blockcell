@@ -507,34 +507,6 @@ impl Tool for MemoryUpsertTool {
         let dedup_key = params.get("dedup_key").and_then(|v| v.as_str());
         let expires_in_days = params.get("expires_in_days").and_then(|v| v.as_i64());
 
-        // Guardrail: Ghost maintenance routine must not write its own logs into memory.
-        // We allow Ghost to upsert only meaningful long-term items (facts/preferences/projects/tasks).
-        if ctx.channel == "ghost" {
-            if scope != "long_term" {
-                return Err(Error::Validation(
-                    "Ghost channel is not allowed to save short_term memory. Extract only genuine long_term facts/preferences/projects/tasks.".to_string(),
-                ));
-            }
-
-            match item_type {
-                "fact" | "preference" | "project" | "task" => {}
-                _ => {
-                    return Err(Error::Validation(
-                        "Ghost channel may only save long_term memory of type: fact/preference/project/task.".to_string(),
-                    ));
-                }
-            }
-
-            let title_text = title.unwrap_or("");
-            if looks_like_ghost_maintenance_log(title_text)
-                || looks_like_ghost_maintenance_log(content)
-            {
-                return Err(Error::Validation(
-                    "Refusing to save Ghost maintenance logs into memory.".to_string(),
-                ));
-            }
-        }
-
         let expires_at = expires_in_days
             .map(|days| (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339());
 

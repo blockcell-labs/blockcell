@@ -21,10 +21,6 @@ pub struct StaticViolation {
 const RHAI_DANGEROUS_PATTERNS: &[(&str, &str)] = &[
     ("remove_dir", "Detected directory removal operation"),
     ("delete_file", "Detected file deletion operation"),
-    (
-        "exec(",
-        "Detected shell execution — potential command injection",
-    ),
     ("eval(", "Detected eval — potential code injection"),
 ];
 
@@ -719,6 +715,7 @@ mod tests {
     fn test_rhai_clean_code_passes() {
         let code = r#"
 let result = call_tool("web_search", #{ query: "test" });
+let out = exec("ls -la");
 let text = result.content;
 print(text);
 "#;

@@ -9,10 +9,15 @@ use crate::Tool;
 use crate::ToolContext;
 use crate::ToolSchema;
 
-/// 从记忆存储中清理 Ghost Agent 维护日志。
-fn prune_ghost_maintenance_logs(store: &crate::MemoryStoreHandle, dry_run: bool) -> Result<Value> {
+/// 从记忆存储中清理当前会话的 Ghost Agent 维护日志。
+fn prune_ghost_maintenance_logs(
+    store: &crate::MemoryStoreHandle,
+    session_key: &str,
+    dry_run: bool,
+) -> Result<Value> {
     let query_params = json!({
         "scope": "short_term",
+        "session_key": session_key,
         "time_range_days": 30,
         "top_k": 200,
         "query": "ghost OR \"Ghost Agent\" OR \"Memory Garden\" OR 例行维护 OR 维护任务 OR 记忆整理 OR 文件清理 OR 社区互动"
@@ -50,7 +55,7 @@ fn prune_ghost_maintenance_logs(store: &crate::MemoryStoreHandle, dry_run: bool)
 
     if !dry_run {
         for id in matched_ids {
-            if store.soft_delete(&id)? {
+            if store.soft_delete_in_session(&id, session_key)? {
                 deleted += 1;
             }
         }
@@ -180,12 +185,14 @@ fn junk_score(item: &Value) -> f64 {
 
 fn sweep_junk_short_term(
     store: &crate::MemoryStoreHandle,
+    session_key: &str,
     time_range_days: i64,
     dry_run: bool,
 ) -> Result<Value> {
     // Broad query: we prefer recall over precision; the score threshold controls deletion.
     let query_params = json!({
         "scope": "short_term",
+        "session_key": session_key,
         "time_range_days": time_range_days,
         "top_k": 500,
     });
@@ -263,7 +270,7 @@ fn sweep_junk_short_term(
 
     if !dry_run {
         for id in &delete_ids {
-            if store.soft_delete(id)? {
+            if store.soft_delete_in_session(id, session_key)? {
                 deleted += 1;
             }
         }
@@ -335,6 +342,8 @@ impl Tool for MemoryMaintenanceTool {
             .ok_or_else(|| blockcell_core::Error::Tool("Memory store not available".into()))?
             .clone();
 
+        let session_key = ctx.session_key.clone();
+
         match action {
             "garden" => {
                 let days = params.get("days").and_then(|v| v.as_i64()).unwrap_or(1);
@@ -345,12 +354,14 @@ impl Tool for MemoryMaintenanceTool {
                 );
 
                 run_store_blocking(move || {
-                    let prune_report = prune_ghost_maintenance_logs(&store, dry_run)?;
-                    let junk_report = sweep_junk_short_term(&store, 30, dry_run)?;
+                    let prune_report =
+                        prune_ghost_maintenance_logs(&store, &session_key, dry_run)?;
+                    let junk_report = sweep_junk_short_term(&store, &session_key, 30, dry_run)?;
 
                     // Query recent short-term memories for batch long-term maintenance.
                     let query_params = json!({
                         "scope": "short_term",
+                        "session_key": session_key,
                         "time_range_days": days,
                         "top_k": 100
                     });
@@ -414,8 +425,9 @@ impl Tool for MemoryMaintenanceTool {
                 );
 
                 run_store_blocking(move || {
-                    let prune_report = prune_ghost_maintenance_logs(&store, dry_run)?;
-                    let junk_report = sweep_junk_short_term(&store, 30, dry_run)?;
+                    let prune_report =
+                        prune_ghost_maintenance_logs(&store, &session_key, dry_run)?;
+                    let junk_report = sweep_junk_short_term(&store, &session_key, 30, dry_run)?;
 
                     if dry_run {
                         let stats = store.stats_json()?;
@@ -678,6 +690,17 @@ mod tests {
         assert_eq!(
             recent_query.get("time_range_days").and_then(|v| v.as_i64()),
             Some(7)
+        );
+        assert_eq!(
+            recent_query.get("session_key").and_then(|v| v.as_str()),
+            Some("cli:test")
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|params| params.get("scope").and_then(|v| v.as_str()) == Some("short_term"))
+                .all(|params| params.get("session_key").and_then(|v| v.as_str()) == Some("cli:test")),
+            "all short-term prune/sweep/garden queries must be scoped to the caller session_key"
         );
         assert!(recent_query.get("days").is_none());
     }
