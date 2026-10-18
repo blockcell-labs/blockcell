@@ -189,6 +189,10 @@ pub struct EvolutionService {
     active_evolutions: Arc<Mutex<HashMap<String, String>>>,
     /// P2-6: pipeline 并发互斥锁（正在执行 pipeline 的 evolution_id 集合）
     pipeline_locks: Arc<Mutex<HashSet<String>>>,
+    /// 进化触发临界区互斥：串行化 `resolve_in_progress_evolution_id` → `trigger_evolution`
+    /// → `active_evolutions.insert`，对齐 `CoreEvolution::request_lock`，防止并发调用在
+    /// 磁盘记录落盘前同时看到"无进行中进化"而双触发。
+    request_lock: Arc<Mutex<()>>,
     config: EvolutionServiceConfig,
     /// 可选的 LLM provider，设置后 tick() 会自动驱动完整进化 pipeline
     llm_provider: Option<Arc<dyn LLMProvider>>,
@@ -421,6 +425,7 @@ impl EvolutionService {
             observation_stats: Arc::new(Mutex::new(ObservationStats::default())),
             active_evolutions: Arc::new(Mutex::new(HashMap::new())),
             pipeline_locks: Arc::new(Mutex::new(HashSet::new())),
+            request_lock: Arc::new(Mutex::new(())),
             config,
             llm_provider: None,
             deploy_callback: None,
@@ -477,6 +482,10 @@ impl EvolutionService {
                 evolution_triggered: None,
             });
         }
+
+        // 串行化 check-then-act（进程内 + 跨进程 fs2 锁），防止并发触发同一技能双建记录。
+        let _req_guard = self.request_lock.lock().await;
+        let _file_guard = self.acquire_trigger_file_lock(skill_name).await?;
 
         // 以磁盘记录作为主事实来源，避免多实例内存态漂移导致误判。
         let existing_evolution_id = self.resolve_in_progress_evolution_id(skill_name).await;
@@ -1391,6 +1400,8 @@ impl EvolutionService {
         context: EvolutionContext,
     ) -> blockcell_core::Result<String> {
         let skill_name = context.skill_name.clone();
+        let _req_guard = self.request_lock.lock().await;
+        let _file_guard = self.acquire_trigger_file_lock(&skill_name).await?;
         if let Some(existing_id) = self.resolve_in_progress_evolution_id(&skill_name).await {
             return Err(Error::Evolution(format!(
                 "技能 `{}` 已有进行中的进化: {}",
@@ -1736,6 +1747,8 @@ impl EvolutionService {
         skill_name: &str,
         description: &str,
     ) -> Result<String> {
+        let _req_guard = self.request_lock.lock().await;
+        let _file_guard = self.acquire_trigger_file_lock(skill_name).await?;
         // 以磁盘记录为准检查进行中的进化，避免多实例内存状态不一致。
         if let Some(existing_id) = self.resolve_in_progress_evolution_id(skill_name).await {
             return Err(Error::Evolution(format!(
@@ -1803,6 +1816,23 @@ impl EvolutionService {
     /// 获取进化记录目录路径
     fn records_dir(&self) -> PathBuf {
         self.evolution.records_dir()
+    }
+
+    async fn acquire_trigger_file_lock(
+        &self,
+        skill_name: &str,
+    ) -> Result<crate::file_owner_lock::FileOwnerLock> {
+        let records_root = self.evolution.records_dir();
+        let skill_owned = skill_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::file_owner_lock::FileOwnerLock::acquire(
+                &records_root,
+                "trigger",
+                &skill_owned,
+            )
+        })
+        .await
+        .map_err(|e| Error::Evolution(format!("Trigger lock task join error: {e}")))?
     }
 
     /// 列出所有进化记录（返回 EvolutionRecord 列表）

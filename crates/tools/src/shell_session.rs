@@ -217,12 +217,20 @@ impl ShellSessionManager {
             let raw_head = tokens.next().unwrap_or("");
             let head = raw_head.trim_start_matches(['!', '{', '(']);
             if head != "cd" && head != "pushd" {
-                // cd/pushd 藏在非命令头位置（`if cd x`、`echo cd` 等）——无法判断
-                // 是否真执行且改变父 shell cwd，保守置未知。
-                if tokens.any(|t| {
-                    t.trim_matches(|c| matches!(c, '"' | '\'' | ';')) == "cd"
-                        || t.trim_matches(|c| matches!(c, '"' | '\'' | ';')) == "pushd"
-                }) {
+                // cd/pushd 紧跟在控制流/命令委派前缀后（`if cd x`、`sudo cd x`、`eval cd x`）
+                // 时可能真执行并改变或分叉 cwd；普通参数位（如 `echo cd`、`git commit -m "cd"`）
+                // 不会改变 shell cwd，不应误置未知。
+                const DELEGATING_HEADS: &[&str] = &[
+                    "if", "then", "else", "elif", "while", "until", "do", "sudo", "env",
+                    "command", "builtin", "eval", "time", "nohup",
+                ];
+                if DELEGATING_HEADS.contains(&head)
+                    && tokens.any(|t| {
+                        let stripped =
+                            t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | '(' | ')'));
+                        stripped == "cd" || stripped == "pushd" || stripped == "popd"
+                    })
+                {
                     *state = None;
                 }
                 continue;
@@ -537,6 +545,14 @@ impl ShellSessionManager {
         timeout: Duration,
     ) -> Result<ShellCommandOutput> {
         let session = self.get(session_id).await?;
+        let combined = self.preview_stdin(session_id, command);
+        if crate::exec::is_dangerous_command(command)
+            || crate::exec::is_dangerous_command(&combined)
+        {
+            return Err(Error::PermissionDenied(
+                "Command matches dangerous pattern and is blocked".to_string(),
+            ));
+        }
         {
             let mut session = session.lock().await;
             if session.active.is_some() {
@@ -564,6 +580,7 @@ impl ShellSessionManager {
                 delivered_offset,
             });
         }
+        self.clear_stdin_buffer(session_id);
         self.track_cd(session_id, command);
         self.poll(session_id, timeout).await
     }
@@ -1367,6 +1384,35 @@ mod tests {
         // 引号包裹的相对路径照常解析
         manager.track_cd("s", "cd '/a/b'");
         assert_eq!(manager.cwd_snapshot("s"), Some(Some(PathBuf::from("/a/b"))));
+
+        // 普通命令参数位里的 `cd` 不改变 cwd，不应误置未知
+        manager.track_cd("s", "echo cd");
+        assert_eq!(manager.cwd_snapshot("s"), Some(Some(PathBuf::from("/a/b"))));
+    }
+
+    #[tokio::test]
+    async fn run_command_blocks_dangerous_command_split_from_stdin_buffer() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create shell session");
+
+        manager
+            .check_and_record_stdin_chunk(&session_id, "rm -r")
+            .expect("prefix chunk allowed");
+        let err = manager
+            .run_command(&session_id, "f /", Duration::from_secs(1))
+            .await
+            .expect_err("split dangerous command across write_stdin + run_command must be blocked");
+        assert!(matches!(err, Error::PermissionDenied(_)));
+
+        manager.close(&session_id).await.expect("close session");
     }
 
     /// 命令输出会分批到达。轮询等待期间每一批都必须累积到最终结果里——只保留最后一批

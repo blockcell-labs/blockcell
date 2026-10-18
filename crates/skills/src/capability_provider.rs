@@ -755,11 +755,37 @@ impl CapabilityRegistry {
         brief
     }
 
-    /// 持久化注册表到磁盘
+    /// 持久化注册表到磁盘（跨进程文件锁保护 + 合并磁盘已有未知描述符，防止多实例并发保存互相覆盖）
     pub fn save(&self) -> Result<()> {
         std::fs::create_dir_all(&self.registry_dir)?;
+        let _guard = crate::file_owner_lock::FileOwnerLock::acquire(
+            &self.registry_dir,
+            "registry",
+            "evolved_tools",
+        )?;
         let registry_file = self.registry_dir.join("evolved_tools.json");
-        let descriptors: Vec<&CapabilityDescriptor> = self.descriptors.values().collect();
+        let mut merged: HashMap<String, CapabilityDescriptor> = HashMap::new();
+        if registry_file.exists() {
+            if let Ok(existing_json) = std::fs::read_to_string(&registry_file) {
+                if let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&existing_json) {
+                    for entry in entries {
+                        if entry.get("provider_kind").and_then(|k| k.as_str())
+                            == Some("dynamic_library")
+                        {
+                            continue;
+                        }
+                        if let Ok(desc) = serde_json::from_value::<CapabilityDescriptor>(entry) {
+                            merged.insert(desc.id.clone(), desc);
+                        }
+                    }
+                }
+            }
+        }
+        for (id, desc) in &self.descriptors {
+            merged.insert(id.clone(), desc.clone());
+        }
+        let mut descriptors: Vec<&CapabilityDescriptor> = merged.values().collect();
+        descriptors.sort_by(|a, b| a.id.cmp(&b.id));
         let json = serde_json::to_string_pretty(&descriptors)?;
         blockcell_core::file_store::atomic_write(&registry_file, json.as_bytes())?;
         debug!("🔌 [能力] 注册表已保存到磁盘");
@@ -1290,6 +1316,48 @@ mod tests {
             CapabilityStatus::Available
         ));
         assert!(restored.canary_trackers.contains_key("test.canary"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_preserves_descriptors_registered_by_other_instances() {
+        let dir = std::env::temp_dir().join(format!(
+            "test_cap_registry_merge_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut reg_a = CapabilityRegistry::new(dir.clone());
+        reg_a.register(
+            CapabilityDescriptor::new(
+                "cap.a",
+                "A",
+                "From instance A",
+                CapabilityType::Internal,
+                ProviderKind::BuiltIn,
+            )
+            .with_status(CapabilityStatus::Available),
+        );
+        reg_a.save().unwrap();
+
+        let mut reg_b = CapabilityRegistry::new(dir.clone());
+        reg_b.register(
+            CapabilityDescriptor::new(
+                "cap.b",
+                "B",
+                "From instance B",
+                CapabilityType::Internal,
+                ProviderKind::BuiltIn,
+            )
+            .with_status(CapabilityStatus::Available),
+        );
+        reg_b.save().unwrap();
+
+        let mut merged = CapabilityRegistry::new(dir.clone());
+        merged.load().unwrap();
+        assert!(merged.get_descriptor("cap.a").is_some());
+        assert!(merged.get_descriptor("cap.b").is_some());
 
         let _ = std::fs::remove_dir_all(dir);
     }

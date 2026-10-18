@@ -752,12 +752,27 @@ fn command_mutates_cwd(command: &str) -> bool {
                 .trim_start_matches(['!', '{', '('])
                 .trim_end_matches(')');
             matches!(head, "cd" | "pushd" | "popd")
-                || tokens.any(|t| {
+                || (matches!(
+                    head,
+                    "if" | "then"
+                        | "else"
+                        | "elif"
+                        | "while"
+                        | "until"
+                        | "do"
+                        | "sudo"
+                        | "env"
+                        | "command"
+                        | "builtin"
+                        | "eval"
+                        | "time"
+                        | "nohup"
+                ) && tokens.any(|t| {
                     matches!(
                         t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | '(' | ')' | '{' | '}')),
                         "cd" | "pushd" | "popd"
                     )
-                })
+                }))
         })
 }
 
@@ -996,6 +1011,7 @@ mod tests {
             "ls -la",
             "python3 -c \"open('x').read()\"",
             "echo hello world",
+            "echo cd",
             "git commit -m msg",
         ] {
             assert!(
