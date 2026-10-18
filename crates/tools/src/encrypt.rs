@@ -175,15 +175,8 @@ async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
         // Raw-key mode: openssl `enc` does not persist an explicit `-iv`, so the IV is
         // kept in a header in front of the ciphertext. Without it the output could never
         // be decrypted (the previous implementation generated an IV and dropped it).
-        let iv_hex = generate_hex_bytes(16);
-        let args = vec![
-            "enc".to_string(),
-            "-aes-256-cbc".to_string(),
-            "-K".to_string(),
-            k.to_string(),
-            "-iv".to_string(),
-            iv_hex.clone(),
-        ];
+        // The cipher itself runs in-process: passing -K/-iv through openssl argv would
+        // expose the raw key in the process table.
         let file_len = std::fs::metadata(&resolved_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -198,7 +191,7 @@ async fn action_encrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
             .await
             .map_err(|e| Error::Tool(format!("Read task failed: {}", e)))?
             .map_err(|e| Error::Tool(format!("Failed to read {}: {}", resolved_path, e)))?;
-        let ciphertext = run_openssl_enc(&args, Some(plaintext)).await?;
+        let (ciphertext, iv_hex) = aes256_cbc_encrypt(k, &plaintext)?;
 
         let mut payload =
             Vec::with_capacity(KEY_MODE_MAGIC.len() + iv_hex.len() + ciphertext.len());
@@ -311,19 +304,9 @@ async fn action_decrypt_file(params: &Value, ctx: &ToolContext) -> Result<Value>
             ));
         }
         let iv_hex = std::str::from_utf8(&raw[KEY_MODE_MAGIC.len()..header_len])
-            .map_err(|_| Error::Tool("encrypted file has a corrupt IV header".into()))?
-            .to_string();
-        let args = vec![
-            "enc".to_string(),
-            "-aes-256-cbc".to_string(),
-            "-d".to_string(),
-            "-K".to_string(),
-            k.to_string(),
-            "-iv".to_string(),
-            iv_hex,
-        ];
-        let plaintext = run_openssl_enc(&args, Some(raw[header_len..].to_vec()))
-            .await
+            .map_err(|_| Error::Tool("encrypted file has a corrupt IV header".into()))?;
+        // In-process AES-256-CBC: the raw key must not travel over openssl argv.
+        let plaintext = aes256_cbc_decrypt(k, iv_hex, &raw[header_len..])
             .map_err(|e| Error::Tool(format!("Decryption failed: {e}")))?;
         let out_c = resolved_output.clone();
         tokio::task::spawn_blocking(move || std::fs::write(out_c, plaintext))
@@ -515,6 +498,45 @@ fn action_generate_key(params: &Value) -> Result<Value> {
         "format": "hex",
         "note": "Store this key securely. It cannot be recovered if lost.",
     }))
+}
+
+/// AES-256-CBC encrypt with a caller-supplied raw key (openssl `enc` compatible
+/// PKCS#7 padding). Returns (ciphertext, hex-encoded IV).
+fn aes256_cbc_encrypt(key_hex: &str, plaintext: &[u8]) -> Result<(Vec<u8>, String)> {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+    let key = hex::decode(key_hex)
+        .map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
+    if key.len() != 32 {
+        return Err(Error::Tool("key must decode to 32 bytes".to_string()));
+    }
+    let mut iv = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+    let ciphertext =
+        Aes256CbcEnc::new(key.as_slice().into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    Ok((ciphertext, hex::encode(iv)))
+}
+
+/// AES-256-CBC decrypt with a caller-supplied raw key and hex IV.
+fn aes256_cbc_decrypt(key_hex: &str, iv_hex: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let key = hex::decode(key_hex)
+        .map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
+    let iv = hex::decode(iv_hex)
+        .map_err(|_| Error::Tool("encrypted file has a corrupt IV header".to_string()))?;
+    if iv.len() != 16 {
+        return Err(Error::Tool(
+            "encrypted file has a corrupt IV header".to_string(),
+        ));
+    }
+    let mut iv_arr = [0u8; 16];
+    iv_arr.copy_from_slice(&iv);
+    Aes256CbcDec::new(key.as_slice().into(), &iv_arr.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .map_err(|_| Error::Tool("bad key, IV, or corrupted ciphertext".to_string()))
 }
 
 /// Passphrase bytes for openssl's `-pass stdin` (a single line).

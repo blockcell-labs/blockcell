@@ -669,6 +669,7 @@ dependencies = [
 name = "blockcell-tools"
 version = "0.1.7"
 dependencies = [
+ "aes",
  "async-imap",
  "async-trait",
  "base64 0.22.1",
@@ -677,8 +678,10 @@ dependencies = [
  "blockcell-skills",
  "blockcell-storage",
  "calamine",
+ "cbc",
  "chrono",
  "chrono-tz",
+ "cipher",
  "cron",
  "csv",
  "dirs",
@@ -686,6 +689,7 @@ dependencies = [
  "flate2",
  "futures",
  "glob",
+ "hex",
  "htmd",
  "ignore",
  "image",

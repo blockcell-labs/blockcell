@@ -135,24 +135,36 @@ impl super::AgentRuntime {
             }
             "shell" => {
                 let shell_action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
+                let session_id = args.get("session_id").and_then(|v| v.as_str());
                 let cmd_opt = match shell_action {
                     "run" => args
                         .get("command")
                         .and_then(|v| v.as_str())
                         .map(String::from),
                     "write_stdin" => args.get("input").and_then(|v| v.as_str()).map(|input| {
-                        let session_id = args
-                            .get("session_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        blockcell_tools::shell_session::preview_session_stdin(session_id, input)
+                        blockcell_tools::shell_session::preview_session_stdin(
+                            session_id.unwrap_or_default(),
+                            input,
+                        )
                     }),
                     _ => None,
                 };
                 if let Some(cmd) = cmd_opt {
+                    // Persistent sessions execute in their own cwd, not the
+                    // workspace — relative paths must resolve against the
+                    // session's tracked cwd. Unknown cwd (cd target could not
+                    // be resolved statically) fails closed via a synthetic
+                    // external path that policy treats as Confirm. A command
+                    // that itself changes directory mid-string cannot be
+                    // mapped to a single cwd — treat relative paths as unknown.
+                    let session_cwd = if command_mutates_cwd(&cmd) {
+                        Some(None)
+                    } else {
+                        session_id.and_then(blockcell_tools::shell_session::session_cwd)
+                    };
                     accesses.extend(extract_command_paths(&cmd).into_iter().map(|path| {
                         PathAccess {
-                            path,
+                            path: resolve_shell_access_path(&path, &session_cwd),
                             op: PathOp::Exec,
                         }
                     }));
@@ -694,6 +706,61 @@ fn command_has_path_consuming_verb(command: &str) -> bool {
     })
 }
 
+/// Resolve a relative path extracted from a shell command against the
+/// persistent session's tracked cwd. `session_cwd` is the triple state from
+/// `shell_session::session_cwd`: `None` = no session record (new session runs
+/// in the workspace, so the path stays relative and the caller resolves it
+/// against the workspace as before); `Some(Some(cwd))` = tracked cwd;
+/// `Some(None)` = unknown cwd — fail closed via a synthetic absolute path
+/// outside the workspace so policy cannot treat it as an allowed workspace
+/// file.
+fn resolve_shell_access_path(
+    path: &str,
+    session_cwd: &Option<Option<PathBuf>>,
+) -> String {
+    if path.starts_with('/') || path.starts_with("~/") {
+        return path.to_string();
+    }
+    match session_cwd {
+        Some(Some(cwd)) => cwd.join(path).to_string_lossy().to_string(),
+        Some(None) => {
+            // 未知 cwd 下相对深度不可表达——把 `..` 中和为普通组件，
+            // 否则词法归一化会让路径爬出哨兵根伪装成根目录下的文件。
+            let neutralized = path.replace("..", "__up__");
+            format!(
+                "/__unknown_shell_cwd__/{}",
+                neutralized.trim_start_matches('/')
+            )
+        }
+        None => path.to_string(),
+    }
+}
+
+/// Whether a command string itself contains a `cd`/`pushd`/`popd` that could
+/// change the persistent session's cwd mid-command. Conservative: also treats
+/// subshell/grouping contexts as mutating, since a `cd` inside them does not
+/// affect the parent but its effect on ordering can't be tracked cheaply.
+fn command_mutates_cwd(command: &str) -> bool {
+    command
+        .split(['\n', ';', '&', '|'])
+        .any(|segment| {
+            let seg = segment.trim();
+            let mut tokens = seg.split_whitespace();
+            let head = tokens
+                .next()
+                .unwrap_or("")
+                .trim_start_matches(['!', '{', '('])
+                .trim_end_matches(')');
+            matches!(head, "cd" | "pushd" | "popd")
+                || tokens.any(|t| {
+                    matches!(
+                        t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | '(' | ')' | '{' | '}')),
+                        "cd" | "pushd" | "popd"
+                    )
+                })
+        })
+}
+
 fn normalize_shell_home_vars(tok: &str) -> String {
     if tok == "$HOME" || tok == "${HOME}" {
         "~".to_string()
@@ -728,7 +795,11 @@ fn is_safe_relative_skill_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_command_paths, is_safe_relative_skill_path};
+    use super::{
+        command_mutates_cwd, extract_command_paths, is_safe_relative_skill_path,
+        resolve_shell_access_path,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn accepts_safe_relative_skill_paths() {
@@ -863,5 +934,74 @@ mod tests {
         assert!(extract_command_paths("echo $(pwd)/x")
             .iter()
             .any(|p| p.starts_with("/__unresolved_shell_var__/")));
+    }
+
+    /// 持久 shell 的 cwd 与 workspace 分叉时，相对路径必须按会话 cwd 解析；
+    /// cwd 未知（`cd` 目标无法静态解析）时 fail-closed 到工作区外的哨兵路径。
+    #[test]
+    fn shell_paths_resolve_against_tracked_session_cwd() {
+        let tracked = Some(Some(PathBuf::from("/tmp/moved")));
+        assert_eq!(
+            resolve_shell_access_path("../secret.txt", &tracked),
+            "/tmp/moved/../secret.txt"
+        );
+        assert_eq!(
+            resolve_shell_access_path("./out.log", &tracked),
+            "/tmp/moved/./out.log"
+        );
+        // 绝对路径与 ~ 路径不随会话 cwd 变化
+        assert_eq!(
+            resolve_shell_access_path("/etc/passwd", &tracked),
+            "/etc/passwd"
+        );
+        assert_eq!(
+            resolve_shell_access_path("~/.ssh/id_rsa", &tracked),
+            "~/.ssh/id_rsa"
+        );
+
+        // cwd 未知 → 合成绝对路径落在工作区外，policy 默认 Confirm 而非按 workspace 命中 Allow；
+        // `..` 被中和，词法归一化后仍留在哨兵根下
+        let unknown = Some(None);
+        assert_eq!(
+            resolve_shell_access_path("../secret.txt", &unknown),
+            "/__unknown_shell_cwd__/__up__/secret.txt"
+        );
+        assert_eq!(
+            resolve_shell_access_path("../../../../etc/passwd", &unknown),
+            "/__unknown_shell_cwd__/__up__/__up__/__up__/__up__/etc/passwd"
+        );
+
+        // 无会话记录（新会话运行于 workspace）→ 保持相对路径，由 resolve_path 按 workspace 解析
+        assert_eq!(
+            resolve_shell_access_path("src/main.py", &None),
+            "src/main.py"
+        );
+    }
+
+    /// 同一命令字符串内自带 `cd`/`pushd` 时无法把相对路径映射到单一 cwd——
+    /// 必须由检查侧按未知 cwd fail-closed。
+    #[test]
+    fn detects_cwd_mutation_inside_a_command_string() {
+        for cmd in [
+            "cd /tmp && cat secret",
+            "pwd; cd ../other",
+            "pushd /var",
+            "if cd /x; then echo hi; fi",
+            "(cd /tmp); ls",
+        ] {
+            assert!(command_mutates_cwd(cmd), "expected `{cmd}` to mutate cwd");
+        }
+        for cmd in [
+            "cat ./config",
+            "ls -la",
+            "python3 -c \"open('x').read()\"",
+            "echo hello world",
+            "git commit -m msg",
+        ] {
+            assert!(
+                !command_mutates_cwd(cmd),
+                "expected `{cmd}` not to mutate cwd"
+            );
+        }
     }
 }

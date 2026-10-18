@@ -936,6 +936,7 @@ impl AgentRuntime {
                     record_active_skill_name(&mut session_metadata, &skill_ctx.name);
                     append_activated_skill_history(
                         &mut history,
+                        &mut current_messages,
                         &skill_call.id,
                         &skill_ctx.name,
                         &goal,

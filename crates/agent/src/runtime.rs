@@ -814,8 +814,10 @@ fn summarize_tool_args(args: &serde_json::Value) -> String {
     truncate_str(&text, 500)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_activated_skill_history(
     history: &mut Vec<ChatMessage>,
+    current_messages: &mut Vec<ChatMessage>,
     activation_call_id: &str,
     skill_name: &str,
     goal: &str,
@@ -833,7 +835,11 @@ fn append_activated_skill_history(
         .to_string(),
     );
     activation_result.name = Some(ACTIVATE_SKILL_TOOL_NAME.to_string());
-    history.push(activation_result);
+    history.push(activation_result.clone());
+    // Deferred review snapshots are built from `current_messages`; without the
+    // activation tool_result here the assistant message's activate_skill
+    // tool_use stays unpaired and fails provider-side validation.
+    current_messages.push(activation_result);
 
     push_internal_skill_trace(
         history,

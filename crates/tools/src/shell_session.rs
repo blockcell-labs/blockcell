@@ -3,7 +3,7 @@ use blockcell_core::{Error, Result};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,6 +98,11 @@ pub(crate) struct ShellSessionManager {
     policies: Arc<std::sync::RwLock<HashMap<String, SandboxPolicy>>>,
     /// 各会话通过 `write_stdin` 分片注入的滑动输入窗口，用于跨多次调用识别拆分的危险命令或路径。
     stdin_buffers: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    /// 各会话跟踪到的逻辑 cwd：Some(path) = 已知（创建时为 workspace，之后按
+    /// 命令中的 cd/pushd 更新）；None = 未知（cd 目标无法静态解析或内部进入
+    /// 子 shell）。shell 真实 cwd 属进程内部状态无法直接观测，只能尽力追踪；
+    /// 未知状态下路径检查必须 fail-closed。
+    cwds: Arc<std::sync::RwLock<HashMap<String, Option<PathBuf>>>>,
     reaper_running: Arc<std::sync::atomic::AtomicBool>,
     sandbox: Arc<std::sync::RwLock<Arc<dyn SandboxProvider>>>,
 }
@@ -112,6 +117,7 @@ impl ShellSessionManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             policies: Arc::new(std::sync::RwLock::new(HashMap::new())),
             stdin_buffers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            cwds: Arc::new(std::sync::RwLock::new(HashMap::new())),
             reaper_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox: Arc::new(std::sync::RwLock::new(sandbox)),
         }
@@ -179,6 +185,10 @@ impl ShellSessionManager {
             }
             buf.drain(..cut);
         }
+        drop(guard);
+        // Track logical cwd for the path checker: the chunk was accepted and is
+        // about to be written to the shell, so apply any cd/pushd it contains.
+        self.track_cd(session_id, &combined);
         Ok(())
     }
 
@@ -186,6 +196,91 @@ impl ShellSessionManager {
         if let Ok(mut guard) = self.stdin_buffers.write() {
             guard.remove(session_id);
         }
+    }
+
+    /// 按命令文本更新会话的逻辑 cwd。只在能静态解析时推进：相对 `cd` 依赖
+    /// 已跟踪的 cwd；含展开/替换、`cd -`、裸 `pushd`、或 `cd` 出现在子 shell
+    /// 语境（无法判断是否会改父 shell cwd）时置为未知，交由检查侧 fail-closed。
+    fn track_cd(&self, session_id: &str, text: &str) {
+        let Ok(mut cwds) = self.cwds.write() else {
+            return;
+        };
+        let Some(state) = cwds.get_mut(session_id) else {
+            return;
+        };
+        for segment in text.split(['\n', ';', '&', '|']) {
+            let seg = segment.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            let mut tokens = seg.split_whitespace();
+            let raw_head = tokens.next().unwrap_or("");
+            let head = raw_head.trim_start_matches(['!', '{', '(']);
+            if head != "cd" && head != "pushd" {
+                // cd/pushd 藏在非命令头位置（`if cd x`、`echo cd` 等）——无法判断
+                // 是否真执行且改变父 shell cwd，保守置未知。
+                if tokens.any(|t| {
+                    t.trim_matches(|c| matches!(c, '"' | '\'' | ';')) == "cd"
+                        || t.trim_matches(|c| matches!(c, '"' | '\'' | ';')) == "pushd"
+                }) {
+                    *state = None;
+                }
+                continue;
+            }
+            // `cd` 出现在含展开/子 shell 的分段中 → 目标无法静态解析或不影响
+            // 父 shell cwd，两种都不该据此推进状态。
+            if seg.contains('$') || seg.contains('`') || seg.contains('(') {
+                *state = None;
+                continue;
+            }
+            let rest = seg[raw_head.len()..].trim();
+            let quoted = (rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2)
+                || (rest.starts_with('\'') && rest.ends_with('\'') && rest.len() >= 2);
+            let target = if quoted {
+                rest[1..rest.len() - 1].trim()
+            } else {
+                rest
+            };
+            if !quoted && target.contains(char::is_whitespace) {
+                // 多余参数/无法确定的参数列表 → shell 大概率报错不改 cwd，但保守按未知处理
+                *state = None;
+                continue;
+            }
+            match (head, target) {
+                ("cd", "") => {
+                    *state = dirs::home_dir();
+                }
+                (_, "-") | ("pushd", "") => *state = None,
+                (_, t) if t == "~" || t.starts_with("~/") => {
+                    *state = dirs::home_dir().map(|h| {
+                        normalize_lexically(&h.join(t.strip_prefix("~/").unwrap_or("")))
+                    });
+                }
+                (_, t) if t.starts_with('/') => {
+                    *state = Some(normalize_lexically(&PathBuf::from(t)));
+                }
+                (_, t) => match state.as_ref() {
+                    Some(cwd) => {
+                        let joined = cwd.join(t);
+                        *state = Some(normalize_lexically(&joined));
+                    }
+                    None => {
+                        *state = None;
+                    }
+                },
+            }
+        }
+    }
+
+    /// 会话当前跟踪到的逻辑 cwd：
+    /// - `None`：无此会话记录（新会话将以 workspace 启动，调用方按 workspace 解析）
+    /// - `Some(Some(path))`：跟踪到的 cwd
+    /// - `Some(None)`：cwd 未知（解析失败/子 shell 分叉），调用方必须 fail-closed
+    pub(crate) fn cwd_snapshot(&self, session_id: &str) -> Option<Option<PathBuf>> {
+        self.cwds
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(session_id).cloned())
     }
 
     fn ensure_background_reaper(&self) {
@@ -303,6 +398,9 @@ impl ShellSessionManager {
         if let Ok(mut policies) = self.policies.write() {
             policies.insert(session_id.clone(), sandbox_policy);
         }
+        if let Ok(mut cwds) = self.cwds.write() {
+            cwds.insert(session_id.clone(), Some(workspace.to_path_buf()));
+        }
         self.ensure_background_reaper();
         Ok(session_id)
     }
@@ -415,6 +513,9 @@ impl ShellSessionManager {
             if let Ok(mut policies) = self.policies.write() {
                 policies.remove(session_id);
             }
+            if let Ok(mut cwds) = self.cwds.write() {
+                cwds.remove(session_id);
+            }
             self.clear_stdin_buffer(session_id);
         }
         exited
@@ -463,6 +564,7 @@ impl ShellSessionManager {
                 delivered_offset,
             });
         }
+        self.track_cd(session_id, command);
         self.poll(session_id, timeout).await
     }
 
@@ -627,6 +729,9 @@ impl ShellSessionManager {
         if let Ok(mut policies) = self.policies.write() {
             policies.remove(session_id);
         }
+        if let Ok(mut cwds) = self.cwds.write() {
+            cwds.remove(session_id);
+        }
         self.clear_stdin_buffer(session_id);
         let mut session = session.lock().await;
         if let Some(tm) = session.task_manager.take() {
@@ -670,6 +775,30 @@ pub fn preview_session_stdin(session_id: &str, chunk: &str) -> String {
 
 fn normalize_continued_lines(input: &str) -> String {
     input.replace("\\\r\n", "").replace("\\\n", "")
+}
+
+/// Lexically normalize `.`/`..` components (no filesystem access).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 会话当前跟踪到的逻辑 cwd（供路径安全检查解析相对路径）：
+/// - `None`：无会话记录（新会话以 workspace 启动）
+/// - `Some(Some(path))`：跟踪到的 cwd
+/// - `Some(None)`：cwd 未知，调用方必须 fail-closed
+pub fn session_cwd(session_id: &str) -> Option<Option<PathBuf>> {
+    SHELL_SESSIONS.cwd_snapshot(session_id)
 }
 
 /// 会话创建时固定的沙箱策略（同步查询）；会话不存在返回 `None`。
@@ -1133,6 +1262,111 @@ mod tests {
         assert!(!first.running);
         assert!(second.output.contains("nested"));
         manager.close(&session_id).await.expect("close session");
+    }
+
+    /// `run_command`/`write_stdin` 中的 cd 会改变持久 shell 的 cwd——路径安全检查
+    /// 必须按跟踪到的 cwd 解析后续相对路径，而非固定按 workspace。
+    #[tokio::test]
+    async fn session_cwd_tracks_cd_and_goes_unknown_on_unresolvable() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create shell session");
+
+        assert_eq!(
+            manager.cwd_snapshot(&session_id),
+            Some(Some(workspace.path().to_path_buf())),
+            "new session starts in the workspace"
+        );
+
+        manager
+            .run_command(&session_id, "mkdir nested && cd nested", Duration::from_secs(2))
+            .await
+            .expect("cd into subdirectory");
+        assert_eq!(
+            manager.cwd_snapshot(&session_id),
+            Some(Some(normalize_lexically(&workspace.path().join("nested")))),
+        );
+
+        manager
+            .run_command(&session_id, "cd ..", Duration::from_secs(2))
+            .await
+            .expect("cd back");
+        assert_eq!(
+            manager.cwd_snapshot(&session_id),
+            Some(Some(normalize_lexically(workspace.path()))),
+        );
+
+        // 绝对 cd 总是可追踪
+        manager
+            .run_command(&session_id, "cd /tmp", Duration::from_secs(2))
+            .await
+            .expect("cd to absolute path");
+        assert_eq!(
+            manager.cwd_snapshot(&session_id),
+            Some(Some(PathBuf::from("/tmp"))),
+        );
+
+        // 展开式目标无法静态解析 → 未知（检查侧 fail-closed）
+        manager
+            .run_command(&session_id, "cd $SOME_DIR", Duration::from_secs(2))
+            .await
+            .expect("cd to unresolvable target");
+        assert_eq!(manager.cwd_snapshot(&session_id), Some(None));
+
+        // 未知状态下绝对 cd 可恢复跟踪
+        manager
+            .run_command(&session_id, "cd /var", Duration::from_secs(2))
+            .await
+            .expect("cd recovers tracking");
+        assert_eq!(
+            manager.cwd_snapshot(&session_id),
+            Some(Some(PathBuf::from("/var"))),
+        );
+
+        manager.close(&session_id).await.expect("close session");
+        assert_eq!(manager.cwd_snapshot(&session_id), None);
+    }
+
+    #[test]
+    fn track_cd_static_cases() {
+        let manager = ShellSessionManager::new();
+        manager
+            .cwds
+            .write()
+            .expect("cwds lock")
+            .insert("s".to_string(), Some(PathBuf::from("/ws/app")));
+
+        manager.track_cd("s", "cd sub/dir");
+        assert_eq!(
+            manager.cwd_snapshot("s"),
+            Some(Some(PathBuf::from("/ws/app/sub/dir")))
+        );
+
+        manager.track_cd("s", "cd ../../..");
+        assert_eq!(manager.cwd_snapshot("s"), Some(Some(PathBuf::from("/ws"))));
+
+        // 子 shell 中的 cd 不改变父 shell cwd → 未知
+        manager.track_cd("s", "(cd /tmp)");
+        assert_eq!(manager.cwd_snapshot("s"), Some(None));
+
+        // 未知状态下相对 cd 仍未知
+        manager.track_cd("s", "cd rel");
+        assert_eq!(manager.cwd_snapshot("s"), Some(None));
+
+        // cd - 依赖 OLDPWD → 未知
+        manager.track_cd("s", "cd /x; cd -");
+        assert_eq!(manager.cwd_snapshot("s"), Some(None));
+
+        // 引号包裹的相对路径照常解析
+        manager.track_cd("s", "cd '/a/b'");
+        assert_eq!(manager.cwd_snapshot("s"), Some(Some(PathBuf::from("/a/b"))));
     }
 
     /// 命令输出会分批到达。轮询等待期间每一批都必须累积到最终结果里——只保留最后一批

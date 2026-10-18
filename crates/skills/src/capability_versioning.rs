@@ -67,6 +67,10 @@ impl CapabilityFileLock {
     /// 带重试地获取 fs2 排他文件锁。锁文件长期保留（同 file_lock 的锚点设计），
     /// 不存在 stale 锁文件概念：无持有者的文件可立即获得锁。
     fn acquire_with_retry(&self) -> Option<CapabilityLockGuard> {
+        self.acquire_with_retries(CAP_LOCK_MAX_RETRIES)
+    }
+
+    fn acquire_with_retries(&self, max_retries: u32) -> Option<CapabilityLockGuard> {
         if let Some(parent) = self.lock_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -77,7 +81,7 @@ impl CapabilityFileLock {
             .truncate(false)
             .open(&self.lock_path)
             .ok()?;
-        for _ in 0..CAP_LOCK_MAX_RETRIES {
+        for _ in 0..max_retries {
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     let owner = format!(
@@ -1034,6 +1038,66 @@ mod tests {
         // 所有版本仍然存在（非破坏性）
         let versions = vm.list_versions("seq.rollback").unwrap();
         assert_eq!(versions.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn capability_lock_held_guard_blocks_second_acquire_until_drop() {
+        let tmp = std::env::temp_dir().join(format!(
+            "test_cap_lock_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let first = CapabilityFileLock::new(&tmp, "cap.a")
+            .acquire_with_retries(1)
+            .expect("first acquire succeeds");
+        // 同一 capability 的第二个锁（即使由另一实例发起）在持有期间不可获取
+        assert!(
+            CapabilityFileLock::new(&tmp, "cap.a")
+                .acquire_with_retries(2)
+                .is_none(),
+            "held lock must block a second acquire"
+        );
+        drop(first);
+        assert!(
+            CapabilityFileLock::new(&tmp, "cap.a")
+                .acquire_with_retries(2)
+                .is_some(),
+            "lock must be released when the guard is dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn capability_lock_different_ids_are_independent() {
+        let tmp = std::env::temp_dir().join(format!(
+            "test_cap_lock_indep_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let _guard = CapabilityFileLock::new(&tmp, "cap.a")
+            .acquire_with_retries(1)
+            .expect("first acquire succeeds");
+        assert!(
+            CapabilityFileLock::new(&tmp, "cap.b")
+                .acquire_with_retries(1)
+                .is_some(),
+            "a different capability id must not be blocked"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
