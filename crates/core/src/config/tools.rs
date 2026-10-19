@@ -138,6 +138,10 @@ impl Default for PathAccessConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityConfig {
+    /// Explicit destination for unscoped background notifications. Without
+    /// this setting only a local CLI session can establish the destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_session_key: Option<String>,
     /// Path-access policy rules.
     #[serde(default)]
     pub path_access: PathAccessConfig,

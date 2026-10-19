@@ -249,54 +249,74 @@ fn confirm_matches(
     matches: &[ForgetMatch],
     reason: &str,
 ) -> Result<usize> {
+    let _lock = blockcell_core::file_store::ExclusiveFileLock::acquire(
+        &paths.knowledge_index_db().with_extension("forget.lock"),
+    )?;
     let file_store = ctx.memory_file_store.as_ref();
     let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db())?;
     let mut removed = 0usize;
     for item in matches {
-        // Tombstone each entry only after its deletion succeeded, so a mid-loop
-        // failure leaves "removed entries tombstoned, rest untouched" instead of
-        // "everything tombstoned but only partially removed" — with the old
-        // ordering, undeleted entries could never be re-learned.
-        match item.kind.as_str() {
-            "canonical_file" => {
-                let store = file_store.ok_or_else(|| {
-                    Error::Tool("Memory file store not available for canonical forget".to_string())
-                })?;
-                store.remove_scoped_file_memory_json(
-                    item.scope.as_deref().unwrap_or("workspace"),
-                    item.target.as_deref().unwrap_or("memory"),
-                    &if item.key.starts_with("legacy-") {
-                        item.content.clone()
-                    } else {
-                        format!("[id:{}]", item.key)
-                    },
-                )?;
-                index.record_forgotten_content(&item.content, reason)?;
-                removed += 1;
-            }
-            "session_file" => {
-                let store = file_store.ok_or_else(|| {
-                    Error::Tool("Memory file store not available for session forget".to_string())
-                })?;
-                store.remove_scoped_file_memory_json(
-                    "session",
-                    item.target.as_deref().unwrap_or("memory"),
-                    &item.content,
-                )?;
-                index.record_forgotten_content(&item.content, reason)?;
-                removed += 1;
-            }
-            "sqlite_short_term" => {
-                let store = ctx.memory_store.as_ref().ok_or_else(|| {
-                    Error::Tool("Memory store not available for short-term forget".to_string())
-                })?;
-                if store.soft_delete_in_session(&item.key, &ctx.session_key)? {
-                    index.record_forgotten_content(&item.content, reason)?;
+        // Process entries individually; a failed deletion must not tombstone
+        // unrelated entries later in the batch.
+        if !matches!(
+            item.kind.as_str(),
+            "canonical_file" | "session_file" | "sqlite_short_term"
+        ) {
+            continue;
+        }
+        let already_forgotten = index.is_forgotten_content(&item.content)?;
+        // Persist before destructive IO: a tombstone write failure must leave
+        // the source intact. Compensate an ordinary deletion failure below.
+        index.record_forgotten_content(&item.content, reason)?;
+        let previous_removed = removed;
+        let deletion = (|| -> Result<()> {
+            match item.kind.as_str() {
+                "canonical_file" => {
+                    let store = file_store.ok_or_else(|| {
+                        Error::Tool(
+                            "Memory file store not available for canonical forget".to_string(),
+                        )
+                    })?;
+                    store.remove_scoped_file_memory_json(
+                        item.scope.as_deref().unwrap_or("workspace"),
+                        item.target.as_deref().unwrap_or("memory"),
+                        &if item.key.starts_with("legacy-") {
+                            item.content.clone()
+                        } else {
+                            format!("[id:{}]", item.key)
+                        },
+                    )?;
                     removed += 1;
                 }
+                "session_file" => {
+                    let store = file_store.ok_or_else(|| {
+                        Error::Tool(
+                            "Memory file store not available for session forget".to_string(),
+                        )
+                    })?;
+                    store.remove_scoped_file_memory_json(
+                        "session",
+                        item.target.as_deref().unwrap_or("memory"),
+                        &item.content,
+                    )?;
+                    removed += 1;
+                }
+                "sqlite_short_term" => {
+                    let store = ctx.memory_store.as_ref().ok_or_else(|| {
+                        Error::Tool("Memory store not available for short-term forget".to_string())
+                    })?;
+                    if store.soft_delete_in_session(&item.key, &ctx.session_key)? {
+                        removed += 1;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+            Ok(())
+        })();
+        if (deletion.is_err() || removed == previous_removed) && !already_forgotten {
+            index.remove_forgotten_content(&item.content)?;
         }
+        deletion?;
     }
 
     index.rebuild_from_files(paths)?;
@@ -584,5 +604,67 @@ mod tests {
         assert!(crate::ToolRegistry::with_defaults()
             .get("knowledge_forget")
             .is_some());
+    }
+
+    #[test]
+    fn failed_deletion_removes_new_tombstone_but_preserves_existing_one() {
+        let paths = Paths::with_base(
+            std::env::temp_dir().join(format!("forget-failure-{}", uuid::Uuid::new_v4())),
+        );
+        paths.ensure_dirs().unwrap();
+        let memory = Arc::new(TestMemoryStore {
+            active: Mutex::new(true),
+        });
+        let files = Arc::new(TestFileStore {
+            paths: paths.clone(),
+            session_key: "cli:test".into(),
+        });
+        let mut ctx = test_context(&paths, memory, files);
+        ctx.memory_file_store = None;
+        let item = ForgetMatch {
+            kind: "canonical_file".into(),
+            key: "missing".into(),
+            target: Some("user".into()),
+            scope: Some("user".into()),
+            content: "keep intact".into(),
+        };
+        let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db()).unwrap();
+        assert!(confirm_matches(&paths, &ctx, &[item.clone()], "test").is_err());
+        assert!(!index.is_forgotten_content(&item.content).unwrap());
+        index
+            .record_forgotten_content(&item.content, "previous request")
+            .unwrap();
+        assert!(confirm_matches(&paths, &ctx, &[item.clone()], "test").is_err());
+        assert!(index.is_forgotten_content(&item.content).unwrap());
+    }
+
+    #[test]
+    fn tombstone_write_failure_leaves_source_untouched() {
+        let paths = Paths::with_base(
+            std::env::temp_dir().join(format!("forget-write-failure-{}", uuid::Uuid::new_v4())),
+        );
+        paths.ensure_dirs().unwrap();
+        let content = "- [id:keep] must remain\n";
+        std::fs::write(paths.user_md(), content).unwrap();
+        let memory = Arc::new(TestMemoryStore {
+            active: Mutex::new(true),
+        });
+        let files = Arc::new(TestFileStore {
+            paths: paths.clone(),
+            session_key: "cli:test".into(),
+        });
+        let ctx = test_context(&paths, memory, files);
+        blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db()).unwrap();
+        let conn = rusqlite::Connection::open(paths.knowledge_index_db()).unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_forget BEFORE INSERT ON forgotten BEGIN SELECT RAISE(FAIL, 'injected tombstone failure'); END;").unwrap();
+        let item = ForgetMatch {
+            kind: "canonical_file".into(),
+            key: "keep".into(),
+            target: Some("user".into()),
+            scope: Some("user".into()),
+            content: "must remain".into(),
+        };
+        assert!(confirm_matches(&paths, &ctx, &[item], "test").is_err());
+        assert_eq!(std::fs::read_to_string(paths.user_md()).unwrap(), content);
     }
 }

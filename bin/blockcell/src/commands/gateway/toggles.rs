@@ -106,6 +106,16 @@ pub(super) async fn handle_toggles_update(
 
     let path = state.paths.toggles_file();
     let _guard = TOGGLES_WRITE_LOCK.lock().await;
+    let lock_path = path.with_extension("lock");
+    let _file_guard = match tokio::task::spawn_blocking(move || {
+        blockcell_core::file_store::ExclusiveFileLock::acquire(&lock_path)
+    })
+    .await
+    {
+        Ok(Ok(guard)) => guard,
+        Ok(Err(error)) => return Json(serde_json::json!({"error": error.to_string()})),
+        Err(error) => return Json(serde_json::json!({"error": error.to_string()})),
+    };
     let mut store: serde_json::Value = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
         tokio::fs::read_to_string(&path)
             .await

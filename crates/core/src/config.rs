@@ -393,6 +393,55 @@ fn merge_unknown_keys(previous: &Value, next: &mut Value) {
     }
 }
 
+/// Keep operator comments when normalizing configuration. Comments are emitted
+/// as a preamble in their original order; quoted URL/string content is untouched.
+fn preserved_json5_comments(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i..].starts_with(b"//") {
+            let start = i;
+            i += 2;
+            while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
+                if raw.is_char_boundary(i)
+                    && (raw[i..].starts_with('\u{2028}') || raw[i..].starts_with('\u{2029}'))
+                {
+                    break;
+                }
+                i += 1;
+            }
+            result.push_str(&raw[start..i]);
+            result.push('\n');
+        } else if bytes[i..].starts_with(b"/*") {
+            let start = i;
+            i += 2;
+            while i + 1 < bytes.len() && !bytes[i..].starts_with(b"*/") {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            result.push_str(&raw[start..i]);
+            result.push('\n');
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
 pub fn stringify_json5_pretty<T>(value: &T) -> Result<String>
 where
     T: Serialize,
@@ -815,13 +864,16 @@ impl Config {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut next = serde_json::to_value(self)?;
+        let mut comments = String::new();
         if let Ok(raw) = std::fs::read_to_string(path) {
             if let Ok(previous) = parse_json5_value_preserving_env(&raw) {
                 preserve_unchanged_env_placeholders(&previous, &mut next);
                 merge_unknown_keys(&previous, &mut next);
+                comments = preserved_json5_comments(&raw);
             }
         }
-        write_json5_pretty(path, &next)
+        comments.push_str(&stringify_json5_pretty(&next)?);
+        write_text_atomic_durable(path, &comments)
     }
 
     pub fn get_api_key(&self) -> Option<(&str, &ProviderConfig)> {
@@ -1341,6 +1393,31 @@ mod tests {
         unsafe {
             std::env::remove_var("BLOCKCELL_TEST_SAVE_KEY");
         }
+    }
+
+    #[test]
+    fn test_config_save_preserves_comments() {
+        let path = temp_config_path("comments.json5");
+        fs::write(
+            &path,
+            "// operator notes\n{ agents: { defaults: { model: 'old' /* rationale */ } } }",
+        )
+        .unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.agents.defaults.model = "new".into();
+        config.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("// operator notes"));
+        assert!(saved.contains("/* rationale */"));
+        assert_eq!(Config::load(&path).unwrap().agents.defaults.model, "new");
+        config.save(&path).unwrap();
+        assert_eq!(saved, fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn comment_extraction_ignores_quotes_and_urls() {
+        let raw = r#"{ url: 'https://example.test/a//b', text: "escaped\"/* not a comment */", x: 1 /* 中文备注 */ } // tail"#;
+        assert_eq!(preserved_json5_comments(raw), "/* 中文备注 */\n// tail\n");
     }
 
     #[test]

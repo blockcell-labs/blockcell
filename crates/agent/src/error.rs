@@ -49,7 +49,7 @@ pub(crate) fn dangerous_exec_denied(tool_name: &str, has_confirm_channel: bool) 
     let hint = if has_confirm_channel {
         "The command looks dangerous (e.g. kill/pkill/killall/service stop). Ask the user to confirm explicitly before running it."
     } else {
-        "This channel cannot show an interactive confirm prompt. Reply with '确认执行' (or '确认重启') to proceed, otherwise I will not run kill/pkill/killall/service-stop commands."
+        "This channel cannot show an interactive confirm prompt. Approval must name the exact tool and JSON arguments; a generic confirmation cannot authorize execution."
     };
     tool_denied_json(
         tool_name,

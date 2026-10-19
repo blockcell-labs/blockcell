@@ -411,7 +411,7 @@ impl super::AgentRuntime {
                     .map(|value| value.to_string()),
             };
 
-            if confirm_tx.send(request).await.is_err() {
+            if !matches!(tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await, Ok(Ok(()))) {
                 warn!("Failed to send confirmation request, denying access");
                 return false;
             }
@@ -470,7 +470,7 @@ impl super::AgentRuntime {
                     .and_then(|value| value.as_str())
                     .map(|value| value.to_string()),
             };
-            if confirm_tx.send(request).await.is_err() {
+            if !matches!(tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await, Ok(Ok(()))) {
                 warn!(
                     tool = tool_name,
                     "Failed to send dangerous-operation confirmation request, denying"

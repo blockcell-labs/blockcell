@@ -112,6 +112,12 @@ impl Tool for ToggleManageTool {
                     return Ok(json!({ "error": "category must be 'skills' or 'tools'" }));
                 }
 
+                let lock_path = toggles_path.with_extension("lock");
+                let _guard = tokio::task::spawn_blocking(move || {
+                    blockcell_core::file_store::ExclusiveFileLock::acquire(&lock_path)
+                })
+                .await
+                .map_err(|e| blockcell_core::Error::Tool(e.to_string()))??;
                 let mut store = load_toggles(&toggles_path);
 
                 // Ensure category object exists

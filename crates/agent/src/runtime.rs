@@ -302,6 +302,7 @@ impl blockcell_skills::LLMProvider for ProviderLLMAdapter {
 /// subagents, without requiring a reference to AgentRuntime.
 #[derive(Clone)]
 pub struct RuntimeSpawnHandle {
+    memory_file_store: Option<blockcell_tools::MemoryFileStoreHandle>,
     config: Config,
     paths: Paths,
     task_manager: TaskManager,
@@ -367,6 +368,7 @@ impl SpawnHandle for RuntimeSpawnHandle {
         // Create child abort token for the subagent (chain propagation)
         let child_abort_token = self.abort_token.as_ref().map(|t| t.child());
         let join_handle = tokio::spawn(run_subagent_task(
+            self.memory_file_store.clone(),
             config,
             paths,
             provider_pool,
@@ -2111,19 +2113,6 @@ fn extract_urls_from_search_result(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn user_explicitly_confirms_dangerous_op(user_text: &str) -> bool {
-    let t = user_text.trim();
-    if t.is_empty() {
-        return false;
-    }
-
-    // For channels without an interactive confirm prompt (confirm_tx=None),
-    // require the user to explicitly confirm in text.
-    // Keep this simple and language-friendly.
-    t.contains("确认")
-        && (t.contains("执行") || t.contains("重启") || t.contains("继续") || t.contains("允许"))
-}
-
 fn overwrite_last_assistant_message(history: &mut [ChatMessage], new_text: &str) {
     if let Some(last) = history.last_mut() {
         if last.role == "assistant" {
@@ -2173,8 +2162,7 @@ type TogglesCache = HashMap<PathBuf, (std::time::SystemTime, u64, serde_json::Va
 /// Cached parsed toggles.json keyed by file mtime+len: per-call sites on the tool
 /// hot path only pay a `stat` syscall unless the file actually changed.
 fn cached_toggles_json(path: &Path) -> Option<serde_json::Value> {
-    static CACHE: LazyLock<Mutex<TogglesCache>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static CACHE: LazyLock<Mutex<TogglesCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?;
     let len = meta.len();
@@ -2184,10 +2172,8 @@ fn cached_toggles_json(path: &Path) -> Option<serde_json::Value> {
             return Some(v.clone());
         }
     }
-    let val = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(path).ok()?,
-    )
-    .ok()?;
+    let val =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).ok()?).ok()?;
     if cache.len() >= 16 {
         cache.clear();
     }
@@ -2252,8 +2238,7 @@ pub struct AgentRuntime {
     /// Files within these directories will not require separate confirmation.
     /// Entries are keyed by session key so an authorization granted in one
     /// session cannot leak into another session/user on a shared runtime.
-    authorized_dirs:
-        Arc<Mutex<HashSet<(String, PathBuf, blockcell_core::path_policy::PathOp)>>>,
+    authorized_dirs: Arc<Mutex<HashSet<(String, PathBuf, blockcell_core::path_policy::PathOp)>>>,
     /// 非交互通道的文本确认消费记录：用户原文的"确认执行"只允许放行**一个**
     /// 危险操作，而非本回合所有危险操作（逐操作确认在无交互通道的最强近似）。
     /// 键 = channel + sender + timestamp_ms，按消息去重；跨 clone 共享。

@@ -486,7 +486,9 @@ impl ContextBuilder {
     /// `incremental_project_environment` call for this session consumes it
     /// instead of spawning git subprocesses on the executor thread.
     pub(crate) async fn prefetch_project_environment(&self, session_key: &str) {
-        let rendered = self.incremental_project_environment_async(session_key).await;
+        let rendered = self
+            .incremental_project_environment_async(session_key)
+            .await;
         let mut cache = self
             .session_cache
             .lock()
@@ -704,8 +706,11 @@ impl ContextBuilder {
                 if let Ok(read_dir) = std::fs::read_dir(&dir) {
                     for entry in read_dir.flatten() {
                         let path = entry.path();
-                        if path.is_dir() {
+                        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                             stack.push(path);
+                            continue;
+                        }
+                        if !path.is_file() {
                             continue;
                         }
                         let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
@@ -718,27 +723,41 @@ impl ContextBuilder {
                                 (
                                     m.modified()
                                         .ok()
-                                        .and_then(|t| {
-                                            t.duration_since(std::time::UNIX_EPOCH).ok()
-                                        })
+                                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                         .map(|d| d.as_nanos())
                                         .unwrap_or(0),
                                     m.len(),
                                 )
                             })
                             .unwrap_or((0, 0));
-                        entries.push((root.clone(), rel, mtime_ns, len));
+                        // Content catches same-length edits with preserved/coarse mtimes.
+                        // Do not descend directory symlinks, which can form cycles.
+                        let content = std::fs::File::open(&path).ok().and_then(|mut file| {
+                            use std::io::Read;
+                            let mut digest = DefaultHasher::new();
+                            let mut buffer = [0u8; 8192];
+                            loop {
+                                let size = file.read(&mut buffer).ok()?;
+                                if size == 0 {
+                                    break;
+                                }
+                                digest.write(&buffer[..size]);
+                            }
+                            Some(digest.finish())
+                        });
+                        entries.push((root.clone(), rel, mtime_ns, len, content));
                     }
                 }
             }
         }
         entries.sort();
         let mut hasher = DefaultHasher::new();
-        for (root, rel, mtime_ns, len) in &entries {
+        for (root, rel, mtime_ns, len, content) in &entries {
             root.hash(&mut hasher);
             rel.hash(&mut hasher);
             mtime_ns.hash(&mut hasher);
             len.hash(&mut hasher);
+            content.hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -751,13 +770,8 @@ impl ContextBuilder {
         // 命中率损失随技能数线性增长。
         let fingerprint = Self::skills_tree_fingerprint(&self.paths);
         {
-            let cache = self
-                .session_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if self.skill_manager.is_some()
-                && cache.skills_fingerprint == Some(fingerprint)
-            {
+            let cache = self.session_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if self.skill_manager.is_some() && cache.skills_fingerprint == Some(fingerprint) {
                 return Vec::new();
             }
         }
@@ -785,10 +799,7 @@ impl ContextBuilder {
             // prompt snapshots so skill edits and deletions (where `new_skills` is empty)
             // are also immediately visible.
             self.refresh_skill_index_summary();
-            let mut cache = self
-                .session_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cache = self.session_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.skills_fingerprint = Some(fingerprint);
             cache.system_prompt_snapshots.clear();
         }
@@ -2862,4 +2873,23 @@ fn reload_skills_fingerprint_is_shared_across_clones() {
         1,
         "clone must share the fingerprint decision and skip reload"
     );
+}
+
+#[test]
+fn skill_fingerprint_detects_same_length_preserved_mtime_edit() {
+    let base = std::env::temp_dir().join(format!("blockcell-fingerprint-{}", uuid::Uuid::new_v4()));
+    let paths = Paths::with_base(base);
+    paths.ensure_dirs().unwrap();
+    let path = paths.skills_dir().join("fingerprint.txt");
+    std::fs::write(&path, "first").unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let before = ContextBuilder::skills_tree_fingerprint(&paths);
+    std::fs::write(&path, "other").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_ne!(before, ContextBuilder::skills_tree_fingerprint(&paths));
 }

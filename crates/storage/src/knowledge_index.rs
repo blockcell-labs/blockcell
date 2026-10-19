@@ -275,9 +275,8 @@ impl KnowledgeIndex {
                 .map(|(offset, _)| format!("?{}", offset + 1))
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!(
-                "SELECT dedup_key FROM forgotten WHERE dedup_key IN ({placeholders})"
-            );
+            let sql =
+                format!("SELECT dedup_key FROM forgotten WHERE dedup_key IN ({placeholders})");
             let params = candidates
                 .iter()
                 .map(|(entry, _)| entry.content_hash.clone())
@@ -330,6 +329,20 @@ impl KnowledgeIndex {
         )
         .map_err(map_sqlite_error)?;
         Ok(dedup_key)
+    }
+
+    /// Remove a newly prepared tombstone when the associated deletion fails.
+    pub fn remove_forgotten_content(&self, content: &str) -> Result<()> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|_| Error::Storage("Knowledge index lock poisoned".into()))?;
+        conn.execute(
+            "DELETE FROM forgotten WHERE dedup_key = ?1",
+            params![knowledge_dedup_key(content)],
+        )
+        .map_err(map_sqlite_error)?;
+        Ok(())
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<KnowledgeIndexEntry>> {

@@ -194,6 +194,65 @@ fn well_formed_skill_md() -> String {
     body
 }
 
+#[tokio::test]
+async fn fake_provider_drives_generation_through_deployment_and_rollback() {
+    struct Replies(std::sync::Mutex<std::collections::VecDeque<String>>);
+    #[async_trait::async_trait]
+    impl LLMProvider for Replies {
+        async fn generate(&self, _prompt: &str) -> Result<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| Error::Evolution("unexpected LLM call".into()))
+        }
+    }
+    let root = evo_root("provider_lifecycle");
+    let skills = root.join("skills");
+    let record = record_for(
+        "unused",
+        SkillLayout::PromptTool,
+        SkillType::PromptOnly,
+        false,
+    );
+    let dir = skills.join(&record.skill_name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let baseline = well_formed_skill_md();
+    std::fs::write(dir.join("SKILL.md"), &baseline).unwrap();
+    let candidate = baseline.replace("Demo skill", "Improved skill");
+    let provider = Replies(std::sync::Mutex::new(std::collections::VecDeque::from([
+        candidate.clone(),
+        r#"{"passed":true,"issues":[]}"#.into(),
+    ])));
+    let engine = SkillEvolution::new(skills, 5);
+    let id = engine.trigger_evolution(record.context).await.unwrap();
+    engine.generate_patch(&id, &provider).await.unwrap();
+    assert!(crate::audit::static_audit(&SkillType::PromptOnly, &candidate).passed);
+    assert!(engine.audit_patch(&id, &provider).await.unwrap().passed);
+    assert!(engine.compile_check(&id).await.unwrap().0);
+    assert!(engine.contract_check(&id).unwrap().0);
+    engine.deploy_and_observe(&id).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+        candidate.trim()
+    );
+    engine.record_observation_call(&id, true).unwrap();
+    assert_eq!(engine.check_observation(&id, 1.0).unwrap(), Some(false));
+    engine
+        .rollback(&id, "regression in observation")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+        baseline
+    );
+    assert_eq!(
+        engine.load_record(&id).unwrap().status,
+        EvolutionStatus::RolledBack
+    );
+    assert!(provider.0.lock().unwrap().is_empty());
+}
+
 fn engine_with(tag: &str, record: &EvolutionRecord) -> SkillEvolution {
     let root = evo_root(tag);
     let engine = SkillEvolution::new(root.join("skills"), 5);
@@ -351,7 +410,8 @@ fn contract_check_rejects_meta_with_unknown_fields() {
     let id = "evo_contract_meta";
     let mut record = record_for(id, SkillLayout::PromptTool, SkillType::PromptOnly, false);
     let mut patch = patch_with("# Title\n\n## Shared\nx\n\n## Prompt\ny\n");
-    patch.explanation = "```yaml\nname: skill\ndescription: d\nrouting: legacy-field\n```\n".to_string();
+    patch.explanation =
+        "```yaml\nname: skill\ndescription: d\nrouting: legacy-field\n```\n".to_string();
     record.patch = Some(patch);
     record.status = EvolutionStatus::CompilePassed;
     let engine = engine_with("contract_meta", &record);

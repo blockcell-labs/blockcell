@@ -324,26 +324,33 @@ impl AgentRuntime {
     async fn approve_dangerous_operation(
         &mut self,
         tool_name: &str,
+        args: &serde_json::Value,
         items: Vec<String>,
         msg: &InboundMessage,
     ) -> bool {
         if self.confirm_tx.is_none() {
-            if !user_explicitly_confirms_dangerous_op(&msg.content) {
+            let prefix = format!("确认执行 {} ", tool_name);
+            let supplied = msg
+                .content
+                .trim()
+                .strip_prefix(&prefix)
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+            if supplied.as_ref() != Some(args) {
                 return false;
             }
             // 文本确认按消息一次性消费：同一条用户消息最多放行一个危险操作。
             // 否则"确认执行"四字等价于本回合全部危险操作全权放行。
             let key = format!(
-                "{}\u{1f}{}\u{1f}{}",
-                msg.channel, msg.sender_id, msg.timestamp_ms
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                msg.channel, msg.sender_id, msg.timestamp_ms, tool_name
             );
             let mut used = self
                 .consumed_text_confirmations
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            // 防无界增长：超过上限清空（极老键重新可用，与现状一致且不扩大风险面）
+            // Fail closed at capacity instead of making old approvals replayable.
             if used.len() >= 1024 {
-                used.clear();
+                return false;
             }
             used.insert(key)
         } else {
@@ -406,7 +413,7 @@ impl AgentRuntime {
         items.insert(0, format!("environment: {}", environment.as_str()));
         let interactive = self.confirm_tx.is_some();
         if self
-            .approve_dangerous_operation(tool_name, items, inv.msg)
+            .approve_dangerous_operation(tool_name, &inv.args, items, inv.msg)
             .await
         {
             // 危险操作批准即视为本次调用的整体确认：后续的 PathAccess/ExplicitConfirmation
@@ -414,7 +421,12 @@ impl AgentRuntime {
             inv.dangerous_confirmed = true;
             Ok(())
         } else if matches!(tool_name, "exec" | "shell") {
-            Err(dangerous_exec_denied(tool_name, interactive))
+            let denial = dangerous_exec_denied(tool_name, interactive);
+            Err(if interactive {
+                denial
+            } else {
+                format!("{}\n确认格式：确认执行 {} {}", denial, tool_name, inv.args)
+            })
         } else {
             Err(dangerous_file_ops_denied())
         }
@@ -472,7 +484,7 @@ impl AgentRuntime {
             detail
         )];
         if self
-            .approve_dangerous_operation(&inv.call.name, items, inv.msg)
+            .approve_dangerous_operation(&inv.call.name, &inv.args, items, inv.msg)
             .await
         {
             Ok(())
@@ -532,6 +544,7 @@ impl AgentRuntime {
 
         // Build spawn handle for tools
         let spawn_handle = Arc::new(RuntimeSpawnHandle {
+            memory_file_store: self.memory_file_store.clone(),
             config: self.config.clone(),
             paths: self.paths.clone(),
             task_manager: self.task_manager.clone(),
@@ -637,6 +650,7 @@ impl AgentRuntime {
                 let approved = self
                     .approve_dangerous_operation(
                         "shell",
+                        &full_access_retry_args(&inv.args),
                         vec![format!(
                             "sandbox escalation ({reason}): {}",
                             inv.args

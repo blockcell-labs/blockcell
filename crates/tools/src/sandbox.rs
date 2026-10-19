@@ -50,7 +50,7 @@ pub enum SandboxBackend {
 pub fn select_backend(
     os: &str,
     seatbelt_available: bool,
-    landlock_abi: Option<i32>,
+    _landlock_abi: Option<i32>,
     policy: SandboxPolicy,
 ) -> SandboxBackend {
     if policy == SandboxPolicy::FullAccess {
@@ -58,7 +58,11 @@ pub fn select_backend(
     }
     match os {
         "macos" if seatbelt_available => SandboxBackend::MacOsSeatbelt,
-        "linux" if landlock_abi.unwrap_or(0) >= 1 => SandboxBackend::LinuxLandlockSeccomp,
+        // The current Landlock rules constrain writes but do not protect
+        // credential reads. Do not advertise this as an enforced sandbox.
+        // Use the existing explicit-approval fallback until read isolation is
+        // implemented and verified on Linux.
+        "linux" => SandboxBackend::ApprovalRequired,
         _ => SandboxBackend::ApprovalRequired,
     }
 }
@@ -743,7 +747,7 @@ mod tests {
         );
         assert_eq!(
             select_backend("linux", false, Some(3), SandboxPolicy::WorkspaceWrite),
-            SandboxBackend::LinuxLandlockSeccomp
+            SandboxBackend::ApprovalRequired
         );
         assert_eq!(
             select_backend("windows", false, None, SandboxPolicy::WorkspaceWrite),

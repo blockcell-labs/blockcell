@@ -6051,7 +6051,8 @@ async fn text_confirmation_is_consumed_once_per_message() {
     // 同一条"确认执行"最多放行一个危险操作，新消息重新获得一次额度。
     let mut runtime = test_runtime();
     let mut msg = test_main_session_inbound("cli", "text-confirm-once");
-    msg.content = "确认执行".to_string();
+    msg.content =
+        "确认执行 exec {\"command\":\"pkill -9 blockcell-nonexistent-marker\"}".to_string();
     let call = || {
         tool_call(
             "exec",
@@ -6072,12 +6073,49 @@ async fn text_confirmation_is_consumed_once_per_message() {
     );
 
     let mut msg2 = test_main_session_inbound("cli", "text-confirm-once");
-    msg2.content = "确认执行".to_string();
+    msg2.content = msg.content.clone();
     msg2.timestamp_ms += 1;
     let third = runtime.execute_tool_call(&call(), &msg2, None).await.text;
     assert!(
         !third.contains("requires explicit user confirmation"),
         "{third}"
+    );
+}
+
+#[tokio::test]
+async fn generic_text_confirmation_cannot_approve_an_unidentified_operation() {
+    let mut runtime = test_runtime();
+    let mut msg = test_main_session_inbound("cli", "p2-confirm");
+    msg.content = "确认执行".into();
+    let call = tool_call(
+        "exec",
+        serde_json::json!({"command":"pkill -9 blockcell-nonexistent-marker"}),
+    );
+    let result = runtime.execute_tool_call(&call, &msg, None).await.text;
+    assert!(
+        result.contains("requires explicit user confirmation"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn another_session_cannot_replace_shared_notification_target() {
+    let mut runtime = test_runtime();
+    runtime
+        .update_main_session_target(&test_main_session_inbound("cli", "owner"))
+        .await;
+    runtime
+        .update_main_session_target(&test_main_session_inbound("telegram", "stranger"))
+        .await;
+    assert_eq!(
+        runtime
+            .shared_session_target
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .chat_id,
+        "owner"
     );
 }
 

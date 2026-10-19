@@ -510,6 +510,35 @@ impl AgentRuntime {
         }
 
         let next_session_key = msg.session_key();
+        if let Some(expected) = self.config.security.main_session_key.as_deref() {
+            if next_session_key != expected {
+                return;
+            }
+        } else if msg.channel != "cli" {
+            return;
+        }
+        // Shared background delivery must not follow whichever conversation
+        // happens to send the latest message. Pin it atomically across forks.
+        {
+            let mut shared = self
+                .shared_session_target
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(target) = shared.as_ref() {
+                if target.session_key != next_session_key && msg.channel != "cli" {
+                    self.main_session_target = Some(target.clone());
+                    return;
+                }
+            } else {
+                *shared = Some(MainSessionTarget {
+                    channel: msg.channel.clone(),
+                    account_id: msg.account_id.clone(),
+                    chat_id: msg.chat_id.clone(),
+                    session_key: next_session_key.clone(),
+                    agent_id: self.agent_id.clone(),
+                });
+            }
+        }
         if self.ghost_learning_enabled() {
             if let Some(previous) = self.main_session_target.as_ref() {
                 if previous.session_key != next_session_key {
@@ -537,7 +566,13 @@ impl AgentRuntime {
         };
         self.main_session_target = Some(target.clone());
         if let Ok(mut guard) = self.shared_session_target.write() {
-            *guard = Some(target);
+            if guard
+                .as_ref()
+                .map(|current| current.session_key == target.session_key)
+                .unwrap_or(true)
+            {
+                *guard = Some(target);
+            }
         }
     }
 

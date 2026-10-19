@@ -42,6 +42,7 @@ impl SubagentCompletionReporter {
 /// chain that would otherwise prevent the future from being `Send`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_subagent_task(
+    parent_memory_file_store: Option<blockcell_tools::MemoryFileStoreHandle>,
     config: Config,
     paths: Paths,
     provider_pool: Arc<ProviderPool>,
@@ -105,8 +106,11 @@ pub(crate) async fn run_subagent_task(
     // 多个子代理时该路径会重复全量执行。
     let mut sub_runtime = match tokio::task::spawn_blocking(move || {
         let mut runtime = AgentRuntime::new(config, paths, provider_pool, tool_registry)?;
-        if let Err(e) = runtime.init_memory_file_store() {
-            tracing::warn!(error = %e, "Failed to initialize subagent file memory store");
+        runtime.memory_file_store = parent_memory_file_store;
+        if runtime.memory_file_store.is_none() {
+            if let Err(e) = runtime.init_memory_file_store() {
+                tracing::warn!(error = %e, "Failed to initialize subagent file memory store");
+            }
         }
         if let Err(e) = runtime.init_skill_file_store() {
             tracing::warn!(error = %e, "Failed to initialize subagent skill file store");
