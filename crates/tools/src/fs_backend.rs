@@ -42,6 +42,11 @@ pub trait FilesystemBackend: Send + Sync {
     /// 按 UTF-8 原样读取文件内容。
     async fn read_to_string(&self, path: &Path) -> Result<String>;
 
+    /// 返回文件字节数；路径不存在或不是普通文件时返回 `None`。
+    ///
+    /// 供工具在读取前做大小上限判断，避免把超大文件整体读入内存。
+    async fn size(&self, path: &Path) -> Result<Option<u64>>;
+
     /// 读取供模型阅读的文本：Office 文档（xlsx/xls/docx/pptx）转换为文本，其余同
     /// [`Self::read_to_string`]。转换结果不可写回原文件。
     async fn read_document(&self, path: &Path) -> Result<String>;
@@ -68,6 +73,15 @@ impl FilesystemBackend for LocalFilesystem {
 
     async fn read_to_string(&self, path: &Path) -> Result<String> {
         Ok(tokio::fs::read_to_string(path).await?)
+    }
+
+    async fn size(&self, path: &Path) -> Result<Option<u64>> {
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn read_document(&self, path: &Path) -> Result<String> {

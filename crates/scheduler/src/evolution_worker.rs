@@ -61,11 +61,10 @@ where
     tokio::select! {
         result = future => Some(result),
         changed = lease_lost.changed() => {
-            if changed.is_err() || *lease_lost.borrow() {
-                None
-            } else {
-                None
-            }
+            // The only sender in this module publishes `true` when the lease is
+            // lost, so any change (or a closed channel) means "abandon the step".
+            let _ = changed;
+            None
         }
     }
 }

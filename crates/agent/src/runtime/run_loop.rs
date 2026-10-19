@@ -250,12 +250,25 @@ impl AgentRuntime {
                                                 .to_string();
 
                                             // 将消息内容替换为继续指令，走正常的消息处理流程
-                                            // 标记 metadata 表明这是 resume 自动继续，不是用户新输入
+                                            // 标记 metadata 表明这是 resume 自动继续，不是用户新输入。
+                                            // 合并而非整体替换：ws_connection_id / completion_receipt_id
+                                            // 等既有字段决定回执能否完成，不能在恢复时丢掉。
                                             msg.content = format!("[resume_task:continue] {}", last_user_content);
-                                            msg.metadata = serde_json::json!({
-                                                "source": "resume_auto_continue",
-                                                "resumed_task_id": task_id
-                                            });
+                                            if let Some(metadata) = msg.metadata.as_object_mut() {
+                                                metadata.insert(
+                                                    "source".to_string(),
+                                                    serde_json::json!("resume_auto_continue"),
+                                                );
+                                                metadata.insert(
+                                                    "resumed_task_id".to_string(),
+                                                    serde_json::json!(task_id),
+                                                );
+                                            } else {
+                                                msg.metadata = serde_json::json!({
+                                                    "source": "resume_auto_continue",
+                                                    "resumed_task_id": task_id
+                                                });
+                                            }
                                             // 不 continue，让消息走下面的正常 spawn 流程
                                         }
                                         Ok(None) => {

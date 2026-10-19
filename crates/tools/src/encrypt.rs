@@ -57,7 +57,7 @@ impl Tool for EncryptTool {
 
         ToolSchema {
             name: "encrypt".to_string(),
-            description: "Encryption, hashing, and encoding utilities. You MUST provide `action`. action='encrypt_file'|'decrypt_file': requires `path` and either `password` or `key`, optional `output_path`. action='generate_password': optional `length`, `charset`, `exclude_chars`. action='generate_key': optional `bits`. action='hash_file': requires `path`, optional `algorithm`. action='hash_text': requires `text`, optional `algorithm`. action='encode'|'decode': requires `text`, optional `encoding`. action='checksum_verify': requires `path` and `expected_hash`, optional `algorithm`.".to_string(),
+            description: "Encryption, hashing, and encoding utilities. You MUST provide `action`. action='encrypt_file'|'decrypt_file': requires `path` and either `password` or `key`, optional `output_path`. action='generate_password': optional `length`, `charset`, `exclude_chars`. action='generate_key': optional `length` (key size in bits: 128/256). action='hash_file': requires `path`, optional `hash_algorithm`. action='hash_text': requires `text`, optional `hash_algorithm`. action='encode'|'decode': requires `text`, optional `encoding`. action='checksum_verify': requires `path` and `expected_hash`, optional `hash_algorithm`.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": Value::Object(props),

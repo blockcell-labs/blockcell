@@ -1,4 +1,4 @@
-use crate::file_lock::lock_exclusive;
+use crate::file_lock::{lock_exclusive, write_atomically};
 use blockcell_core::types::ChatMessage;
 use blockcell_core::{session_file_stem, session_id_from_file_stem, Paths, Result};
 use serde::{Deserialize, Serialize};
@@ -161,22 +161,25 @@ impl SessionStore {
             return Ok((None, None));
         }
 
-        Ok(self
-            .read_metadata_line(&path)
-            .map(|(created_at, _)| (Some(created_at), self.read_updated_at(&path)))
-            .unwrap_or((None, None)))
-    }
-
-    /// 从 session 文件第一行读取 updated_at 字段
-    fn read_updated_at(&self, path: &std::path::Path) -> Option<String> {
-        let file = File::open(path).ok()?;
+        // Read the header line once: opening the file twice allowed an atomic
+        // replacement between the reads, so created_at and updated_at could
+        // come from different file versions.
+        let Ok(file) = File::open(&path) else {
+            return Ok((None, None));
+        };
         let mut reader = BufReader::new(file);
         let mut first_line = String::new();
-        reader.read_line(&mut first_line).ok()?;
-        let line: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
-        line.get("updated_at")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+        if reader.read_line(&mut first_line).is_err() {
+            return Ok((None, None));
+        }
+        match serde_json::from_str::<SessionLine>(first_line.trim()) {
+            Ok(SessionLine::Metadata {
+                created_at,
+                updated_at,
+                ..
+            }) => Ok((Some(created_at), Some(updated_at))),
+            _ => Ok((None, None)),
+        }
     }
 
     pub fn load_metadata(&self, session_key: &str) -> Result<Value> {
@@ -551,10 +554,21 @@ impl SessionStore {
 
         meta.insert(file_key, serde_json::json!({ "name": name.clone() }));
 
-        let _ = std::fs::write(
+        // Atomic replace: a crash mid-write must not truncate the shared
+        // `_meta.json` and lose every session name.
+        if let Err(error) = write_atomically(
             &meta_path,
-            serde_json::to_string_pretty(&meta).unwrap_or_default(),
-        );
+            serde_json::to_string_pretty(&meta)
+                .unwrap_or_default()
+                .as_bytes(),
+        ) {
+            tracing::warn!(
+                path = %meta_path.display(),
+                error = %error,
+                "Failed to persist session name metadata"
+            );
+            return None;
+        }
 
         Some(name)
     }

@@ -341,21 +341,36 @@ impl MemoryStore {
             .inner
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-        let mut items = Vec::with_capacity(ids.len());
-        for id in ids {
-            let item = conn
-                .query_row(
-                    "SELECT * FROM memory_items WHERE id = ?1",
-                    params![id],
+        // Batch the lookup (candidate windows are ~200 ids): one prepared
+        // statement per chunk instead of one round-trip per id. Chunked to stay
+        // below SQLite's variable limit.
+        const MAX_IDS_PER_QUERY: usize = 500;
+        let mut found: std::collections::HashMap<String, MemoryItem> =
+            std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{}", index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("SELECT * FROM memory_items WHERE id IN ({})", placeholders);
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| blockcell_core::Error::Storage(format!("Load by id error: {}", e)))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(chunk.iter()),
                     Self::memory_item_from_row,
                 )
-                .optional()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Load by id error: {}", e)))?;
-            if let Some(item) = item {
-                items.push(item);
+            for row in rows {
+                let item = row.map_err(|e| {
+                    blockcell_core::Error::Storage(format!("Load by id error: {}", e))
+                })?;
+                found.insert(item.id.clone(), item);
             }
         }
-        Ok(items)
+        // Preserve the caller's order (ranking) and drop missing ids.
+        Ok(ids.iter().filter_map(|id| found.remove(id)).collect())
     }
 
     pub(crate) fn item_matches_query(&self, item: &MemoryItem, params: &QueryParams) -> bool {

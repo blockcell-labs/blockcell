@@ -136,7 +136,7 @@ fn configure_provider(
             entry.api_base = Some("http://localhost:11434".to_string());
         }
     } else {
-        let has_existing = !entry.api_key.trim().is_empty() && entry.api_key != "dummy";
+        let has_existing = !blockcell_core::config::is_placeholder_api_key(&entry.api_key);
         let final_key = if let Some(flag) = api_key_flag {
             flag.trim().to_string()
         } else if has_existing {
@@ -149,7 +149,7 @@ fn configure_provider(
             entry.api_key = final_key;
         }
 
-        if entry.api_key.trim().is_empty() || entry.api_key == "dummy" {
+        if blockcell_core::config::is_placeholder_api_key(&entry.api_key) {
             bail!("Provider '{}' requires a valid API key.", provider);
         }
     }

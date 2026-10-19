@@ -107,6 +107,12 @@ impl super::AgentRuntime {
                 push_path(&mut accesses, args, "path", PathOp::Read);
                 push_path(&mut accesses, args, "output_path", PathOp::Write);
             }
+            "http_request" => {
+                // `save_to` writes the response body to disk. The runtime only
+                // recognises this name here, so omitting the branch meant the
+                // write never reached the path policy.
+                push_path(&mut accesses, args, "save_to", PathOp::Write);
+            }
             "app_control" => {
                 push_path(&mut accesses, args, "screenshot_path", PathOp::Write);
             }
@@ -286,6 +292,7 @@ impl super::AgentRuntime {
     ) -> bool {
         self.check_path_permission_with_confirmation(tool_name, args, msg, false, false)
             .await
+            .is_ok()
     }
 
     /// `policy_confirmed`：本次调用已经过用户确认（Policy/DangerousOperation 阶段批准），
@@ -300,7 +307,7 @@ impl super::AgentRuntime {
         msg: &InboundMessage,
         policy_confirmed: bool,
         confirmed_may_cache: bool,
-    ) -> bool {
+    ) -> Result<(), String> {
         if matches!(tool_name, "exec_local" | "exec_skill_script") {
             // These run scripts addressed relative to the active skill
             // directory, so the generic workspace policy doesn't apply. Still
@@ -312,19 +319,23 @@ impl super::AgentRuntime {
                     tool = tool_name,
                     path, "Rejecting exec script path that escapes skill scope"
                 );
-                return false;
+                return Err("script path escapes the active skill directory".to_string());
             }
-            return true;
+            return Ok(());
         }
         let path_accesses = self.extract_path_accesses(tool_name, args);
         if path_accesses.is_empty() {
-            return true;
+            return Ok(());
         }
         let session_key = persist_session_key_for(msg);
 
         // Classify each path by policy outcome
         let mut deny_paths: Vec<String> = Vec::new();
         let mut confirm_paths: Vec<PathAccess> = Vec::new();
+        // Directories are only cached once the *whole* operation is approved:
+        // caching inside the loop left grants behind when a later path caused
+        // the call to be rejected.
+        let mut cacheable: Vec<PathAccess> = Vec::new();
 
         for access in &path_accesses {
             let resolved = self.resolve_path(&access.path);
@@ -364,13 +375,13 @@ impl super::AgentRuntime {
                         "Path access allowed by policy"
                     );
                     if self.path_policy.cache_confirmed_dirs() {
-                        self.authorize_directory(&resolved, access.op, &session_key);
+                        cacheable.push(access.clone());
                     }
                 }
                 PolicyAction::Confirm => {
                     if policy_confirmed {
                         if confirmed_may_cache && self.path_policy.cache_confirmed_dirs() {
-                            self.authorize_directory(&resolved, access.op, &session_key);
+                            cacheable.push(access.clone());
                         }
                     } else {
                         confirm_paths.push(access.clone());
@@ -381,12 +392,16 @@ impl super::AgentRuntime {
 
         // Any hard-deny → reject the whole operation
         if !deny_paths.is_empty() {
-            return false;
+            return Err(format!(
+                "path access denied by policy: {}",
+                deny_paths.join(", ")
+            ));
         }
 
         // All paths were allowed (workspace / session-cache / policy-allow)
         if confirm_paths.is_empty() {
-            return true;
+            self.cache_authorized_paths(&cacheable, &session_key);
+            return Ok(());
         }
 
         // Need user confirmation for the remaining paths
@@ -413,26 +428,23 @@ impl super::AgentRuntime {
 
             if !matches!(tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await, Ok(Ok(()))) {
                 warn!("Failed to send confirmation request, denying access");
-                return false;
+                return Err("path confirmation request could not be delivered".to_string());
             }
 
             match tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, response_rx).await {
-                Ok(Ok(allowed)) => {
-                    if allowed && self.path_policy.cache_confirmed_dirs() {
-                        for access in &confirm_paths {
-                            let resolved = self.resolve_path(&access.path);
-                            self.authorize_directory(&resolved, access.op, &session_key);
-                        }
-                    }
-                    allowed
+                Ok(Ok(true)) => {
+                    cacheable.extend(confirm_paths.iter().cloned());
+                    self.cache_authorized_paths(&cacheable, &session_key);
+                    Ok(())
                 }
+                Ok(Ok(false)) => Err("path access was denied by the user".to_string()),
                 Ok(Err(_)) => {
                     warn!("Confirmation channel closed, denying access");
-                    false
+                    Err("path confirmation channel closed".to_string())
                 }
                 Err(_) => {
                     warn!("Confirmation request timed out, denying access");
-                    false
+                    Err("path confirmation timed out".to_string())
                 }
             }
         } else {
@@ -440,7 +452,18 @@ impl super::AgentRuntime {
                 tool = tool_name,
                 "No confirmation channel, denying access to paths outside workspace"
             );
-            false
+            Err("path requires confirmation but no confirmation channel is available".to_string())
+        }
+    }
+
+    /// Cache directory grants after the whole operation has been approved.
+    fn cache_authorized_paths(&mut self, accesses: &[PathAccess], session_key: &str) {
+        if !self.path_policy.cache_confirmed_dirs() {
+            return;
+        }
+        for access in accesses {
+            let resolved = self.resolve_path(&access.path);
+            self.authorize_directory(&resolved, access.op, session_key);
         }
     }
 

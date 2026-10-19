@@ -155,7 +155,6 @@ fn record_for(
         patch: None,
         audit: None,
         contract: None,
-        shadow_test: None,
         observation: None,
         observation_total_calls: 0,
         observation_error_calls: 0,
@@ -613,4 +612,12 @@ async fn deploy_and_observe_then_rollback_restores_the_baseline() {
     );
     let reloaded = engine.load_record(id).expect("reload record");
     assert_eq!(reloaded.status, EvolutionStatus::RolledBack);
+}
+
+#[test]
+fn p3_load_skill_source_rejects_parent() {
+    let root = temp_skills_dir("source_parent");
+    let engine = SkillEvolution::new(root.clone(), 5);
+    assert!(engine.load_skill_source("../outside").is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }

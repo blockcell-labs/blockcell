@@ -371,7 +371,7 @@ impl SkillEvolutionWorker {
             return Ok(());
         }
 
-        let existing = blocking::list_workflows(&self.store, None).await?;
+        let existing = blocking::list_active_workflows(&self.store).await?;
         for (skill_name, evolution_id) in pending {
             if existing.iter().any(|workflow| {
                 workflow.description == evolution_id && Self::workflow_blocks_enqueue(workflow)

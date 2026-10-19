@@ -386,6 +386,10 @@ impl AuditLogger {
         let json = serde_json::to_string(&record)?;
         writeln!(file, "{}", json)?;
         file.flush()?;
+        // `flush` on a File is a no-op; without sync_data a crash can drop the
+        // tail of the hash chain (integrity of the surviving prefix is intact,
+        // but the last event is lost).
+        file.sync_data()?;
 
         Ok(())
     }

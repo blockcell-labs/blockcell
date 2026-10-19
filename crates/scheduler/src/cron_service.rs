@@ -15,8 +15,11 @@ use tracing::{debug, error, info};
 
 #[cfg(not(test))]
 const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+// Keep the test budget well above the 500 ms `add_job` assertions below: with
+// a 500 ms receipt timeout on both sides, a slow disk could let the tick time
+// out before the test completes the receipt (flaky on loaded machines).
 #[cfg(test)]
-const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobStore {

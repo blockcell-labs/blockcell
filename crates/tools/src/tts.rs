@@ -486,17 +486,24 @@ async fn speak_api(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = crate::bounded_io::read_text_limited(response, 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Err(Error::Tool(format!(
             "OpenAI TTS API error {}: {}",
             status, text
         )));
     }
 
-    let bytes = response
-        .bytes()
+    // Provider-supplied body: cap it instead of trusting Content-Length.
+    let (bytes, truncated) = crate::bounded_io::read_response_limited(response, 64 * 1024 * 1024)
         .await
         .map_err(|e| Error::Tool(format!("Failed to read TTS response: {}", e)))?;
+    if truncated {
+        return Err(Error::Tool(
+            "TTS response exceeded the 64MB limit".to_string(),
+        ));
+    }
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -533,8 +540,12 @@ async fn check_command(cmd: &str) -> bool {
 }
 
 fn resolve_path(path: &str, workspace: &std::path::Path) -> String {
-    if path.starts_with('/') || path.starts_with('~') {
+    if path.starts_with('/') {
         path.to_string()
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(relative).display().to_string())
+            .unwrap_or_else(|| path.to_string())
     } else {
         workspace.join(path).display().to_string()
     }
@@ -544,6 +555,14 @@ fn resolve_path(path: &str, workspace: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn p3_bare_tilde_matches_runtime_relative_path() {
+        let workspace = std::path::Path::new("/tmp/p3-workspace");
+        for path in ["~", "~foo", "~中文"] {
+            assert_eq!(resolve_path(path, workspace), workspace.join(path).display().to_string());
+        }
+    }
 
     #[test]
     fn test_tts_schema() {

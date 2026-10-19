@@ -178,6 +178,23 @@ pub fn is_terminal_status(status: &TaskStatus) -> bool {
 /// 延迟清理的宽限期（秒）
 pub const EVICT_GRACE_PERIOD_SECS: i64 = 30;
 
+/// Maximum queued steering messages per task. Without a bound an unresponsive
+/// task could grow its queue indefinitely.
+const MAX_QUEUED_MESSAGES: usize = 64;
+
+/// Lifecycle event summaries are delivered to users/system events; keep only a
+/// bounded prefix instead of embedding a full tool result or stack trace.
+const MAX_LIFECYCLE_TEXT_CHARS: usize = 500;
+
+fn truncate_event_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
+}
+
 mod persistence;
 
 #[cfg(test)]
@@ -466,7 +483,13 @@ impl TaskManager {
                 "后台任务已完成".to_string(),
                 task.result
                     .as_ref()
-                    .map(|result| format!("{} 已完成：{}", task.label, result))
+                    .map(|result| {
+                        format!(
+                            "{} 已完成：{}",
+                            task.label,
+                            truncate_event_text(result, MAX_LIFECYCLE_TEXT_CHARS)
+                        )
+                    })
                     .unwrap_or_else(|| format!("{} 已完成", task.label)),
                 DeliveryPolicy::default(),
             ),
@@ -475,7 +498,13 @@ impl TaskManager {
                 "后台任务失败".to_string(),
                 task.error
                     .as_ref()
-                    .map(|error| format!("{} 执行失败：{}", task.label, error))
+                    .map(|error| {
+                        format!(
+                            "{} 执行失败：{}",
+                            task.label,
+                            truncate_event_text(error, MAX_LIFECYCLE_TEXT_CHARS)
+                        )
+                    })
                     .unwrap_or_else(|| format!("{} 执行失败", task.label)),
                 DeliveryPolicy::critical(),
             ),
@@ -1096,6 +1125,12 @@ impl TaskManager {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let queue = queues.entry(task_id.to_string()).or_default();
+            if queue.len() >= MAX_QUEUED_MESSAGES {
+                return Err(Error::Tool(format!(
+                    "Task '{}' message queue is full ({} pending); retry after it drains.",
+                    task_id, MAX_QUEUED_MESSAGES
+                )));
+            }
             queue.push_back(message.clone());
         }
 

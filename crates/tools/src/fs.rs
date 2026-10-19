@@ -128,6 +128,22 @@ impl Tool for ReadFileTool {
             Some(_) => return Err(Error::Tool(format!("Not a file: {}", path.display()))),
         }
 
+        // Non-Office files are read whole; refuse oversized inputs instead of
+        // letting a multi-GB log/text file exhaust memory. Office documents
+        // have their own (higher) limits inside `office::read_office_file`.
+        if !crate::office::is_office_file(&path) {
+            const MAX_READ_BYTES: u64 = 32 * 1024 * 1024;
+            if let Some(size) = self.fs.size(&path).await? {
+                if size > MAX_READ_BYTES {
+                    return Err(Error::Validation(format!(
+                        "File is too large to read as text ({} bytes, limit {}). \
+                         Use grep/code_search or read a slice with another tool.",
+                        size, MAX_READ_BYTES
+                    )));
+                }
+            }
+        }
+
         let content = self.fs.read_document(&path).await?;
         // Office 文件（xlsx, xls, docx, pptx）由 backend 转为文本，结果中标注原始格式。
         let format = crate::office::is_office_file(&path).then(|| {
@@ -639,6 +655,14 @@ mod tests {
         }
         async fn read_document(&self, path: &std::path::Path) -> Result<String> {
             self.read_to_string(path).await
+        }
+        async fn size(&self, path: &std::path::Path) -> Result<Option<u64>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(path)
+                .map(|content| content.len() as u64))
         }
         async fn write(&self, path: &std::path::Path, content: &str) -> Result<()> {
             self.0

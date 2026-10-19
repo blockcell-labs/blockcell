@@ -37,7 +37,7 @@ fn is_default_api_type(t: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommunityHubConfig {
-    #[serde(default)]
+    #[serde(default = "default_community_hub_url")]
     pub hub_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -50,6 +50,19 @@ pub struct CommunityHubConfig {
 
 fn default_community_hub_url() -> Option<String> {
     Some("https://hub-api.blockcell.dev".to_string())
+}
+
+#[cfg(test)]
+mod p3_tests {
+    use super::*;
+
+    #[test]
+    fn p3_missing_hub_url_uses_default_but_null_disables_it() {
+        let config: CommunityHubConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.hub_url, CommunityHubConfig::default().hub_url);
+        let disabled: CommunityHubConfig = serde_json::from_str(r#"{"hubUrl":null}"#).unwrap();
+        assert_eq!(disabled.hub_url, None);
+    }
 }
 
 impl Default for CommunityHubConfig {

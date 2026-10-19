@@ -207,6 +207,11 @@ impl Tool for TermuxApiTool {
                 | "infrared_transmit"
                 | "keystore"
                 | "wifi_enable"
+                // Privacy-sensitive sensors: these capture camera/microphone/
+                // location data and were previously missing from the gate.
+                | "camera_photo"
+                | "microphone_record"
+                | "location"
         )
     }
 
@@ -303,6 +308,23 @@ mod tests {
         let params = &schema.parameters;
         let action_enum = params["properties"]["action"]["enum"].as_array().unwrap();
         assert!(action_enum.len() >= 40);
+    }
+
+    #[test]
+    fn test_privacy_sensor_actions_require_confirmation() {
+        let tool = TermuxApiTool;
+        for action in ["camera_photo", "microphone_record", "location", "sms_send"] {
+            assert!(
+                tool.requires_confirmation(&json!({ "action": action })),
+                "{action} must require explicit confirmation"
+            );
+        }
+        for action in ["battery_status", "camera_info", "sensor"] {
+            assert!(
+                !tool.requires_confirmation(&json!({ "action": action })),
+                "{action} is read-only and must not require confirmation"
+            );
+        }
     }
 
     #[test]

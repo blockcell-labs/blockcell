@@ -34,10 +34,19 @@ impl Tool for SystemInfoTool {
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        params
+        let category = params
             .get("category")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Validation("Missing required parameter: category".to_string()))?;
+        if !matches!(
+            category,
+            "all" | "hardware" | "software" | "network" | "tools"
+        ) {
+            return Err(Error::Validation(format!(
+                "Unknown category '{}'; expected all|hardware|software|network|tools",
+                category
+            )));
+        }
         Ok(())
     }
 
@@ -46,8 +55,16 @@ impl Tool for SystemInfoTool {
 
         let mut result = json!({});
 
-        if category == "all" || category == "hardware" {
-            result["hardware"] = probe_hardware().await;
+        // Probe hardware once and reuse the result in `probe_tools`; otherwise
+        // `category=all` runs camera/microphone/GPU detection twice (each one
+        // spawning `system_profiler`).
+        let hardware = if category == "all" || category == "hardware" {
+            Some(probe_hardware().await)
+        } else {
+            None
+        };
+        if let Some(hardware) = &hardware {
+            result["hardware"] = hardware.clone();
         }
         if category == "all" || category == "software" {
             result["software"] = probe_software().await;
@@ -56,7 +73,7 @@ impl Tool for SystemInfoTool {
             result["network"] = probe_network().await;
         }
         if category == "all" || category == "tools" {
-            result["tools"] = probe_tools(&ctx).await;
+            result["tools"] = probe_tools(&ctx, hardware.as_ref()).await;
         }
 
         Ok(result)
@@ -196,7 +213,7 @@ async fn probe_network() -> Value {
 }
 
 /// 探测已注册的工具和能力
-async fn probe_tools(ctx: &ToolContext) -> Value {
+async fn probe_tools(ctx: &ToolContext, hardware: Option<&Value>) -> Value {
     let mut caps = json!({});
 
     // Check what the agent can currently do
@@ -229,14 +246,29 @@ async fn probe_tools(ctx: &ToolContext) -> Value {
         abilities.push("script.node — Run Node.js scripts".to_string());
     }
 
-    // Hardware detection
-    if detect_camera().await {
+    // Hardware detection. Reuse the already-probed snapshot when available so
+    // `category=all` does not run the same `system_profiler` queries twice.
+    let camera = match hardware {
+        Some(hw) => hw["camera"].as_bool().unwrap_or(false),
+        None => detect_camera().await,
+    };
+    if camera {
         abilities.push("hardware.camera — Camera available".to_string());
     }
-    if detect_microphone().await {
+    let microphone = match hardware {
+        Some(hw) => hw["microphone"].as_bool().unwrap_or(false),
+        None => detect_microphone().await,
+    };
+    if microphone {
         abilities.push("hardware.microphone — Microphone available".to_string());
     }
-    if !detect_gpu().await.is_empty() {
+    let has_gpu = match hardware {
+        Some(hw) => hw
+            .get("gpu")
+            .is_some_and(|gpu| !gpu.as_array().is_none_or(|items| items.is_empty())),
+        None => !detect_gpu().await.is_empty(),
+    };
+    if has_gpu {
         abilities.push("hardware.gpu — GPU available".to_string());
     }
 

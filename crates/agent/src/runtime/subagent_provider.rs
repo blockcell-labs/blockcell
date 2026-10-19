@@ -10,6 +10,11 @@ use blockcell_tools::subagent::{
     SubagentRequest, SubagentStatus, ToolGrant,
 };
 
+/// Upper bound for waiting on a typed subagent result. A task that stays
+/// `Running` forever (stuck provider, lost lease) must not block the calling
+/// tool indefinitely.
+const TYPED_SUBAGENT_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 #[derive(Clone)]
 pub struct InProcessSubagentProvider {
     provider_pool: Arc<ProviderPool>,
@@ -606,6 +611,7 @@ impl SubagentHandle for TypedHandle {
     }
 
     async fn result(&self) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + TYPED_SUBAGENT_RESULT_TIMEOUT;
         loop {
             let task = self.task_manager.get_task(self.id()).await.ok_or_else(|| {
                 blockcell_core::Error::NotFound(format!("subagent task {}", self.id()))
@@ -624,6 +630,13 @@ impl SubagentHandle for TypedHandle {
                     )))
                 }
                 TaskStatus::Queued | TaskStatus::Running => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(blockcell_core::Error::Timeout(format!(
+                            "subagent {} did not finish within {}s",
+                            self.id(),
+                            TYPED_SUBAGENT_RESULT_TIMEOUT.as_secs()
+                        )));
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await
                 }
             }

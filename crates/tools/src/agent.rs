@@ -207,15 +207,21 @@ Specify subagent_type for typed agents (background execution, returns task_id)."
         let agent_type = parsed.subagent_type.unwrap();
 
         // ===== 从注册表验证 agent_type =====
-        if let Some(ref registry) = ctx.agent_type_registry {
-            if !registry.has_type(&agent_type) {
-                let available = registry.type_names();
-                return Err(Error::Validation(format!(
-                    "无效的 subagent_type '{}', 可用类型: {}",
-                    agent_type,
-                    available.join(", ")
-                )));
-            }
+        // Typed subagents must be validated against the registry; without it
+        // we cannot prove the type exists, so fail closed instead of silently
+        // dispatching an unknown type (matches `can_spawn_subagent`).
+        let registry = ctx.agent_type_registry.as_ref().ok_or_else(|| {
+            Error::Tool(
+                "Agent type registry is unavailable; cannot spawn a typed subagent".to_string(),
+            )
+        })?;
+        if !registry.has_type(&agent_type) {
+            let available = registry.type_names();
+            return Err(Error::Validation(format!(
+                "无效的 subagent_type '{}', 可用类型: {}",
+                agent_type,
+                available.join(", ")
+            )));
         }
 
         // ===== 检查是否有同类型的 Running 任务 =====

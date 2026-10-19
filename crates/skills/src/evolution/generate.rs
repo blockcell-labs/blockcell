@@ -197,7 +197,6 @@ impl SkillEvolution {
         record.patch = Some(patch.clone());
         record.audit = None; // 清除旧审计结果
         record.contract = None; // 清除旧契约检查结果
-        record.shadow_test = None; // 清除旧测试结果
         record.observation = None; // 清除观察窗口配置，确保状态一致性
         record.status = EvolutionStatus::Generated;
         record.updated_at = chrono::Utc::now().timestamp();

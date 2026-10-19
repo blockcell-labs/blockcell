@@ -186,6 +186,19 @@ impl ToolLoopGuard {
         .to_string())
     }
 
+    /// Non-mutating counterpart of [`Self::admit`], used by the read-only
+    /// prefetch gate: a call that the loop guard would reject must not be
+    /// executed eagerly (its result would be discarded).
+    fn would_admit(&self, tool_name: &str) -> bool {
+        let limit = self
+            .limits_by_tool
+            .get(tool_name)
+            .copied()
+            .unwrap_or(self.default_limit);
+        let count = self.call_counts.get(tool_name).copied().unwrap_or(0);
+        count < limit && self.total_calls < self.global_limit
+    }
+
     /// 记录调用结论；同一调用连续未成功达到阈值时返回 `true`。
     fn record(&mut self, call: &ToolCallRequest, failed: bool) -> bool {
         if !failed {
@@ -2605,6 +2618,10 @@ impl AgentRuntime {
         self.runtime_handle = Some(handle);
     }
 
+    /// Test-only hook: production runtimes share the coordinator through
+    /// `fork_for_message_task`, which clones the `Arc` directly. Keeping this
+    /// setter out of production builds avoids a dead public method.
+    #[cfg(test)]
     pub(crate) fn install_shared_learning_coordinator(
         &mut self,
         coordinator: Arc<crate::learning_coordinator::LearningCoordinator>,

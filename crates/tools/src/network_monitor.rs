@@ -5,6 +5,15 @@ use tracing::debug;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
+/// Upper bounds for caller-supplied network parameters. Without them a single
+/// tool call can pin `ping`/`traceroute`/`nc` for an arbitrarily long time or
+/// spawn thousands of concurrent port probes.
+const MAX_NETWORK_TIMEOUT_SECS: u64 = 300;
+const MAX_PING_COUNT: u64 = 100;
+const MAX_TRACEROUTE_HOPS: u64 = 64;
+const MAX_PORT_SCAN_CONCURRENCY: u64 = 256;
+
+
 /// Network monitoring and diagnostics tool.
 ///
 /// Actions:
@@ -107,8 +116,16 @@ async fn action_ping(params: &Value) -> Result<Value> {
         .get("host")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for ping".into()))?;
-    let count = params.get("count").and_then(|v| v.as_u64()).unwrap_or(4);
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
+    let count = params
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4)
+        .clamp(1, MAX_PING_COUNT);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     let output = tokio::process::Command::new("ping")
         .args([
@@ -171,8 +188,13 @@ async fn action_traceroute(params: &Value) -> Result<Value> {
     let max_hops = params
         .get("max_hops")
         .and_then(|v| v.as_u64())
-        .unwrap_or(30);
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(5);
+        .unwrap_or(30)
+        .clamp(1, MAX_TRACEROUTE_HOPS);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     let output = tokio::process::Command::new("traceroute")
         .args([
@@ -221,7 +243,11 @@ async fn action_port_scan(params: &Value) -> Result<Value> {
         .get("host")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for port_scan".into()))?;
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(3);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     let ports = resolve_ports(params)?;
 
@@ -233,7 +259,8 @@ async fn action_port_scan(params: &Value) -> Result<Value> {
     let concurrent = params
         .get("concurrent")
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50)
+        .clamp(1, MAX_PORT_SCAN_CONCURRENCY) as usize;
 
     for chunk in ports.chunks(concurrent) {
         let mut handles = Vec::new();
@@ -439,8 +466,16 @@ async fn action_ssl_check(params: &Value) -> Result<Value> {
         .get("host")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("host is required for ssl_check".into()))?;
-    let port = params.get("port").and_then(|v| v.as_u64()).unwrap_or(443);
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
+    let port = params
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(443)
+        .clamp(1, 65535);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     // Invoke openssl directly (no shell): host/port are caller supplied and must
     // never be interpreted as shell syntax.
@@ -683,7 +718,11 @@ async fn action_http_check(params: &Value) -> Result<Value> {
         })
         .ok_or_else(|| Error::Tool("url is required for http_check".into()))?;
 
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     let start = std::time::Instant::now();
 
@@ -746,7 +785,11 @@ async fn action_bandwidth(params: &Value) -> Result<Value> {
         .get("url")
         .and_then(|v| v.as_str())
         .unwrap_or("https://speed.cloudflare.com/__down?bytes=10000000");
-    let timeout = params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+    let timeout = params
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+        .clamp(1, MAX_NETWORK_TIMEOUT_SECS);
 
     // Same SSRF guard as `http_check`: the default test URL is public, but `url` is a
     // caller-supplied parameter and could point at link-local/metadata endpoints.

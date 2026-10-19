@@ -26,7 +26,11 @@ def run_applescript(script):
 
 
 def escape_applescript(value):
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    # AppleScript string literals cannot contain raw newlines. Join lines with
+    # the `linefeed` constant so the surrounding quotes stay balanced.
+    normalized = escaped.replace("\r\n", "\n").replace("\r", "\n")
+    return '" & linefeed & "'.join(normalized.split("\n"))
 
 
 def build_wechat_script(contact, message):

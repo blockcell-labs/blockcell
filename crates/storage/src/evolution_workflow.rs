@@ -81,6 +81,9 @@ impl EvolutionWorkflowStore {
     }
 
     pub fn open(db_path: &Path) -> Result<Self> {
+        if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
         let conn = Connection::open(db_path).map_err(map_sqlite_error)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
@@ -311,63 +314,69 @@ impl EvolutionWorkflowStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite_error)?;
 
+        // Both statements use RETURNING so the caller only sees workflows that
+        // this call actually recovered. Previously the follow-up SELECT matched
+        // every Requested workflow (including ones never claimed), which made
+        // the "Recovered N workflows" log and the worker wake-up meaningless.
+        const RETURNING_COLS: &str = "id, capability_id, description, provider_kind, status, attempt, max_attempts,
+                        priority, created_at, updated_at, lease_owner, lease_until, last_error";
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(WorkflowRecord {
+                id: row.get(0)?,
+                capability_id: row.get(1)?,
+                description: row.get(2)?,
+                provider_kind: row.get(3)?,
+                status: row.get(4)?,
+                attempt: row.get(5)?,
+                max_attempts: row.get(6)?,
+                priority: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                lease_owner: row.get(10)?,
+                lease_until: row.get(11)?,
+                last_error: row.get(12)?,
+            })
+        };
+
+        let mut records = Vec::new();
+
         // 1. Reset expired leases back to Requested
-        tx.execute(
-            "UPDATE evo_workflows
-             SET status = 'Requested', lease_owner = NULL, lease_until = NULL, updated_at = ?1
-             WHERE status = 'Claimed'
-               AND lease_until IS NOT NULL
-               AND lease_until < ?1",
-            params![now_str],
-        )
-        .map_err(map_sqlite_error)?;
+        {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "UPDATE evo_workflows
+                     SET status = 'Requested', lease_owner = NULL, lease_until = NULL, updated_at = ?1
+                     WHERE status = 'Claimed'
+                       AND lease_until IS NOT NULL
+                       AND lease_until < ?1
+                       AND attempt < max_attempts
+                     RETURNING {RETURNING_COLS}"
+                ))
+                .map_err(map_sqlite_error)?;
+            let rows = stmt.query_map(params![now_str], map_row).map_err(map_sqlite_error)?;
+            for row in rows {
+                records.push(row.map_err(map_sqlite_error)?);
+            }
+        }
 
         // 2. Recover RetryScheduled workflows whose backoff has elapsed
-        tx.execute(
-            "UPDATE evo_workflows
-             SET lease_owner = NULL, lease_until = NULL, updated_at = ?1
-             WHERE status = 'RetryScheduled'
-               AND (lease_until IS NULL OR lease_until < ?1)",
-            params![now_str],
-        )
-        .map_err(map_sqlite_error)?;
-
-        // Return recoverable workflows
-        let mut stmt = tx
-            .prepare(
-                "SELECT id, capability_id, description, provider_kind, status, attempt, max_attempts,
-                        priority, created_at, updated_at, lease_owner, lease_until, last_error
-                 FROM evo_workflows
-                 WHERE status IN ('Requested', 'RetryScheduled')
-                   AND attempt < max_attempts
-                   AND (lease_until IS NULL OR lease_until < ?1)",
-            )
-            .map_err(map_sqlite_error)?;
-
-        let rows = stmt
-            .query_map(params![now_str], |row| {
-                Ok(WorkflowRecord {
-                    id: row.get(0)?,
-                    capability_id: row.get(1)?,
-                    description: row.get(2)?,
-                    provider_kind: row.get(3)?,
-                    status: row.get(4)?,
-                    attempt: row.get(5)?,
-                    max_attempts: row.get(6)?,
-                    priority: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
-                    lease_owner: row.get(10)?,
-                    lease_until: row.get(11)?,
-                    last_error: row.get(12)?,
-                })
-            })
-            .map_err(map_sqlite_error)?;
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row.map_err(map_sqlite_error)?);
+        {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "UPDATE evo_workflows
+                     SET status = 'Requested', lease_owner = NULL, lease_until = NULL, updated_at = ?1
+                     WHERE status = 'RetryScheduled'
+                       AND (lease_until IS NULL OR lease_until < ?1)
+                       AND attempt < max_attempts
+                     RETURNING {RETURNING_COLS}"
+                ))
+                .map_err(map_sqlite_error)?;
+            let rows = stmt.query_map(params![now_str], map_row).map_err(map_sqlite_error)?;
+            for row in rows {
+                records.push(row.map_err(map_sqlite_error)?);
+            }
         }
-        drop(stmt);
+
         tx.commit().map_err(map_sqlite_error)?;
 
         Ok(records)
@@ -797,8 +806,8 @@ impl EvolutionWorkflowStore {
                 })
             })
             .map_err(map_sqlite_error)?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite_error)?;
         Ok(records)
     }
 
@@ -840,14 +849,36 @@ impl EvolutionWorkflowStore {
             Some(s) => stmt
                 .query_map(params![s], map_row)
                 .map_err(map_sqlite_error)?
-                .filter_map(|r| r.ok())
-                .collect(),
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_sqlite_error)?,
             None => stmt
                 .query_map([], map_row)
                 .map_err(map_sqlite_error)?
-                .filter_map(|r| r.ok())
-                .collect(),
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_sqlite_error)?,
         };
+        Ok(records)
+    }
+
+    /// List workflows that can still change state (i.e. not Promoted / Failed /
+    /// Cancelled). Used by enqueue de-duplication so terminal rows do not make
+    /// the scan grow without bound.
+    pub fn list_active_workflows(&self) -> Result<Vec<WorkflowRecord>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, capability_id, description, provider_kind, status, attempt, max_attempts,
+                        priority, created_at, updated_at, lease_owner, lease_until, last_error
+                 FROM evo_workflows
+                 WHERE status NOT IN ('Promoted', 'Failed', 'Cancelled')
+                 ORDER BY created_at DESC",
+            )
+            .map_err(map_sqlite_error)?;
+        let records = stmt
+            .query_map([], workflow_from_row)
+            .map_err(map_sqlite_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite_error)?;
         Ok(records)
     }
 
@@ -928,8 +959,8 @@ impl EvolutionWorkflowStore {
                 })
             })
             .map_err(map_sqlite_error)?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite_error)?;
         Ok(records)
     }
 }
@@ -966,6 +997,45 @@ fn map_sqlite_error(e: rusqlite::Error) -> blockcell_core::Error {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn p3_open_creates_parent_directories() {
+        let dir = TempDir::new().unwrap();
+        let store = EvolutionWorkflowStore::open(&dir.path().join("nested/data/evolution.db")).unwrap();
+        store.enqueue("cap.test", "test", "process").unwrap();
+    }
+
+    #[test]
+    fn p3_workflow_mapping_errors_are_not_silently_dropped() {
+        let (_dir, store) = open_temp_store();
+        let id = store.enqueue("cap", "description", "process").unwrap();
+        store.lock_conn().unwrap().execute(
+            "UPDATE evo_workflows SET attempt = 'corrupt' WHERE id = ?1", params![id]
+        ).unwrap();
+        assert!(store.list_workflows(None).is_err());
+        assert!(store.list_workflows(Some("Requested")).is_err());
+    }
+
+    #[test]
+    fn p3_recovery_does_not_report_unclaimed_workflows() {
+        let (_dir, store) = open_temp_store();
+        store.enqueue("cap", "description", "process").unwrap();
+        assert!(store.recover_expired_leases().unwrap().is_empty());
+    }
+
+    #[test]
+    fn p3_expired_retry_is_recovered_only_once() {
+        let (_dir, store) = open_temp_store();
+        let id = store.enqueue("cap", "description", "process").unwrap();
+        store.lock_conn().unwrap().execute(
+            "UPDATE evo_workflows SET status = 'RetryScheduled', lease_until = '2000-01-01T00:00:00Z' WHERE id = ?1",
+            params![id],
+        ).unwrap();
+        let recovered = store.recover_expired_leases().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert!(store.recover_expired_leases().unwrap().is_empty());
+        assert_eq!(store.claim_next("worker", 60, None, None).unwrap().unwrap().id, id);
+    }
 
     fn open_temp_store() -> (TempDir, EvolutionWorkflowStore) {
         let dir = TempDir::new().expect("temp dir");

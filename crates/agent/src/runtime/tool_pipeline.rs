@@ -73,12 +73,10 @@ const ADMISSION_STAGES: [AdmissionStage; 6] = [
     AdmissionStage::ExplicitConfirmation,
 ];
 
-const MEMORY_WRITE_TOOLS: [&str; 4] = [
-    "memory_manage",
-    "memory_upsert",
-    "memory_forget",
-    "auto_memory",
-];
+// Registered memory-writing tools. `auto_memory` is a background subsystem,
+// not a tool in the registry, so it must not appear here (a dead entry makes
+// future readers believe such a tool exists).
+const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_manage", "memory_upsert", "memory_forget"];
 
 /// 成功的工具调用对应的领域事件：记忆写入、后台子代理启动。
 fn semantic_tool_event(call: &ToolCallRequest, result: &serde_json::Value) -> Option<AgentEvent> {
@@ -285,7 +283,9 @@ impl AgentRuntime {
         outcome: ToolOutcome,
         duration_ms: u64,
     ) {
-        let session_key = msg.session_key();
+        // Audit must use the same session key as the `tool/call` event and the
+        // persisted session log; cron delivery resolves to the target session.
+        let session_key = persist_session_key_for(msg);
         // 与 `tool/call` 事件同名对齐：审计同样记录本次调用声明的执行环境。
         let environment = self.tool_registry.execution_environment(&call.name, args);
         // 写盘 + 双锁（AUDIT_WRITE_LOCK + fs2 advisory）可能耗时数 ms，移入
@@ -434,23 +434,15 @@ impl AgentRuntime {
 
     /// Check path safety before executing filesystem/exec tools
     async fn guard_path_access(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
-        if self
-            .check_path_permission_with_confirmation(
-                &inv.call.name,
-                &inv.args,
-                inv.msg,
-                inv.policy_confirmed || inv.dangerous_confirmed,
-                inv.policy_confirmed,
-            )
-            .await
-        {
-            Ok(())
-        } else {
-            Err(crate::error::path_access_denied(
-                &inv.call.name,
-                "outside workspace",
-            ))
-        }
+        self.check_path_permission_with_confirmation(
+            &inv.call.name,
+            &inv.args,
+            inv.msg,
+            inv.policy_confirmed || inv.dangerous_confirmed,
+            inv.policy_confirmed,
+        )
+        .await
+        .map_err(|reason| crate::error::path_access_denied(&inv.call.name, &reason))
     }
 
     /// 工具声明"本次调用需要用户显式确认"（如 `sandbox_policy=full-access` 的 shell）时，

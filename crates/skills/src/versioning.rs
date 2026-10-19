@@ -42,6 +42,24 @@ pub struct VersionHistory {
     pub skill_name: String,
     pub versions: Vec<SkillVersion>,
     pub current_version: String,
+    /// 单调递增的下一版本号。旧版历史文件没有该字段，加载时按已有版本
+    /// 的最大编号补算（见 `normalized_next_version`），避免 cleanup 删除
+    /// 旧版本后版本号被复用。
+    #[serde(default)]
+    pub next_version: u64,
+}
+
+impl VersionHistory {
+    /// 返回单调递增的下一版本号，兼容没有 `next_version` 的旧历史文件。
+    pub fn normalized_next_version(&self) -> u64 {
+        let max_existing = self
+            .versions
+            .iter()
+            .filter_map(|v| v.version.strip_prefix('v')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        self.next_version.max(max_existing + 1).max(1)
+    }
 }
 
 /// 版本管理器
@@ -66,6 +84,7 @@ impl VersionManager {
                 skill_name: skill_name.to_string(),
                 versions: vec![],
                 current_version: "v1".to_string(),
+                next_version: 1,
             });
         }
 
@@ -122,9 +141,10 @@ impl VersionManager {
     ) -> Result<SkillVersion> {
         let mut history = self.get_history(skill_name)?;
 
-        // 计算新版本号
-        let version_num = history.versions.len() + 1;
+        // 计算新版本号：使用持久化的单调计数器，cleanup 删除旧版本后不复用编号
+        let version_num = history.normalized_next_version();
         let version = format!("v{}", version_num);
+        history.next_version = version_num + 1;
 
         // 计算当前技能内容的 hash
         let hash = self.compute_skill_hash(skill_name)?;
@@ -714,7 +734,16 @@ impl VersionManager {
         // Write snapshot to a temp dir first, then swap — avoids broken state on crash.
         // If the process crashes after clearing but before copying, the temp dir still
         // has the data and we can retry.
-        let temp_restore_dir = skill_dir.with_extension("restore_tmp");
+        //
+        // The temp dir name must be unique per *full* skill name: `my.skill` and
+        // `my.other` both map to `my.restore_tmp` under `with_extension`, and the
+        // per-skill lock does not serialize two different skills.
+        let mut temp_hasher = Sha256::new();
+        temp_hasher.update(skill_name.as_bytes());
+        let temp_hash = format!("{:x}", temp_hasher.finalize());
+        let temp_restore_dir = self
+            .skills_dir
+            .join(format!(".restore_tmp_{}", &temp_hash[..16]));
 
         // Clean up any leftover temp dir from a previous failed restore
         if temp_restore_dir.exists() {
@@ -1027,8 +1056,9 @@ impl VersionManager {
 
         // 修改版本号和来源
         let mut history = self.get_history(skill_name)?;
-        let version_num = history.versions.len() + 1;
+        let version_num = history.normalized_next_version();
         version.version = format!("v{}", version_num);
+        history.next_version = version_num + 1;
         version.created_by = VersionSource::Import;
         version.created_at = chrono::Utc::now().timestamp();
 
@@ -1065,6 +1095,20 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn p3_version_numbers_remain_monotonic_after_cleanup() {
+        let root = temp_skills_dir("p3_cleanup");
+        std::fs::create_dir_all(root.join("test")).unwrap();
+        std::fs::write(root.join("test/SKILL.md"), "# Test\nA useful prompt skill for testing version retention.").unwrap();
+        let manager = VersionManager::new(root.clone());
+        for _ in 0..3 {
+            manager.create_version("test", VersionSource::Manual, None).unwrap();
+        }
+        manager.cleanup_old_versions("test", 1).unwrap();
+        assert_eq!(manager.create_version("test", VersionSource::Manual, None).unwrap().version, "v4");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn temp_skills_dir(tag: &str) -> PathBuf {
         let mut root = std::env::temp_dir();

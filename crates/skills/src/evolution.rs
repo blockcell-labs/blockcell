@@ -255,15 +255,11 @@ pub struct AuditIssue {
     pub message: String,
 }
 
-/// Shadow Test 结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShadowTestResult {
-    pub passed: bool,
-    pub test_cases_run: u32,
-    pub test_cases_passed: u32,
-    pub errors: Vec<String>,
-    pub tested_at: i64,
-}
+/// Minimum length for a PromptTool skill body. Previously compile_check (50),
+/// static audit (100), contract check (100) and the generation prompt (200)
+/// each used a different number, so the same content could pass one gate and
+/// fail another. Keep the single source of truth here.
+pub(crate) const MIN_PROMPT_TOOL_CHARS: usize = 100;
 
 /// 观察窗口配置（简化模型：部署后进入观察期，错误率超阈值则回滚）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,7 +348,6 @@ pub struct EvolutionRecord {
     /// 编排次序的调用方/resume 路径跳过契约检查直接部署。
     #[serde(default)]
     pub contract: Option<ContractResult>,
-    pub shadow_test: Option<ShadowTestResult>,
     /// 观察窗口（部署后的错误率监控）
     pub observation: Option<ObservationWindow>,
     #[serde(default)]

@@ -977,6 +977,23 @@ fn is_read_only_command(cmd: &str) -> bool {
         }
     }
 
+    // `find` is on the read-only prefix list, but several of its action flags
+    // mutate the filesystem (`-delete`, `-exec ...`, `-fprint FILE`, ...).
+    // Flag tokens are skipped by the path confinement checks below, so they
+    // must be rejected here or a "read-only" shell could delete files inside
+    // the memory directory.
+    const FIND_MUTATING_FLAGS: &[&str] = &[
+        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0",
+        "-fprintf", "-fwrite",
+    ];
+    if cmd_lower.split_whitespace().any(|token| {
+        FIND_MUTATING_FLAGS
+            .iter()
+            .any(|flag| token == *flag)
+    }) {
+        return false;
+    }
+
     // 检查是否以只读前缀开头
     // 使用更严格的匹配：命令必须紧随空格或结束
     read_only_prefixes.iter().any(|&prefix| {
@@ -1201,6 +1218,8 @@ mod tests {
 
     #[test]
     fn test_read_only_commands() {
+        assert!(!is_read_only_command("find . -delete"));
+        assert!(!is_read_only_command("find . -fprint output"));
         assert!(is_read_only_command("ls -la"));
         assert!(is_read_only_command("grep pattern file.txt"));
         assert!(is_read_only_command("git status"));

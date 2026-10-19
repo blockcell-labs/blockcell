@@ -7,6 +7,7 @@ use thiserror::Error;
 /// 这是有意为之——灵活的消息格式便于快速迭代和动态错误构造。
 /// 未来版本可视稳定性需求逐步引入 typed 错误字段。
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Config error: {0}")]
     Config(String),

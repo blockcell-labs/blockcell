@@ -1032,6 +1032,22 @@ fn test_core_tools_contains_toggle_manage() {
 }
 
 #[test]
+fn test_http_request_save_to_is_a_write_access() {
+    let runtime = test_runtime();
+    let accesses = runtime.extract_path_accesses(
+        "http_request",
+        &serde_json::json!({"url": "https://example.com", "save_to": "download.bin"}),
+    );
+    assert!(
+        accesses.iter().any(|access| {
+            access.op == blockcell_core::path_policy::PathOp::Write
+                && access.path.ends_with("download.bin")
+        }),
+        "save_to must be subject to the write path policy"
+    );
+}
+
+#[test]
 fn test_path_within_base_allows_normal_child_path() {
     let base = PathBuf::from("/tmp/workspace");
     let candidate = base.join("skills/new/SKILL.py");
@@ -1189,11 +1205,13 @@ async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
         runtime_cached
             .check_path_permission_with_confirmation("exec", &args, &msg, true, true)
             .await
+            .is_ok()
     );
     assert!(
         runtime_cached
             .check_path_permission_with_confirmation("exec", &args, &msg, false, false)
             .await
+            .is_ok()
     );
 
     // 危险命令确认：本次放行但不写入会话缓存，再次访问必须重新走确认
@@ -1202,12 +1220,14 @@ async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
         runtime_scoped
             .check_path_permission_with_confirmation("exec", &args, &msg, true, false)
             .await
+            .is_ok()
     );
     // 无确认通道 → Confirm 路径被拒（说明上次批准没有泄漏到会话级）
     assert!(
         !runtime_scoped
             .check_path_permission_with_confirmation("exec", &args, &msg, false, false)
             .await
+            .is_ok()
     );
 }
 
@@ -5261,6 +5281,17 @@ fn tool_call_with_id(id: &str, name: &str, arguments: serde_json::Value) -> Tool
     }
 }
 
+
+/// Tool scope used by prefetch tests: the prefetch gate now respects the
+/// per-step tool whitelist.
+fn prefetch_test_scope() -> Vec<String> {
+    vec!["read_file".to_string(), "web_fetch".to_string()]
+}
+
+fn prefetch_test_guard() -> ToolLoopGuard {
+    ToolLoopGuard::new(200, std::collections::HashMap::new())
+}
+
 #[tokio::test]
 async fn prefetch_runs_read_only_calls_and_skips_write_and_exec() {
     let runtime = test_runtime_with_default_tools();
@@ -5281,7 +5312,9 @@ async fn prefetch_runs_read_only_calls_and_skips_write_and_exec() {
         tool_call_with_id("c4", "exec", serde_json::json!({"command": "ls"})),
     ];
 
-    let prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    let prefetched = runtime
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
+        .await;
     assert_eq!(
         prefetched.len(),
         2,
@@ -5310,7 +5343,7 @@ async fn prefetch_skips_when_fewer_than_two_eligible_calls() {
     let msg = test_main_session_inbound("cli", "prefetch-one");
     let calls = vec![tool_call("read_file", serde_json::json!({"path": "a.txt"}))];
     assert!(runtime
-        .prefetch_read_only_tools(&calls, &msg)
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
         .await
         .is_empty());
 }
@@ -5338,7 +5371,7 @@ async fn prefetch_honors_pre_execute_reject_and_rewritten_args() {
         tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
     ];
     assert!(runtime
-        .prefetch_read_only_tools(&calls, &msg)
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
         .await
         .is_empty());
 
@@ -5360,7 +5393,9 @@ async fn prefetch_honors_pre_execute_reject_and_rewritten_args() {
         tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
         tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
     ];
-    let prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    let prefetched = runtime
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
+        .await;
     assert_eq!(prefetched.len(), 2);
     assert_eq!(
         prefetched["c1"].args,
@@ -5389,7 +5424,9 @@ async fn pipeline_reuses_prefetched_result_without_refiring_pre_execute() {
         tool_call_with_id("c1", "read_file", serde_json::json!({"path": "alpha.txt"})),
         tool_call_with_id("c2", "read_file", serde_json::json!({"path": "beta.txt"})),
     ];
-    let mut prefetched = runtime.prefetch_read_only_tools(&calls, &msg).await;
+    let mut prefetched = runtime
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
+        .await;
     let pre = prefetched.remove("c1");
     let out = runtime
         .execute_tool_call_prefetched(&calls[0], &msg, None, pre)
@@ -5429,7 +5466,7 @@ async fn prefetch_respects_tool_policy_deny() {
         tool_call_with_id("c2", "read_file", serde_json::json!({"path": "b.txt"})),
     ];
     assert!(runtime
-        .prefetch_read_only_tools(&calls, &msg)
+        .prefetch_read_only_tools(&calls, &msg, &prefetch_test_scope(), &prefetch_test_guard())
         .await
         .is_empty());
 }

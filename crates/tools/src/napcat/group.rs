@@ -489,6 +489,13 @@ impl Tool for NapcatSetGroupBanTool {
                 "Missing required parameter: user_id".into(),
             ));
         }
+        if let Some(duration) = params.get("duration").and_then(|v| v.as_u64()) {
+            if u32::try_from(duration).is_err() {
+                return Err(Error::Validation(
+                    "duration must fit in an unsigned 32-bit integer".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -505,7 +512,9 @@ impl Tool for NapcatSetGroupBanTool {
         let duration = params
             .get("duration")
             .and_then(|v| v.as_u64())
-            .unwrap_or(1800) as u32;
+            .unwrap_or(1800);
+        let duration = u32::try_from(duration)
+            .map_err(|_| Error::Validation("duration is too large".into()))?;
         let account_id = resolve_account_id(&ctx, &params);
 
         let request = ApiRequest::set_group_ban(group_id, user_id, duration, None);

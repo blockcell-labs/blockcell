@@ -414,11 +414,23 @@ impl SkillIndex {
             return Some(content.clone());
         }
 
-        // 从索引查找路径 — try exact key first, then search by name suffix
-        let entry = self
-            .entries
-            .get(name)
-            .or_else(|| self.entries.values().find(|e| e.name == name))?;
+        // 从索引查找路径 — try exact key first, then search by name suffix.
+        // 同名技能可存在于多个 category：歧义时返回 None，而不是按 HashMap
+        // 迭代顺序随机选中一个（调用方应使用 composite key）。
+        let entry = if let Some(entry) = self.entries.get(name) {
+            entry
+        } else {
+            let mut matches = self.entries.values().filter(|e| e.name == name);
+            let first = matches.next()?;
+            if matches.next().is_some() {
+                tracing::warn!(
+                    skill_name = name,
+                    "[SkillIndex] Ambiguous skill name across categories; use category/name"
+                );
+                return None;
+            }
+            first
+        };
 
         // 按优先级尝试读取 skill 文件；meta-only skill 至少应能加载元信息。
         for file_name in &[

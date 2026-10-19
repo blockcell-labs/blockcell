@@ -752,10 +752,7 @@ fn provider_ready(config: &Config, provider: &str) -> bool {
     config
         .providers
         .get(provider)
-        .map(|p| {
-            let key = p.api_key.trim();
-            !key.is_empty() && key != "dummy"
-        })
+        .map(|p| !blockcell_core::config::is_placeholder_api_key(&p.api_key))
         .unwrap_or(false)
 }
 

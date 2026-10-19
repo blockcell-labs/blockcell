@@ -2514,7 +2514,6 @@ mod tests {
             patch: None,
             audit: None,
             contract: None,
-            shadow_test: None,
             observation: None,
             observation_total_calls: 0,
             observation_error_calls: 0,

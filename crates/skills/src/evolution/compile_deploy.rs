@@ -19,12 +19,13 @@ impl SkillEvolution {
                 let content = patch.diff.trim();
                 if content.is_empty() {
                     (false, Some("SKILL.md content is empty".to_string()))
-                } else if content.len() < 50 {
+                } else if content.chars().count() < crate::evolution::MIN_PROMPT_TOOL_CHARS {
                     (
                         false,
                         Some(format!(
-                            "SKILL.md content too short ({} chars, need >= 50)",
-                            content.len()
+                            "SKILL.md content too short ({} chars, need >= {})",
+                            content.chars().count(),
+                            crate::evolution::MIN_PROMPT_TOOL_CHARS
                         )),
                     )
                 } else {
@@ -96,12 +97,13 @@ impl SkillEvolution {
                     let content = patch.diff.trim();
                     if content.is_empty() {
                         (false, Some("SKILL.md content is empty".to_string()))
-                    } else if content.len() < 50 {
+                    } else if content.chars().count() < crate::evolution::MIN_PROMPT_TOOL_CHARS {
                         (
                             false,
                             Some(format!(
-                                "SKILL.md content too short ({} chars, need >= 50)",
-                                content.len()
+                                "SKILL.md content too short ({} chars, need >= {})",
+                                content.chars().count(),
+                                crate::evolution::MIN_PROMPT_TOOL_CHARS
                             )),
                         )
                     } else {
@@ -285,7 +287,7 @@ impl SkillEvolution {
                     return self.finish_contract_check(&mut record, issues);
                 };
 
-                if content.trim().len() < 100 {
+                if content.trim().chars().count() < crate::evolution::MIN_PROMPT_TOOL_CHARS {
                     issues.push(format!(
                         "SKILL.md: content too short ({} chars, minimum 100)",
                         content.trim().len()

@@ -91,6 +91,19 @@ fn grep_sync(root: PathBuf, params: Value) -> Result<Value> {
         if !path_matches(&root, entry.path(), file_glob.as_ref()) {
             continue;
         }
+        // Skip huge files instead of slurping them into memory: grep output is
+        // already capped, but the read itself was unbounded.
+        const MAX_GREP_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        if std::fs::metadata(entry.path())
+            .map(|metadata| metadata.len() > MAX_GREP_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            tracing::debug!(
+                path = %entry.path().display(),
+                "Skipping oversized file during grep"
+            );
+            continue;
+        }
         let content = match std::fs::read_to_string(entry.path()) {
             Ok(content) => content,
             Err(_) => continue,

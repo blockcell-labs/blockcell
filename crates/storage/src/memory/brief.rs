@@ -305,6 +305,12 @@ impl MemoryStore {
         }))
     }
 
+    /// Memory statistics for a session.
+    ///
+    /// Counts the same visible set as [`MemoryStore::query`]: rows owned by the
+    /// session **plus** global rows (`session_key IS NULL`). Counting only the
+    /// exact session key made `stats` disagree with `query` and could make an
+    /// LLM conclude "no memories" while global memories were still injected.
     pub fn stats_in_session(&self, session_key: &str) -> Result<serde_json::Value> {
         let conn = self
             .inner
@@ -313,7 +319,8 @@ impl MemoryStore {
         let count = |predicate: &str| -> i64 {
             conn.query_row(
                 &format!(
-                    "SELECT COUNT(*) FROM memory_items WHERE session_key = ?1 AND {}",
+                    "SELECT COUNT(*) FROM memory_items
+                     WHERE (session_key = ?1 OR session_key IS NULL) AND {}",
                     predicate
                 ),
                 params![session_key],

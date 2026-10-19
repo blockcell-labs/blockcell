@@ -38,6 +38,21 @@ pub struct CapabilityVersionHistory {
     pub capability_id: String,
     pub versions: Vec<CapabilityVersion>,
     pub current_version: String,
+    /// 单调递增的下一版本号；旧历史文件缺该字段时按已有版本最大编号补算。
+    #[serde(default)]
+    pub next_version: u64,
+}
+
+impl CapabilityVersionHistory {
+    pub fn normalized_next_version(&self) -> u64 {
+        let max_existing = self
+            .versions
+            .iter()
+            .filter_map(|v| v.version.strip_prefix('v')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        self.next_version.max(max_existing + 1).max(1)
+    }
 }
 
 // === Per-capability 跨进程文件锁 ===
@@ -124,6 +139,10 @@ fn with_capability_lock<F, R>(versions_dir: &Path, capability_id: &str, f: F) ->
 where
     F: FnOnce() -> Result<R>,
 {
+    // This module's path safety historically relied on the caller
+    // (core_evolution) validating the id. Enforce it at the entry point so a
+    // future caller cannot inject path separators into lock/history paths.
+    validate_capability_id(capability_id)?;
     let lock = CapabilityFileLock::new(versions_dir, capability_id);
     let guard = lock.acquire_with_retry();
     if guard.is_none() {
@@ -142,6 +161,22 @@ where
 /// 将 capability_id 转换为文件系统安全名称
 fn safe_capability_id(capability_id: &str) -> String {
     capability_id.replace('.', "_")
+}
+
+/// Validate a capability id before it is joined into any path.
+fn validate_capability_id(capability_id: &str) -> Result<()> {
+    if capability_id.is_empty()
+        || capability_id.len() > 128
+        || !capability_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(Error::Other(format!(
+            "invalid capability id: '{}'",
+            capability_id
+        )));
+    }
+    Ok(())
 }
 
 /// 恢复未完成的 rollback journal（崩溃安全机制）
@@ -270,9 +305,10 @@ impl CapabilityVersionManager {
         // Load or create history
         let mut history = self.get_history_unlocked(capability_id)?;
 
-        // Calculate version number
-        let version_num = history.versions.len() + 1;
+        // Calculate version number (monotonic across cleanup)
+        let version_num = history.normalized_next_version();
         let version = format!("v{}", version_num);
+        history.next_version = version_num + 1;
 
         // Calculate artifact hash
         let artifact_content = fs::read(artifact_path)
@@ -656,6 +692,7 @@ impl CapabilityVersionManager {
                         capability_id: capability_id.to_string(),
                         versions: vec![],
                         current_version: "v0".to_string(),
+                        next_version: 1,
                     });
                 }
                 // 恢复成功，继续读取主文件
@@ -664,6 +701,7 @@ impl CapabilityVersionManager {
                     capability_id: capability_id.to_string(),
                     versions: vec![],
                     current_version: "v0".to_string(),
+                    next_version: 1,
                 });
             }
         }
@@ -689,6 +727,7 @@ impl CapabilityVersionManager {
                             capability_id: capability_id.to_string(),
                             versions: vec![],
                             current_version: "v0".to_string(),
+                            next_version: 1,
                         });
                     }
                     // 恢复成功，重新读取并解析
@@ -781,6 +820,39 @@ fn simple_hash(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p3_invalid_capability_id_is_rejected_at_entry() {
+        let root = std::env::temp_dir().join(format!("p3-cap-invalid-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifact = root.join("test.sh");
+        std::fs::write(&artifact, "#!/bin/sh\necho test").unwrap();
+        let manager = CapabilityVersionManager::new(root.clone());
+        for id in ["", "../escape", "a/b", "a\\b"] {
+            assert!(
+                manager
+                    .list_versions(id)
+                    .is_err(),
+                "capability id {id:?} must be rejected"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn p3_capability_versions_remain_monotonic_after_cleanup() {
+        let root = std::env::temp_dir().join(format!("p3-capability-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifact = root.join("test.sh");
+        std::fs::write(&artifact, "#!/bin/sh\necho test").unwrap();
+        let manager = CapabilityVersionManager::new(root.clone());
+        for _ in 0..3 {
+            manager.create_version("test.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap();
+        }
+        manager.cleanup_old_versions("test.cap", 1).unwrap();
+        assert_eq!(manager.create_version("test.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap().version, "v4");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn test_capability_version_create_and_list() {

@@ -235,6 +235,14 @@ pub(crate) async fn list_workflows(
     run_blocking(move || store.list_workflows(status_filter.as_deref())).await
 }
 
+/// List non-terminal workflows (excludes Promoted/Failed/Cancelled).
+pub(crate) async fn list_active_workflows(
+    store: &EvolutionWorkflowStore,
+) -> Result<Vec<WorkflowRecord>> {
+    let store = store.clone();
+    run_blocking(move || store.list_active_workflows()).await
+}
+
 pub(crate) async fn enqueue(
     store: &EvolutionWorkflowStore,
     capability_id: &str,

@@ -46,17 +46,26 @@ impl AgentRuntime {
     /// 阶段，hook 每次调用只触发一次。被 hook/策略拒绝的调用在主管线中
     /// 仍会走完整准入并再次触发事件——重复触发不可避免，否则无法产生
     /// 正确的拒绝结果。
-    pub(crate) async fn prefetch_read_only_tools(
+    pub(super) async fn prefetch_read_only_tools(
         &self,
         calls: &[ToolCallRequest],
         msg: &InboundMessage,
+        tool_names: &[String],
+        loop_guard: &ToolLoopGuard,
     ) -> HashMap<String, PrefetchedToolResult> {
         // 先用廉价同步条件筛选候选；少于两个可预取调用时不预取（单个调用没有
         // 重叠收益）。门控必须在 hook 触发之前：pre-execute 事件每次调用只应
         // 出现一次，若候选不足就直接返回，避免"预取探一次、管线拒一次"的双发。
         let candidates: Vec<&ToolCallRequest> = calls
             .iter()
-            .filter(|call| self.prefetch_candidate(call))
+            .filter(|call| {
+                // Respect the per-step tool scope and the iteration budget: the
+                // main loop would skip/reject such calls, so prefetching them
+                // would perform real I/O whose result is thrown away.
+                tool_names.iter().any(|name| name == &call.name)
+                    && loop_guard.would_admit(&call.name)
+                    && self.prefetch_candidate(call)
+            })
             .collect();
         if candidates.len() < 2 {
             return HashMap::new();

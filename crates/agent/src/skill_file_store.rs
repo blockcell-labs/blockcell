@@ -339,10 +339,18 @@ impl SkillFileStore {
         let target = self.resolve_existing_skill_target(name)?;
         let skill_name = target.display_name.clone();
         let relative_path = validate_skill_relative_path(relative_path)?;
+        // SKILL.md has its own (smaller) limit on the edit/patch paths; the
+        // generic write path must enforce the same bound or it becomes a
+        // bypass for oversized skill bodies.
+        let char_limit = if relative_path == Path::new("SKILL.md") {
+            SKILL_MD_CHAR_LIMIT
+        } else {
+            AUX_FILE_CHAR_LIMIT
+        };
         ensure_len(
             &relative_path.to_string_lossy(),
             content,
-            AUX_FILE_CHAR_LIMIT,
+            char_limit,
         )?;
         scan_learned_skill_content(content)?;
         let _wg = self.acquire_write_guard(&target)?;
@@ -510,7 +518,41 @@ impl SkillFileStore {
             .snapshots_dir
             .join(snapshot_dir_name(skill_name, &stamp));
         fs::create_dir_all(&dir)?;
+        if let Err(error) = self.prune_old_snapshots(skill_name) {
+            tracing::warn!(
+                skill = skill_name,
+                error = %error,
+                "Failed to prune old skill snapshots"
+            );
+        }
         Ok(dir)
+    }
+
+    /// Keep only the most recent snapshots per skill. Every mutation copies the
+    /// whole skill directory into `.snapshots`, so without a bound the
+    /// directory grows forever.
+    fn prune_old_snapshots(&self, skill_name: &str) -> Result<()> {
+        const MAX_SNAPSHOTS_PER_SKILL: usize = 20;
+        let prefix = format!("{}_", snapshot_skill_key(skill_name));
+        let mut names: Vec<String> = Vec::new();
+        for entry in fs::read_dir(&self.snapshots_dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name.starts_with(&prefix) {
+                names.push(name);
+            }
+        }
+        if names.len() <= MAX_SNAPSHOTS_PER_SKILL {
+            return Ok(());
+        }
+        names.sort();
+        let remove_count = names.len() - MAX_SNAPSHOTS_PER_SKILL;
+        for name in names.into_iter().take(remove_count) {
+            fs::remove_dir_all(self.snapshots_dir.join(name))?;
+        }
+        Ok(())
     }
 
     fn latest_snapshot_for(&self, skill_name: &str) -> Result<Option<PathBuf>> {
@@ -542,6 +584,12 @@ impl SkillFileStore {
         if !self.toggles_file.exists() {
             return Ok(());
         }
+        // Share the same cross-process lock as `toggle_manage`: an unlocked
+        // read-modify-write here could resurrect a stale value and undo a
+        // concurrent toggle.
+        let lock_path = self.toggles_file.with_extension("lock");
+        let _guard = blockcell_core::file_store::ExclusiveFileLock::acquire(&lock_path)
+            .map_err(|error| Error::Other(format!("toggles lock failed: {}", error)))?;
         let mut toggles = fs::read_to_string(&self.toggles_file)
             .ok()
             .and_then(|content| serde_json::from_str::<Value>(&content).ok())
@@ -1033,6 +1081,14 @@ mod tests {
             Uuid::new_v4()
         ));
         Paths::with_base(base)
+    }
+
+    #[test]
+    fn write_skill_markdown_enforces_markdown_limit() {
+        let paths = test_paths("md-limit");
+        let store = SkillFileStore::open(&paths).unwrap();
+        store.create("example", "Example", "Instructions").unwrap();
+        assert!(store.write_file("example", "SKILL.md", &"x".repeat(SKILL_MD_CHAR_LIMIT + 1)).is_err());
     }
 
     #[test]

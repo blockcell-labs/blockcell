@@ -299,12 +299,13 @@ async fn call_openai(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = crate::bounded_io::read_text_limited(response, 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Err(Error::Tool(format!("OpenAI error {}: {}", status, text)));
     }
 
-    let data: Value = response
-        .json()
+    let data: Value = crate::bounded_io::read_json_limited(response, 8 * 1024 * 1024)
         .await
         .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
@@ -358,12 +359,13 @@ async fn call_anthropic(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = crate::bounded_io::read_text_limited(response, 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Err(Error::Tool(format!("Anthropic error {}: {}", status, text)));
     }
 
-    let data: Value = response
-        .json()
+    let data: Value = crate::bounded_io::read_json_limited(response, 8 * 1024 * 1024)
         .await
         .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
@@ -398,13 +400,14 @@ async fn call_gemini(
     }
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        model
     );
 
     let client = reqwest::Client::new();
     let response = client
         .post(&url)
+        .header("x-goog-api-key", &api_key)
         .json(&json!({
             "contents": [{"parts": parts}],
             "generationConfig": { "maxOutputTokens": max_tokens }
@@ -415,12 +418,13 @@ async fn call_gemini(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = crate::bounded_io::read_text_limited(response, 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
         return Err(Error::Tool(format!("Gemini error {}: {}", status, text)));
     }
 
-    let data: Value = response
-        .json()
+    let data: Value = crate::bounded_io::read_json_limited(response, 8 * 1024 * 1024)
         .await
         .map_err(|e| Error::Tool(format!("Failed to parse response: {}", e)))?;
 
@@ -435,12 +439,11 @@ async fn call_gemini(
 fn resolve_path(path: &str, workspace: &std::path::Path) -> String {
     if path.starts_with('/') {
         path.to_string()
-    } else if path.starts_with('~') {
-        if let Some(home) = dirs::home_dir() {
-            home.join(&path[2..]).display().to_string()
-        } else {
-            path.to_string()
-        }
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        // `~foo` stays a relative filename, matching the runtime's resolver.
+        dirs::home_dir()
+            .map(|home| home.join(relative).display().to_string())
+            .unwrap_or_else(|| path.to_string())
     } else {
         workspace.join(path).display().to_string()
     }

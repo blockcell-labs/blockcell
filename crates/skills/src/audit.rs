@@ -639,7 +639,7 @@ fn check_prompt_only(code: &str, violations: &mut Vec<StaticViolation>) {
     }
 
     // Content must be substantive
-    if code.trim().len() < 100 {
+    if code.trim().chars().count() < crate::evolution::MIN_PROMPT_TOOL_CHARS {
         violations.push(StaticViolation {
             severity: "error",
             rule: "too_short",

@@ -194,7 +194,13 @@ class BCMailCLI:
                     part = MIMEBase("application", "octet-stream")
                     part.set_payload(handle.read())
                 encoders.encode_base64(part)
-                filename = os.path.basename(file_path)
+                # Header values must not contain CR/LF (header injection).
+                filename = (
+                    os.path.basename(file_path)
+                    .replace("\r", "")
+                    .replace("\n", "")
+                    .replace('"', "_")
+                )
                 part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
                 msg.attach(part)
                 print(f"📎 已添加附件: {filename}")
@@ -361,10 +367,18 @@ class BCMailCLI:
         conn = self._connect_imap()
         try:
             conn.select("INBOX", readonly=True)
-            print(f"🔍 搜索关键词: '{args.keyword}'")
-            status, data = conn.search(None, f'SUBJECT "{args.keyword}"')
+            # IMAP SEARCH conditions are quoted; strip quotes and CR/LF so the
+            # keyword cannot close the string and rewrite the search criteria.
+            keyword = (
+                str(args.keyword)
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .replace('"', " ")
+            )
+            print(f"🔍 搜索关键词: '{keyword}'")
+            status, data = conn.search(None, f'SUBJECT "{keyword}"')
             if status != "OK" or not data[0]:
-                status, data = conn.search(None, f'BODY "{args.keyword}"')
+                status, data = conn.search(None, f'BODY "{keyword}"')
             if status != "OK" or not data[0]:
                 print("   未找到相关邮件")
                 return

@@ -126,8 +126,11 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
     #[cfg(not(windows))]
     {
-        // Unix 上 rename 是原子替换
-        std::fs::rename(&tmp_path, path)?;
+        // Unix 上 rename 是原子替换；失败时清理临时文件，避免残留 .tmp
+        if let Err(error) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error);
+        }
     }
 
     Ok(())

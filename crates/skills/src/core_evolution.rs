@@ -213,13 +213,22 @@ impl Drop for PipelineLockGuard {
     fn drop(&mut self) {
         if let Ok(mut locks) = self.locks.try_lock() {
             locks.remove(&self.evolution_id);
-        } else {
-            let locks = Arc::clone(&self.locks);
-            let evolution_id = std::mem::take(&mut self.evolution_id);
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            return;
+        }
+        let locks = Arc::clone(&self.locks);
+        let evolution_id = std::mem::take(&mut self.evolution_id);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
                 handle.spawn(async move {
                     locks.lock().await.remove(&evolution_id);
                 });
+            }
+            Err(_) => {
+                // No runtime available (runtime shutting down / non-async
+                // context). Block briefly instead of leaving the id locked
+                // forever, which would make every later run of this evolution
+                // fail with "already running".
+                locks.blocking_lock().remove(&evolution_id);
             }
         }
     }

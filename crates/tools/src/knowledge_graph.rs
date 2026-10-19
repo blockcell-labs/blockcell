@@ -6,6 +6,11 @@ use tracing::debug;
 
 use crate::{Tool, ToolContext, ToolSchema};
 
+/// Hard upper bound for `max_results`. Without it a caller (or an LLM) can ask
+/// for `u64::MAX`, which effectively serializes the whole graph into one tool
+/// response.
+const MAX_QUERY_RESULTS: u64 = 1_000;
+
 /// Lightweight knowledge graph tool backed by SQLite.
 ///
 /// Stores entities (nodes) and relations (edges) in a local SQLite database.
@@ -385,7 +390,7 @@ fn action_search_entities(db: &rusqlite::Connection, params: &Value) -> Result<V
         .get("max_results")
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
-        .min(i64::MAX as u64) as i64;
+        .min(MAX_QUERY_RESULTS) as i64;
 
     let entities = if !query.is_empty() {
         // FTS search
@@ -507,7 +512,9 @@ fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Valu
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    db.execute(
+    let tx = db.unchecked_transaction()
+        .map_err(|e| Error::Tool(format!("Failed to begin relation transaction: {}", e)))?;
+    tx.execute(
         "INSERT INTO relations (id, source_id, target_id, relation_type, properties) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![id, source_id, target_id, relation_type, props_str],
     ).map_err(|e| Error::Tool(format!("Failed to add relation: {}", e)))?;
@@ -522,13 +529,15 @@ fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Valu
 
     if bidirectional {
         let reverse_id = uuid::Uuid::new_v4().to_string();
-        db.execute(
+        tx.execute(
             "INSERT INTO relations (id, source_id, target_id, relation_type, properties) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![reverse_id, target_id, source_id, relation_type, props_str],
         ).map_err(|e| Error::Tool(format!("Failed to add reverse relation: {}", e)))?;
         result["reverse_relation_id"] = json!(reverse_id);
         result["bidirectional"] = json!(true);
     }
+
+    tx.commit().map_err(|e| Error::Tool(format!("Failed to commit relation: {}", e)))?;
 
     Ok(result)
 }
@@ -608,7 +617,15 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
         .get("target_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::Tool("target_id is required for find_path".into()))?;
-    let max_depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let max_depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+
+    if source_id == target_id {
+        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM entities WHERE id = ?1)", [source_id], |row| row.get(0))
+            .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
+        if exists {
+            return Ok(json!({"found":true,"source_id":source_id,"target_id":target_id,"path":[{"entity_id":source_id}],"length":0}));
+        }
+    }
 
     // BFS shortest path
     let mut visited = std::collections::HashSet::new();
@@ -922,7 +939,7 @@ fn action_query(db: &rusqlite::Connection, params: &Value) -> Result<Value> {
         .get("max_results")
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
-        .min(i64::MAX as u64) as i64;
+        .min(MAX_QUERY_RESULTS) as i64;
 
     // Simple pattern matching: "entity_type:person" or "tag:important" or free text
     if query.starts_with("type:") || query.starts_with("entity_type:") {
@@ -1097,13 +1114,23 @@ fn export_dot(entities: &[Value], relations: &[Value]) -> String {
 }
 
 fn export_mermaid(entities: &[Value], relations: &[Value]) -> String {
+    /// Entity names come from user/model input and are interpolated into a
+    /// quoted Mermaid label. Escape the characters that terminate the label
+    /// (`"`, `[`, `]`) using Mermaid's entity syntax.
+    fn mermaid_label(value: &str) -> String {
+        value
+            .replace('"', "#quot;")
+            .replace('[', "#91;")
+            .replace(']', "#93;")
+    }
+
     let mut md = String::from("graph LR\n");
     for e in entities {
         let id = e["id"].as_str().unwrap_or("");
         let name = e["name"].as_str().unwrap_or(id);
         // Sanitize for mermaid (replace special chars)
         let safe_id = id.replace(['-', ' '], "_");
-        md.push_str(&format!("  {}[\"{}\"]\n", safe_id, name));
+        md.push_str(&format!("  {}[\"{}\"]\n", safe_id, mermaid_label(name)));
     }
     for r in relations {
         let src = r["source_id"]
@@ -1118,7 +1145,12 @@ fn export_mermaid(entities: &[Value], relations: &[Value]) -> String {
         if rtype.is_empty() {
             md.push_str(&format!("  {} --> {}\n", src, tgt));
         } else {
-            md.push_str(&format!("  {} -->|\"{}\"| {}\n", src, tgt, rtype));
+            md.push_str(&format!(
+                "  {} -->|\"{}\"| {}\n",
+                src,
+                tgt,
+                mermaid_label(rtype)
+            ));
         }
     }
     md
@@ -1128,6 +1160,51 @@ fn export_mermaid(entities: &[Value], relations: &[Value]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn p3_mermaid_labels_escape_quotes_and_brackets() {
+        let entities = vec![json!({"id":"a-1","name":"a\"b[c]d"})];
+        let relations = vec![json!({"source_id":"a-1","target_id":"a-1","relation_type":"r\"x"})];
+        let out = export_mermaid(&entities, &relations);
+        assert!(out.contains("#quot;b#91;c#93;d"), "{out}");
+        assert!(out.contains("r#quot;x"), "{out}");
+    }
+
+    #[test]
+    fn p3_bidirectional_insert_is_atomic() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        init_schema(&db).unwrap();
+        for id in ["a", "b"] {
+            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id})).unwrap();
+        }
+        db.execute_batch("CREATE TRIGGER reject_reverse BEFORE INSERT ON relations WHEN NEW.source_id = 'b' BEGIN SELECT RAISE(ABORT, 'reverse rejected'); END;").unwrap();
+        assert!(action_add_relation(&db, &json!({"source_id":"a","target_id":"b","relation_type":"links","bidirectional":true})).is_err());
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn p3_self_path_exists_only_for_existing_entity() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        init_schema(&db).unwrap();
+        action_add_entity(&db, &json!({"entity_id":"a","entity_type":"test","name":"A"})).unwrap();
+        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"a"})).unwrap()["found"], true);
+        assert_eq!(action_find_path(&db, &json!({"source_id":"missing","target_id":"missing"})).unwrap()["found"], false);
+    }
+
+    #[test]
+    fn p3_find_path_default_depth_matches_schema() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        init_schema(&db).unwrap();
+        for id in ["a", "b", "c", "d"] {
+            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id})).unwrap();
+        }
+        for (a,b) in [("a","b"),("b","c"),("c","d")] {
+            action_add_relation(&db, &json!({"source_id":a,"target_id":b,"relation_type":"links"})).unwrap();
+        }
+        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"d"})).unwrap()["found"], false);
+        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"d","depth":3})).unwrap()["found"], true);
+    }
 
     fn make_tool() -> KnowledgeGraphTool {
         KnowledgeGraphTool

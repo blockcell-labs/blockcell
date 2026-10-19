@@ -1,6 +1,6 @@
 use crate::service::{EvolutionService, EvolutionServiceConfig};
 use crate::versioning::{VersionManager, VersionSource};
-use blockcell_core::{Paths, Result};
+use blockcell_core::{Error, Paths, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -632,6 +632,36 @@ pub struct SkillTestFixture {
 /// 1. 有 meta.yaml 或 meta.json → BlockCell（优先，避免误判）
 /// 2. SKILL.md 以 "---" 开头 → OpenClaw
 /// 3. 默认 → BlockCell
+/// Escape text for inclusion in an XML text node / attribute value.
+///
+/// Skill names and descriptions come from disk (possibly model-generated); a
+/// raw `<`/`&` would corrupt the prompt fragment built by `get_summary_xml`.
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Read a skill metadata file with a hard size limit.
+///
+/// `meta.yaml`/`meta.json` are tiny by contract; an oversized or corrupted
+/// file must fail loudly rather than being slurped into memory.
+fn read_meta_bounded(path: &Path, max_bytes: u64) -> Result<String> {
+    let size = std::fs::metadata(path)?.len();
+    if size > max_bytes {
+        return Err(Error::Other(format!(
+            "{} exceeds {} byte limit (size: {})",
+            path.display(),
+            max_bytes,
+            size
+        )));
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
 fn detect_skill_format(skill_dir: &Path) -> SkillSource {
     // 优先检查 BlockCell 标志文件
     if skill_dir.join("meta.yaml").exists() || skill_dir.join("meta.json").exists() {
@@ -1110,17 +1140,21 @@ impl SkillManager {
     }
 
     fn load_meta(&self, skill_dir: &std::path::Path) -> Result<SkillMeta> {
+        /// Metadata is small by contract; refuse oversized files instead of
+        /// reading them fully into memory (symmetric with the SKILL.md limit).
+        const MAX_META_BYTES: u64 = 256 * 1024;
+
         // Try meta.yaml first
         let yaml_path = skill_dir.join("meta.yaml");
         if yaml_path.exists() {
-            let content = std::fs::read_to_string(&yaml_path)?;
+            let content = read_meta_bounded(&yaml_path, MAX_META_BYTES)?;
             return Ok(serde_yaml::from_str(&content)?);
         }
 
         // Try meta.json
         let json_path = skill_dir.join("meta.json");
         if json_path.exists() {
-            let content = std::fs::read_to_string(&json_path)?;
+            let content = read_meta_bounded(&json_path, MAX_META_BYTES)?;
             return Ok(serde_json::from_str(&content)?);
         }
 
@@ -1163,20 +1197,26 @@ impl SkillManager {
         let mut xml = String::from("<skills>\n");
 
         for skill in self.skills.values() {
-            xml.push_str(&format!("  <skill available=\"{}\">\n", skill.available));
-            xml.push_str(&format!("    <name>{}</name>\n", skill.name));
+            xml.push_str(&format!(
+                "  <skill available=\"{}\">\n",
+                skill.available
+            ));
+            xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
             xml.push_str(&format!(
                 "    <description>{}</description>\n",
-                skill.meta.description
+                escape_xml(&skill.meta.description)
             ));
             xml.push_str(&format!(
                 "    <location>{}/SKILL.md</location>\n",
-                skill.path.display()
+                escape_xml(&skill.path.display().to_string())
             ));
 
             if !skill.available {
                 if let Some(reason) = &skill.unavailable_reason {
-                    xml.push_str(&format!("    <requires>{}</requires>\n", reason));
+                    xml.push_str(&format!(
+                        "    <requires>{}</requires>\n",
+                        escape_xml(reason)
+                    ));
                 }
             }
 
@@ -1401,6 +1441,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nonce));
         fs::create_dir_all(&dir).expect("create temp skill dir");
         dir
+    }
+
+    #[test]
+    fn p3_metadata_size_is_bounded() {
+        let root = temp_skill_dir("p3_meta_limit");
+        fs::write(root.join("meta.yaml"), "x".repeat(256 * 1024 + 1)).unwrap();
+        let error = SkillManager::new().load_meta(&root).unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

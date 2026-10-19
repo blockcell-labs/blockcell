@@ -177,7 +177,7 @@ impl SkillDispatcher {
 
                 match exec(&name, params_json.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: name,
                             params: params_json,
                             result: result.clone(),
@@ -187,7 +187,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: name,
                             params: params_json,
                             result: err_val.clone(),
@@ -212,7 +212,7 @@ impl SkillDispatcher {
 
                     match exec(&name, params_json.clone()) {
                         Ok(result) => {
-                            tc.lock().unwrap().push(ToolCallRecord {
+                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                                 tool_name: name,
                                 params: params_json,
                                 result: result.clone(),
@@ -222,7 +222,7 @@ impl SkillDispatcher {
                         }
                         Err(e) => {
                             let err_val = serde_json::json!({"error": format!("{}", e)});
-                            tc.lock().unwrap().push(ToolCallRecord {
+                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                                 tool_name: name,
                                 params: params_json,
                                 result: err_val.clone(),
@@ -240,7 +240,7 @@ impl SkillDispatcher {
             let out = output.clone();
             engine.register_fn("set_output", move |val: Dynamic| {
                 let json_val = dynamic_to_json(&val);
-                *out.lock().unwrap() = Some(json_val);
+                *out.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(json_val);
             });
         }
 
@@ -249,7 +249,7 @@ impl SkillDispatcher {
             let out = output.clone();
             engine.register_fn("set_output_json", move |json_str: String| {
                 let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
-                *out.lock().unwrap() = Some(val);
+                *out.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(val);
             });
         }
 
@@ -328,7 +328,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"command": command});
                 match exec("exec", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "exec".to_string(),
                             params,
                             result: result.clone(),
@@ -338,7 +338,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "exec".to_string(),
                             params,
                             result: err_val.clone(),
@@ -358,7 +358,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"query": query});
                 match exec("web_search", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "web_search".to_string(),
                             params,
                             result: result.clone(),
@@ -368,7 +368,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "web_search".to_string(),
                             params,
                             result: err_val.clone(),
@@ -388,7 +388,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"url": url});
                 match exec("web_fetch", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "web_fetch".to_string(),
                             params,
                             result: result.clone(),
@@ -398,7 +398,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "web_fetch".to_string(),
                             params,
                             result: err_val.clone(),
@@ -418,7 +418,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"path": path});
                 match exec("read_file", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "read_file".to_string(),
                             params,
                             result: result.clone(),
@@ -428,7 +428,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "read_file".to_string(),
                             params,
                             result: err_val.clone(),
@@ -450,7 +450,7 @@ impl SkillDispatcher {
                     let params = serde_json::json!({"path": path, "content": content});
                     match exec("write_file", params.clone()) {
                         Ok(result) => {
-                            tc.lock().unwrap().push(ToolCallRecord {
+                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                                 tool_name: "write_file".to_string(),
                                 params,
                                 result: result.clone(),
@@ -460,7 +460,7 @@ impl SkillDispatcher {
                         }
                         Err(e) => {
                             let err_val = serde_json::json!({"error": format!("{}", e)});
-                            tc.lock().unwrap().push(ToolCallRecord {
+                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                                 tool_name: "write_file".to_string(),
                                 params,
                                 result: err_val.clone(),
@@ -481,7 +481,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"url": url, "method": "GET"});
                 match exec("http_request", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "http_request".to_string(),
                             params,
                             result: result.clone(),
@@ -491,7 +491,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "http_request".to_string(),
                             params,
                             result: err_val.clone(),
@@ -511,7 +511,7 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"content": content});
                 match exec("message", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "message".to_string(),
                             params,
                             result: result.clone(),
@@ -521,7 +521,7 @@ impl SkillDispatcher {
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap().push(ToolCallRecord {
+                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
                             tool_name: "message".to_string(),
                             params,
                             result: err_val.clone(),
@@ -548,8 +548,8 @@ impl SkillDispatcher {
         // Execute
         let result = engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast);
 
-        let tc = tool_calls.lock().unwrap().clone();
-        let out = output.lock().unwrap().clone();
+        let tc = tool_calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 
         match result {
             Ok(value) => {

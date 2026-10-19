@@ -4,6 +4,29 @@ impl MemoryStore {
     /// Upsert a memory item. If dedup_key is set and a matching non-deleted item exists,
     /// update it instead of inserting a new one.
     pub fn upsert(&self, params: UpsertParams) -> Result<MemoryItem> {
+        // `importance` feeds the ranking formula directly and tags are stored
+        // as a comma-separated CSV column, so both must be normalized at the
+        // single write entry point rather than trusting callers.
+        if !(0.0..=1.0).contains(&params.importance) {
+            return Err(blockcell_core::Error::Validation(format!(
+                "importance must be within 0.0..=1.0, got {}",
+                params.importance
+            )));
+        }
+        let mut normalized_tags = Vec::with_capacity(params.tags.len());
+        for tag in &params.tags {
+            let tag = tag.trim();
+            if tag.is_empty() {
+                continue;
+            }
+            if tag.contains(',') {
+                return Err(blockcell_core::Error::Validation(
+                    "tags must not contain ',' (the column is comma-separated)".to_string(),
+                ));
+            }
+            normalized_tags.push(tag.to_string());
+        }
+
         let item = {
             let mut conn = self
                 .inner
@@ -16,7 +39,7 @@ impl MemoryStore {
                 })?;
 
             let now = Utc::now().to_rfc3339();
-            let tags_str = params.tags.join(",");
+            let tags_str = normalized_tags.join(",");
 
             let item = if let Some(ref dk) = params.dedup_key {
                 if !dk.is_empty() {

@@ -235,6 +235,9 @@ impl HookManager {
             cmd.arg("-c").arg(&command);
             cmd
         };
+        // On timeout the future is dropped; without this the child (and any
+        // grandchildren) would keep running in the background.
+        process.kill_on_drop(true);
 
         if !ctx.cwd.trim().is_empty() {
             process.current_dir(&ctx.cwd);

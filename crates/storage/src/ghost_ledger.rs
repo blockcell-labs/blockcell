@@ -455,7 +455,12 @@ impl GhostLedger {
         let lease_until =
             (Utc::now() + chrono::Duration::seconds(lease_duration_secs)).to_rfc3339();
         let mut conn = self.lock_conn()?;
-        let tx = conn.transaction().map_err(map_sqlite_error)?;
+        // Immediate: SELECT-then-UPDATE under a Deferred transaction can fail
+        // with SQLITE_BUSY_SNAPSHOT when another connection (heartbeat) commits
+        // between the snapshot and the claim update.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
         let rows = {
             let mut stmt = tx
                 .prepare(

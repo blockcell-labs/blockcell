@@ -605,7 +605,7 @@ impl Tool for CommunityHubTool {
                 });
 
                 let url = resolve_download_url(&hub_url, name, &info);
-                debug!(skill = %name, url = %url, "Community Hub: resolved download url");
+                debug!(skill = %name, url = %redact_hub_url(&url), "Community Hub: resolved download url");
 
                 crate::ssrf::ensure_url_allowed(&url).await?;
 

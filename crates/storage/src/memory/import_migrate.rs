@@ -103,17 +103,27 @@ impl MemoryStore {
     }
 
     /// Check if migration has already been done.
-    pub fn is_migrated(&self) -> bool {
-        let conn = match self.inner.lock() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        conn.query_row(
+    ///
+    /// Returns an error for real database failures (e.g. poisoned lock) so the
+    /// caller can distinguish "not migrated" from "could not check" instead of
+    /// silently re-running the migration.
+    pub fn is_migrated(&self) -> Result<bool> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
+        match conn.query_row(
             "SELECT value FROM memory_meta WHERE key = 'migrated_from_md'",
             [],
             |row| row.get::<_, String>(0),
-        )
-        .is_ok()
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(blockcell_core::Error::Storage(format!(
+                "Failed to read migration marker: {}",
+                error
+            ))),
+        }
     }
 
     /// Mark migration as done.
@@ -133,7 +143,7 @@ impl MemoryStore {
 
     /// Run the full migration from MEMORY.md and daily files.
     pub fn migrate_from_files(&self, memory_dir: &Path) -> Result<usize> {
-        if self.is_migrated() {
+        if self.is_migrated()? {
             debug!("Memory migration already done, skipping");
             return Ok(0);
         }

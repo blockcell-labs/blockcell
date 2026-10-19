@@ -207,9 +207,10 @@ impl SkillEvolution {
         prompt.push_str("Output the markdown content in a ```markdown code block.\n");
         prompt.push_str("Also output an updated meta.yaml in a ```yaml code block.\n");
         prompt.push_str(Self::trigger_rules_prompt());
-        prompt.push_str(
-            "The document must be at least 200 characters, practical, and clearly structured.\n",
-        );
+        prompt.push_str(&format!(
+            "The document must be at least {} characters, practical, and clearly structured.\n",
+            crate::evolution::MIN_PROMPT_TOOL_CHARS
+        ));
 
         Ok(prompt)
     }

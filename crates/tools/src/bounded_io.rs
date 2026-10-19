@@ -28,6 +28,25 @@ pub(crate) async fn read_response_limited(
     Ok((output, truncated))
 }
 
+pub(crate) async fn read_json_limited(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<serde_json::Value> {
+    let (bytes, truncated) = read_response_limited(response, limit).await?;
+    if truncated {
+        return Err(Error::Tool(format!(
+            "JSON response exceeded the {limit} byte limit"
+        )));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Tool(format!("Failed to parse response: {e}")))
+}
+
+pub(crate) async fn read_text_limited(response: reqwest::Response, limit: usize) -> Result<String> {
+    let (bytes, _truncated) = read_response_limited(response, limit).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 pub(crate) async fn stream_response_to_file(
     mut response: reqwest::Response,
     path: &Path,
@@ -57,6 +76,17 @@ pub(crate) async fn stream_response_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn p3_json_response_rejects_oversized_body() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(200)
+            .body(String::from(r#"{"text":"ok"}"#))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+        let error = read_json_limited(response, 8).await.unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
+    }
 
     #[test]
     fn append_limited_stops_at_byte_limit() {

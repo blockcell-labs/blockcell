@@ -91,6 +91,8 @@ impl SkillEvolution {
     /// Load the current skill source for a skill (returns None if not found).
     /// Checks SKILL.rhai, SKILL.py, and SKILL.md in that order.
     pub fn load_skill_source(&self, skill_name: &str) -> Result<Option<String>> {
+        // Public API: never join an unvalidated name onto skills_dir.
+        validate_skill_name(skill_name)?;
         let skill_dir = self.skills_dir.join(skill_name);
         for filename in &["SKILL.rhai", "SKILL.py", "SKILL.md"] {
             let path = skill_dir.join(filename);
@@ -128,7 +130,6 @@ impl SkillEvolution {
             patch: None,
             audit: None,
             contract: None,
-            shadow_test: None,
             observation: None,
             observation_total_calls: 0,
             observation_error_calls: 0,

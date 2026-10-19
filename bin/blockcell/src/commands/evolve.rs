@@ -257,12 +257,6 @@ pub async fn list(all: bool, verbose: bool) -> anyhow::Result<()> {
                     audit.issues.len()
                 );
             }
-            if let Some(ref test) = r.shadow_test {
-                println!(
-                    "    Tests: {}/{} passed",
-                    test.test_cases_passed, test.test_cases_run
-                );
-            }
             if let Some(ref rollout) = r.rollout {
                 let stage = &rollout.stages[rollout.current_stage];
                 println!(

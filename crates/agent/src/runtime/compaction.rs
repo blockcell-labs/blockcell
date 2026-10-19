@@ -424,10 +424,11 @@ impl AgentRuntime {
                             .ok()?
                             .as_millis() as u64;
                         let elapsed_ms = now_ms.saturating_sub(ts_ms);
-                        Some(
-                            std::time::Instant::now()
-                                - std::time::Duration::from_millis(elapsed_ms),
-                        )
+                        // `Instant - Duration` panics on underflow (e.g. very
+                        // large configured stale thresholds on a freshly booted
+                        // machine); `checked_sub` degrades to "unknown start".
+                        std::time::Instant::now()
+                            .checked_sub(std::time::Duration::from_millis(elapsed_ms))
                     })
                 }
             } else {

@@ -1,5 +1,10 @@
 use super::*;
 
+/// Upper bound on `?` placeholders per statement. SQLite's default limit is
+/// 999 on older builds; chunk well below it so bulk maintenance never fails to
+/// prepare as a whole.
+const MAX_SQL_IN_PARAMS: usize = 500;
+
 impl MemoryStore {
     /// Soft-delete only active legacy long-term rows after a successful file migration.
     pub fn retire_long_term_items(&self, ids: &[String]) -> Result<usize> {
@@ -218,28 +223,36 @@ impl MemoryStore {
             drop(stmt);
 
             let now = Utc::now().to_rfc3339();
-            let placeholders = (0..ids.len())
-                .map(|offset| format!("?{}", offset + 2))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let update_sql = format!(
-                "UPDATE memory_items SET deleted_at = ?1 WHERE id IN ({})",
-                placeholders
-            );
+            // Chunk so a large maintenance sweep cannot exceed SQLite's
+            // variable limit (see MAX_SQL_IN_PARAMS).
+            const MAX_UPDATE_PARAMS: usize = MAX_SQL_IN_PARAMS;
+            for chunk in ids.chunks(MAX_UPDATE_PARAMS) {
+                let placeholders = (0..chunk.len())
+                    .map(|offset| format!("?{}", offset + 2))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let update_sql = format!(
+                    "UPDATE memory_items SET deleted_at = ?1 WHERE id IN ({})",
+                    placeholders
+                );
 
-            let mut update_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-                Vec::with_capacity(ids.len() + 1);
-            update_values.push(Box::new(now));
-            for id in &ids {
-                update_values.push(Box::new(id.clone()));
+                let mut update_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    Vec::with_capacity(chunk.len() + 1);
+                update_values.push(Box::new(now.clone()));
+                for id in chunk {
+                    update_values.push(Box::new(id.clone()));
+                }
+                let update_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    update_values.iter().map(|value| value.as_ref()).collect();
+
+                tx.execute(&update_sql, update_refs.as_slice())
+                    .map_err(|e| {
+                        blockcell_core::Error::Storage(format!(
+                            "Batch delete update error: {}",
+                            e
+                        ))
+                    })?;
             }
-            let update_refs: Vec<&dyn rusqlite::types::ToSql> =
-                update_values.iter().map(|value| value.as_ref()).collect();
-
-            tx.execute(&update_sql, update_refs.as_slice())
-                .map_err(|e| {
-                    blockcell_core::Error::Storage(format!("Batch delete update error: {}", e))
-                })?;
 
             if self.vector.is_some() {
                 for id in &ids {
@@ -449,40 +462,44 @@ impl MemoryStore {
             };
 
             if !expired_ids.is_empty() {
-                let placeholders = (0..expired_ids.len())
-                    .map(|offset| format!("?{}", offset + 2))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "UPDATE memory_items SET deleted_at = ?1 WHERE id IN ({})",
-                    placeholders
-                );
-                let mut values: Vec<Box<dyn rusqlite::types::ToSql>> =
-                    Vec::with_capacity(expired_ids.len() + 1);
-                values.push(Box::new(now));
-                for id in &expired_ids {
-                    values.push(Box::new(id.clone()));
+                for chunk in expired_ids.chunks(MAX_SQL_IN_PARAMS) {
+                    let placeholders = (0..chunk.len())
+                        .map(|offset| format!("?{}", offset + 2))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "UPDATE memory_items SET deleted_at = ?1 WHERE id IN ({})",
+                        placeholders
+                    );
+                    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> =
+                        Vec::with_capacity(chunk.len() + 1);
+                    values.push(Box::new(now.clone()));
+                    for id in chunk {
+                        values.push(Box::new(id.clone()));
+                    }
+                    let refs: Vec<&dyn rusqlite::types::ToSql> =
+                        values.iter().map(|value| value.as_ref()).collect();
+                    tx.execute(&sql, refs.as_slice()).map_err(|e| {
+                        blockcell_core::Error::Storage(format!("TTL cleanup update error: {}", e))
+                    })?;
                 }
-                let refs: Vec<&dyn rusqlite::types::ToSql> =
-                    values.iter().map(|value| value.as_ref()).collect();
-                tx.execute(&sql, refs.as_slice()).map_err(|e| {
-                    blockcell_core::Error::Storage(format!("TTL cleanup update error: {}", e))
-                })?;
             }
 
             if !purged_ids.is_empty() {
-                let placeholders = (0..purged_ids.len())
-                    .map(|offset| format!("?{}", offset + 1))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!("DELETE FROM memory_items WHERE id IN ({})", placeholders);
-                let values: Vec<&dyn rusqlite::types::ToSql> = purged_ids
-                    .iter()
-                    .map(|id| id as &dyn rusqlite::types::ToSql)
-                    .collect();
-                tx.execute(&sql, values.as_slice()).map_err(|e| {
-                    blockcell_core::Error::Storage(format!("Purge delete error: {}", e))
-                })?;
+                for chunk in purged_ids.chunks(MAX_SQL_IN_PARAMS) {
+                    let placeholders = (0..chunk.len())
+                        .map(|offset| format!("?{}", offset + 1))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!("DELETE FROM memory_items WHERE id IN ({})", placeholders);
+                    let values: Vec<&dyn rusqlite::types::ToSql> = chunk
+                        .iter()
+                        .map(|id| id as &dyn rusqlite::types::ToSql)
+                        .collect();
+                    tx.execute(&sql, values.as_slice()).map_err(|e| {
+                        blockcell_core::Error::Storage(format!("Purge delete error: {}", e))
+                    })?;
+                }
             }
 
             if self.vector.is_some() {

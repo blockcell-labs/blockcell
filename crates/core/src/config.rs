@@ -101,6 +101,21 @@ fn default_cron_tick_interval() -> u64 {
     1
 }
 
+/// Placeholder API key used by providers that do not require authentication
+/// (currently the local `vllm` preset). Treated as "not configured" everywhere
+/// a real credential is required, including [`Config::get_api_key`].
+pub const PLACEHOLDER_API_KEY: &str = "dummy";
+
+/// Returns true for API keys that only exist to satisfy a provider client's
+/// non-empty check and carry no credential (local `vllm`/`ollama` presets).
+///
+/// CLI commands historically hard-coded `api_key != "dummy"`; keeping the rule
+/// in one place prevents the display/doctor/status views from disagreeing with
+/// [`Config::get_api_key`].
+pub fn is_placeholder_api_key(key: &str) -> bool {
+    matches!(key.trim(), "" | PLACEHOLDER_API_KEY | "ollama")
+}
+
 /// Minimum allowed cron tick interval in seconds.
 const MIN_CRON_TICK_INTERVAL_SECS: u64 = 1;
 /// Maximum allowed cron tick interval in seconds.
@@ -134,7 +149,7 @@ impl Default for Config {
         providers.insert(
             "vllm".to_string(),
             ProviderConfig {
-                api_key: "dummy".to_string(),
+                api_key: PLACEHOLDER_API_KEY.to_string(),
                 api_base: Some("http://localhost:8000/v1".to_string()),
                 proxy: None,
                 api_type: "openai".to_string(),
@@ -876,6 +891,11 @@ impl Config {
         write_text_atomic_durable(path, &comments)
     }
 
+    /// Return the highest-priority provider that has a usable API key.
+    ///
+    /// Placeholder keys (see [`PLACEHOLDER_API_KEY`]) are treated as "not
+    /// configured" so that a fresh install does not report the local `vllm`
+    /// preset as an active provider. This matches the CLI's `has_key` checks.
     pub fn get_api_key(&self) -> Option<(&str, &ProviderConfig)> {
         let priority = [
             "openrouter",
@@ -892,7 +912,7 @@ impl Config {
 
         for name in priority {
             if let Some(provider) = self.providers.get(name) {
-                if !provider.api_key.is_empty() {
+                if !is_placeholder_api_key(&provider.api_key) {
                     return Some((name, provider));
                 }
             }
@@ -1587,6 +1607,22 @@ mod tests {
 
         let explicit_json = serde_json::to_string(&explicit_default.memory.memory_system).unwrap();
         assert!(explicit_json.contains("circuitBreaker"));
+    }
+
+    #[test]
+    fn test_get_api_key_ignores_placeholder_preset() {
+        let cfg = Config::default();
+        assert!(
+            cfg.get_api_key().is_none(),
+            "fresh config must not report a local placeholder key as an active provider"
+        );
+
+        let mut cfg = Config::default();
+        cfg.providers
+            .get_mut("openai")
+            .expect("openai preset")
+            .api_key = "sk-real".to_string();
+        assert_eq!(cfg.get_api_key().map(|(name, _)| name), Some("openai"));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use tracing::Subscriber;
@@ -22,6 +22,15 @@ use tracing_subscriber::{
 
 /// 全局日志控制器单例
 pub static LOG_CONTROLLER: OnceLock<LogController> = OnceLock::new();
+
+/// Lock a mutex for logging state, recovering from poisoning.
+///
+/// A panic inside a log call must never escalate into a panic at the *next*
+/// log call site (including inside `on_event`), so poisoning is ignored:
+/// the guarded values are plain flags/paths that stay consistent.
+fn lock_logging<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// 日志控制器
 pub struct LogController {
@@ -77,12 +86,12 @@ impl LogController {
 
     /// 切换控制台输出（独立控制，不影响文件）
     pub fn set_console(&self, enabled: bool) {
-        *self.console_enabled.lock().unwrap() = enabled;
+        *lock_logging(&self.console_enabled) = enabled;
     }
 
     /// 切换文件输出（独立控制，不影响控制台）
     pub fn set_file(&self, enabled: bool) {
-        *self.file_enabled.lock().unwrap() = enabled;
+        *lock_logging(&self.file_enabled) = enabled;
     }
 
     /// 获取当前状态
@@ -108,9 +117,9 @@ impl LogController {
         LogStatus {
             level,
             module_filters,
-            console_enabled: *self.console_enabled.lock().unwrap(),
-            file_enabled: *self.file_enabled.lock().unwrap(),
-            log_file: self.current_file.lock().unwrap().clone(),
+            console_enabled: *lock_logging(&self.console_enabled),
+            file_enabled: *lock_logging(&self.file_enabled),
+            log_file: lock_logging(&self.current_file).clone(),
         }
     }
 }
@@ -140,7 +149,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if !*self.enabled.lock().unwrap() {
+        if !*lock_logging(&self.enabled) {
             return;
         }
 
@@ -181,11 +190,11 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        if !*self.enabled.lock().unwrap() {
+        if !*lock_logging(&self.enabled) {
             return;
         }
 
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = lock_logging(&self.writer);
 
         if self.json_format {
             let _ = writeln!(writer, "{}", format_event_json(event));

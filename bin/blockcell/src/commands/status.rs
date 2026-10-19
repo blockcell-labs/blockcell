@@ -407,8 +407,7 @@ fn provider_ready(config: &Config, name: &str, api_key: &str) -> bool {
             && !config.agents.defaults.model.trim().is_empty();
         return in_pool || selected_by_legacy;
     }
-    let key = api_key.trim();
-    !key.is_empty() && key != "dummy"
+    !blockcell_core::config::is_placeholder_api_key(api_key)
 }
 
 fn resolved_agent_active_provider_and_model(

@@ -17,6 +17,12 @@ impl Tool for EmailTool {
         blockcell_core::Idempotency::Required
     }
 
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        // Sending mail is an irreversible external side effect (and can leak
+        // data); reading/searching stays confirmation-free.
+        params.get("action").and_then(|v| v.as_str()) == Some("send")
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "email".to_string(),
@@ -141,8 +147,9 @@ impl Tool for EmailTool {
             }
             "list" => {}
             "read" => {
-                if params.get("uid").and_then(|v| v.as_u64()).is_none() {
-                    return Err(Error::Validation("read requires 'uid'".to_string()));
+                if !params.get("uid").and_then(|v| v.as_u64())
+                    .is_some_and(|uid| uid > 0 && uid <= u32::MAX as u64) {
+                    return Err(Error::Validation("read requires 'uid' in 1..=4294967295".to_string()));
                 }
             }
             "search" => {
@@ -152,10 +159,16 @@ impl Tool for EmailTool {
             }
             _ => return Err(Error::Validation(format!("Unknown action: {}", action))),
         }
+        if matches!(action, "list" | "search") && params.get("limit").is_some() {
+            if !params["limit"].as_u64().is_some_and(|limit| (1..=100).contains(&limit)) {
+                return Err(Error::Validation("limit must be an integer in 1..=100".to_string()));
+            }
+        }
         Ok(())
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
+        self.validate(&params)?;
         let action = params["action"].as_str().unwrap();
         let workspace = ctx.workspace.clone();
 
@@ -984,6 +997,29 @@ mod tests {
             .validate(&json!({"action": "read", "uid": 123}))
             .is_ok());
         assert!(tool.validate(&json!({"action": "read"})).is_err());
+    }
+
+    #[test]
+    fn p3_only_send_requires_confirmation() {
+        let tool = EmailTool;
+        assert!(tool.requires_confirmation(&json!({"action":"send"})));
+        for action in ["list", "read", "search"] {
+            assert!(!tool.requires_confirmation(&json!({"action": action})));
+        }
+    }
+
+    #[test]
+    fn p3_rejects_invalid_imap_ranges() {
+        let tool = EmailTool;
+        for uid in [0, u32::MAX as u64 + 1, u64::MAX] {
+            assert!(tool.validate(&json!({"action":"read","uid":uid})).is_err());
+        }
+        for action in ["list", "search"] {
+            for limit in [0, 101, u64::MAX] {
+                assert!(tool.validate(&json!({"action":action,"query":"hello","limit":limit})).is_err());
+            }
+            assert!(tool.validate(&json!({"action":action,"query":"hello","limit":100})).is_ok());
+        }
     }
 
     #[test]

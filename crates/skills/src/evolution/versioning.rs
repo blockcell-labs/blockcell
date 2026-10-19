@@ -66,7 +66,9 @@ impl SkillEvolution {
         // 可能已被 truncate，但 write 失败意味着内容未完整写入，恢复也无从下手。
         // 因此写入失败直接返回——此时 skill 文件可能损坏，但至少不会留下
         // 错误的版本快照。staged 技能写入的是 staging 目录，不影响主目录。
-        if let Err(e) = std::fs::write(&skill_path, &patch.diff) {
+        // 原子写入（temp+rename）：直接 `fs::write` 覆写会在进程崩溃时留下
+        // 截断的技能文件，而 record 文件早已使用 tmp+rename。
+        if let Err(e) = blockcell_core::file_store::atomic_write(&skill_path, patch.diff.as_bytes()) {
             // 非 staged：尝试用 pre_write_version 恢复磁盘文件
             if !record.context.staged {
                 if let Some(ref prev_ver) = pre_write_version {
@@ -237,25 +239,8 @@ impl SkillEvolution {
                 version_history_migrated = true;
             }
 
-            if let Some(meta) = self.extract_yaml_from_response(&patch.explanation) {
-                let meta_path = dest_skill_dir.join("meta.yaml");
-                let meta_issues = validate_meta_yaml(&meta);
-                if meta_issues.is_empty() {
-                    if let Err(e) = std::fs::write(&meta_path, &meta) {
-                        warn!(
-                            skill = %record.skill_name,
-                            error = %e,
-                            "Failed to write meta.yaml to promoted skill"
-                        );
-                    }
-                } else {
-                    warn!(
-                        skill = %record.skill_name,
-                        issues = %meta_issues.join("; "),
-                        "Refusing to write invalid meta.yaml from LLM response"
-                    );
-                }
-            }
+            // meta.yaml was already written into the staging directory above and
+            // moved here by the promotion rename — rewriting it is redundant.
 
             info!(
                 skill = %record.skill_name,

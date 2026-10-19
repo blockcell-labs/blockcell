@@ -136,9 +136,9 @@ impl Tool for AudioTranscribeTool {
 }
 
 fn expand_path(path: &str, ctx: &ToolContext) -> String {
-    if path.starts_with('~') {
+    if let Some(relative) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return path.replacen('~', &home.to_string_lossy(), 1);
+            return home.join(relative).to_string_lossy().into_owned();
         }
     }
     if std::path::Path::new(path).is_absolute() {
@@ -531,8 +531,7 @@ async fn try_api_transcribe(
         .map_err(|e| Error::Tool(format!("API request failed: {}", e)))?;
 
     let status = response.status();
-    let body: String = response
-        .text()
+    let body = crate::bounded_io::read_text_limited(response, 8 * 1024 * 1024)
         .await
         .map_err(|e| Error::Tool(format!("Failed to read API response: {}", e)))?;
 
@@ -706,6 +705,44 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p3_tilde_prefix_is_a_relative_filename() {
+        let ctx = crate::ToolContext {
+            workspace: std::env::temp_dir(),
+            base: std::env::temp_dir(),
+            builtin_skills_dir: None,
+            active_skill_dir: None,
+            session_key: "cli:budget".to_string(),
+            channel: "cli".to_string(),
+            account_id: None,
+            sender_id: Some("user".to_string()),
+            sender_role: None,
+            chat_id: "budget".to_string(),
+            config: blockcell_core::Config::default(),
+            permissions: blockcell_core::types::PermissionSet::new(),
+            task_manager: None,
+            memory_store: None,
+            memory_file_store: None,
+            ghost_memory_lifecycle: None,
+            skill_file_store: None,
+            session_search: None,
+            outbound_tx: None,
+            spawn_handle: None,
+            capability_registry: None,
+            core_evolution: None,
+            event_emitter: None,
+            channel_contacts_file: None,
+            response_cache: None,
+            runtime_handle: None,
+            agent_identity: None,
+            skill_mutex: None,
+            agent_type_registry: None,
+            evolution_workflow_store: None,
+        };
+        assert_eq!(expand_path("~recording.wav", &ctx), ctx.workspace.join("~recording.wav").to_string_lossy());
+    }
+
 
     #[test]
     fn test_schema() {

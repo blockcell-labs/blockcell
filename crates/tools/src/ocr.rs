@@ -416,12 +416,15 @@ async fn check_command(cmd: &str) -> bool {
 }
 
 fn resolve_path(path: &str, workspace: &std::path::Path) -> String {
-    if path.starts_with('/') || path.starts_with('~') {
-        if path.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
-                return home.join(&path[2..]).display().to_string();
-            }
+    // Only `~/` means the home directory. `~foo` and bare `~` are relative
+    // filename; expanding it as home+"foo" let the tool write outside the
+    // workspace without the runtime's path policy seeing it.
+    if let Some(relative) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(relative).display().to_string();
         }
+    }
+    if path.starts_with('/') {
         path.to_string()
     } else {
         workspace.join(path).display().to_string()

@@ -93,9 +93,10 @@ impl HealthChecker {
 
     /// 检查是否能加载新能力（写入工作目录）
     async fn check_load_capabilities() -> bool {
-        let workspace = dirs::home_dir()
-            .map(|h| h.join(".blockcell/workspace"))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // Use the configured paths instead of a hard-coded ~/.blockcell path so
+        // custom roots (tests, BLOCKCELL_HOME, agent-scoped dirs) are honored.
+        let workspace = blockcell_core::Paths::default().workspace();
+        let _ = std::fs::create_dir_all(&workspace);
 
         // Check if we can write to the workspace
         let test_file = workspace.join(".health_check_test");

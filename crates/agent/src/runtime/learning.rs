@@ -69,8 +69,10 @@ impl super::AgentRuntime {
         let outbound_tx = self.outbound_tx.clone();
         // 共享 skill_index_summary Arc, 供后台 Review 完成后刷新
         let skill_index_cache = self.context_builder.skill_index_summary_arc();
-        // 继承主 agent 的 abort token，确保用户取消任务时后台 review 也被取消
-        let review_abort_token = self.abort_token.child();
+        // 后台 Review 挂到取消链的根节点，而不是当前消息的 token：同一会话的
+        // 下一条消息会 cancel 上一条消息 token，若 Review 是其子节点会被连带取消。
+        // 根节点仍覆盖进程/运行时级取消。
+        let review_abort_token = self.abort_token.root().child();
 
         tokio::spawn(async move {
             let _review_completion_guard = reservation.into_completion_guard();

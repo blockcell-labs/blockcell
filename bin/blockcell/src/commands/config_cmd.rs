@@ -355,7 +355,7 @@ pub async fn providers() -> anyhow::Result<()> {
 
     for name in &names {
         let provider = &config.providers[*name];
-        let has_key = !provider.api_key.is_empty() && provider.api_key != "dummy";
+        let has_key = !blockcell_core::config::is_placeholder_api_key(&provider.api_key);
         let is_active = active.as_deref() == Some(name.as_str());
 
         let status_icon = if is_active {

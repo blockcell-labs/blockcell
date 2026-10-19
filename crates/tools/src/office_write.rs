@@ -720,9 +720,9 @@ fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &st
 }
 
 fn expand_path(path: &str, workspace: &std::path::Path) -> String {
-    if path.starts_with('~') {
+    if let Some(relative) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return path.replacen('~', &home.to_string_lossy(), 1);
+            return home.join(relative).to_string_lossy().into_owned();
         }
     }
     if std::path::Path::new(path).is_absolute() {
@@ -846,6 +846,12 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p3_tilde_prefix_is_a_relative_filename() {
+        let workspace = std::path::Path::new("/tmp/workspace");
+        assert_eq!(expand_path("~report.docx", workspace), "/tmp/workspace/~report.docx");
+    }
 
     #[test]
     fn test_schema() {

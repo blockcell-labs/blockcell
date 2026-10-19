@@ -779,7 +779,7 @@ fn file_migration_does_not_mark_complete_after_read_failure() {
     std::fs::write(dir.path().join("2026-07-23.md"), [0xff, 0xfe, 0xfd]).unwrap();
 
     assert!(store.migrate_from_files(dir.path()).is_err());
-    assert!(!store.is_migrated());
+    assert!(!store.is_migrated().unwrap());
 }
 
 #[test]
@@ -1763,4 +1763,45 @@ fn test_brief_query_reuses_hybrid_retrieval() {
         *embedder.query_inputs.lock().unwrap(),
         vec!["semantic match".to_string()]
     );
+}
+
+fn p3_params() -> UpsertParams {
+    UpsertParams { scope: "short_term".into(), item_type: "fact".into(), title: None,
+        content: "test".into(), summary: None, tags: vec![], source: "user".into(),
+        channel: None, session_key: None, importance: 0.5, dedup_key: None, expires_at: None }
+}
+
+#[test]
+fn p3_memory_rejects_invalid_importance_and_ambiguous_tags() {
+    let (store, _dir) = test_store();
+    for importance in [-1.0, 1.1, f64::INFINITY, f64::NAN] {
+        let mut params = p3_params(); params.importance = importance;
+        assert!(store.upsert(params).is_err(), "importance {importance}");
+    }
+    let mut params = p3_params(); params.tags = vec!["a,b".into()];
+    assert!(store.upsert(params).is_err());
+    let mut params = p3_params(); params.tags = vec!["  alpha  ".into()];
+    assert_eq!(store.upsert(params).unwrap().tags, vec!["alpha"]);
+}
+
+#[test]
+fn p3_session_stats_include_visible_global_rows() {
+    let (store, _dir) = test_store();
+    store.upsert(p3_params()).unwrap();
+    let mut local = p3_params(); local.session_key = Some("chat:a".into());
+    store.upsert(local).unwrap();
+    let mut other = p3_params(); other.session_key = Some("chat:b".into());
+    store.upsert(other).unwrap();
+    assert_eq!(store.stats_in_session("chat:a").unwrap()["total_active"], 2);
+}
+
+#[test]
+fn p3_large_batch_delete_stays_below_sql_variable_limit() {
+    let (store, _dir) = test_store();
+    {
+        let conn = store.inner.lock().unwrap();
+        conn.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<33000)
+        INSERT INTO memory_items(id, content, created_at, updated_at) SELECT CAST(i AS TEXT), 'test', '2020', '2020' FROM n;").unwrap();
+    }
+    assert_eq!(store.batch_soft_delete(None, None, None, None).unwrap(), 33000);
 }

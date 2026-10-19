@@ -61,14 +61,14 @@ impl Default for ExecTool {
 static DENY_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
         r"(?i)\bdd\b.*\bof=/dev/",                  // dd writing to a block device
-        r"(?i)\bdd\b.*\bif=/dev/(sd|hd|nvme|disk)", // dd reading a raw disk
+        r"(?i)\bdd\b.*\bif=/dev/(sd|hd|nvme|disk|vda|md|loop|ram|zram)", // dd reading a raw disk
         r"(?i)\bmkfs(\.|\b)",                       // make filesystem
         r"(?i)\bshutdown\b",
         r"(?i)\breboot\b",
         r"(?i)\bhalt\b",
         r"(?i)\bformat\s+([a-z]:|/dev/)", // format a drive/partition
         r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;", // fork bomb
-        r"(?i)>\s*/dev/(sd|hd|nvme|disk|mapper)", // overwrite a block device
+        r"(?i)>\s*/dev/(sd|hd|nvme|disk|mapper|vda|md|loop|ram|zram)", // overwrite a block device
         r"(?i)\bwipefs\b",
     ]
     .iter()
@@ -266,16 +266,18 @@ impl Tool for ExecTool {
                 let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-                // Truncate if too long (use safe_truncate to avoid panic on multi-byte chars)
+                // Truncate if too long (use safe_truncate to avoid panic on multi-byte chars).
+                // Compare character counts, not byte lengths: `max_output_chars` is a
+                // character budget, so `len()` truncated CJK/emoji output ~4x early.
                 let mut truncated = output.truncated;
-                if stdout.len() > max_output_chars {
+                if stdout.chars().count() > max_output_chars {
                     stdout = format!(
                         "{}\n... (output truncated)",
                         crate::safe_truncate(&stdout, max_output_chars)
                     );
                     truncated = true;
                 }
-                if stderr.len() > max_output_chars {
+                if stderr.chars().count() > max_output_chars {
                     stderr = format!(
                         "{}\n... (output truncated)",
                         crate::safe_truncate(&stderr, max_output_chars)

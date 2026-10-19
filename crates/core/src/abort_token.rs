@@ -49,6 +49,20 @@ impl AbortToken {
         }
     }
 
+    /// Return the root (top-most parent) of this cancellation chain.
+    ///
+    /// Background work that must outlive a single message turn should be a
+    /// child of the root rather than of the per-turn token: the next message
+    /// cancels the previous turn token, which would otherwise abort unrelated
+    /// background work.
+    pub fn root(&self) -> &AbortToken {
+        let mut current = self;
+        while let Some(parent) = &current.parent {
+            current = parent.as_ref();
+        }
+        current
+    }
+
     /// 检查是否已取消
     pub fn is_cancelled(&self) -> bool {
         let mut current = self;
@@ -218,6 +232,21 @@ impl Drop for CleanupHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_token_outlives_intermediate_cancellation() {
+        let root = AbortToken::new();
+        let turn = root.child();
+        let background = turn.root().child();
+        turn.cancel();
+        assert!(turn.is_cancelled());
+        assert!(
+            !background.is_cancelled(),
+            "background work attached to the root must survive a turn cancellation"
+        );
+        root.cancel();
+        assert!(background.is_cancelled());
+    }
 
     #[test]
     fn test_abort_token_new_not_cancelled() {
