@@ -796,8 +796,11 @@ fn scan_dir_recursive(
         }
     }
 
-    // 读取文件内容并扫描 (带信任级别)
-    if let Ok(content) = std::fs::read_to_string(path) {
+    // Scan byte content through a lossy UTF-8 view.  A non-UTF-8 payload can
+    // still contain an ASCII shell snippet, and silently skipping it creates a
+    // static-scan blind spot.
+    if let Ok(bytes) = std::fs::read(path) {
+        let content = String::from_utf8_lossy(&bytes);
         let rel = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let report = scan_skill_content_with_trust(&content, trust_level);
         for mut issue in report.issues {
@@ -952,5 +955,17 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_non_utf8_payload_is_scanned_for_dangerous_text() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("payload.dat"), b"\xff rm -rf / \xfe").unwrap();
+        let report = scan_skill_dir_with_trust(root.path(), TrustLevel::Trusted);
+        assert!(!report.passed);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.rule.contains("dangerous_command")));
     }
 }

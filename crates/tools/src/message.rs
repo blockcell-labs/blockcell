@@ -18,6 +18,15 @@ impl Tool for MessageTool {
         blockcell_core::Idempotency::Required
     }
 
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        // A message addressed to an explicit channel/contact is an external
+        // side effect. Same-session replies retain the existing conversational
+        // flow, while cross-target sends require an explicit confirmation.
+        params.get("channel").is_some()
+            || params.get("chat_id").is_some()
+            || params.get("target_name").is_some()
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "message".to_string(),
@@ -366,5 +375,13 @@ mod tests {
         assert!(tool.validate(&json!({})).is_err());
         assert!(tool.validate(&json!({"content": ""})).is_err());
         assert!(tool.validate(&json!({"media": []})).is_err());
+    }
+
+    #[test]
+    fn cross_target_message_requires_confirmation() {
+        let tool = MessageTool;
+        assert!(!tool.requires_confirmation(&json!({"content": "hi"})));
+        assert!(tool.requires_confirmation(&json!({"content": "hi", "channel": "telegram"})));
+        assert!(tool.requires_confirmation(&json!({"content": "hi", "chat_id": "42"})));
     }
 }

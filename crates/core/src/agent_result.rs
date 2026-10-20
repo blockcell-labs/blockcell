@@ -172,19 +172,21 @@ impl AgentResult {
     pub fn to_json_string(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "AgentResult serialization failed, using fallback");
-            // 对错误信息进行 JSON 安全转义
-            let safe_error = e
-                .to_string()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\t', "\\t")
-                .replace('\r', "\\r");
-            format!(
-                r#"{{"status":"Failed","content":"serialization failed: {}"}}"#,
-                safe_error
-            )
+            Self::serialization_fallback(&e.to_string())
         })
+    }
+
+    pub(crate) fn serialization_fallback(error: &str) -> String {
+        serde_json::json!({
+            "status": "Failed",
+            "summary": "Result serialization failed",
+            "content": [],
+            "files_modified": [],
+            "files_created": [],
+            "execution_time_ms": 0,
+            "error_message": format!("serialization failed: {error}")
+        })
+        .to_string()
     }
 
     /// 从JSON解析

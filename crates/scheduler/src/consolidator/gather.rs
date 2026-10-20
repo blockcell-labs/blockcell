@@ -229,7 +229,7 @@ impl DreamConsolidator {
 
             // A section whose body is just `*title*` carries no signal. Compare
             // without allocating a temporary format string per section.
-            let title_only = section_content.len() == title.len() + 4
+            let title_only = section_content.len() == title.len() + 2
                 && section_content.starts_with('*')
                 && section_content.ends_with('*')
                 && &section_content[1..section_content.len() - 1] == title;

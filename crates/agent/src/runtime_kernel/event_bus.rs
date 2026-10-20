@@ -143,10 +143,22 @@ impl EventBus {
             candidate_id: ctx.candidate_id.as_deref(),
         });
         snapshot.sort_by_key(|item| item.spec.priority);
+        // A listener timeout is per listener, but the event itself also needs
+        // a wall-clock budget. Without this deadline N slow listeners could
+        // block a turn for N * DEFAULT_LISTENER_TIMEOUT.
+        let deadline = tokio::time::Instant::now() + DEFAULT_LISTENER_TIMEOUT;
 
         for item in snapshot {
             let spec = &item.spec;
-            let outcome = run_isolated(item.listener.as_ref(), spec.timeout, ctx, event).await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let timeout = if remaining.is_zero() {
+                Some(Duration::ZERO)
+            } else {
+                spec.timeout
+                    .map(|limit| limit.min(remaining))
+                    .or(Some(remaining))
+            };
+            let outcome = run_isolated(item.listener.as_ref(), timeout, ctx, event).await;
             match outcome {
                 Ok(EventDecision::Continue) => {}
                 Ok(EventDecision::Reject { reason }) => {

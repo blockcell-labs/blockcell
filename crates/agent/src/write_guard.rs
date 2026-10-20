@@ -223,6 +223,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn categorized_skill_write_blocks_tool_leaf_alias() {
+        let guard = WriteGuard::default();
+        let _held = guard.acquire(WriteTarget::skill("coding/debug")).unwrap();
+        assert!(SkillMutexOps::try_acquire(&guard, "debug").is_none());
+    }
+
+    #[test]
     fn test_acquire_and_release() {
         let guard = WriteGuard::new(PathBuf::from("/tmp/test"));
 

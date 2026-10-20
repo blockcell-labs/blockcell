@@ -52,21 +52,29 @@ impl AgentRuntime {
         msg: &InboundMessage,
         tool_names: &[String],
         loop_guard: &ToolLoopGuard,
+        disabled_tools: &HashSet<String>,
+        disabled_skills: &HashSet<String>,
     ) -> HashMap<String, PrefetchedToolResult> {
         // 先用廉价同步条件筛选候选；少于两个可预取调用时不预取（单个调用没有
         // 重叠收益）。门控必须在 hook 触发之前：pre-execute 事件每次调用只应
         // 出现一次，若候选不足就直接返回，避免"预取探一次、管线拒一次"的双发。
-        let candidates: Vec<&ToolCallRequest> = calls
-            .iter()
-            .filter(|call| {
+        let mut pending_by_tool = HashMap::new();
+        let mut pending_total = 0_u32;
+        let mut candidates = Vec::new();
+        for call in calls {
+            if {
                 // Respect the per-step tool scope and the iteration budget: the
                 // main loop would skip/reject such calls, so prefetching them
                 // would perform real I/O whose result is thrown away.
                 tool_names.iter().any(|name| name == &call.name)
-                    && loop_guard.would_admit(&call.name)
-                    && self.prefetch_candidate(call)
-            })
-            .collect();
+                    && loop_guard.would_admit_batch(&call.name, &pending_by_tool, pending_total)
+                    && self.prefetch_candidate(call, disabled_tools, disabled_skills)
+            } {
+                *pending_by_tool.entry(call.name.clone()).or_insert(0) += 1;
+                pending_total = pending_total.saturating_add(1);
+                candidates.push(call);
+            }
+        }
         if candidates.len() < 2 {
             return HashMap::new();
         }
@@ -126,12 +134,15 @@ impl AgentRuntime {
     }
 
     /// 廉价同步前置：白名单 + 未被禁用。
-    fn prefetch_candidate(&self, call: &ToolCallRequest) -> bool {
+    fn prefetch_candidate(
+        &self,
+        call: &ToolCallRequest,
+        disabled_tools: &HashSet<String>,
+        disabled_skills: &HashSet<String>,
+    ) -> bool {
         if !PREFETCHABLE_TOOLS.contains(&call.name.as_str()) {
             return false;
         }
-        let (disabled_tools, disabled_skills) =
-            load_disabled_toggles_pair(&self.paths, "tools", "skills");
         !disabled_tools.contains(&call.name) && !disabled_skills.contains(&call.name)
     }
 

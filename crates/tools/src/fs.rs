@@ -250,6 +250,7 @@ impl Tool for WriteFileTool {
         let path = expand_path(path_str, &ctx.workspace);
 
         let bytes_written = content.len();
+        let _write_guard = self.fs.lock_for_write(&path).await?;
         self.fs.write(&path, content).await?;
 
         Ok(json!({
@@ -339,6 +340,7 @@ impl Tool for EditFileTool {
         let path_str = params["path"].as_str().unwrap();
         let edits = parse_edits(&params)?;
         let path = expand_path(path_str, &ctx.workspace);
+        let _write_guard = self.fs.lock_for_write(&path).await?;
 
         if self.fs.kind(&path).await?.is_none() {
             return Err(Error::NotFound(format!(
@@ -646,12 +648,15 @@ mod tests {
             })
         }
         async fn read_to_string(&self, path: &std::path::Path) -> Result<String> {
-            self.0
+            let content = self
+                .0
                 .lock()
                 .unwrap()
                 .get(path)
                 .cloned()
-                .ok_or_else(|| Error::NotFound(path.display().to_string()))
+                .ok_or_else(|| Error::NotFound(path.display().to_string()));
+            tokio::task::yield_now().await;
+            content
         }
         async fn read_document(&self, path: &std::path::Path) -> Result<String> {
             self.read_to_string(path).await
@@ -687,6 +692,29 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_from_separate_tools_preserve_both_changes() {
+        let workspace = std::path::Path::new("/virtual-workspace");
+        let fs = Arc::new(MemoryFs::default());
+        let path = workspace.join("shared.txt");
+        fs.write(&path, "alpha beta").await.unwrap();
+        let first = EditFileTool::new(fs.clone());
+        let second = EditFileTool::new(fs.clone());
+        let (a, b) = tokio::join!(
+            first.execute(
+                tool_context(workspace),
+                json!({"path":"shared.txt", "old_text":"alpha", "new_text":"A"})
+            ),
+            second.execute(
+                tool_context(workspace),
+                json!({"path":"shared.txt", "old_text":"beta", "new_text":"B"})
+            ),
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(fs.read_to_string(&path).await.unwrap(), "A B");
     }
 
     #[tokio::test]

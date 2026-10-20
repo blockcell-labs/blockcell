@@ -419,7 +419,9 @@ impl VersionManager {
         };
 
         let content = std::fs::read_to_string(&skill_file)?;
-        let hash = format!("{:x}", md5::compute(content.as_bytes()));
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
         Ok(hash)
     }
 
@@ -1100,13 +1102,25 @@ mod tests {
     fn p3_version_numbers_remain_monotonic_after_cleanup() {
         let root = temp_skills_dir("p3_cleanup");
         std::fs::create_dir_all(root.join("test")).unwrap();
-        std::fs::write(root.join("test/SKILL.md"), "# Test\nA useful prompt skill for testing version retention.").unwrap();
+        std::fs::write(
+            root.join("test/SKILL.md"),
+            "# Test\nA useful prompt skill for testing version retention.",
+        )
+        .unwrap();
         let manager = VersionManager::new(root.clone());
         for _ in 0..3 {
-            manager.create_version("test", VersionSource::Manual, None).unwrap();
+            manager
+                .create_version("test", VersionSource::Manual, None)
+                .unwrap();
         }
         manager.cleanup_old_versions("test", 1).unwrap();
-        assert_eq!(manager.create_version("test", VersionSource::Manual, None).unwrap().version, "v4");
+        assert_eq!(
+            manager
+                .create_version("test", VersionSource::Manual, None)
+                .unwrap()
+                .version,
+            "v4"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

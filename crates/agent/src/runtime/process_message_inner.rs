@@ -956,7 +956,14 @@ impl AgentRuntime {
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
                                                                            // 只读预取：彼此独立的只读调用并发执行，主循环按原顺序消费结果（P2-2）。
                 let mut prefetched = self
-                    .prefetch_read_only_tools(&response.tool_calls, &msg, &tool_names, &loop_guard)
+                    .prefetch_read_only_tools(
+                        &response.tool_calls,
+                        &msg,
+                        &tool_names,
+                        &loop_guard,
+                        &disabled_tools,
+                        &disabled_skills,
+                    )
                     .await;
                 for (call_index, tool_call) in response.tool_calls.iter().enumerate() {
                     if tool_call.name == "web_search" || tool_call.name == "web_fetch" {

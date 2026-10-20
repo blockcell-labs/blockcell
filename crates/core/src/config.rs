@@ -280,25 +280,65 @@ fn format_json5_parse_error(
 
 fn expand_env_vars_in_text(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
-    let mut index = 0usize;
-
-    while let Some(relative_start) = content[index..].find("${") {
-        let start = index + relative_start;
-        out.push_str(&content[index..start]);
-
-        let expr_start = start + 2;
-        if let Some(relative_end) = content[expr_start..].find('}') {
-            let end = expr_start + relative_end;
-            let expr = &content[expr_start..end];
-            out.push_str(&expand_env_expr(expr));
-            index = end + 1;
-        } else {
-            out.push_str(&content[start..]);
-            return out;
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            line_comment = !matches!(byte, b'\n' | b'\r');
+        } else if block_comment {
+            if byte == b'*' && next == Some(b'/') {
+                out.push_str("*/");
+                index += 2;
+                block_comment = false;
+                continue;
+            }
+        } else if byte == b'$' && next == Some(b'{') {
+            if let Some(end) = content[index + 2..].find('}') {
+                let end = index + 2 + end;
+                let raw = expand_env_expr(&content[index + 2..end]);
+                if quote.is_some() {
+                    out.push_str(&escape_env_value(&raw));
+                } else {
+                    // Unquoted interpolation represents one scalar, never JSON5 syntax.
+                    match json5::from_str::<Value>(&raw) {
+                        Ok(value @ (Value::Null | Value::Bool(_) | Value::Number(_))) => {
+                            out.push_str(&value.to_string());
+                        }
+                        _ => out.push('\0'), // force the normal parse-error path
+                    }
+                }
+                index = end + 1;
+                continue;
+            }
+        } else if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                out.push('\\');
+                index += 1;
+                if let Some(ch) = content[index..].chars().next() {
+                    out.push(ch);
+                    index += ch.len_utf8();
+                }
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'/' && next == Some(b'/') {
+            line_comment = true;
+        } else if byte == b'/' && next == Some(b'*') {
+            block_comment = true;
         }
+        let ch = content[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
     }
-
-    out.push_str(&content[index..]);
     out
 }
 
@@ -319,19 +359,37 @@ fn expand_env_expr(expr: &str) -> String {
         }
         std::env::var(name).unwrap_or_default()
     };
-    escape_env_value(&raw)
+    raw
 }
 
 /// ${ENV} 在 JSON5 解析前做文本替换——值中的 `"` 可闭合外层引号注入任意 JSON 键。
-/// 转义 `\` 与 `"`：引号内用法仍是合法字符串字面量；纯数字/布尔等 unquoted
-/// 用法不受影响；含结构字符的 unquoted 值将解析报错而非静默注入。
+/// 转义 JSON5 的两种引号、反斜杠及换行；未加引号的插值另行限制为单一标量。
 fn escape_env_value(raw: &str) -> String {
-    if !raw.contains(['\\', '"']) {
+    if !raw.contains(['\\', '"', '\'', '\n', '\r', '\u{2028}', '\u{2029}']) {
         return raw.to_string();
     }
     let mut out = String::with_capacity(raw.len() + 8);
     for ch in raw.chars() {
-        if ch == '\\' || ch == '"' {
+        match ch {
+            '\n' => {
+                out.push_str("\\n");
+                continue;
+            }
+            '\r' => {
+                out.push_str("\\r");
+                continue;
+            }
+            '\u{2028}' => {
+                out.push_str("\\u2028");
+                continue;
+            }
+            '\u{2029}' => {
+                out.push_str("\\u2029");
+                continue;
+            }
+            _ => {}
+        }
+        if ch == '\\' || ch == '"' || ch == '\'' {
             out.push('\\');
         }
         out.push(ch);
@@ -383,7 +441,11 @@ fn preserve_unchanged_env_placeholders(previous: &Value, next: &mut Value) {
             }
         }
         (Value::String(previous), Value::String(next))
-            if previous.contains("${") && expand_env_vars_in_text(previous) == *next =>
+            if previous.contains("${")
+                && serde_json::to_string(previous)
+                    .ok()
+                    .and_then(|quoted| parse_json5_str::<String>(&quoted).ok())
+                    .is_some_and(|expanded| expanded == *next) =>
         {
             *next = previous.clone();
         }
@@ -1963,5 +2025,50 @@ mod tests {
             .map(|agent| agent.id)
             .collect();
         assert_eq!(ids, vec!["default".to_string(), "ops".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod recheck_probe_env {
+    #[test]
+    fn interpolation_preserves_scalars_strings_and_comment_context() {
+        let value = super::parse_json5_value(
+            r#"{
+                // don't let comment quotes alter string detection: '
+                n: ${P3_CONTEXT_UNSET_72C:-12},
+                b: ${P3_CONTEXT_UNSET_72C:-true},
+                z: ${P3_CONTEXT_UNSET_72C:-null},
+                url: '${P3_CONTEXT_UNSET_72C:-https://example.com/a,b}',
+                /* ' " */ text: "${P3_CONTEXT_UNSET_72C:-hello}",
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(value["n"], 12);
+        assert_eq!(value["b"], true);
+        assert!(value["z"].is_null());
+        assert_eq!(value["url"], "https://example.com/a,b");
+        assert_eq!(value["text"], "hello");
+    }
+
+    #[test]
+    fn unquoted_env_cannot_inject_config_fields() {
+        std::env::set_var("P3_UNQUOTED_INJECT", "null, injected: true, tail: null");
+        let result = super::parse_json5_value("{value: ${P3_UNQUOTED_INJECT}}");
+        std::env::remove_var("P3_UNQUOTED_INJECT");
+        assert!(
+            result.is_err(),
+            "non-scalar unquoted expansion must be rejected"
+        );
+    }
+
+    #[test]
+    fn recheck_probe_single_quote() {
+        std::env::set_var("P3_RECHECK_INJECT", "x', injected: true, tail: 'y");
+        let result = super::parse_json5_value("{value: '${P3_RECHECK_INJECT}'}").unwrap();
+        std::env::remove_var("P3_RECHECK_INJECT");
+        assert!(
+            result.get("injected").is_none(),
+            "unexpected injected key: {result}"
+        );
     }
 }

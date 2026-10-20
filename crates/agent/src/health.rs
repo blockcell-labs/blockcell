@@ -1,4 +1,4 @@
-use blockcell_core::SurvivalInvariants;
+use blockcell_core::{Paths, SurvivalInvariants};
 use tracing::{info, warn};
 
 /// 生存不变量检查器 — 对应文档第 7 节 Meta-Evolution
@@ -13,6 +13,13 @@ pub struct HealthChecker;
 impl HealthChecker {
     /// 执行完整的生存不变量检查
     pub async fn check_all() -> SurvivalInvariants {
+        Self::check_all_with_paths(&Paths::default()).await
+    }
+
+    /// Run the health check against a caller-provided paths root. Gateway and
+    /// tests can therefore validate their configured workspace instead of the
+    /// process user's default `~/.blockcell` directory.
+    pub async fn check_all_with_paths(paths: &Paths) -> SurvivalInvariants {
         let mut invariants = SurvivalInvariants {
             last_checked: chrono::Utc::now().timestamp(),
             ..Default::default()
@@ -37,7 +44,7 @@ impl HealthChecker {
         );
 
         // 2. 是否还能加载新能力？
-        invariants.can_load_capabilities = Self::check_load_capabilities().await;
+        invariants.can_load_capabilities = Self::check_load_capabilities(paths).await;
         invariants.diagnostics.insert(
             "load_capabilities".to_string(),
             if invariants.can_load_capabilities {
@@ -92,10 +99,8 @@ impl HealthChecker {
     }
 
     /// 检查是否能加载新能力（写入工作目录）
-    async fn check_load_capabilities() -> bool {
-        // Use the configured paths instead of a hard-coded ~/.blockcell path so
-        // custom roots (tests, BLOCKCELL_HOME, agent-scoped dirs) are honored.
-        let workspace = blockcell_core::Paths::default().workspace();
+    async fn check_load_capabilities(paths: &Paths) -> bool {
+        let workspace = paths.workspace();
         let _ = std::fs::create_dir_all(&workspace);
 
         // Check if we can write to the workspace

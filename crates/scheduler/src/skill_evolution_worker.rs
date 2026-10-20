@@ -6,7 +6,7 @@
 
 use blockcell_agent::EvolutionNotifier;
 use blockcell_core::{Error, Result};
-use blockcell_skills::evolution::EvolutionStatus;
+use blockcell_skills::evolution::{EvolutionRecord, EvolutionStatus};
 use blockcell_skills::{
     EvolutionService, EvolutionServiceConfig, LLMProvider, SingleEvolutionResult,
 };
@@ -43,6 +43,12 @@ pub struct SkillEvolutionWorker {
 }
 
 impl SkillEvolutionWorker {
+    async fn load_record_blocking(&self, evolution_id: &str) -> Result<EvolutionRecord> {
+        let evolution = self.service.evolution().clone();
+        let evolution_id = evolution_id.to_string();
+        crate::blocking::run_blocking(move || evolution.load_record(&evolution_id)).await
+    }
+
     fn workflow_status_for_evolution(status: &EvolutionStatus) -> Option<&'static str> {
         match *status.normalize() {
             EvolutionStatus::Completed => Some("Promoted"),
@@ -53,7 +59,7 @@ impl SkillEvolutionWorker {
 
     async fn finalize_observation_workflows(&self) -> Result<()> {
         for workflow in blocking::list_workflows(&self.store, Some("Observing")).await? {
-            let Ok(record) = self.service.evolution().load_record(&workflow.description) else {
+            let Ok(record) = self.load_record_blocking(&workflow.description).await else {
                 continue;
             };
             let Some(status) = Self::workflow_status_for_evolution(&record.status) else {
@@ -119,11 +125,23 @@ impl SkillEvolutionWorker {
                 }
                 _ = self.wakeup.notified() => {
                     debug!(worker_id = %self.worker_id, "SkillEvolutionWorker woken up");
-                    self.tick_guarded().await;
+                    tokio::select! {
+                        _ = self.tick_guarded() => {}
+                        _ = shutdown.recv() => {
+                            info!(worker_id = %self.worker_id, "SkillEvolutionWorker shutting down");
+                            return;
+                        }
+                    }
                 }
                 _ = interval.tick() => {
                     debug!(worker_id = %self.worker_id, "SkillEvolutionWorker poll tick");
-                    self.tick_guarded().await;
+                    tokio::select! {
+                        _ = self.tick_guarded() => {}
+                        _ = shutdown.recv() => {
+                            info!(worker_id = %self.worker_id, "SkillEvolutionWorker shutting down");
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -332,7 +350,7 @@ impl SkillEvolutionWorker {
                     &message,
                 )
                 .await;
-                if self.skill_record_is_terminal(&workflow) {
+                if self.skill_record_is_terminal(&workflow).await {
                     let _ = blocking::update_workflow_status_if_owned(
                         &self.store,
                         &workflow.id,
@@ -415,7 +433,7 @@ impl SkillEvolutionWorker {
 
         match result {
             Ok(SingleEvolutionResult::Completed) => {
-                let record = self.service.evolution().load_record(evolution_id)?;
+                let record = self.load_record_blocking(evolution_id).await?;
                 Ok(PipelineOutcome::Done(
                     serde_json::json!({
                         "skill_name": skill_name,
@@ -468,7 +486,7 @@ impl SkillEvolutionWorker {
                 }
             },
             Err(e) => {
-                let record = self.service.evolution().load_record(evolution_id).ok();
+                let record = self.load_record_blocking(evolution_id).await.ok();
                 let status = record.as_ref().map(|r| r.status.normalize());
                 match status {
                     Some(s)
@@ -492,10 +510,9 @@ impl SkillEvolutionWorker {
         }
     }
 
-    fn skill_record_is_terminal(&self, workflow: &WorkflowRecord) -> bool {
-        self.service
-            .evolution()
-            .load_record(&workflow.description)
+    async fn skill_record_is_terminal(&self, workflow: &WorkflowRecord) -> bool {
+        self.load_record_blocking(&workflow.description)
+            .await
             .map(|record| {
                 matches!(
                     *record.status.normalize(),

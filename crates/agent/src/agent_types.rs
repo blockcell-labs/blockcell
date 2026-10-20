@@ -260,7 +260,7 @@ impl AgentTypeDefinition {
             permission_mode: PermissionMode::Inherit,
             isolation: None,
             tools: Some(
-                ["list_dir", "read_file", "grep", "glob", "shell"]
+                ["list_dir", "read_file", "grep", "glob"]
                     .iter()
                     .map(|tool| tool.to_string())
                     .collect(),
@@ -297,13 +297,23 @@ impl AgentTypeDefinition {
         Self {
             agent_type: "verification".to_string(),
             when_to_use: "Verification specialist for testing and validating implementations. Tries to break the implementation.".to_string(),
-            disallowed_tools: ["agent", "spawn", "write_file", "edit_file", "exec"].iter().map(|s| s.to_string()).collect(),
+            disallowed_tools: [
+                "agent", "spawn", "write_file", "edit_file", "exec", "shell", "skill_manage",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             max_turns: Some(15),
             system_prompt_template: Some(VERIFICATION_SYSTEM_PROMPT.to_string()),
             one_shot: false,
             permission_mode: PermissionMode::Inherit,
             isolation: None,
-            tools: None,
+            tools: Some(
+                ["list_dir", "read_file", "grep", "glob"]
+                    .iter()
+                    .map(|tool| tool.to_string())
+                    .collect(),
+            ),
             model: None,
             skills: vec![],
             mcp_servers: vec![],
@@ -620,7 +630,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains(&"edit_file".to_string()));
-        assert!(reviewer
+        assert!(!reviewer
             .tools
             .as_ref()
             .unwrap()
@@ -740,6 +750,8 @@ mod tests {
             "read_file",
             "grep",
             "web_search",
+            "shell",
+            "skill_manage",
         ];
         let invalid = registry.validate_disallowed_tools(&known_tools);
         assert!(

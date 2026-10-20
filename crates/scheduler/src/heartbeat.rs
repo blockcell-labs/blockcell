@@ -29,18 +29,7 @@ impl HeartbeatService {
         self
     }
 
-    fn is_heartbeat_empty(&self) -> bool {
-        let path = self.paths.heartbeat_md();
-
-        if !path.exists() {
-            return true;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return true,
-        };
-
+    fn heartbeat_content_is_empty(content: &str) -> bool {
         // Check if content is effectively empty
         for line in content.lines() {
             let trimmed = line.trim();
@@ -72,8 +61,18 @@ impl HeartbeatService {
         true
     }
 
+    async fn is_heartbeat_empty(&self) -> bool {
+        let path = self.paths.heartbeat_md();
+        let content =
+            match crate::blocking::run_blocking_io(move || std::fs::read_to_string(path)).await {
+                Ok(content) => content,
+                Err(_) => return true,
+            };
+        Self::heartbeat_content_is_empty(&content)
+    }
+
     async fn trigger(&self) -> Result<()> {
-        if self.is_heartbeat_empty() {
+        if self.is_heartbeat_empty().await {
             debug!("Heartbeat file is empty, skipping");
             return Ok(());
         }

@@ -80,9 +80,7 @@ impl SkillFileStore {
         let Some(ref guard) = self.write_guard else {
             return Ok(None);
         };
-        // Key on the leaf skill name so this learning-layer write and the
-        // tool-layer write (skill_manage, which only sees the raw name) map to
-        // the same WriteGuard target and actually serialize against each other.
+        // The tool layer accepts leaf aliases; both paths must share a lock key.
         let write_target = WriteTarget::skill(&target.name);
         guard
             .acquire(write_target)
@@ -258,20 +256,27 @@ impl SkillFileStore {
             .lock()
             .map_err(|_| Error::Other("skill file write lock poisoned".to_string()))?;
         let _file_guard = OwnerAwareFileLock::acquire(&self.lock_path)?;
-        let skill_md = target.dir.join("SKILL.md");
-        self.validate_skill_path(&skill_md)?;
-        let current = fs::read_to_string(&skill_md)
+        let skill_file = skill_content_file(&target.dir).ok_or_else(|| {
+            Error::NotFound(format!("skill content file not found: {}", skill_name))
+        })?;
+        self.validate_skill_path(&skill_file)?;
+        let current = fs::read_to_string(&skill_file)
             .map_err(|err| Error::NotFound(format!("skill not found: {} ({})", skill_name, err)))?;
         let next = patch_skill_content(&current, old_text, &content)?;
-        ensure_len("SKILL.md", &next, SKILL_MD_CHAR_LIMIT)?;
+        let limit = if skill_file.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            SKILL_MD_CHAR_LIMIT
+        } else {
+            AUX_FILE_CHAR_LIMIT
+        };
+        ensure_len(&skill_file.to_string_lossy(), &next, limit)?;
         scan_learned_skill_content(&next)?;
-        let snapshot_ref = self.snapshot_before_write(&target, &skill_md)?;
-        atomic_write(&skill_md, &next)?;
+        let snapshot_ref = self.snapshot_before_write(&target, &skill_file)?;
+        atomic_write(&skill_file, &next)?;
         self.run_post_commit_maintenance(&skill_name);
         Ok(SkillFileMutation {
             skill_name,
             action: "patch".to_string(),
-            path: skill_md,
+            path: skill_file,
             snapshot_ref,
             message: "Skill patched".to_string(),
         })
@@ -288,18 +293,26 @@ impl SkillFileStore {
             .lock()
             .map_err(|_| Error::Other("skill file write lock poisoned".to_string()))?;
         let _file_guard = OwnerAwareFileLock::acquire(&self.lock_path)?;
-        let skill_md = target.dir.join("SKILL.md");
-        self.validate_skill_path(&skill_md)?;
-        if !skill_md.exists() {
+        let skill_file = skill_content_file(&target.dir).ok_or_else(|| {
+            Error::NotFound(format!("skill content file not found: {}", skill_name))
+        })?;
+        self.validate_skill_path(&skill_file)?;
+        if !skill_file.exists() {
             return Err(Error::NotFound(format!("skill not found: {}", skill_name)));
         }
-        let snapshot_ref = self.snapshot_before_write(&target, &skill_md)?;
-        atomic_write(&skill_md, &content)?;
+        let limit = if skill_file.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            SKILL_MD_CHAR_LIMIT
+        } else {
+            AUX_FILE_CHAR_LIMIT
+        };
+        ensure_len(&skill_file.to_string_lossy(), &content, limit)?;
+        let snapshot_ref = self.snapshot_before_write(&target, &skill_file)?;
+        atomic_write(&skill_file, &content)?;
         self.run_post_commit_maintenance(&skill_name);
         Ok(SkillFileMutation {
             skill_name,
             action: "edit".to_string(),
-            path: skill_md,
+            path: skill_file,
             snapshot_ref,
             message: "Skill edited".to_string(),
         })
@@ -347,11 +360,7 @@ impl SkillFileStore {
         } else {
             AUX_FILE_CHAR_LIMIT
         };
-        ensure_len(
-            &relative_path.to_string_lossy(),
-            content,
-            char_limit,
-        )?;
+        ensure_len(&relative_path.to_string_lossy(), content, char_limit)?;
         scan_learned_skill_content(content)?;
         let _wg = self.acquire_write_guard(&target)?;
         let _guard = self
@@ -508,7 +517,15 @@ impl SkillFileStore {
             return Ok(None);
         }
         let snapshot_dir = self.new_snapshot_dir(&target.display_name)?;
-        copy_dir_recursive(source_dir, &snapshot_dir)?;
+        if let Err(error) = copy_dir_recursive(source_dir, &snapshot_dir) {
+            if let Err(cleanup_error) = fs::remove_dir_all(&snapshot_dir) {
+                tracing::warn!(path = %snapshot_dir.display(), error = %cleanup_error, "Failed to remove incomplete skill snapshot");
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.prune_old_snapshots(&target.display_name) {
+            tracing::warn!(skill = %target.display_name, error = %error, "Failed to prune old skill snapshots");
+        }
         Ok(Some(snapshot_dir.to_string_lossy().to_string()))
     }
 
@@ -518,13 +535,6 @@ impl SkillFileStore {
             .snapshots_dir
             .join(snapshot_dir_name(skill_name, &stamp));
         fs::create_dir_all(&dir)?;
-        if let Err(error) = self.prune_old_snapshots(skill_name) {
-            tracing::warn!(
-                skill = skill_name,
-                error = %error,
-                "Failed to prune old skill snapshots"
-            );
-        }
         Ok(dir)
     }
 
@@ -1074,6 +1084,35 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_snapshot_preserves_completed_snapshots() {
+        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let paths = Paths::with_base(base.path().to_path_buf());
+        let store = SkillFileStore::open(&paths).unwrap();
+        store.create("example", "Example", "Instructions").unwrap();
+        let mut target = store.resolve_existing_skill_target("example").unwrap();
+        for _ in 0..20 {
+            store.snapshot_skill_dir(&target).unwrap();
+        }
+        let names = || {
+            let mut names: Vec<_> = fs::read_dir(&store.snapshots_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = names();
+        // Model a source directory replaced by a file before copying begins.
+        target.dir = target.dir.join("SKILL.md");
+        assert!(store.snapshot_skill_dir(&target).is_err());
+        assert_eq!(
+            names(),
+            before,
+            "failed copy must not evict a completed snapshot"
+        );
+    }
+
     fn test_paths(name: &str) -> Paths {
         let base = std::env::temp_dir().join(format!(
             "blockcell-skill-file-store-{}-{}",
@@ -1088,7 +1127,9 @@ mod tests {
         let paths = test_paths("md-limit");
         let store = SkillFileStore::open(&paths).unwrap();
         store.create("example", "Example", "Instructions").unwrap();
-        assert!(store.write_file("example", "SKILL.md", &"x".repeat(SKILL_MD_CHAR_LIMIT + 1)).is_err());
+        assert!(store
+            .write_file("example", "SKILL.md", &"x".repeat(SKILL_MD_CHAR_LIMIT + 1))
+            .is_err());
     }
 
     #[test]

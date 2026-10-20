@@ -23,6 +23,7 @@ pub use crate::memory_contract::MemoryType;
 const VECTOR_SYNC_OP_UPSERT: &str = "upsert";
 const VECTOR_SYNC_OP_DELETE: &str = "delete";
 pub const MAX_MEMORY_QUERY_RESULTS: usize = 50;
+pub const MAX_MEMORY_CONTENT_CHARS: usize = 32_768;
 
 /// Scope of a memory item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

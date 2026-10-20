@@ -4,6 +4,11 @@ impl MemoryStore {
     /// Upsert a memory item. If dedup_key is set and a matching non-deleted item exists,
     /// update it instead of inserting a new one.
     pub fn upsert(&self, params: UpsertParams) -> Result<MemoryItem> {
+        if params.content.chars().count() > MAX_MEMORY_CONTENT_CHARS {
+            return Err(blockcell_core::Error::Validation(format!(
+                "memory content exceeds the {MAX_MEMORY_CONTENT_CHARS} character limit"
+            )));
+        }
         // `importance` feeds the ranking formula directly and tags are stored
         // as a comma-separated CSV column, so both must be normalized at the
         // single write entry point rather than trusting callers.

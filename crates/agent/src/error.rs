@@ -74,7 +74,7 @@ pub(crate) fn path_access_denied(tool_name: &str, path: &str) -> String {
     tool_denied_json(
         tool_name,
         &format!("Path access denied by security policy: {}", path),
-        "The path is outside the allowed workspace. Check path_access.json5 configuration.",
+        "Check the path policy, confirmation decision, and workspace/authorized-directory configuration.",
     )
 }
 

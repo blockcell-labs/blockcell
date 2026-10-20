@@ -46,6 +46,59 @@ pub(crate) fn lock_exclusive(path: &Path) -> io::Result<ExclusiveFileLock> {
     Ok(ExclusiveFileLock { file })
 }
 
+pub(crate) fn lock_exclusive_with_timeout(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> io::Result<ExclusiveFileLock> {
+    let lock_path = lock_path_for(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(ExclusiveFileLock { file }),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("timed out waiting for file lock: {}", path.display()),
+                    ));
+                }
+                std::thread::sleep(
+                    std::time::Duration::from_millis(10).min(timeout.saturating_sub(elapsed)),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_lock_timeout_returns_would_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let _held = lock_exclusive(&path).unwrap();
+        let started = std::time::Instant::now();
+        let error = match lock_exclusive_with_timeout(&path, std::time::Duration::from_millis(40)) {
+            Ok(_) => panic!("contended file lock should time out"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+}
+
 #[cfg(windows)]
 fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;

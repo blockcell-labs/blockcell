@@ -4,7 +4,7 @@ use blockcell_skills::dispatcher::{SkillDispatchResult, SkillDispatcher};
 use blockcell_skills::SkillMeta;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::Arc;
 
 use crate::exec_local::{
     resolve_script_path, validate_relative_skill_path, validate_runner, ExecLocalTool,
@@ -13,10 +13,15 @@ use crate::registry::ToolRegistry;
 use crate::tool_guard::NestedToolGuard;
 use crate::{Tool, ToolContext, ToolSchema};
 
-/// 默认的 ToolRegistry 单例，避免每次 exec_skill_script 调用都重新创建
-static DEFAULT_TOOL_REGISTRY: LazyLock<ToolRegistry> = LazyLock::new(ToolRegistry::with_defaults);
-
 pub struct ExecSkillScriptTool;
+
+fn nested_tool_registry(config: &blockcell_core::Config) -> ToolRegistry {
+    let mut registry = ToolRegistry::with_defaults();
+    registry.register(Arc::new(crate::exec::ExecTool::from_config(
+        &config.tools.exec,
+    )));
+    registry
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScriptRuntime {
@@ -232,11 +237,14 @@ impl Tool for ExecSkillScriptTool {
                 }
 
                 let handle = tokio::runtime::Handle::current();
-                let registry = &*DEFAULT_TOOL_REGISTRY;
                 let rhai_ctx = ctx.clone();
                 let declared_tools = load_declared_skill_tools(&skill_dir)?;
                 let dispatcher = SkillDispatcher::new();
                 let result = tokio::task::spawn_blocking(move || {
+                    // Nested exec must use the same configured shell policy as
+                    // the parent agent. A process-wide default registry would
+                    // silently fall back to workspace-write here.
+                    let registry = nested_tool_registry(&rhai_ctx.config);
                     // 嵌套调用不经过 Runtime 的 Guarded Tool Pipeline，由守卫执行同一套准入检查与审计
                     let guard = NestedToolGuard::new(&rhai_ctx);
                     dispatcher.execute_sync(

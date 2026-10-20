@@ -421,6 +421,16 @@ impl super::AgentRuntime {
     pub async fn init_memory_injector(&mut self) -> std::io::Result<()> {
         use crate::auto_memory::{consolidate_legacy_layer5, InjectionConfig, MemoryInjector};
 
+        // Forked message runtimes may initialize concurrently. Reserve the
+        // one-shot attempt before doing disk I/O so a persistent failure does
+        // not fan out into one retry per message.
+        if self
+            .memory_injector_init_failed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+
         if let Err(error) = consolidate_legacy_layer5(&self.paths) {
             warn!(
                 error = %error,
@@ -481,6 +491,8 @@ impl super::AgentRuntime {
         if !self.memory_injector_needs_reload() {
             return Ok(());
         }
+        self.memory_injector_init_failed
+            .store(false, std::sync::atomic::Ordering::Release);
 
         use crate::auto_memory::{consolidate_legacy_layer5, InjectionConfig, MemoryInjector};
 

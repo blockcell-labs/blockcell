@@ -99,18 +99,12 @@ pub fn create_memory_file_can_use_tool(memory_path: &Path) -> CanUseToolFn {
 /// 创建自动记忆提取的工具权限检查
 ///
 /// 允许：
-/// - REPL（内部会重新调用此函数）
 /// - Read/Grep/Glob/ListDir（只读，且仅限记忆目录内的显式路径）
 /// - Shell/Exec 只读命令（必须指定记忆目录内的工作目录，且命令参数不能逃逸）
 /// - Edit/Write 仅限 memory 目录内
 pub fn create_auto_mem_can_use_tool(memory_dir: &Path) -> CanUseToolFn {
     let memory_dir = memory_dir.to_path_buf();
     Arc::new(move |tool_name: &str, input: &serde_json::Value| {
-        // 允许 REPL
-        if tool_name == "repl" {
-            return ToolPermission::Allow;
-        }
-
         // 只读文件工具也必须限制在记忆目录内，避免后台 agent 读取任意本地路径。
         if matches!(tool_name, "read_file" | "grep" | "glob" | "list_dir") {
             return allow_read_only_path(tool_name, input, &memory_dir);
@@ -147,11 +141,6 @@ pub fn create_auto_mem_can_use_tool(memory_dir: &Path) -> CanUseToolFn {
 pub fn create_dream_can_use_tool(memory_root: &Path) -> CanUseToolFn {
     let memory_root = memory_root.to_path_buf();
     Arc::new(move |tool_name: &str, input: &serde_json::Value| {
-        // 允许 REPL
-        if tool_name == "repl" {
-            return ToolPermission::Allow;
-        }
-
         // 只读工具必须显式访问记忆根目录内的路径，避免 dream agent 泄露本地敏感文件。
         if matches!(tool_name, "read_file" | "grep" | "glob" | "ls" | "list_dir") {
             return allow_read_only_path(tool_name, input, &memory_root);
@@ -983,14 +972,13 @@ fn is_read_only_command(cmd: &str) -> bool {
     // must be rejected here or a "read-only" shell could delete files inside
     // the memory directory.
     const FIND_MUTATING_FLAGS: &[&str] = &[
-        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0",
-        "-fprintf", "-fwrite",
+        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf",
+        "-fwrite",
     ];
-    if cmd_lower.split_whitespace().any(|token| {
-        FIND_MUTATING_FLAGS
-            .iter()
-            .any(|flag| token == *flag)
-    }) {
+    if cmd_lower
+        .split_whitespace()
+        .any(|token| FIND_MUTATING_FLAGS.iter().any(|flag| token == *flag))
+    {
         return false;
     }
 

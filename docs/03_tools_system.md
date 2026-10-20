@@ -406,3 +406,12 @@ blockcell 的工具系统是它的核心竞争力：
 
 *项目地址：https://github.com/blockcell-labs/blockcell*
 *官网：https://blockcell.dev*
+
+
+## 执行环境、确认与 shell 会话
+
+工具通过 `execution_environment(params)` 声明执行环境，审计和 `tool/call` 事件记录该声明：`in-process`、`local`、`workspace-write`、`network`、`shell` 或 `full-access`。环境声明用于描述资源访问；执行前的准入由路径策略、工具策略、危险操作检查和 `requires_confirmation(params)` 分别控制。
+
+`requires_confirmation` 表示本次调用必须获得明确确认。例如 full-access 的 `shell` 每次调用都需要确认；`exec` 的危险命令由命令检查流程确认。确认绑定工具及完整参数，修改参数后需要重新确认。没有有效确认渠道且未取得精确确认时，调用被拒绝。
+
+`shell` 首次调用不带 `session_id`，可指定 `sandbox_policy`；后续复用返回的 `session_id` 可保留 cwd、环境变量和虚拟环境。会话创建时固定策略，复用时显式传入不同策略会在执行前报校验错误；省略策略时使用会话快照，确认检查也读取同一快照。切换到 full-access 需要新建会话；当前自动提权重试不会继承旧会话的 cwd/env，调用方需要显式重建所需状态。

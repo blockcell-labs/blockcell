@@ -34,7 +34,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn init_schema(&self) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .inner
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
@@ -74,27 +74,6 @@ impl MemoryStore {
             CREATE INDEX IF NOT EXISTS idx_memory_expires ON memory_items(expires_at);
             CREATE INDEX IF NOT EXISTS idx_memory_dedup ON memory_items(dedup_key);
             CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory_items(importance);
-
-            DROP INDEX IF EXISTS idx_memory_active_dedup_unique;
-
-            -- Preserve legacy duplicate rows but remove their conflicting key,
-            -- then enforce one active row per session for every non-empty dedup key.
-            UPDATE memory_items
-            SET dedup_key = NULL
-            WHERE dedup_key IS NOT NULL
-              AND dedup_key != ''
-              AND deleted_at IS NULL
-              AND rowid NOT IN (
-                  SELECT MAX(rowid)
-                  FROM memory_items
-                  WHERE dedup_key IS NOT NULL
-                    AND dedup_key != ''
-                    AND deleted_at IS NULL
-                  GROUP BY dedup_key, COALESCE(session_key, '')
-              );
-            CREATE UNIQUE INDEX idx_memory_active_dedup_unique
-            ON memory_items(dedup_key, COALESCE(session_key, ''))
-            WHERE dedup_key IS NOT NULL AND dedup_key != '' AND deleted_at IS NULL;
 
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 title,
@@ -155,7 +134,71 @@ impl MemoryStore {
                 })?;
         }
 
+        ensure_dedup_unique_index(&mut conn)?;
+
         debug!("Memory store schema initialized");
         Ok(())
     }
+}
+
+fn ensure_dedup_unique_index(conn: &mut Connection) -> Result<()> {
+    let version: Option<String> = conn
+        .query_row(
+            "SELECT value FROM memory_meta WHERE key = 'dedup_unique_index_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            blockcell_core::Error::Storage(format!("Failed to read memory schema version: {error}"))
+        })?;
+    let index_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_active_dedup_unique')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            blockcell_core::Error::Storage(format!("Failed to inspect memory indexes: {error}"))
+        })?;
+    if version.as_deref() == Some("1") && index_exists {
+        return Ok(());
+    }
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            blockcell_core::Error::Storage(format!(
+                "Failed to begin memory dedup migration: {error}"
+            ))
+        })?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_memory_active_dedup_unique;
+         UPDATE memory_items
+         SET dedup_key = NULL
+         WHERE dedup_key IS NOT NULL
+           AND dedup_key != ''
+           AND deleted_at IS NULL
+           AND rowid NOT IN (
+               SELECT MAX(rowid)
+               FROM memory_items
+               WHERE dedup_key IS NOT NULL
+                 AND dedup_key != ''
+                 AND deleted_at IS NULL
+               GROUP BY dedup_key, COALESCE(session_key, '')
+           );
+         CREATE UNIQUE INDEX idx_memory_active_dedup_unique
+         ON memory_items(dedup_key, COALESCE(session_key, ''))
+         WHERE dedup_key IS NOT NULL AND dedup_key != '' AND deleted_at IS NULL;
+         INSERT INTO memory_meta(key, value)
+         VALUES ('dedup_unique_index_version', '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    )
+    .map_err(|error| {
+        blockcell_core::Error::Storage(format!("Failed to migrate memory dedup index: {error}"))
+    })?;
+    tx.commit().map_err(|error| {
+        blockcell_core::Error::Storage(format!("Failed to commit memory dedup migration: {error}"))
+    })?;
+    Ok(())
 }

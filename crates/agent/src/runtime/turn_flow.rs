@@ -521,6 +521,20 @@ impl AgentRuntime {
             &updated_history,
             &session_metadata,
         )?;
+
+        // Skill-routed turns return before the general message pipeline. Keep
+        // the same turn-end learning boundary and review scheduling semantics
+        // as ordinary turns instead of silently dropping this episode.
+        if let Err(error) = self.capture_turn_end_learning_boundary(
+            msg,
+            &updated_history,
+            &result.final_response,
+            &std::collections::HashMap::new(),
+            true,
+        ) {
+            tracing::warn!(error = %error, "Skill turn learning boundary capture failed");
+        }
+        self.spawn_pending_ghost_background_reviews();
         self.deliver_skill_response(msg, &result.final_response, Some("skill"))
             .await;
 

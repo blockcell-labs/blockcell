@@ -184,8 +184,12 @@ impl AgentRuntime {
             }
             ToolPolicyDecision::Ask => {
                 let items = vec![format!("{}: {}", tool_name, summarize_tool_args(tool_args))];
+                // Policy-level confirmation follows the same interactive and
+                // explicit-text paths as the dangerous-operation gate. This
+                // keeps non-interactive channels fail-closed while allowing a
+                // caller to approve the exact tool arguments deliberately.
                 if self
-                    .confirm_dangerous_operation(tool_name, items, msg)
+                    .approve_dangerous_operation(tool_name, tool_args, items, msg)
                     .await
                 {
                     PolicyOutcome::ProceedConfirmed

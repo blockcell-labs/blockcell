@@ -140,7 +140,7 @@ type CleanupHandler = Box<dyn FnOnce() + Send>;
 /// `CleanupHandle` 的 index 不会误触新注册的 handler。
 struct CleanupState {
     generation: u64,
-    handlers: Vec<CleanupHandler>,
+    handlers: Vec<Option<CleanupHandler>>,
 }
 
 /// Cleanup 函数注册表
@@ -172,7 +172,7 @@ impl CleanupRegistry {
             Err(poisoned) => poisoned.into_inner(),
         };
         let index = state.handlers.len();
-        state.handlers.push(Box::new(handler));
+        state.handlers.push(Some(Box::new(handler)));
 
         CleanupHandle {
             registry: self.state.clone(),
@@ -189,7 +189,7 @@ impl CleanupRegistry {
                 Err(poisoned) => poisoned.into_inner(),
             };
             state.generation += 1;
-            state.handlers.drain(..).collect()
+            state.handlers.drain(..).flatten().collect()
         };
         for handler in handlers {
             handler();
@@ -214,14 +214,17 @@ impl Drop for CleanupHandle {
             };
             // 仅当仍属注册时的同一代才允许按 index 取出——run_all 之后 index 已失效。
             if state.generation == self.generation {
-                state
-                    .handlers
-                    .get_mut(self.index)
-                    .map(|handler| std::mem::replace(handler, Box::new(|| {})))
+                state.handlers.get_mut(self.index).and_then(Option::take)
             } else {
                 None
             }
         };
+        {
+            let mut state = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            while state.handlers.last().is_some_and(Option::is_none) {
+                state.handlers.pop();
+            }
+        }
         if let Some(handler) = handler {
             // Use catch_unwind to prevent panic-during-drop from aborting the process
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
@@ -393,5 +396,20 @@ mod cleanup_generation_tests {
         assert_eq!(*counter.lock().unwrap(), 0);
         drop(fresh);
         assert_eq!(*counter.lock().unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod recheck_probe_cleanup {
+    #[test]
+    fn recheck_probe_dropped_slots() {
+        let registry = super::CleanupRegistry::new();
+        for _ in 0..1000 {
+            drop(registry.register(|| {}));
+        }
+        assert!(
+            registry.state.lock().unwrap().handlers.len() < 10,
+            "dropped handlers retain 1000 slots"
+        );
     }
 }

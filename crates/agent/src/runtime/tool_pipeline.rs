@@ -321,7 +321,7 @@ impl AgentRuntime {
     }
 
     /// 非交互通道依据用户原文中的显式确认，交互通道走确认请求。
-    async fn approve_dangerous_operation(
+    pub(super) async fn approve_dangerous_operation(
         &mut self,
         tool_name: &str,
         args: &serde_json::Value,

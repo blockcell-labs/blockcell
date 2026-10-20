@@ -274,7 +274,8 @@ impl GhostMaintenanceService {
                     // Hot-reload config（按 mtime 短路，避免每分钟重复读+解析）
                     let current_mtime = config_mtime(&config_file);
                     if reload_tracker.should_reload(current_mtime) {
-                        match Config::load_or_default(&config_paths) {
+                        let load_paths = config_paths.clone();
+                        match crate::blocking::run_blocking(move || Config::load_or_default(&load_paths)).await {
                             Ok(new_config) => {
                                 let new_ghost = GhostMaintenanceServiceConfig::from_config(&new_config);
 

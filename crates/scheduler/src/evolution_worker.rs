@@ -103,11 +103,23 @@ impl EvolutionWorker {
                 }
                 _ = self.wakeup.notified() => {
                     debug!(worker_id = %self.worker_id, "Woken up by notify");
-                    self.tick_guarded().await;
+                    tokio::select! {
+                        _ = self.tick_guarded() => {}
+                        _ = shutdown.recv() => {
+                            info!(worker_id = %self.worker_id, "EvolutionWorker shutting down");
+                            return;
+                        }
+                    }
                 }
                 _ = interval.tick() => {
                     debug!(worker_id = %self.worker_id, "Poll tick");
-                    self.tick_guarded().await;
+                    tokio::select! {
+                        _ = self.tick_guarded() => {}
+                        _ = shutdown.recv() => {
+                            info!(worker_id = %self.worker_id, "EvolutionWorker shutting down");
+                            return;
+                        }
+                    }
                 }
             }
         }

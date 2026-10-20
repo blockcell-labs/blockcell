@@ -160,6 +160,16 @@ where
 
 /// 将 capability_id 转换为文件系统安全名称
 fn safe_capability_id(capability_id: &str) -> String {
+    // Encode the complete identifier instead of replacing punctuation.  A
+    // replacement maps `a.b` and `a_b` to the same history/lock path.
+    let mut encoded = String::from("cap_");
+    for byte in capability_id.as_bytes() {
+        encoded.push_str(&format!("{:02x}", byte));
+    }
+    encoded
+}
+
+fn legacy_safe_capability_id(capability_id: &str) -> String {
     capability_id.replace('.', "_")
 }
 
@@ -674,6 +684,22 @@ impl CapabilityVersionManager {
     /// 2. 如果主文件存在但 JSON 解析失败（半写损坏），且备份文件存在，恢复备份。
     fn get_history_unlocked(&self, capability_id: &str) -> Result<CapabilityVersionHistory> {
         let history_file = self.history_file_path(capability_id);
+        // Read histories created before the collision-safe encoding was
+        // introduced.  Validate the embedded id before accepting the file;
+        // legacy names can represent multiple distinct identifiers.
+        let history_file = if history_file.exists() {
+            history_file
+        } else {
+            let legacy = self.versions_dir.join(format!(
+                "{}_history.json",
+                legacy_safe_capability_id(capability_id)
+            ));
+            if legacy.exists() {
+                legacy
+            } else {
+                history_file
+            }
+        };
         let bak_path = history_file.with_extension("json.bak");
 
         if !history_file.exists() {
@@ -708,8 +734,12 @@ impl CapabilityVersionManager {
 
         // 主文件存在，尝试解析
         let content = fs::read_to_string(&history_file)?;
-        match serde_json::from_str(&content) {
-            Ok(history) => Ok(history),
+        match serde_json::from_str::<CapabilityVersionHistory>(&content) {
+            Ok(history) if history.capability_id == capability_id => Ok(history),
+            Ok(_) => Err(Error::Other(format!(
+                "版本历史 capability_id 与请求不匹配: {}",
+                history_file.display()
+            ))),
             Err(parse_err) => {
                 // 主文件存在但 JSON 解析失败（可能是崩溃导致半写损坏）
                 // 如果备份文件存在，恢复备份
@@ -822,6 +852,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn p3_distinct_capability_ids_do_not_share_history() {
+        let root = std::env::temp_dir().join(format!("p3-cap-collision-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let artifact = root.join("test.sh");
+        std::fs::write(
+            &artifact,
+            "#!/bin/sh
+echo test",
+        )
+        .unwrap();
+        let manager = CapabilityVersionManager::new(root.clone());
+        manager
+            .create_version(
+                "a.b",
+                artifact.to_str().unwrap(),
+                CapabilityVersionSource::Evolution,
+                None,
+            )
+            .unwrap();
+        assert!(manager.list_versions("a_b").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn p3_invalid_capability_id_is_rejected_at_entry() {
         let root = std::env::temp_dir().join(format!("p3-cap-invalid-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -830,9 +884,7 @@ mod tests {
         let manager = CapabilityVersionManager::new(root.clone());
         for id in ["", "../escape", "a/b", "a\\b"] {
             assert!(
-                manager
-                    .list_versions(id)
-                    .is_err(),
+                manager.list_versions(id).is_err(),
                 "capability id {id:?} must be rejected"
             );
         }
@@ -847,10 +899,28 @@ mod tests {
         std::fs::write(&artifact, "#!/bin/sh\necho test").unwrap();
         let manager = CapabilityVersionManager::new(root.clone());
         for _ in 0..3 {
-            manager.create_version("test.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap();
+            manager
+                .create_version(
+                    "test.cap",
+                    artifact.to_str().unwrap(),
+                    CapabilityVersionSource::Evolution,
+                    None,
+                )
+                .unwrap();
         }
         manager.cleanup_old_versions("test.cap", 1).unwrap();
-        assert_eq!(manager.create_version("test.cap", artifact.to_str().unwrap(), CapabilityVersionSource::Evolution, None).unwrap().version, "v4");
+        assert_eq!(
+            manager
+                .create_version(
+                    "test.cap",
+                    artifact.to_str().unwrap(),
+                    CapabilityVersionSource::Evolution,
+                    None
+                )
+                .unwrap()
+                .version,
+            "v4"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -992,7 +1062,7 @@ mod tests {
         assert_eq!(versions.len(), 2);
 
         // Can roll-forward back to v2
-        let history_file = tmp.join("tool_versions").join("rollback_cap_history.json");
+        let history_file = vm.history_file_path("rollback.cap");
         let content = std::fs::read_to_string(&history_file).unwrap();
         let mut history: CapabilityVersionHistory = serde_json::from_str(&content).unwrap();
         history.current_version = "v2".to_string();

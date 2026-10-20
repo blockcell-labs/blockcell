@@ -36,6 +36,15 @@ pub struct FsEntry {
 
 #[async_trait]
 pub trait FilesystemBackend: Send + Sync {
+    /// Hold across the complete read/modify/write operation. Custom backends
+    /// default to conservative process-wide serialization; remote implementations
+    /// should override this with a server-side transaction or lease.
+    async fn lock_for_write(&self, _path: &Path) -> Result<Box<dyn Send>> {
+        static LOCK: std::sync::LazyLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+            std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+        Ok(Box::new(LOCK.clone().lock_owned().await))
+    }
+
     /// 路径不存在时返回 `None`。
     async fn kind(&self, path: &Path) -> Result<Option<FsEntryKind>>;
 
@@ -63,6 +72,40 @@ pub struct LocalFilesystem;
 
 #[async_trait]
 impl FilesystemBackend for LocalFilesystem {
+    async fn lock_for_write(&self, path: &Path) -> Result<Box<dyn Send>> {
+        let path = path.to_path_buf();
+        let guard = tokio::task::spawn_blocking(move || {
+            let canonical = match std::fs::canonicalize(&path) {
+                Ok(path) => path,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let parent = path
+                        .parent()
+                        .ok_or_else(|| Error::Validation("File has no parent".into()))?;
+                    std::fs::create_dir_all(parent)?;
+                    std::fs::canonicalize(parent)?.join(
+                        path.file_name()
+                            .ok_or_else(|| Error::Validation("File has no name".into()))?,
+                    )
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut lock_name = std::ffi::OsString::from(".");
+            lock_name.push(
+                canonical
+                    .file_name()
+                    .ok_or_else(|| Error::Validation("File has no name".into()))?,
+            );
+            lock_name.push(".blockcell-write.lock");
+            blockcell_core::file_store::ExclusiveFileLock::acquire(
+                &canonical.with_file_name(lock_name),
+            )
+            .map_err(Error::from)
+        })
+        .await
+        .map_err(|error| Error::Tool(format!("File lock task failed: {error}")))??;
+        Ok(Box::new(guard))
+    }
+
     async fn kind(&self, path: &Path) -> Result<Option<FsEntryKind>> {
         match tokio::fs::metadata(path).await {
             Ok(metadata) => Ok(Some(file_type_kind(metadata.file_type()))),
@@ -127,6 +170,20 @@ fn file_type_kind(file_type: std::fs::FileType) -> FsEntryKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_write_lock_blocks_an_independent_os_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("item.txt");
+        let fs = LocalFilesystem;
+        let held = fs.lock_for_write(&path).await.unwrap();
+        let lock_path = dir.path().join(".item.txt.blockcell-write.lock");
+        let error =
+            blockcell_core::file_store::ExclusiveFileLock::try_acquire(&lock_path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(held);
+        assert!(blockcell_core::file_store::ExclusiveFileLock::try_acquire(&lock_path).is_ok());
+    }
 
     #[tokio::test]
     async fn local_filesystem_round_trips_and_reports_kinds() {

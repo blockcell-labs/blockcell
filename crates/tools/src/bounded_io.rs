@@ -6,7 +6,9 @@ pub(crate) fn append_limited(output: &mut Vec<u8>, chunk: &[u8], limit: usize) -
     let remaining = limit.saturating_sub(output.len());
     let take = remaining.min(chunk.len());
     output.extend_from_slice(&chunk[..take]);
-    take < chunk.len() || output.len() >= limit
+    // Filling the limit exactly is valid; only bytes that cannot be retained
+    // prove that the response exceeds the bound.
+    take < chunk.len()
 }
 
 pub(crate) async fn read_response_limited(
@@ -64,7 +66,7 @@ pub(crate) async fn stream_response_to_file(
         let take = remaining.min(chunk.len());
         file.write_all(&chunk[..take]).await?;
         written += take;
-        if take < chunk.len() || written >= limit {
+        if take < chunk.len() {
             truncated = true;
             break;
         }
@@ -76,6 +78,38 @@ pub(crate) async fn stream_response_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn p3_json_response_accepts_exact_limit() {
+        let body = r#"{"ok":true}"#;
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .body(body.to_string())
+            .unwrap();
+        assert_eq!(
+            read_json_limited(reqwest::Response::from(response), body.len())
+                .await
+                .unwrap(),
+            serde_json::json!({"ok":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_file_response_accepts_exact_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .body("abcd".to_string())
+            .unwrap();
+        assert_eq!(
+            stream_response_to_file(
+                reqwest::Response::from(response),
+                &dir.path().join("body"),
+                4
+            )
+            .await
+            .unwrap(),
+            (4, false)
+        );
+    }
 
     #[tokio::test]
     async fn p3_json_response_rejects_oversized_body() {

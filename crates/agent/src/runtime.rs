@@ -199,6 +199,34 @@ impl ToolLoopGuard {
         count < limit && self.total_calls < self.global_limit
     }
 
+    /// Check a candidate against the guard plus calls already reserved by a
+    /// single prefetch batch. The batch executes concurrently, so it cannot
+    /// call `admit` one-by-one; keeping these reservations prevents a batch
+    /// from overshooting the per-tool or global budget.
+    fn would_admit_batch(
+        &self,
+        tool_name: &str,
+        pending: &HashMap<String, u32>,
+        pending_total: u32,
+    ) -> bool {
+        if !self.would_admit(tool_name)
+            || self.total_calls.saturating_add(pending_total) >= self.global_limit
+        {
+            return false;
+        }
+        let limit = self
+            .limits_by_tool
+            .get(tool_name)
+            .copied()
+            .unwrap_or(self.default_limit);
+        self.call_counts
+            .get(tool_name)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(pending.get(tool_name).copied().unwrap_or(0))
+            < limit
+    }
+
     /// 记录调用结论；同一调用连续未成功达到阈值时返回 `true`。
     fn record(&mut self, call: &ToolCallRequest, failed: bool) -> bool {
         if !failed {
@@ -2321,6 +2349,9 @@ pub struct AgentRuntime {
     /// Flag to signal that memory injector cache needs refresh after Layer 5 extraction.
     /// Uses Arc<AtomicBool> because background tasks need to set this flag.
     memory_injector_needs_reload: Arc<std::sync::atomic::AtomicBool>,
+    /// Prevent repeated Layer 5 initialization attempts after a persistent
+    /// load failure; an explicit reload signal clears this circuit breaker.
+    memory_injector_init_failed: Arc<std::sync::atomic::AtomicBool>,
     /// AbortToken for cancelling this runtime and its sub-agents.
     abort_token: AbortToken,
     /// Self-referential handle for the agent tool (RuntimeHandle trait object).
@@ -2492,6 +2523,7 @@ impl AgentRuntime {
             memory_system: None,
             session_memory_systems: Arc::new(Mutex::new(HashMap::new())),
             memory_injector_needs_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            memory_injector_init_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             abort_token: AbortToken::new(),
             runtime_handle: None,
             agent_type_registry,
@@ -2583,6 +2615,7 @@ impl AgentRuntime {
             memory_system: None,
             session_memory_systems: Arc::clone(&self.session_memory_systems),
             memory_injector_needs_reload: Arc::clone(&self.memory_injector_needs_reload),
+            memory_injector_init_failed: Arc::clone(&self.memory_injector_init_failed),
             abort_token,
             runtime_handle: None,
             learning_coordinator: Arc::clone(&self.learning_coordinator),
@@ -2758,6 +2791,9 @@ const MAX_SESSION_MEMORY_SYSTEMS: usize = 64;
 impl AgentRuntime {
     /// Return a MemorySystem to the shared pool, evicting an arbitrary entry when full.
     fn return_memory_system_to_pool(&self, ms: crate::memory_system::MemorySystem) {
+        // Pooled systems are idle until reused; do not leave their `.active`
+        // marker behind and prevent Dream pruning from reclaiming the session.
+        ms.clear_session_active_sync();
         let Ok(mut map) = self.session_memory_systems.lock() else {
             return;
         };

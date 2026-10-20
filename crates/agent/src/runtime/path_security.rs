@@ -426,7 +426,10 @@ impl super::AgentRuntime {
                     .map(|value| value.to_string()),
             };
 
-            if !matches!(tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await, Ok(Ok(()))) {
+            if !matches!(
+                tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await,
+                Ok(Ok(()))
+            ) {
                 warn!("Failed to send confirmation request, denying access");
                 return Err("path confirmation request could not be delivered".to_string());
             }
@@ -493,7 +496,10 @@ impl super::AgentRuntime {
                     .and_then(|value| value.as_str())
                     .map(|value| value.to_string()),
             };
-            if !matches!(tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await, Ok(Ok(()))) {
+            if !matches!(
+                tokio::time::timeout(CONFIRM_REQUEST_TIMEOUT, confirm_tx.send(request)).await,
+                Ok(Ok(()))
+            ) {
                 warn!(
                     tool = tool_name,
                     "Failed to send dangerous-operation confirmation request, denying"
@@ -737,10 +743,7 @@ fn command_has_path_consuming_verb(command: &str) -> bool {
 /// `Some(None)` = unknown cwd — fail closed via a synthetic absolute path
 /// outside the workspace so policy cannot treat it as an allowed workspace
 /// file.
-fn resolve_shell_access_path(
-    path: &str,
-    session_cwd: &Option<Option<PathBuf>>,
-) -> String {
+fn resolve_shell_access_path(path: &str, session_cwd: &Option<Option<PathBuf>>) -> String {
     if path.starts_with('/') || path.starts_with("~/") {
         return path.to_string();
     }
@@ -764,39 +767,37 @@ fn resolve_shell_access_path(
 /// subshell/grouping contexts as mutating, since a `cd` inside them does not
 /// affect the parent but its effect on ordering can't be tracked cheaply.
 fn command_mutates_cwd(command: &str) -> bool {
-    command
-        .split(['\n', ';', '&', '|'])
-        .any(|segment| {
-            let seg = segment.trim();
-            let mut tokens = seg.split_whitespace();
-            let head = tokens
-                .next()
-                .unwrap_or("")
-                .trim_start_matches(['!', '{', '('])
-                .trim_end_matches(')');
-            matches!(head, "cd" | "pushd" | "popd")
-                || (matches!(
-                    head,
-                    "if" | "then"
-                        | "else"
-                        | "elif"
-                        | "while"
-                        | "until"
-                        | "do"
-                        | "sudo"
-                        | "env"
-                        | "command"
-                        | "builtin"
-                        | "eval"
-                        | "time"
-                        | "nohup"
-                ) && tokens.any(|t| {
-                    matches!(
-                        t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | '(' | ')' | '{' | '}')),
-                        "cd" | "pushd" | "popd"
-                    )
-                }))
-        })
+    command.split(['\n', ';', '&', '|']).any(|segment| {
+        let seg = segment.trim();
+        let mut tokens = seg.split_whitespace();
+        let head = tokens
+            .next()
+            .unwrap_or("")
+            .trim_start_matches(['!', '{', '('])
+            .trim_end_matches(')');
+        matches!(head, "cd" | "pushd" | "popd")
+            || (matches!(
+                head,
+                "if" | "then"
+                    | "else"
+                    | "elif"
+                    | "while"
+                    | "until"
+                    | "do"
+                    | "sudo"
+                    | "env"
+                    | "command"
+                    | "builtin"
+                    | "eval"
+                    | "time"
+                    | "nohup"
+            ) && tokens.any(|t| {
+                matches!(
+                    t.trim_matches(|c| matches!(c, '"' | '\'' | ';' | '(' | ')' | '{' | '}')),
+                    "cd" | "pushd" | "popd"
+                )
+            }))
+    })
 }
 
 fn normalize_shell_home_vars(tok: &str) -> String {

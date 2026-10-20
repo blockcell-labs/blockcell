@@ -17,7 +17,7 @@ impl SkillEvolution {
             record.observation_error_calls += 1;
         }
         record.updated_at = chrono::Utc::now().timestamp();
-        self.save_record(&record)
+        self.save_record_unlocked(&record)
     }
 
     /// P0-2: create_new_version 直接写入完整脚本（不再 apply diff）
@@ -68,7 +68,8 @@ impl SkillEvolution {
         // 错误的版本快照。staged 技能写入的是 staging 目录，不影响主目录。
         // 原子写入（temp+rename）：直接 `fs::write` 覆写会在进程崩溃时留下
         // 截断的技能文件，而 record 文件早已使用 tmp+rename。
-        if let Err(e) = blockcell_core::file_store::atomic_write(&skill_path, patch.diff.as_bytes()) {
+        if let Err(e) = blockcell_core::file_store::atomic_write(&skill_path, patch.diff.as_bytes())
+        {
             // 非 staged：尝试用 pre_write_version 恢复磁盘文件
             if !record.context.staged {
                 if let Some(ref prev_ver) = pre_write_version {
@@ -446,6 +447,20 @@ impl SkillEvolution {
 
     /// P2-7: 原子写入 — write-tmp-then-rename，避免崩溃时文件损坏
     pub(crate) fn save_record(&self, record: &EvolutionRecord) -> Result<()> {
+        let records_dir = self
+            .evolution_db
+            .parent()
+            .unwrap()
+            .join("evolution_records");
+        let _lock = crate::file_owner_lock::FileOwnerLock::acquire(
+            &records_dir,
+            "evolution-record",
+            &record.id,
+        )?;
+        self.save_record_unlocked(record)
+    }
+
+    fn save_record_unlocked(&self, record: &EvolutionRecord) -> Result<()> {
         let records_dir = self
             .evolution_db
             .parent()

@@ -202,6 +202,13 @@ impl McpResolvedConfig {
             McpRootConfig::default()
         };
 
+        for (name, definition) in &root.servers {
+            if name.trim().is_empty() || definition.command.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "MCP server '{name}' requires a non-empty name and command"
+                )));
+            }
+        }
         let defaults = root.defaults.clone();
         let mut servers: HashMap<String, McpServerConfig> = root
             .servers
@@ -242,5 +249,31 @@ impl McpResolvedConfig {
         }
 
         Ok(Self { defaults, servers })
+    }
+}
+
+#[cfg(test)]
+mod recheck_contract_probe {
+    #[test]
+    fn recheck_contract_probe_root_command() {
+        let root = std::env::temp_dir().join(format!("p3-mcp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = crate::Paths::with_base(root.clone());
+        std::fs::write(
+            paths.mcp_config_file(),
+            r#"{"servers":{"bad":{"command":"   "}}}"#,
+        )
+        .unwrap();
+        let result = super::McpResolvedConfig::load_merged(&paths);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.is_err(), "root config accepted whitespace command");
+    }
+    #[test]
+    fn recheck_contract_probe_fallback_json() {
+        let fallback = crate::agent_result::AgentResult::serialization_fallback("test");
+        assert!(
+            crate::agent_result::AgentResult::from_json(&fallback).is_some(),
+            "fallback cannot deserialize as AgentResult"
+        );
     }
 }

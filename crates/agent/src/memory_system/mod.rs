@@ -571,6 +571,22 @@ impl MemorySystem {
         Ok(())
     }
 
+    /// Clear the active marker from synchronous teardown paths (the runtime
+    /// memory-system pool returns entries from `Drop`, where awaiting is not
+    /// possible). Idle pooled sessions must not block pruning.
+    pub(crate) fn clear_session_active_sync(&self) {
+        let active_file = self.session_dir().join(".active");
+        if let Err(error) = std::fs::remove_file(&active_file) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    error = %error,
+                    "Failed to clear pooled session active marker"
+                );
+            }
+        }
+    }
+
     /// 创建并初始化记忆系统（便捷方法）
     pub async fn new_initialized(
         config: MemorySystemConfig,

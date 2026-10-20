@@ -155,7 +155,11 @@ impl KnowledgeIndex {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let cjk_bigrams = crate::fts::cjk_bigrams(query);
+        // Bound the number of repeated SQL placeholders for adversarially long
+        // CJK queries. Each term appears twice in the predicate, so 400 terms
+        // remain below SQLite's default variable limit.
+        let mut cjk_bigrams = crate::fts::cjk_bigrams(query);
+        cjk_bigrams.truncate(400);
         let conn = self
             .inner
             .lock()
@@ -230,18 +234,9 @@ impl KnowledgeIndex {
         let candidates = rows
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(map_sqlite_error)?;
-        let best_cjk_relevance = if cjk_bigrams.is_empty() {
-            None
-        } else {
-            candidates
-                .iter()
-                .map(|(_, relevance)| *relevance)
-                .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
-        };
         // superseded / forgotten 过滤限定到本次候选集（≤500），
-        // 不再每次搜索都全量加载两张表。注意不能下推为 WHERE 子句：
-        // 被取代条目仍参与 best_cjk_relevance 锚点计算（压严部分匹配的
-        // 放行门槛），先行排除会改变 CJK 分支的相关性语义。
+        // 不再每次搜索都全量加载两张表。CJK 候选按命中数排序，保留
+        // 部分命中结果，避免多字查询被错误收窄为“必须命中所有 bigram”。
         let mut superseded = HashSet::new();
         if !candidates.is_empty() {
             let placeholders = candidates
@@ -293,9 +288,6 @@ impl KnowledgeIndex {
         }
         let mut by_hash: HashMap<String, (KnowledgeIndexEntry, f64)> = HashMap::new();
         for (entry, relevance) in candidates {
-            if best_cjk_relevance.is_some_and(|best| relevance > best) {
-                continue;
-            }
             if superseded.contains(&entry.id) || forgotten.contains(&entry.content_hash) {
                 continue;
             }
