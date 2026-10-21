@@ -20,6 +20,12 @@ struct IndexState {
     /// 写入世代：每次 mark_dirty 递增。rebuild 前后比较世代可区分
     /// "进入重建时的脏标记"与"训练期间的新写入"，避免把不完整索引误标为 clean。
     write_epoch: u64,
+    /// 与 `cached_index` 同源同代的 id 顺序：第 i 个向量对应的行 id。
+    ///
+    /// 无 filter 的检索只需要这张映射把 IVF 命中下标翻译成 id，不必把整张表
+    /// 的向量读出来再 JSON 解码（P3-138）。它只在 `dirty == false` 时有效，
+    /// 任何写入都会随 `mark_dirty` 一起清空。
+    id_order: Option<Vec<String>>,
 }
 
 struct StorageLayout {
@@ -71,6 +77,7 @@ impl RabitqIndex {
                 dimensions,
                 dirty,
                 write_epoch: 0,
+                id_order: None,
             }),
         })
     }
@@ -98,6 +105,7 @@ impl RabitqIndex {
             .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
         state.dirty = true;
         state.cached_index = None;
+        state.id_order = None;
         state.write_epoch = state.write_epoch.wrapping_add(1);
         Ok(())
     }
@@ -106,10 +114,14 @@ impl RabitqIndex {
     /// 若训练期间有新写入（write_epoch 递增），索引不完整——仍装入缓存
     /// （好过无缓存），但保留 dirty 让下一次 ensure_index_ready 再重建，
     /// 避免把缺失新向量的索引误标为 clean。
+    ///
+    /// `id_order` 必须与 `index` 同源（同一次 `rows` 快照）；传 `None` 表示
+    /// 这次提交没有可用的 id 映射，后续检索会退回全表读取。
     fn store_clean_index(
         &self,
         index: Option<IvfRabitqIndex>,
         dimensions: Option<usize>,
+        id_order: Option<Vec<String>>,
         epoch: u64,
     ) -> Result<()> {
         let mut state = self
@@ -118,7 +130,21 @@ impl RabitqIndex {
             .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
         state.cached_index = index;
         state.dimensions = dimensions;
+        state.id_order = id_order;
         state.dirty = state.write_epoch != epoch;
+        Ok(())
+    }
+
+    /// 只登记 id 映射，不改动 dirty/维度。用于"索引已经就绪、这次顺手补上
+    /// 映射"的路径；世代不匹配（期间有写入）时丢弃，下一次检索重建即可。
+    fn store_id_order(&self, ids: Vec<String>, epoch: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
+        if state.write_epoch == epoch {
+            state.id_order = Some(ids);
+        }
         Ok(())
     }
 
@@ -156,7 +182,7 @@ impl RabitqIndex {
     fn ensure_index_ready(&self, rows: &[StoredVector], epoch: u64) -> Result<bool> {
         if rows.is_empty() {
             self.clear_index_file_if_exists()?;
-            self.store_clean_index(None, None, epoch)?;
+            self.store_clean_index(None, None, None, epoch)?;
             return Ok(true);
         }
 
@@ -183,7 +209,7 @@ impl RabitqIndex {
         if rows.len() < MIN_TRAIN_SIZE {
             if dirty {
                 self.clear_index_file_if_exists()?;
-                self.store_clean_index(None, Some(dimensions), epoch)?;
+                self.store_clean_index(None, Some(dimensions), None, epoch)?;
             }
             return Ok(true);
         }
@@ -198,6 +224,11 @@ impl RabitqIndex {
                     match IvfRabitqIndex::load_from_path(&self.layout.index_path) {
                         Ok(index) => {
                             state.cached_index = Some(index);
+                            // The on-disk index was trained on the rowid order of
+                            // this very table, and `dirty == false` means no write
+                            // happened since, so `rows` is that same order.
+                            state.id_order =
+                                Some(rows.iter().map(|row| row.id.clone()).collect());
                         }
                         Err(_) => {
                             drop(state);
@@ -228,7 +259,7 @@ impl RabitqIndex {
     fn rebuild_index(&self, rows: &[StoredVector], dimensions: usize, epoch: u64) -> Result<()> {
         if rows.is_empty() {
             self.clear_index_file_if_exists()?;
-            self.store_clean_index(None, None, epoch)?;
+            self.store_clean_index(None, None, None, epoch)?;
             return Ok(());
         }
 
@@ -251,7 +282,12 @@ impl RabitqIndex {
             .save_to_path(&self.layout.index_path)
             .map_err(|error| Error::Storage(format!("RaBitQ index save failed: {}", error)))?;
 
-        self.store_clean_index(Some(index), Some(dimensions), epoch)
+        self.store_clean_index(
+            Some(index),
+            Some(dimensions),
+            Some(rows.iter().map(|row| row.id.clone()).collect()),
+            epoch,
+        )
     }
 
     fn clear_index_file_if_exists(&self) -> Result<()> {
@@ -292,6 +328,53 @@ impl RabitqIndex {
             .lock()
             .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
         Ok(state.write_epoch)
+    }
+
+    /// Unfiltered query against the cached index, without touching the rows.
+    ///
+    /// Returns `None` whenever the cache cannot be trusted (missing, dirty, or
+    /// a different write epoch), so the caller falls back to the full path. The
+    /// epoch is captured before the lock is taken: a write in that window bumps
+    /// `write_epoch` and makes the check below fail closed.
+    fn search_cached_index(
+        &self,
+        vector: &[f32],
+        top_k: usize,
+        epoch: u64,
+    ) -> Result<Option<Vec<VectorHit>>> {
+        // Lock ordering: dimension check first (it takes the state lock), then
+        // the long-lived lock below. `std::sync::Mutex` is not reentrant.
+        self.ensure_query_dimensions(vector.len())?;
+
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| Error::Storage(format!("RaBitQ state lock error: {}", e)))?;
+        if state.dirty || state.write_epoch != epoch {
+            return Ok(None);
+        }
+        let (Some(index), Some(id_order)) = (state.cached_index.as_ref(), state.id_order.as_ref())
+        else {
+            return Ok(None);
+        };
+
+        let probe = choose_probe(id_order.len(), top_k);
+        let results = index
+            .search(vector, SearchParams::new(top_k, probe))
+            .map_err(|error| Error::Storage(format!("RaBitQ search failed: {}", error)))?;
+
+        let mut hits = Vec::with_capacity(results.len());
+        for result in results {
+            let Some(id) = id_order.get(result.id) else {
+                // Index and mapping disagree — do not guess, rebuild instead.
+                return Ok(None);
+            };
+            hits.push(VectorHit {
+                id: id.clone(),
+                score: -(result.score as f64),
+            });
+        }
+        Ok(Some(hits))
     }
 }
 
@@ -377,6 +460,16 @@ impl VectorIndex for RabitqIndex {
         // 若先读行再读 epoch，落在两者之间的写入会让"陈旧行快照"配"新 epoch"
         // 在重建提交时被误标 clean，消费掉本该保留的 dirty 标记。
         let epoch = self.current_write_epoch()?;
+
+        // Fast path: a clean cached index plus its id mapping is everything an
+        // unfiltered query needs. Skipping `load_rows` here avoids reading and
+        // JSON-decoding every stored vector on each search (P3-138).
+        if filter.is_none() {
+            if let Some(hits) = self.search_cached_index(vector, top_k, epoch)? {
+                return Ok(hits);
+            }
+        }
+
         let mut rows = self.load_rows()?;
         if let Some(filter) = filter {
             rows.retain(|row| filter.matches(&row.meta));
@@ -395,6 +488,10 @@ impl VectorIndex for RabitqIndex {
         }
 
         let id_order: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+        // Warm the fast path for subsequent queries. `epoch` guards against a
+        // write landing between the row snapshot and this call.
+        self.store_id_order(id_order.clone(), epoch)?;
+
         let state = self
             .state
             .lock()
@@ -440,6 +537,8 @@ impl VectorIndex for RabitqIndex {
             "vectors": count,
             "dirty": state.dirty,
             "dimensions": state.dimensions,
+            // 无 filter 的检索能否走缓存快路径（P3-138）。
+            "id_order_cached": state.id_order.is_some(),
         }))
     }
 
@@ -456,7 +555,7 @@ impl VectorIndex for RabitqIndex {
 
         self.clear_index_file_if_exists()?;
         let epoch = self.current_write_epoch()?;
-        self.store_clean_index(None, None, epoch)?;
+        self.store_clean_index(None, None, None, epoch)?;
         Ok(())
     }
 }
@@ -724,14 +823,14 @@ mod tests {
         let index = RabitqIndex::open_or_create(uri.to_str().unwrap(), "memory_vectors").unwrap();
 
         let epoch = index.current_write_epoch().unwrap();
-        index.store_clean_index(None, None, epoch).unwrap();
+        index.store_clean_index(None, None, None, epoch).unwrap();
         assert!(!index.state.lock().unwrap().dirty);
 
         // 模拟训练期间的并发 upsert：mark_dirty 递增 epoch 后，
         // 用重建前的旧 epoch 提交结果，dirty 必须保留。
         let epoch = index.current_write_epoch().unwrap();
         index.mark_dirty().unwrap();
-        index.store_clean_index(None, None, epoch).unwrap();
+        index.store_clean_index(None, None, None, epoch).unwrap();
         assert!(index.state.lock().unwrap().dirty);
     }
 
@@ -771,5 +870,90 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
         assert_eq!(ids, vec!["session-a", "global"]);
+    }
+
+    fn seeded_index(dir: &TempDir) -> RabitqIndex {
+        let uri = dir.path().join("vectors.rabitq");
+        let index = RabitqIndex::open_or_create(uri.to_str().unwrap(), "memory_vectors").unwrap();
+        let meta = VectorMeta {
+            scope: "long_term".to_string(),
+            item_type: "fact".to_string(),
+            tags: vec!["vector".to_string()],
+            session_key: None,
+        };
+        // Above MIN_TRAIN_SIZE so the IVF path (not exact search) is exercised.
+        for i in 0..48 {
+            let value = i as f32;
+            index
+                .upsert(&format!("memory-{i}"), &[value, value + 0.1, value + 0.2], &meta)
+                .unwrap();
+        }
+        index
+    }
+
+    /// P3-138: an unfiltered query must be answerable from the cached id mapping
+    /// alone. Deleting the rows behind the index's back proves the second search
+    /// did not read them — if it had, the result would be empty.
+    #[test]
+    fn rabitq_unfiltered_search_reuses_cached_id_order() {
+        let dir = TempDir::new().unwrap();
+        let index = seeded_index(&dir);
+
+        let query = [1.0, 1.1, 1.2];
+        let first = index.search(&query, 3, None).unwrap();
+        assert!(!first.is_empty());
+        assert!(
+            index.state.lock().unwrap().id_order.is_some(),
+            "first search must warm the id mapping"
+        );
+        assert_eq!(
+            index.stats().unwrap()["id_order_cached"],
+            serde_json::Value::Bool(true)
+        );
+
+        // Bypass mark_dirty on purpose: the cache must not depend on the rows.
+        {
+            let conn = index.db.lock().unwrap();
+            conn.execute("DELETE FROM memory_vectors", []).unwrap();
+        }
+
+        let second = index.search(&query, 3, None).unwrap();
+        let first_ids: Vec<&str> = first.iter().map(|hit| hit.id.as_str()).collect();
+        let second_ids: Vec<&str> = second.iter().map(|hit| hit.id.as_str()).collect();
+        assert_eq!(
+            second_ids, first_ids,
+            "warm cache must answer without reading rows"
+        );
+    }
+
+    /// The cache must never outlive a write: a new vector has to be visible on
+    /// the very next search, which means `mark_dirty` clears the mapping.
+    #[test]
+    fn rabitq_write_invalidates_cached_id_order() {
+        let dir = TempDir::new().unwrap();
+        let index = seeded_index(&dir);
+
+        let _ = index.search(&[1.0, 1.1, 1.2], 3, None).unwrap();
+        assert!(index.state.lock().unwrap().id_order.is_some());
+
+        index
+            .upsert(
+                "memory-new",
+                &[1000.0, 1000.1, 1000.2],
+                &VectorMeta {
+                    scope: "long_term".to_string(),
+                    item_type: "fact".to_string(),
+                    tags: Vec::new(),
+                    session_key: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            index.state.lock().unwrap().id_order.is_none(),
+            "a write must invalidate the cached mapping"
+        );
+
+        let hits = index.search(&[1000.0, 1000.1, 1000.2], 1, None).unwrap();
+        assert_eq!(hits.first().map(|hit| hit.id.as_str()), Some("memory-new"));
     }
 }
