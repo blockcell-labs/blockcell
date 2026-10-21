@@ -3,19 +3,7 @@ use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::{Tool, ToolContext, ToolSchema};
-
-fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('/') {
-        PathBuf::from(path)
-    } else {
-        workspace.join(path)
-    }
-}
+use crate::{expand_path, Tool, ToolContext, ToolSchema};
 
 pub struct DataProcessTool;
 

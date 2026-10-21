@@ -3,7 +3,7 @@ use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::{Tool, ToolContext, ToolSchema};
+use crate::{expand_path, Tool, ToolContext, ToolSchema};
 
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
@@ -32,18 +32,6 @@ fn check_compression_ratio(uncompressed: u64, compressed: u64) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('/') {
-        PathBuf::from(path)
-    } else {
-        workspace.join(path)
-    }
 }
 
 fn target_is_within_source(source: &Path, target: &Path) -> bool {

@@ -598,7 +598,7 @@ impl Tool for CommunityHubTool {
                     hub_url.trim_end_matches('/'),
                     urlencoding::encode(name)
                 );
-                debug!(skill = %name, url = %info_url, "Community Hub: resolving skill metadata");
+                debug!(skill = %name, url = %redact_hub_url(&info_url), "Community Hub: resolving skill metadata");
                 let info = hub_get(&client, &info_url, &api_key).await.unwrap_or_else(|e| {
                     warn!(skill = %name, err = %e, "Community Hub: failed to fetch skill metadata; falling back to download endpoint");
                     json!({})
@@ -786,7 +786,7 @@ impl Tool for CommunityHubTool {
                     urlencoding::encode(query),
                     urlencoding::encode(&tags)
                 );
-                debug!(url = %url, "Community Hub: searching nodes");
+                debug!(url = %redact_hub_url(&url), "Community Hub: searching nodes");
                 let result = hub_get(&client, &url, &api_key).await?;
                 Ok(json!({ "nodes": result }))
             }

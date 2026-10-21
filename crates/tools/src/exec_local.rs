@@ -707,7 +707,11 @@ mod tests {
         )
         .unwrap();
         let result = ExecLocalTool
-            .execute_python_with_fallback(dir.path(), &script, &[], 1, 4096)
+            // 1s was too tight: interpreter startup alone costs ~0.8s on a loaded
+            // host, so the child could be killed before its first statement ran and
+            // the read below failed with ENOENT. The script sleeps 10s, so 5s still
+            // exercises the timeout path (same fix as the cron test timeout).
+            .execute_python_with_fallback(dir.path(), &script, &[], 5, 4096)
             .await;
         assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
         assert_eq!(

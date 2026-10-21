@@ -7850,3 +7850,32 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
             .is_some());
     }
 }
+
+/// The shared session MemorySystem pool must stay bounded (P3-004).
+///
+/// Exercised through `pool_insert` rather than a real runtime: constructing
+/// `MemorySystem` per session would dominate the test and prove nothing extra
+/// about the eviction rule.
+#[test]
+fn session_memory_system_pool_evicts_at_capacity() {
+    let mut pool: HashMap<String, usize> = HashMap::new();
+    for i in 0..MAX_SESSION_MEMORY_SYSTEMS {
+        pool_insert(&mut pool, format!("session-{i}"), i);
+    }
+    assert_eq!(pool.len(), MAX_SESSION_MEMORY_SYSTEMS);
+
+    // A brand-new session at capacity must evict exactly one entry.
+    pool_insert(&mut pool, "session-new".to_string(), 999);
+    assert_eq!(
+        pool.len(),
+        MAX_SESSION_MEMORY_SYSTEMS,
+        "pool must not grow past the cap"
+    );
+    assert_eq!(pool.get("session-new"), Some(&999));
+
+    // Re-inserting an existing key must not evict anything (it is a replace).
+    let survivors = pool.len();
+    pool_insert(&mut pool, "session-new".to_string(), 1000);
+    assert_eq!(pool.len(), survivors);
+    assert_eq!(pool.get("session-new"), Some(&1000));
+}

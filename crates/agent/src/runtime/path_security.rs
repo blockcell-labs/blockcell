@@ -45,7 +45,17 @@ impl super::AgentRuntime {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> Vec<PathAccess> {
-        let mut accesses = Vec::new();
+        extract_path_accesses(tool_name, args)
+    }
+}
+
+/// Free-function form of the extraction table.
+///
+/// The table itself needs no runtime state, so it is testable in isolation
+/// (P3-022): a missed branch here silently exempts a tool's paths from the
+/// path policy, which is exactly the class of bug the table exists to prevent.
+pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -> Vec<PathAccess> {
+    let mut accesses = Vec::new();
         let action = args
             .get("action")
             .and_then(|value| value.as_str())
@@ -181,13 +191,14 @@ impl super::AgentRuntime {
         accesses
     }
 
+impl super::AgentRuntime {
     /// Resolve a path string the same way tools do (expand ~ and relative paths).
     pub(super) fn resolve_path(&self, path_str: &str) -> PathBuf {
         if path_str.starts_with("~/") {
             dirs::home_dir()
                 .map(|h| h.join(&path_str[2..]))
                 .unwrap_or_else(|| PathBuf::from(path_str))
-        } else if path_str.starts_with('/') {
+        } else if Path::new(path_str).is_absolute() {
             PathBuf::from(path_str)
         } else {
             self.paths.workspace().join(path_str)
@@ -835,10 +846,96 @@ fn is_safe_relative_skill_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_mutates_cwd, extract_command_paths, is_safe_relative_skill_path,
-        resolve_shell_access_path,
+        command_mutates_cwd, extract_command_paths, extract_path_accesses,
+        is_safe_relative_skill_path, resolve_shell_access_path, PathAccess,
     };
+    use blockcell_core::path_policy::PathOp;
+    use serde_json::json;
     use std::path::PathBuf;
+
+    /// Table-driven coverage for the tool → path-field mapping (P3-022).
+    ///
+    /// A missing branch here does not fail loudly: the tool's path simply never
+    /// reaches the path policy, so writes escape the workspace silently. The
+    /// `http_request.save_to` case below is a real instance of that bug.
+    #[test]
+    fn path_extraction_table_covers_tool_field_mapping() {
+        type ExtractionCase<'a> = (&'a str, serde_json::Value, Vec<(&'a str, PathOp)>);
+        let cases: Vec<ExtractionCase> = vec![
+            ("read_file", json!({"path": "a.txt"}), vec![("a.txt", PathOp::Read)]),
+            (
+                "write_file",
+                json!({"path": "~/x.txt"}),
+                vec![("~/x.txt", PathOp::Write)],
+            ),
+            (
+                "edit_file",
+                json!({"path": "src/main.rs"}),
+                vec![("src/main.rs", PathOp::Write)],
+            ),
+            ("list_dir", json!({"path": "."}), vec![(".", PathOp::List)]),
+            (
+                "file_ops",
+                json!({"action": "copy", "path": "a", "destination": "b"}),
+                vec![("a", PathOp::Read), ("b", PathOp::Write)],
+            ),
+            (
+                "file_ops",
+                json!({"action": "delete", "path": "a", "destination": "b"}),
+                vec![("a", PathOp::Write), ("b", PathOp::Write)],
+            ),
+            (
+                "data_process",
+                json!({"action": "write_csv", "path": "in.csv", "output_path": "out.csv"}),
+                vec![("in.csv", PathOp::Write), ("out.csv", PathOp::Write)],
+            ),
+            (
+                "video_process",
+                json!({"input": "a.mp4", "inputs": ["b.mp4"], "output_path": "o.mp4"}),
+                vec![
+                    ("a.mp4", PathOp::Read),
+                    ("b.mp4", PathOp::Read),
+                    ("o.mp4", PathOp::Write),
+                ],
+            ),
+            (
+                "http_request",
+                json!({"save_to": "resp.bin"}),
+                vec![("resp.bin", PathOp::Write)],
+            ),
+            (
+                "message",
+                json!({"media": ["a.png", "b.png"]}),
+                vec![("a.png", PathOp::Read), ("b.png", PathOp::Read)],
+            ),
+            ("exec", json!({"working_dir": "/tmp"}), vec![("/tmp", PathOp::Exec)]),
+            ("totally_unknown_tool", json!({"path": "a"}), vec![]),
+        ];
+
+        for (tool, args, expected) in cases {
+            let expected: Vec<PathAccess> = expected
+                .into_iter()
+                .map(|(path, op)| PathAccess {
+                    path: path.to_string(),
+                    op,
+                })
+                .collect();
+            assert_eq!(
+                extract_path_accesses(tool, &args),
+                expected,
+                "unexpected path accesses for `{tool}` with {args}"
+            );
+        }
+    }
+
+    /// A field that is present but not a string must be ignored, not treated as
+    /// an empty path (which would resolve to the workspace root and authorise it).
+    #[test]
+    fn path_extraction_ignores_non_string_fields() {
+        assert!(extract_path_accesses("read_file", &json!({"path": 42})).is_empty());
+        assert!(extract_path_accesses("message", &json!({"media": "not-an-array"})).is_empty());
+        assert!(extract_path_accesses("message", &json!({"media": [1, 2]})).is_empty());
+    }
 
     #[test]
     fn accepts_safe_relative_skill_paths() {

@@ -31,6 +31,9 @@ mod cache_safe;
 mod can_use_tool;
 mod context;
 
+// Only the cache-alignment tests build the initial fork message list directly;
+// production goes through `run_forked_agent`. Gating keeps `-D warnings` clean.
+#[cfg(test)]
 pub(crate) use agent::build_initial_forked_messages;
 pub use agent::{
     build_forked_tool_schemas, default_read_only_fork_disallowed_tools, run_forked_agent,

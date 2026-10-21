@@ -1,11 +1,10 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::fs_backend::{FilesystemBackend, FsEntryKind, LocalFilesystem};
-use crate::{Tool, ToolContext, ToolSchema};
+use crate::{expand_path, Tool, ToolContext, ToolSchema};
 
 /// 文件工具通过注入的 [`FilesystemBackend`] 访问文件，工具本身只负责路径解析与参数语义。
 macro_rules! filesystem_tool {
@@ -32,18 +31,6 @@ filesystem_tool!(ReadFileTool);
 filesystem_tool!(WriteFileTool);
 filesystem_tool!(EditFileTool);
 filesystem_tool!(ListDirTool);
-
-fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('/') {
-        PathBuf::from(path)
-    } else {
-        workspace.join(path)
-    }
-}
 
 // ============ read_file ============
 
@@ -506,6 +493,7 @@ mod tests {
     use super::*;
     use crate::PromptContext;
     use serde_json::json;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn tool_context(workspace: &std::path::Path) -> ToolContext {

@@ -70,7 +70,7 @@ use blockcell_core::system_event::{EventPriority, SystemEvent};
 use blockcell_core::types::PermissionSet;
 use blockcell_core::{AgentIdentity, Config, OutboundMessage, Result};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -94,6 +94,33 @@ pub fn safe_truncate(s: &str, max_chars: usize) -> &str {
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     &s[..end]
+}
+
+/// Resolve a tool-supplied path against the workspace.
+///
+/// This is the single definition of tool-side path expansion; the runtime mirrors
+/// it in `path_security::resolve_path` when it extracts path accesses for policy
+/// checks, so the two must stay identical:
+///
+/// - `~/rest` expands to `$HOME/rest` (a bare `~` or `~foo` is **not** home-relative,
+///   it is workspace-relative — matching shell semantics where `~foo` means user
+///   `foo`, not a path under the current user's home).
+/// - absolute paths pass through unchanged.
+/// - everything else is joined onto `workspace`.
+///
+/// Do not hand-roll another copy of this in a tool module: P3-018 was caused by
+/// six drifting implementations disagreeing about `~foo`.
+pub fn expand_path(path: &str, workspace: &Path) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(relative);
+        }
+    }
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
+    }
+    workspace.join(path)
 }
 
 /// Escape a value for interpolation into a single- or double-quoted Python string

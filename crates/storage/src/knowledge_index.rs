@@ -235,8 +235,26 @@ impl KnowledgeIndex {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(map_sqlite_error)?;
         // superseded / forgotten 过滤限定到本次候选集（≤500），
-        // 不再每次搜索都全量加载两张表。CJK 候选按命中数排序，保留
-        // 部分命中结果，避免多字查询被错误收窄为“必须命中所有 bigram”。
+        // 不再每次搜索都全量加载两张表。
+        //
+        // CJK 候选按命中 bigram 数排序（relevance = -命中数）。只有当**存在
+        // 完整命中**（命中数 == bigram 总数）时才收敛到最佳档：多字查询里
+        // 只共享部分 bigram 的条目不应与完整命中条目混在一起返回（否则
+        // "用户偏好详细回答" 会被 "用户偏好简洁回答" 的部分命中召回，掩盖
+        // supersedes 语义）。没有任何完整命中时保留部分命中，避免多字查询
+        // 召回被错误收窄为"必须命中所有 bigram"。
+        let best_cjk_relevance = if cjk_bigrams.is_empty() {
+            None
+        } else {
+            candidates
+                .iter()
+                .map(|(_, relevance)| *relevance)
+                .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+        };
+        let restrict_to_best = cjk_bigrams.is_empty()
+            || best_cjk_relevance.is_some_and(|best| {
+                best <= -(cjk_bigrams.len() as f64) + f64::EPSILON
+            });
         let mut superseded = HashSet::new();
         if !candidates.is_empty() {
             let placeholders = candidates
@@ -288,6 +306,11 @@ impl KnowledgeIndex {
         }
         let mut by_hash: HashMap<String, (KnowledgeIndexEntry, f64)> = HashMap::new();
         for (entry, relevance) in candidates {
+            if restrict_to_best
+                && best_cjk_relevance.is_some_and(|best| relevance > best + f64::EPSILON)
+            {
+                continue;
+            }
             if superseded.contains(&entry.id) || forgotten.contains(&entry.content_hash) {
                 continue;
             }

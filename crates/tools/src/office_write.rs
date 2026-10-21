@@ -462,7 +462,7 @@ fn build_docx(
             docx = docx.add_table(table);
         }
         if let Some(image_path) = non_empty_str(&section["image_path"]) {
-            if let Some(pic) = load_docx_picture(&expand_path(image_path, workspace)) {
+            if let Some(pic) = load_docx_picture(&expand_path_string(image_path, workspace)) {
                 docx = docx.add_paragraph(Paragraph::new().add_run(Run::new().add_image(pic)));
             }
         }
@@ -708,7 +708,9 @@ print('OK')
 fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &str) -> String {
     if let Some(op) = params.get("output_path").and_then(|v| v.as_str()) {
         if !op.is_empty() {
-            return expand_path(op, &ctx.workspace);
+            return crate::expand_path(op, &ctx.workspace)
+                .to_string_lossy()
+                .into_owned();
         }
     }
     let dir = ctx.workspace.join("documents");
@@ -719,16 +721,10 @@ fn resolve_output_path(params: &Value, ctx: &ToolContext, ext: &str, prefix: &st
         .to_string()
 }
 
-fn expand_path(path: &str, workspace: &std::path::Path) -> String {
-    if let Some(relative) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(relative).to_string_lossy().into_owned();
-        }
-    }
-    if std::path::Path::new(path).is_absolute() {
-        return path.to_string();
-    }
-    workspace.join(path).to_string_lossy().to_string()
+fn expand_path_string(path: &str, workspace: &std::path::Path) -> String {
+    crate::expand_path(path, workspace)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Run a Python script and return the result.
@@ -850,7 +846,10 @@ mod tests {
     #[test]
     fn p3_tilde_prefix_is_a_relative_filename() {
         let workspace = std::path::Path::new("/tmp/workspace");
-        assert_eq!(expand_path("~report.docx", workspace), "/tmp/workspace/~report.docx");
+        assert_eq!(
+            expand_path_string("~report.docx", workspace),
+            "/tmp/workspace/~report.docx"
+        );
     }
 
     #[test]
@@ -914,7 +913,10 @@ mod tests {
     fn test_quote_python_str() {
         assert_eq!(quote_python_str("hello"), "'hello'");
         // `\"` inside a single-quoted Python literal still reads back as `"`.
-        assert_eq!(quote_python_str("it's a \"test\""), "'it\\'s a \\\"test\\\"'");
+        assert_eq!(
+            quote_python_str("it's a \"test\""),
+            "'it\\'s a \\\"test\\\"'"
+        );
         assert_eq!(quote_python_str("a\nb"), "'a\\nb'");
     }
 

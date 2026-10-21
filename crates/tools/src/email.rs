@@ -3,7 +3,7 @@ use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::{Tool, ToolContext, ToolSchema};
+use crate::{expand_path, Tool, ToolContext, ToolSchema};
 
 pub struct EmailTool;
 
@@ -179,18 +179,6 @@ impl Tool for EmailTool {
             "search" => action_search_emails(&workspace, &params).await,
             _ => Err(Error::Tool(format!("Unknown action: {}", action))),
         }
-    }
-}
-
-fn expand_path(path: &str, workspace: &std::path::Path) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('/') {
-        PathBuf::from(path)
-    } else {
-        workspace.join(path)
     }
 }
 
@@ -523,7 +511,13 @@ async fn action_read_email(workspace: &Path, params: &Value) -> Result<Value> {
         .get("folder")
         .and_then(|v| v.as_str())
         .unwrap_or("INBOX");
-    let uid = params["uid"].as_u64().unwrap() as u32;
+    // `validate` already rejects out-of-range UIDs, but do not rely on that:
+    // a future call path that skips validation must still fail closed instead of
+    // silently truncating a u64 into a u32.
+    let uid = params["uid"]
+        .as_u64()
+        .and_then(|raw| u32::try_from(raw).ok())
+        .ok_or_else(|| Error::Validation("uid must be an integer in 1..=4294967295".to_string()))?;
     let save_dir = params.get("save_attachments_to").and_then(|v| v.as_str());
 
     let mut session = connect_imap(params).await?;

@@ -2788,6 +2788,21 @@ impl blockcell_tools::RuntimeHandle for AgentRuntime {
 /// cap a long-lived gateway process grows with every session it has ever served.
 const MAX_SESSION_MEMORY_SYSTEMS: usize = 64;
 
+/// Insert into the shared pool, evicting one arbitrary entry when full.
+///
+/// Kept generic (and separate from `MemorySystem`) so the eviction policy can be
+/// regression-tested without constructing a real `MemorySystem`. Pooled entries
+/// are reconstructible, so any victim is acceptable — there is deliberately no
+/// LRU bookkeeping, which also means an existing key must never trigger eviction.
+fn pool_insert<K: std::hash::Hash + Eq + Clone, V>(map: &mut HashMap<K, V>, key: K, value: V) {
+    if map.len() >= MAX_SESSION_MEMORY_SYSTEMS && !map.contains_key(&key) {
+        if let Some(evicted) = map.keys().next().cloned() {
+            map.remove(&evicted);
+        }
+    }
+    map.insert(key, value);
+}
+
 impl AgentRuntime {
     /// Return a MemorySystem to the shared pool, evicting an arbitrary entry when full.
     fn return_memory_system_to_pool(&self, ms: crate::memory_system::MemorySystem) {
@@ -2798,12 +2813,7 @@ impl AgentRuntime {
             return;
         };
         let session_id = ms.session_id().to_string();
-        if map.len() >= MAX_SESSION_MEMORY_SYSTEMS && !map.contains_key(&session_id) {
-            if let Some(evicted) = map.keys().next().cloned() {
-                map.remove(&evicted);
-            }
-        }
-        map.insert(session_id, ms);
+        pool_insert(&mut map, session_id, ms);
     }
 }
 

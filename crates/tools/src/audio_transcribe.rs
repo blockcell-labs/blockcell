@@ -90,7 +90,7 @@ impl Tool for AudioTranscribeTool {
         match action {
             "transcribe" => {
                 let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let path = expand_path(path, &ctx);
+                let path = expand_path_string(path, &ctx);
                 let language = params.get("language").and_then(|v| v.as_str());
                 let model = params
                     .get("model")
@@ -122,7 +122,7 @@ impl Tool for AudioTranscribeTool {
             }
             "extract_audio" => {
                 let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let path = expand_path(path, &ctx);
+                let path = expand_path_string(path, &ctx);
                 let output_path = params
                     .get("output_path")
                     .and_then(|v| v.as_str())
@@ -135,16 +135,10 @@ impl Tool for AudioTranscribeTool {
     }
 }
 
-fn expand_path(path: &str, ctx: &ToolContext) -> String {
-    if let Some(relative) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(relative).to_string_lossy().into_owned();
-        }
-    }
-    if std::path::Path::new(path).is_absolute() {
-        return path.to_string();
-    }
-    ctx.workspace.join(path).to_string_lossy().to_string()
+fn expand_path_string(path: &str, ctx: &ToolContext) -> String {
+    crate::expand_path(path, &ctx.workspace)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Check available transcription backends.
@@ -740,9 +734,11 @@ mod tests {
             agent_type_registry: None,
             evolution_workflow_store: None,
         };
-        assert_eq!(expand_path("~recording.wav", &ctx), ctx.workspace.join("~recording.wav").to_string_lossy());
+        assert_eq!(
+            expand_path_string("~recording.wav", &ctx),
+            ctx.workspace.join("~recording.wav").to_string_lossy()
+        );
     }
-
 
     #[test]
     fn test_schema() {
