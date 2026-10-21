@@ -668,6 +668,7 @@ mod tests {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(lock_path)
             .unwrap();
         lock_file.lock_exclusive().unwrap();

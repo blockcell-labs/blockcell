@@ -1226,10 +1226,10 @@ async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
         .await
         .is_ok());
     // 无确认通道 → Confirm 路径被拒（说明上次批准没有泄漏到会话级）
-    assert!(!runtime_scoped
+    assert!(runtime_scoped
         .check_path_permission_with_confirmation("exec", &args, &msg, false, false)
         .await
-        .is_ok());
+        .is_err());
 }
 
 #[tokio::test]

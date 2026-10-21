@@ -62,14 +62,13 @@ impl AgentRuntime {
         let mut pending_total = 0_u32;
         let mut candidates = Vec::new();
         for call in calls {
-            if {
-                // Respect the per-step tool scope and the iteration budget: the
-                // main loop would skip/reject such calls, so prefetching them
-                // would perform real I/O whose result is thrown away.
-                tool_names.iter().any(|name| name == &call.name)
-                    && loop_guard.would_admit_batch(&call.name, &pending_by_tool, pending_total)
-                    && self.prefetch_candidate(call, disabled_tools, disabled_skills)
-            } {
+            // Respect the per-step tool scope and the iteration budget: the
+            // main loop would skip/reject such calls, so prefetching them
+            // would perform real I/O whose result is thrown away.
+            let admitted = tool_names.iter().any(|name| name == &call.name)
+                && loop_guard.would_admit_batch(&call.name, &pending_by_tool, pending_total)
+                && self.prefetch_candidate(call, disabled_tools, disabled_skills);
+            if admitted {
                 *pending_by_tool.entry(call.name.clone()).or_insert(0) += 1;
                 pending_total = pending_total.saturating_add(1);
                 candidates.push(call);

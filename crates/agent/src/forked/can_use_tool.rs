@@ -218,19 +218,19 @@ impl ReviewToolMode {
     /// 该模式的工具名单（顺序即 schema 发送顺序，也是 Deny 消息的列举顺序）。
     pub fn roster(self) -> &'static [&'static str] {
         match self {
-            ReviewToolMode::Skill => &SKILL_REVIEW_ROSTER,
-            ReviewToolMode::Memory => &MEMORY_REVIEW_ROSTER,
-            ReviewToolMode::Combined => &COMBINED_REVIEW_ROSTER,
-            ReviewToolMode::Flush => &FLUSH_ROSTER,
+            ReviewToolMode::Skill => SKILL_REVIEW_ROSTER,
+            ReviewToolMode::Memory => MEMORY_REVIEW_ROSTER,
+            ReviewToolMode::Combined => COMBINED_REVIEW_ROSTER,
+            ReviewToolMode::Flush => FLUSH_ROSTER,
         }
     }
 
     fn schema_order(self) -> &'static [SchemaSlot] {
         match self {
-            ReviewToolMode::Skill => &SKILL_REVIEW_SCHEMA_ORDER,
-            ReviewToolMode::Memory => &MEMORY_REVIEW_SCHEMA_ORDER,
-            ReviewToolMode::Combined => &COMBINED_REVIEW_SCHEMA_ORDER,
-            ReviewToolMode::Flush => &FLUSH_SCHEMA_ORDER,
+            ReviewToolMode::Skill => SKILL_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Memory => MEMORY_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Combined => COMBINED_REVIEW_SCHEMA_ORDER,
+            ReviewToolMode::Flush => FLUSH_SCHEMA_ORDER,
         }
     }
 }
@@ -977,7 +977,7 @@ fn is_read_only_command(cmd: &str) -> bool {
     ];
     if cmd_lower
         .split_whitespace()
-        .any(|token| FIND_MUTATING_FLAGS.iter().any(|flag| token == *flag))
+        .any(|token| FIND_MUTATING_FLAGS.contains(&token))
     {
         return false;
     }

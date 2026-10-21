@@ -345,89 +345,6 @@ pub async fn search(
     Ok(())
 }
 
-#[cfg(test)]
-mod canonical_migration_tests {
-    use super::*;
-    use blockcell_storage::memory::UpsertParams;
-
-    fn test_paths() -> Paths {
-        Paths::with_base(std::env::temp_dir().join(format!(
-            "blockcell-memory-migrate-canonical-{}",
-            uuid::Uuid::new_v4()
-        )))
-    }
-
-    fn seed_memory(store: &MemoryStore, scope: &str, content: &str) {
-        store
-            .upsert(UpsertParams {
-                scope: scope.to_string(),
-                item_type: "preference".to_string(),
-                title: None,
-                content: content.to_string(),
-                summary: None,
-                tags: vec![],
-                source: "legacy".to_string(),
-                channel: None,
-                session_key: None,
-                importance: 0.8,
-                dedup_key: None,
-                expires_at: None,
-            })
-            .expect("seed memory row");
-    }
-
-    #[test]
-    fn migrate_canonical_deduplicates_retires_and_reindexes() {
-        let paths = test_paths();
-        paths.ensure_dirs().expect("ensure paths");
-        let store =
-            MemoryStore::open(&paths.memory_dir().join("memory.db")).expect("open memory store");
-        seed_memory(&store, "long_term", "User prefers concise replies.");
-        seed_memory(&store, "long_term", "  User prefers concise replies.  ");
-        seed_memory(&store, "short_term", "Temporary task state.");
-
-        let result = migrate_canonical_at(&paths, &store).expect("migrate canonical memory");
-
-        assert_eq!(result.migrated, 1);
-        assert_eq!(result.deduplicated, 1);
-        assert_eq!(result.retired, 2);
-        let canonical = std::fs::read_to_string(paths.memory_md()).expect("read MEMORY.md");
-        assert_eq!(
-            canonical.matches("User prefers concise replies.").count(),
-            1
-        );
-        assert!(canonical.contains("[id:migrated-"));
-        assert!(canonical.contains("[scope:workspace]"));
-        assert!(canonical.contains("[source:verified]"));
-        assert!(store
-            .active_long_term_items()
-            .expect("list active long-term")
-            .is_empty());
-        let short_term = store
-            .query(&QueryParams {
-                scope: Some("short_term".to_string()),
-                top_k: 10,
-                ..QueryParams::default()
-            })
-            .expect("query short-term");
-        assert_eq!(short_term.len(), 1);
-
-        let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db())
-            .expect("open knowledge index");
-        assert_eq!(
-            index
-                .search("concise", 10)
-                .expect("search migrated entry")
-                .len(),
-            1
-        );
-
-        let rerun = migrate_canonical_at(&paths, &store).expect("rerun migration");
-        assert_eq!(rerun.migrated, 0);
-        assert_eq!(rerun.deduplicated, 0);
-        assert_eq!(rerun.retired, 0);
-    }
-}
 
 /// Run maintenance (clean expired + purge recycle bin).
 pub async fn maintenance(recycle_days: i64) -> anyhow::Result<()> {
@@ -517,3 +434,88 @@ pub async fn clear(scope: Option<String>) -> anyhow::Result<()> {
     println!("   Memories moved to recycle bin. Use `maintenance` to permanently purge.");
     Ok(())
 }
+
+#[cfg(test)]
+mod canonical_migration_tests {
+    use super::*;
+    use blockcell_storage::memory::UpsertParams;
+
+    fn test_paths() -> Paths {
+        Paths::with_base(std::env::temp_dir().join(format!(
+            "blockcell-memory-migrate-canonical-{}",
+            uuid::Uuid::new_v4()
+        )))
+    }
+
+    fn seed_memory(store: &MemoryStore, scope: &str, content: &str) {
+        store
+            .upsert(UpsertParams {
+                scope: scope.to_string(),
+                item_type: "preference".to_string(),
+                title: None,
+                content: content.to_string(),
+                summary: None,
+                tags: vec![],
+                source: "legacy".to_string(),
+                channel: None,
+                session_key: None,
+                importance: 0.8,
+                dedup_key: None,
+                expires_at: None,
+            })
+            .expect("seed memory row");
+    }
+
+    #[test]
+    fn migrate_canonical_deduplicates_retires_and_reindexes() {
+        let paths = test_paths();
+        paths.ensure_dirs().expect("ensure paths");
+        let store =
+            MemoryStore::open(&paths.memory_dir().join("memory.db")).expect("open memory store");
+        seed_memory(&store, "long_term", "User prefers concise replies.");
+        seed_memory(&store, "long_term", "  User prefers concise replies.  ");
+        seed_memory(&store, "short_term", "Temporary task state.");
+
+        let result = migrate_canonical_at(&paths, &store).expect("migrate canonical memory");
+
+        assert_eq!(result.migrated, 1);
+        assert_eq!(result.deduplicated, 1);
+        assert_eq!(result.retired, 2);
+        let canonical = std::fs::read_to_string(paths.memory_md()).expect("read MEMORY.md");
+        assert_eq!(
+            canonical.matches("User prefers concise replies.").count(),
+            1
+        );
+        assert!(canonical.contains("[id:migrated-"));
+        assert!(canonical.contains("[scope:workspace]"));
+        assert!(canonical.contains("[source:verified]"));
+        assert!(store
+            .active_long_term_items()
+            .expect("list active long-term")
+            .is_empty());
+        let short_term = store
+            .query(&QueryParams {
+                scope: Some("short_term".to_string()),
+                top_k: 10,
+                ..QueryParams::default()
+            })
+            .expect("query short-term");
+        assert_eq!(short_term.len(), 1);
+
+        let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db())
+            .expect("open knowledge index");
+        assert_eq!(
+            index
+                .search("concise", 10)
+                .expect("search migrated entry")
+                .len(),
+            1
+        );
+
+        let rerun = migrate_canonical_at(&paths, &store).expect("rerun migration");
+        assert_eq!(rerun.migrated, 0);
+        assert_eq!(rerun.deduplicated, 0);
+        assert_eq!(rerun.retired, 0);
+    }
+}
+

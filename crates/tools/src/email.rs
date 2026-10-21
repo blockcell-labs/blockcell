@@ -159,10 +159,15 @@ impl Tool for EmailTool {
             }
             _ => return Err(Error::Validation(format!("Unknown action: {}", action))),
         }
-        if matches!(action, "list" | "search") && params.get("limit").is_some() {
-            if !params["limit"].as_u64().is_some_and(|limit| (1..=100).contains(&limit)) {
-                return Err(Error::Validation("limit must be an integer in 1..=100".to_string()));
-            }
+        if matches!(action, "list" | "search")
+            && params.get("limit").is_some()
+            && !params["limit"]
+                .as_u64()
+                .is_some_and(|limit| (1..=100).contains(&limit))
+        {
+            return Err(Error::Validation(
+                "limit must be an integer in 1..=100".to_string(),
+            ));
         }
         Ok(())
     }

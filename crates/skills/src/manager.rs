@@ -626,12 +626,6 @@ pub struct SkillTestFixture {
 // OpenClaw 兼容：格式检测与可用性检查
 // ---------------------------------------------------------------------------
 
-/// 检测技能目录的格式来源。
-///
-/// 优先级规则：
-/// 1. 有 meta.yaml 或 meta.json → BlockCell（优先，避免误判）
-/// 2. SKILL.md 以 "---" 开头 → OpenClaw
-/// 3. 默认 → BlockCell
 /// Escape text for inclusion in an XML text node / attribute value.
 ///
 /// Skill names and descriptions come from disk (possibly model-generated); a
@@ -662,6 +656,12 @@ fn read_meta_bounded(path: &Path, max_bytes: u64) -> Result<String> {
     Ok(std::fs::read_to_string(path)?)
 }
 
+/// 检测技能目录的格式来源。
+///
+/// 优先级规则：
+/// 1. 有 meta.yaml 或 meta.json → BlockCell（优先，避免误判）
+/// 2. SKILL.md 以 "---" 开头 → OpenClaw
+/// 3. 默认 → BlockCell
 fn detect_skill_format(skill_dir: &Path) -> SkillSource {
     // 优先检查 BlockCell 标志文件
     if skill_dir.join("meta.yaml").exists() || skill_dir.join("meta.json").exists() {

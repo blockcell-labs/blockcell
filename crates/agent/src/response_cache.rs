@@ -957,7 +957,7 @@ mod layer1_tests {
         let stub = cache.maybe_cache_and_stub("ws:test", &content, true);
 
         assert!(stub.is_none());
-        assert!(cache.get_lock().data.get("ws:test").is_none());
+        assert!(!cache.get_lock().data.contains_key("ws:test"));
     }
 
     #[test]

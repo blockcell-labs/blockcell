@@ -41,6 +41,7 @@ pub(crate) fn lock_exclusive(path: &Path) -> io::Result<ExclusiveFileLock> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)?;
     file.lock_exclusive()?;
     Ok(ExclusiveFileLock { file })
@@ -58,6 +59,7 @@ pub(crate) fn lock_exclusive_with_timeout(
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)?;
     let started = std::time::Instant::now();
     loop {
@@ -77,25 +79,6 @@ pub(crate) fn lock_exclusive_with_timeout(
             }
             Err(error) => return Err(error),
         }
-    }
-}
-
-#[cfg(test)]
-mod timeout_tests {
-    use super::*;
-
-    #[test]
-    fn exclusive_lock_timeout_returns_would_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("audit.log");
-        let _held = lock_exclusive(&path).unwrap();
-        let started = std::time::Instant::now();
-        let error = match lock_exclusive_with_timeout(&path, std::time::Duration::from_millis(40)) {
-            Ok(_) => panic!("contended file lock should time out"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
 
@@ -168,4 +151,23 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = std::fs::remove_file(&temp_path);
     }
     result
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_lock_timeout_returns_would_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let _held = lock_exclusive(&path).unwrap();
+        let started = std::time::Instant::now();
+        let error = match lock_exclusive_with_timeout(&path, std::time::Duration::from_millis(40)) {
+            Ok(_) => panic!("contended file lock should time out"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 }

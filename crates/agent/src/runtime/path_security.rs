@@ -592,7 +592,7 @@ fn extract_command_paths(command: &str) -> Vec<String> {
 
             for cand in candidates {
                 let tok = cand
-                    .trim_start_matches(|c: char| matches!(c, '@' | '>' | '<' | '&'))
+                    .trim_start_matches(['@', '>', '<', '&'])
                     .trim_matches(|c: char| c == '"' || c == '\'');
                 if tok.is_empty() || tok.starts_with('-') || tok.contains("://") {
                     continue;

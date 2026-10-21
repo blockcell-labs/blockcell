@@ -197,7 +197,7 @@ pub(crate) fn build_cli_tool_context(
         base: paths.base.clone(),
         builtin_skills_dir: Some(paths.builtin_skills_dir()),
         active_skill_dir: None,
-        config: blockcell_core::Config::load_or_default(&paths)?,
+        config: blockcell_core::Config::load_or_default(paths)?,
         session_key: "cli:test".to_string(),
         channel: String::new(),
         account_id: None,

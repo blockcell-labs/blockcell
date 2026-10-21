@@ -369,7 +369,7 @@ pub(crate) fn truncate_to_token_budget(text: &str, budget: usize) -> String {
     let mut low = 0usize;
     let mut high = boundaries.len().saturating_sub(1);
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         if estimate_tokens(&text[..boundaries[mid]]) <= budget {
             low = mid;
         } else {

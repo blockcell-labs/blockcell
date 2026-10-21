@@ -474,7 +474,7 @@ mod tests {
     }
 
     fn remove_from_path(path: &std::path::Path, old_text: &str) -> Result<Value> {
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(path)?;
         let retained = content
             .lines()
             .filter(|line| !line.contains(old_text))
@@ -629,12 +629,12 @@ mod tests {
             content: "keep intact".into(),
         };
         let index = blockcell_storage::KnowledgeIndex::open(&paths.knowledge_index_db()).unwrap();
-        assert!(confirm_matches(&paths, &ctx, &[item.clone()], "test").is_err());
+        assert!(confirm_matches(&paths, &ctx, std::slice::from_ref(&item), "test").is_err());
         assert!(!index.is_forgotten_content(&item.content).unwrap());
         index
             .record_forgotten_content(&item.content, "previous request")
             .unwrap();
-        assert!(confirm_matches(&paths, &ctx, &[item.clone()], "test").is_err());
+        assert!(confirm_matches(&paths, &ctx, std::slice::from_ref(&item), "test").is_err());
         assert!(index.is_forgotten_content(&item.content).unwrap());
     }
 

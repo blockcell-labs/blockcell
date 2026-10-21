@@ -169,7 +169,7 @@ impl CheckpointManager {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&file_path)
+        let json = fs::read_to_string(file_path)
             .map_err(|e| format!("读取 checkpoint 文件失败: {}", e))?;
 
         let checkpoint: TaskCheckpoint =
