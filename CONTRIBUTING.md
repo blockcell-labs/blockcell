@@ -16,9 +16,9 @@ Thank you for helping improve BlockCell. This guide describes the basic expectat
 
 ## 开发环境 / Development Environment
 
-BlockCell 是 Rust 2021 workspace，最低支持 Rust 1.85。克隆仓库后可运行：
+BlockCell 是 Rust 2021 workspace，最低支持 Rust 1.96（工具链版本固定在 `rust-toolchain.toml`，与 `Cargo.toml` 的 `rust-version` 保持一致）。克隆仓库后可运行：
 
-BlockCell is a Rust 2021 workspace with a minimum supported Rust version of 1.85. After cloning the repository, run:
+BlockCell is a Rust 2021 workspace with a minimum supported Rust version of 1.96 (the toolchain is pinned in `rust-toolchain.toml` and kept in sync with `rust-version` in `Cargo.toml`). After cloning the repository, run:
 
 ```bash
 cargo build --workspace

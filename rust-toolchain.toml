@@ -1,0 +1,5 @@
+# Pinned so local builds, CI and release artifacts all use the same compiler.
+# Bump this together with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

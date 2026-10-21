@@ -5,7 +5,7 @@
 **用 Rust 构建的自进化 AI 多智能体框架**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org)
 [![GitHub stars](https://img.shields.io/github/stars/blockcell-labs/blockcell?style=social)](https://github.com/blockcell-labs/blockcell)
 
 [官网](https://blockcell.dev) • [文档](https://blockcell.dev/docs) • [English](README.en.md)
@@ -205,7 +205,7 @@ curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/insta
 
 ### 从源码构建
 
-**前置要求**：Rust 1.85+
+**前置要求**：Rust 1.96+
 
 ```bash
 git clone https://github.com/blockcell-labs/blockcell.git

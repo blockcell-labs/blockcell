@@ -18,7 +18,9 @@ version = "0.1.7"
 edition = "2021"
 authors = ["blockcell"]
 license = "MIT"
-rust-version = "1.85"
+# Keep in sync with rust-toolchain.toml (channel). The previous 1.85 floor was
+# not buildable: `home` / `ignore` / `image` already require 1.88.
+rust-version = "1.96"
 
 [workspace.dependencies]
 # Async runtime

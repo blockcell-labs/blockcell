@@ -27,6 +27,7 @@ This batch is the Agent Runtime architecture evolution: it absorbs the composabl
 
 ### Changed
 
+- **Toolchain pinned to Rust 1.96.0**: added `rust-toolchain.toml` and raised `rust-version` from 1.85 to 1.96; the Docker builder image and release workflow now use 1.96.0 as well (previously a drifting `rust:1` and 1.92.0 respectively). The old 1.85 floor was not buildable — `home` / `ignore` / `image` already require 1.88.
 - Hooks and WebSocket tool events now feed into the EventBus, keeping the existing `hooks.yaml` configuration compatible.
 - The ToolRegistry is now backed by the unified scope, so tools can be registered per agent / session / evolution candidate, with the more specific scope overriding on name conflicts.
 - Ghost turn review now consumes the Session Event Log instead of inferring tool outcomes, memory writes, and model errors from the transcript.

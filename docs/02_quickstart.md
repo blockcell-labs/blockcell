@@ -43,7 +43,7 @@ source ~/.zshrc
 
 ### 方式二：从源码编译
 
-如果你想自己编译（需要 Rust 1.85+）：
+如果你想自己编译（需要 Rust 1.96+）：
 
 ```bash
 git clone https://github.com/blockcell-labs/blockcell.git

@@ -18,7 +18,7 @@ RUN npm run build
 # ============================================
 # Stage 2: Build Rust Application
 # ============================================
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1.96-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \

@@ -43,7 +43,7 @@ source ~/.zshrc
 
 ### Option B: Build from source
 
-If you want to compile it yourself (requires Rust 1.85+):
+If you want to compile it yourself (requires Rust 1.96+):
 
 ```bash
 git clone https://github.com/blockcell-labs/blockcell.git

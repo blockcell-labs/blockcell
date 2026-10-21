@@ -27,6 +27,7 @@
 
 ### 调整
 
+- **工具链固定为 Rust 1.96.0**：新增 `rust-toolchain.toml`，`rust-version` 由 1.85 提到 1.96；Docker 构建镜像与发布工作流同步到 1.96.0（此前分别是漂移的 `rust:1`、1.92.0）。原 1.85 下限实际不可构建——`home` / `ignore` / `image` 已要求 1.88。
 - Hook 与 WebSocket 工具事件统一接入 EventBus，保留原 `hooks.yaml` 配置兼容。
 - ToolRegistry 接入统一 Scope，工具可按 agent / session / 进化候选作用域注册，同名时更具体作用域覆盖。
 - Ghost 回合复盘改为消费 Session Event Log，工具结论 / 记忆写入 / 模型错误不再从 transcript 推断。

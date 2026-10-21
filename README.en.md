@@ -5,7 +5,7 @@
 **A self-evolving AI agent framework built with Rust**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org)
 [![GitHub stars](https://img.shields.io/github/stars/blockcell-labs/blockcell?style=social)](https://github.com/blockcell-labs/blockcell)
 
 [Website](https://blockcell.dev) • [Documentation](https://blockcell.dev/docs) • [中文](README.md)
@@ -205,7 +205,7 @@ curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/insta
 
 ### Build from Source
 
-**Prerequisites**: Rust 1.85+
+**Prerequisites**: Rust 1.96+
 
 ```bash
 git clone https://github.com/blockcell-labs/blockcell.git
