@@ -888,7 +888,7 @@ impl CronService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Timelike, Utc};
+    use chrono::{Datelike, TimeZone, Timelike, Utc};
 
     #[derive(Clone, Default)]
     struct RecordingEmitter {
@@ -1528,6 +1528,42 @@ mod tests {
             matches!(utc.hour(), 16 | 17),
             "expected 16:00 or 17:00 UTC, got {}:00",
             utc.hour()
+        );
+    }
+
+    #[test]
+    fn cron_expression_with_year_field_is_honoured() {
+        let service = schedule_service();
+        let utc = parse_timezone("UTC").unwrap();
+
+        // 7-field form: sec min hour dom month dow year.
+        let next_ms = service
+            .calculate_next_cron_run_ms("0 0 9 * * * 2027", Some(&utc))
+            .expect("7-field expression with an explicit year must schedule");
+
+        let local = utc.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!(local.year(), 2027);
+        assert_eq!((local.hour(), local.minute()), (9, 0));
+    }
+
+    #[test]
+    fn cron_schedule_at_a_skipped_dst_hour_stays_consistent() {
+        let service = schedule_service();
+        let new_york = parse_timezone("America/New_York").unwrap();
+
+        // 02:30 does not exist on the spring-forward day. Whatever the resolver
+        // does, it must still produce a real instant at :30 — never a crash, a
+        // silent drift to an unrelated hour, or a `None` for a valid expression.
+        let next_ms = service
+            .calculate_next_cron_run_ms("0 30 2 * * *", Some(&new_york))
+            .expect("02:30 schedule must resolve even across a DST gap");
+
+        let local = new_york.timestamp_millis_opt(next_ms).unwrap();
+        assert_eq!(local.minute(), 30);
+        assert!(
+            matches!(local.hour(), 2 | 3),
+            "expected 02:30 or the 03:30 fallback on the gap day, got {:02}:30",
+            local.hour()
         );
     }
 
