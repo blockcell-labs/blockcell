@@ -638,17 +638,23 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
 
     let mut found = false;
 
+    // Prepared once: the statement is identical for every node, and BFS over a
+    // large graph visits each node at most once, so re-preparing per node paid
+    // the parse cost O(nodes) times (P3-052).
+    let mut neighbor_stmt = db
+        .prepare(
+            "SELECT id, source_id, target_id, relation_type FROM relations \
+             WHERE source_id = ?1 OR target_id = ?1",
+        )
+        .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
+
     while let Some((current, depth)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
 
         // Get neighbors (both directions)
-        let mut stmt = db.prepare(
-            "SELECT id, source_id, target_id, relation_type FROM relations WHERE source_id = ?1 OR target_id = ?1"
-        ).map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
-
-        let neighbors: Vec<(String, String, String)> = stmt
+        let neighbors: Vec<(String, String, String)> = neighbor_stmt
             .query_map(rusqlite::params![current], |row| {
                 let rel_id: String = row.get(0)?;
                 let src: String = row.get(1)?;

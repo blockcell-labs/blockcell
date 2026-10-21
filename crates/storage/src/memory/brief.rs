@@ -69,56 +69,16 @@ impl MemoryStore {
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
 
+        let now = Utc::now().to_rfc3339();
         let mut brief = String::new();
 
-        // Long-term items: highest importance, use summary if available
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, summary, content, type, importance FROM memory_items
-             WHERE scope = 'long_term' AND deleted_at IS NULL
-               AND (expires_at IS NULL OR expires_at > ?1)
-               AND (?2 IS NULL OR session_key = ?2 OR session_key IS NULL)
-             ORDER BY importance DESC, access_count DESC, updated_at DESC
-             LIMIT ?3",
-            )
-            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
-
-        let now = Utc::now().to_rfc3339();
-        let now_s = now.as_str();
-        let lt_max = long_term_max as i64;
-        let lt_rows = stmt
-            .query_map(params![now_s, session_key, lt_max], |row| {
-                let title: Option<String> = row.get("title")?;
-                let summary: Option<String> = row.get("summary")?;
-                let content: String = row.get("content")?;
-                let item_type: String = row.get("type")?;
-                Ok((title, summary, content, item_type))
-            })
-            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
-
-        let mut lt_items = Vec::new();
-        for (title, summary, content, item_type) in lt_rows.flatten() {
-            let display = if let Some(s) = summary {
-                s
-            } else if let Some(t) = title {
-                let first_line = content.lines().next().unwrap_or("").to_string();
-                let fl_truncated: String = first_line.chars().take(100).collect();
-                if first_line.chars().count() > 100 {
-                    format!("{}: {}...", t, fl_truncated)
-                } else {
-                    format!("{}: {}", t, first_line)
-                }
-            } else {
-                let truncated: String = content.chars().take(120).collect();
-                if content.chars().count() > 120 {
-                    format!("{}...", truncated)
-                } else {
-                    truncated
-                }
-            };
-            lt_items.push(format!("- [{}] {}", item_type, display));
-        }
-
+        let lt_items = collect_brief_items(
+            &conn,
+            BriefScope::LongTerm,
+            session_key,
+            &now,
+            long_term_max,
+        )?;
         if !lt_items.is_empty() {
             brief.push_str("### Long-term Memory\n");
             for item in &lt_items {
@@ -128,52 +88,13 @@ impl MemoryStore {
             brief.push('\n');
         }
 
-        // Short-term items: recent, high importance
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, summary, content, type, importance FROM memory_items
-             WHERE scope = 'short_term' AND deleted_at IS NULL
-               AND (expires_at IS NULL OR expires_at > ?1)
-               AND (?2 IS NULL OR session_key = ?2 OR session_key IS NULL)
-             ORDER BY updated_at DESC, importance DESC
-             LIMIT ?3",
-            )
-            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
-
-        let st_max = short_term_max as i64;
-        let st_rows = stmt
-            .query_map(params![now_s, session_key, st_max], |row| {
-                let title: Option<String> = row.get("title")?;
-                let summary: Option<String> = row.get("summary")?;
-                let content: String = row.get("content")?;
-                let item_type: String = row.get("type")?;
-                Ok((title, summary, content, item_type))
-            })
-            .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
-
-        let mut st_items = Vec::new();
-        for (title, summary, content, item_type) in st_rows.flatten() {
-            let display = if let Some(s) = summary {
-                s
-            } else if let Some(t) = title {
-                let first_line = content.lines().next().unwrap_or("").to_string();
-                let fl_truncated: String = first_line.chars().take(100).collect();
-                if first_line.chars().count() > 100 {
-                    format!("{}: {}...", t, fl_truncated)
-                } else {
-                    format!("{}: {}", t, first_line)
-                }
-            } else {
-                let truncated: String = content.chars().take(120).collect();
-                if content.chars().count() > 120 {
-                    format!("{}...", truncated)
-                } else {
-                    truncated
-                }
-            };
-            st_items.push(format!("- [{}] {}", item_type, display));
-        }
-
+        let st_items = collect_brief_items(
+            &conn,
+            BriefScope::ShortTerm,
+            session_key,
+            &now,
+            short_term_max,
+        )?;
         if !st_items.is_empty() {
             brief.push_str("### Recent Notes\n");
             for item in &st_items {
@@ -340,4 +261,91 @@ impl MemoryStore {
             }
         }))
     }
+}
+
+/// Which brief section is being collected. Keeps the SQL ordering choice in one
+/// place instead of duplicating the whole query per scope (P3-128).
+#[derive(Clone, Copy)]
+enum BriefScope {
+    LongTerm,
+    ShortTerm,
+}
+
+impl BriefScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LongTerm => "long_term",
+            Self::ShortTerm => "short_term",
+        }
+    }
+
+    /// Ordering is a fixed internal literal, never user input.
+    fn order_by(self) -> &'static str {
+        match self {
+            Self::LongTerm => "importance DESC, access_count DESC, updated_at DESC",
+            Self::ShortTerm => "updated_at DESC, importance DESC",
+        }
+    }
+}
+
+/// Render `- [type] display` lines for one scope.
+///
+/// `display` prefers the explicit summary, then `title: first line`, then a
+/// truncated body — identical for both scopes, which is why it lives here.
+fn collect_brief_items(
+    conn: &rusqlite::Connection,
+    scope: BriefScope,
+    session_key: Option<&str>,
+    now: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let sql = format!(
+        "SELECT title, summary, content, type FROM memory_items
+         WHERE scope = ?4 AND deleted_at IS NULL
+           AND (expires_at IS NULL OR expires_at > ?1)
+           AND (?2 IS NULL OR session_key = ?2 OR session_key IS NULL)
+         ORDER BY {}
+         LIMIT ?3",
+        scope.order_by()
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
+    let rows = stmt
+        .query_map(
+            params![now, session_key, limit as i64, scope.as_str()],
+            |row| {
+                let title: Option<String> = row.get("title")?;
+                let summary: Option<String> = row.get("summary")?;
+                let content: String = row.get("content")?;
+                let item_type: String = row.get("type")?;
+                Ok((title, summary, content, item_type))
+            },
+        )
+        .map_err(|e| blockcell_core::Error::Storage(format!("Brief query error: {}", e)))?;
+
+    let mut items = Vec::new();
+    for (title, summary, content, item_type) in rows.flatten() {
+        let display = if let Some(s) = summary {
+            s
+        } else if let Some(t) = title {
+            let first_line = content.lines().next().unwrap_or("");
+            let truncated: String = first_line.chars().take(100).collect();
+            if first_line.chars().count() > 100 {
+                format!("{}: {}...", t, truncated)
+            } else {
+                format!("{}: {}", t, first_line)
+            }
+        } else {
+            let truncated: String = content.chars().take(120).collect();
+            if content.chars().count() > 120 {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            }
+        };
+        items.push(format!("- [{}] {}", item_type, display));
+    }
+    Ok(items)
 }
