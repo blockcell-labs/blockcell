@@ -252,9 +252,8 @@ impl KnowledgeIndex {
                 .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
         };
         let restrict_to_best = cjk_bigrams.is_empty()
-            || best_cjk_relevance.is_some_and(|best| {
-                best <= -(cjk_bigrams.len() as f64) + f64::EPSILON
-            });
+            || best_cjk_relevance
+                .is_some_and(|best| best <= -(cjk_bigrams.len() as f64) + f64::EPSILON);
         let mut superseded = HashSet::new();
         if !candidates.is_empty() {
             let placeholders = candidates

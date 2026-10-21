@@ -56,140 +56,144 @@ impl super::AgentRuntime {
 /// path policy, which is exactly the class of bug the table exists to prevent.
 pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -> Vec<PathAccess> {
     let mut accesses = Vec::new();
-        let action = args
-            .get("action")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
+    let action = args
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
 
-        match tool_name {
-            "read_file" => push_path(&mut accesses, args, "path", PathOp::Read),
-            "write_file" | "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
-            "list_dir" => push_path(&mut accesses, args, "path", PathOp::List),
-            "file_ops" => {
-                let source_op = match action {
-                    "delete" | "rename" | "move" => PathOp::Write,
-                    _ => PathOp::Read,
-                };
-                push_path(&mut accesses, args, "path", source_op);
-                push_paths(&mut accesses, args, "paths", PathOp::Read);
-                push_path(&mut accesses, args, "destination", PathOp::Write);
-            }
-            "data_process" => {
-                let path_op = if action == "write_csv" {
-                    PathOp::Write
-                } else {
-                    PathOp::Read
-                };
-                push_path(&mut accesses, args, "path", path_op);
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "audio_transcribe" | "ocr" | "encrypt" => {
-                push_path(&mut accesses, args, "path", PathOp::Read);
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "chart_generate" | "office_write" | "camera" | "tts" | "knowledge_graph" => {
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "video_process" => {
-                push_path(&mut accesses, args, "input", PathOp::Read);
-                push_paths(&mut accesses, args, "inputs", PathOp::Read);
-                push_path(&mut accesses, args, "subtitle_file", PathOp::Read);
-                push_path(&mut accesses, args, "watermark_image", PathOp::Read);
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "image_understand" => {
-                push_path(&mut accesses, args, "path", PathOp::Read);
-                push_paths(&mut accesses, args, "paths", PathOp::Read);
-            }
-            "termux_api" => {
-                let file_op = match action {
-                    "share" | "media_scan" | "wallpaper" => PathOp::Read,
-                    _ => PathOp::Write,
-                };
-                push_path(&mut accesses, args, "file_path", file_op);
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "email" => {
-                push_paths(&mut accesses, args, "attachments", PathOp::Read);
-                push_path(&mut accesses, args, "save_attachments_to", PathOp::Write);
-            }
-            "health_api" => {
-                push_path(&mut accesses, args, "path", PathOp::Read);
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-            }
-            "http_request" => {
-                // `save_to` writes the response body to disk. The runtime only
-                // recognises this name here, so omitting the branch meant the
-                // write never reached the path policy.
-                push_path(&mut accesses, args, "save_to", PathOp::Write);
-            }
-            "app_control" => {
-                push_path(&mut accesses, args, "screenshot_path", PathOp::Write);
-            }
-            "message" => {
-                push_paths(&mut accesses, args, "media", PathOp::Read);
-            }
-            "browse" => {
-                push_path(&mut accesses, args, "output_path", PathOp::Write);
-                push_path(&mut accesses, args, "file_path", PathOp::Read);
-                push_paths(&mut accesses, args, "files", PathOp::Read);
-            }
-            "exec" => {
-                push_path(&mut accesses, args, "working_dir", PathOp::Exec);
-                // Also subject filesystem paths referenced inside the command
-                // itself to the path policy, so built-in sensitive paths
-                // (~/.ssh, /etc, ...) are enforced for `exec`, not just for
-                // its working directory.
-                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                    accesses.extend(extract_command_paths(cmd).into_iter().map(|path| {
-                        PathAccess {
+    match tool_name {
+        "read_file" => push_path(&mut accesses, args, "path", PathOp::Read),
+        "write_file" | "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
+        "list_dir" => push_path(&mut accesses, args, "path", PathOp::List),
+        "file_ops" => {
+            let source_op = match action {
+                "delete" | "rename" | "move" => PathOp::Write,
+                _ => PathOp::Read,
+            };
+            push_path(&mut accesses, args, "path", source_op);
+            push_paths(&mut accesses, args, "paths", PathOp::Read);
+            push_path(&mut accesses, args, "destination", PathOp::Write);
+        }
+        "data_process" => {
+            let path_op = if action == "write_csv" {
+                PathOp::Write
+            } else {
+                PathOp::Read
+            };
+            push_path(&mut accesses, args, "path", path_op);
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "audio_transcribe" | "ocr" | "encrypt" => {
+            push_path(&mut accesses, args, "path", PathOp::Read);
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "chart_generate" | "office_write" | "camera" | "tts" | "knowledge_graph" => {
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "video_process" => {
+            push_path(&mut accesses, args, "input", PathOp::Read);
+            push_paths(&mut accesses, args, "inputs", PathOp::Read);
+            push_path(&mut accesses, args, "subtitle_file", PathOp::Read);
+            push_path(&mut accesses, args, "watermark_image", PathOp::Read);
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "image_understand" => {
+            push_path(&mut accesses, args, "path", PathOp::Read);
+            push_paths(&mut accesses, args, "paths", PathOp::Read);
+        }
+        "termux_api" => {
+            let file_op = match action {
+                "share" | "media_scan" | "wallpaper" => PathOp::Read,
+                _ => PathOp::Write,
+            };
+            push_path(&mut accesses, args, "file_path", file_op);
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "email" => {
+            push_paths(&mut accesses, args, "attachments", PathOp::Read);
+            push_path(&mut accesses, args, "save_attachments_to", PathOp::Write);
+        }
+        "health_api" => {
+            push_path(&mut accesses, args, "path", PathOp::Read);
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+        }
+        "http_request" => {
+            // `save_to` writes the response body to disk. The runtime only
+            // recognises this name here, so omitting the branch meant the
+            // write never reached the path policy.
+            push_path(&mut accesses, args, "save_to", PathOp::Write);
+        }
+        "app_control" => {
+            push_path(&mut accesses, args, "screenshot_path", PathOp::Write);
+        }
+        "message" => {
+            push_paths(&mut accesses, args, "media", PathOp::Read);
+        }
+        "browse" => {
+            push_path(&mut accesses, args, "output_path", PathOp::Write);
+            push_path(&mut accesses, args, "file_path", PathOp::Read);
+            push_paths(&mut accesses, args, "files", PathOp::Read);
+        }
+        "exec" => {
+            push_path(&mut accesses, args, "working_dir", PathOp::Exec);
+            // Also subject filesystem paths referenced inside the command
+            // itself to the path policy, so built-in sensitive paths
+            // (~/.ssh, /etc, ...) are enforced for `exec`, not just for
+            // its working directory.
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                accesses.extend(
+                    extract_command_paths(cmd)
+                        .into_iter()
+                        .map(|path| PathAccess {
                             path,
                             op: PathOp::Exec,
-                        }
-                    }));
-                }
+                        }),
+                );
             }
-            "shell" => {
-                let shell_action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
-                let session_id = args.get("session_id").and_then(|v| v.as_str());
-                let cmd_opt = match shell_action {
-                    "run" => args
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    "write_stdin" => args.get("input").and_then(|v| v.as_str()).map(|input| {
-                        blockcell_tools::shell_session::preview_session_stdin(
-                            session_id.unwrap_or_default(),
-                            input,
-                        )
-                    }),
-                    _ => None,
+        }
+        "shell" => {
+            let shell_action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
+            let session_id = args.get("session_id").and_then(|v| v.as_str());
+            let cmd_opt = match shell_action {
+                "run" => args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                "write_stdin" => args.get("input").and_then(|v| v.as_str()).map(|input| {
+                    blockcell_tools::shell_session::preview_session_stdin(
+                        session_id.unwrap_or_default(),
+                        input,
+                    )
+                }),
+                _ => None,
+            };
+            if let Some(cmd) = cmd_opt {
+                // Persistent sessions execute in their own cwd, not the
+                // workspace — relative paths must resolve against the
+                // session's tracked cwd. Unknown cwd (cd target could not
+                // be resolved statically) fails closed via a synthetic
+                // external path that policy treats as Confirm. A command
+                // that itself changes directory mid-string cannot be
+                // mapped to a single cwd — treat relative paths as unknown.
+                let session_cwd = if command_mutates_cwd(&cmd) {
+                    Some(None)
+                } else {
+                    session_id.and_then(blockcell_tools::shell_session::session_cwd)
                 };
-                if let Some(cmd) = cmd_opt {
-                    // Persistent sessions execute in their own cwd, not the
-                    // workspace — relative paths must resolve against the
-                    // session's tracked cwd. Unknown cwd (cd target could not
-                    // be resolved statically) fails closed via a synthetic
-                    // external path that policy treats as Confirm. A command
-                    // that itself changes directory mid-string cannot be
-                    // mapped to a single cwd — treat relative paths as unknown.
-                    let session_cwd = if command_mutates_cwd(&cmd) {
-                        Some(None)
-                    } else {
-                        session_id.and_then(blockcell_tools::shell_session::session_cwd)
-                    };
-                    accesses.extend(extract_command_paths(&cmd).into_iter().map(|path| {
-                        PathAccess {
+                accesses.extend(
+                    extract_command_paths(&cmd)
+                        .into_iter()
+                        .map(|path| PathAccess {
                             path: resolve_shell_access_path(&path, &session_cwd),
                             op: PathOp::Exec,
-                        }
-                    }));
-                }
+                        }),
+                );
             }
-            _ => {}
         }
-        accesses
+        _ => {}
     }
+    accesses
+}
 
 impl super::AgentRuntime {
     /// Resolve a path string the same way tools do (expand ~ and relative paths).
@@ -862,7 +866,11 @@ mod tests {
     fn path_extraction_table_covers_tool_field_mapping() {
         type ExtractionCase<'a> = (&'a str, serde_json::Value, Vec<(&'a str, PathOp)>);
         let cases: Vec<ExtractionCase> = vec![
-            ("read_file", json!({"path": "a.txt"}), vec![("a.txt", PathOp::Read)]),
+            (
+                "read_file",
+                json!({"path": "a.txt"}),
+                vec![("a.txt", PathOp::Read)],
+            ),
             (
                 "write_file",
                 json!({"path": "~/x.txt"}),
@@ -908,7 +916,11 @@ mod tests {
                 json!({"media": ["a.png", "b.png"]}),
                 vec![("a.png", PathOp::Read), ("b.png", PathOp::Read)],
             ),
-            ("exec", json!({"working_dir": "/tmp"}), vec![("/tmp", PathOp::Exec)]),
+            (
+                "exec",
+                json!({"working_dir": "/tmp"}),
+                vec![("/tmp", PathOp::Exec)],
+            ),
             ("totally_unknown_tool", json!({"path": "a"}), vec![]),
         ];
 

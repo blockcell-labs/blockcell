@@ -227,8 +227,7 @@ impl RabitqIndex {
                             // The on-disk index was trained on the rowid order of
                             // this very table, and `dirty == false` means no write
                             // happened since, so `rows` is that same order.
-                            state.id_order =
-                                Some(rows.iter().map(|row| row.id.clone()).collect());
+                            state.id_order = Some(rows.iter().map(|row| row.id.clone()).collect());
                         }
                         Err(_) => {
                             drop(state);
@@ -885,7 +884,11 @@ mod tests {
         for i in 0..48 {
             let value = i as f32;
             index
-                .upsert(&format!("memory-{i}"), &[value, value + 0.1, value + 0.2], &meta)
+                .upsert(
+                    &format!("memory-{i}"),
+                    &[value, value + 0.1, value + 0.2],
+                    &meta,
+                )
                 .unwrap();
         }
         index

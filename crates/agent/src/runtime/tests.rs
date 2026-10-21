@@ -7868,7 +7868,10 @@ fn session_pool_is_bounded_and_evicts_least_recently_returned() {
     // Oldest insertion (session-0) is the victim, not an arbitrary entry.
     pool.put("session-new".to_string(), 999);
     assert_eq!(pool.entries.len(), MAX_SESSION_MEMORY_SYSTEMS);
-    assert!(!pool.entries.contains_key("session-0"), "LRU victim must be the oldest");
+    assert!(
+        !pool.entries.contains_key("session-0"),
+        "LRU victim must be the oldest"
+    );
     assert!(pool.entries.contains_key("session-1"));
     assert_eq!(pool.entries.get("session-new").map(|(_, v)| *v), Some(999));
 
