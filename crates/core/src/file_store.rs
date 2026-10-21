@@ -19,10 +19,14 @@ impl ExclusiveFileLock {
             std::fs::create_dir_all(parent)?;
         }
 
+        // `truncate(false)` is deliberate: the file is truncated only *after*
+        // the lock is taken (see `set_len(0)` below), so a second process can
+        // never wipe the anchor between open and lock acquisition.
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         if let Err(error) = file.try_lock_exclusive() {
             return if error.kind() == ErrorKind::WouldBlock {

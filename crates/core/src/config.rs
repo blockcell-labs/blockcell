@@ -1595,7 +1595,7 @@ mod tests {
         let openai = cfg.providers.get("openai").expect("openai provider");
         // 值中的引号被转义：api_key 是含引号的字面字符串，而非注入的新键。
         assert_eq!(openai.api_key, r#"x", "evil": "1"#);
-        assert!(cfg.providers.get("evil").is_none());
+        assert!(!cfg.providers.contains_key("evil"));
 
         unsafe {
             std::env::remove_var("BLOCKCELL_TEST_EVIL");
