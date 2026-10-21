@@ -2345,7 +2345,7 @@ pub struct AgentRuntime {
     memory_system: Option<crate::memory_system::MemorySystem>,
     /// Shared session-indexed MemorySystem pool so per-message forked runtimes
     /// preserve Layer 4 trackers (FileTracker/SkillTracker) and avoid re-running init_memory_system I/O.
-    session_memory_systems: Arc<Mutex<HashMap<String, crate::memory_system::MemorySystem>>>,
+    session_memory_systems: Arc<Mutex<MemorySystemPool>>,
     /// Flag to signal that memory injector cache needs refresh after Layer 5 extraction.
     /// Uses Arc<AtomicBool> because background tasks need to set this flag.
     memory_injector_needs_reload: Arc<std::sync::atomic::AtomicBool>,
@@ -2521,7 +2521,7 @@ impl AgentRuntime {
                 response_cache_config,
             ),
             memory_system: None,
-            session_memory_systems: Arc::new(Mutex::new(HashMap::new())),
+            session_memory_systems: Arc::new(Mutex::new(MemorySystemPool::new())),
             memory_injector_needs_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             memory_injector_init_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             abort_token: AbortToken::new(),
@@ -2788,32 +2788,66 @@ impl blockcell_tools::RuntimeHandle for AgentRuntime {
 /// cap a long-lived gateway process grows with every session it has ever served.
 const MAX_SESSION_MEMORY_SYSTEMS: usize = 64;
 
-/// Insert into the shared pool, evicting one arbitrary entry when full.
+/// Bounded pool of idle values keyed by session id.
 ///
-/// Kept generic (and separate from `MemorySystem`) so the eviction policy can be
-/// regression-tested without constructing a real `MemorySystem`. Pooled entries
-/// are reconstructible, so any victim is acceptable — there is deliberately no
-/// LRU bookkeeping, which also means an existing key must never trigger eviction.
-fn pool_insert<K: std::hash::Hash + Eq + Clone, V>(map: &mut HashMap<K, V>, key: K, value: V) {
-    if map.len() >= MAX_SESSION_MEMORY_SYSTEMS && !map.contains_key(&key) {
-        if let Some(evicted) = map.keys().next().cloned() {
-            map.remove(&evicted);
-        }
-    }
-    map.insert(key, value);
+/// Generic (and separate from `MemorySystem`) so the eviction policy can be
+/// regression-tested without constructing a real one. Eviction picks the entry
+/// with the oldest `seq`, i.e. the one returned to the pool longest ago: pooled
+/// systems are reconstructible, so a wrong guess costs an init round-trip but is
+/// never fatal. This is what makes it LRU-ish instead of arbitrary (P3-026) —
+/// `HashMap::keys().next()` used to evict a hot session as readily as a cold one.
+struct IdlePool<T> {
+    entries: HashMap<String, (u64, T)>,
+    next_tick: u64,
 }
 
+impl<T> IdlePool<T> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_tick: 0,
+        }
+    }
+
+    /// Remove and return the pooled value, marking the session as in use.
+    fn take(&mut self, session_id: &str) -> Option<T> {
+        self.entries.remove(session_id).map(|(_, value)| value)
+    }
+
+    /// Return a value to the pool, evicting the least-recently-returned entry
+    /// when full. Re-putting an existing key only refreshes its recency.
+    fn put(&mut self, session_id: String, value: T) {
+        if self.entries.len() >= MAX_SESSION_MEMORY_SYSTEMS
+            && !self.entries.contains_key(&session_id)
+        {
+            if let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&victim);
+            }
+        }
+        self.next_tick += 1;
+        self.entries.insert(session_id, (self.next_tick, value));
+    }
+}
+
+type MemorySystemPool = IdlePool<crate::memory_system::MemorySystem>;
+
 impl AgentRuntime {
-    /// Return a MemorySystem to the shared pool, evicting an arbitrary entry when full.
+    /// Return a MemorySystem to the shared pool, evicting the least recently
+    /// returned session when full.
     fn return_memory_system_to_pool(&self, ms: crate::memory_system::MemorySystem) {
         // Pooled systems are idle until reused; do not leave their `.active`
         // marker behind and prevent Dream pruning from reclaiming the session.
         ms.clear_session_active_sync();
-        let Ok(mut map) = self.session_memory_systems.lock() else {
+        let Ok(mut pool) = self.session_memory_systems.lock() else {
             return;
         };
         let session_id = ms.session_id().to_string();
-        pool_insert(&mut map, session_id, ms);
+        pool.put(session_id, ms);
     }
 }
 

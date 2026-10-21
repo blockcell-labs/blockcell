@@ -422,7 +422,7 @@ impl AgentRuntime {
                 .session_memory_systems
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&persist_session_key);
+                .take(&persist_session_key);
             if let Some(ms) = cached_ms {
                 self.memory_system = Some(ms);
             } else if let Err(e) = self.init_memory_system(persist_session_key.clone()).await {

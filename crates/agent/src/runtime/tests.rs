@@ -7709,7 +7709,7 @@ async fn fork_for_message_task_preserves_session_memory_system_across_messages()
         .session_memory_systems
         .lock()
         .unwrap()
-        .remove(session_key)
+        .take(session_key)
         .expect("session MemorySystem should be returned to shared pool on drop");
     assert_eq!(reused.session_id(), session_key);
     assert_eq!(reused.skill_tracker().get_recent_skills(1000).len(), 1);
@@ -7851,31 +7851,38 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
     }
 }
 
-/// The shared session MemorySystem pool must stay bounded (P3-004).
+/// The shared session pool must stay bounded and evict least-recently-returned
+/// sessions first (P3-004 / P3-026).
 ///
-/// Exercised through `pool_insert` rather than a real runtime: constructing
+/// Exercised through `IdlePool<usize>` rather than a real runtime: constructing
 /// `MemorySystem` per session would dominate the test and prove nothing extra
 /// about the eviction rule.
 #[test]
-fn session_memory_system_pool_evicts_at_capacity() {
-    let mut pool: HashMap<String, usize> = HashMap::new();
+fn session_pool_is_bounded_and_evicts_least_recently_returned() {
+    let mut pool: IdlePool<usize> = IdlePool::new();
     for i in 0..MAX_SESSION_MEMORY_SYSTEMS {
-        pool_insert(&mut pool, format!("session-{i}"), i);
+        pool.put(format!("session-{i}"), i);
     }
-    assert_eq!(pool.len(), MAX_SESSION_MEMORY_SYSTEMS);
+    assert_eq!(pool.entries.len(), MAX_SESSION_MEMORY_SYSTEMS);
 
-    // A brand-new session at capacity must evict exactly one entry.
-    pool_insert(&mut pool, "session-new".to_string(), 999);
-    assert_eq!(
-        pool.len(),
-        MAX_SESSION_MEMORY_SYSTEMS,
-        "pool must not grow past the cap"
+    // Oldest insertion (session-0) is the victim, not an arbitrary entry.
+    pool.put("session-new".to_string(), 999);
+    assert_eq!(pool.entries.len(), MAX_SESSION_MEMORY_SYSTEMS);
+    assert!(!pool.entries.contains_key("session-0"), "LRU victim must be the oldest");
+    assert!(pool.entries.contains_key("session-1"));
+    assert_eq!(pool.entries.get("session-new").map(|(_, v)| *v), Some(999));
+
+    // Re-putting an existing key refreshes recency instead of evicting anything.
+    let before = pool.entries.len();
+    pool.put("session-1".to_string(), 111);
+    assert_eq!(pool.entries.len(), before);
+    pool.put("session-newest".to_string(), 1000);
+    assert!(
+        pool.entries.contains_key("session-1"),
+        "recently re-returned session must survive eviction"
     );
-    assert_eq!(pool.get("session-new"), Some(&999));
 
-    // Re-inserting an existing key must not evict anything (it is a replace).
-    let survivors = pool.len();
-    pool_insert(&mut pool, "session-new".to_string(), 1000);
-    assert_eq!(pool.len(), survivors);
-    assert_eq!(pool.get("session-new"), Some(&1000));
+    // `take` removes the entry so the session is treated as in use.
+    assert_eq!(pool.take("session-1"), Some(111));
+    assert!(pool.take("session-1").is_none());
 }
