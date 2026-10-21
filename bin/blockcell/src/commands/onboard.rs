@@ -468,15 +468,21 @@ mod auto_upgrade_tests {
         );
     }
 
+    /// 迁移必须保持 fail-closed：没有可信公钥时仍然要求签名校验，否则
+    /// `autoUpgrade.enabled` 会接受仅 SHA256 的更新（`default_require_signature`
+    /// 在 P2 批次已改为 true）。想要不签名更新，用户显式写 requireSignature=false。
+    ///
+    /// 显式把公钥写成 null，避免依赖编译期的 BLOCKCELL_UPDATER_PUBLIC_KEY。
     #[test]
-    fn migration_does_not_require_a_signature_without_a_trusted_key() {
-        let mut config = serde_json::json!({});
+    fn migration_stays_fail_closed_without_a_trusted_key() {
+        let mut config = serde_json::json!({ "autoUpgrade": { "publicKey": null } });
 
         ensure_auto_upgrade_defaults(&mut config);
 
-        if config["autoUpgrade"]["publicKey"].is_null() {
-            assert_eq!(config["autoUpgrade"]["requireSignature"], false);
-        }
+        assert_eq!(
+            config["autoUpgrade"]["requireSignature"], true,
+            "没有可信公钥时迁移必须保持 fail-closed"
+        );
     }
 }
 
