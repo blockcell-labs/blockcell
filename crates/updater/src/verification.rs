@@ -482,21 +482,51 @@ mod tests {
     async fn timed_out_healthcheck_process_is_terminated() {
         let temp = executable_temp_dir();
         let pid_path = temp.path().join("pid");
-        let script = format!("#!/bin/sh\necho $$ > '{}'\nsleep 30\n", pid_path.display());
+        // `sleep` must outlast the health-check timeout by a wide margin so the
+        // timeout always fires. The script writes its PID as its first command,
+        // but under a loaded machine even `sh` startup can take seconds, so the
+        // read below polls instead of assuming the file is already there —
+        // a fixed 3s budget made this test flaky in `cargo test --workspace`.
+        let script = format!("#!/bin/sh\necho $$ > '{}'\nsleep 60\n", pid_path.display());
         let path = write_script(&temp, &script, true);
 
-        let check = HealthChecker::new(path).check_self_test(3).await;
+        let check = HealthChecker::new(path).check_self_test(5).await;
         assert!(!check.passed);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let pid = std::fs::read_to_string(pid_path).unwrap();
-        let alive = std::process::Command::new("kill")
-            .args(["-0", pid.trim()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        assert!(!alive, "timed-out healthcheck process {pid} is still alive");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_path) {
+                if !pid.trim().is_empty() {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "healthcheck script never wrote its pid file"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        // The kill is asynchronous from the test's point of view: SIGKILL lands
+        // first, but the process stays visible to `kill -0` until it is reaped.
+        // A single check right after the timeout therefore sees a zombie and
+        // reports a false positive, so poll until it disappears.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed-out healthcheck process {pid} is still alive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     // ── Signature verification (supply-chain critical path) ────────────────
