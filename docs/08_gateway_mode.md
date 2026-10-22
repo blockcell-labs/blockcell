@@ -133,7 +133,7 @@ curl http://localhost:18790/v1/health
   "status": "ok",
   "model": "deepseek-v4-pro",
   "uptime_secs": 3600,
-  "version": "0.1.7"
+  "version": "0.1.8"
 }
 ```
 

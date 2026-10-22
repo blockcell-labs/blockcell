@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-agent"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-channels"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "aes",
  "async-trait",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-providers"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-scheduler"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "blockcell-agent",
  "blockcell-core",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-skills"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "blockcell-core",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-storage"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "blockcell-core",
  "chrono",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-tools"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "aes",
  "async-imap",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "blockcell-updater"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "blockcell-core",

@@ -10,7 +10,7 @@
 
 [官网](https://blockcell.dev) • [文档](https://blockcell.dev/docs) • [English](README.en.md)
 
-**最新版本**：v0.1.7 • [下载 Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.7) • [更新日志](CHANGELOG.md)
+**最新版本**：v0.1.8 • [下载 Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.8) • [更新日志](CHANGELOG.md)
 
 </div>
 
@@ -107,13 +107,32 @@ BlockCell 可以通过 `~/.blockcell/hooks.yaml` 在关键生命周期事件上�
 - 支持 `{tool_name}`、`{session_id}`、`{cwd}`、`{command}`、`{file_path}`、`{result}` 等模板变量
 - Hook 失败或超时不会阻断 agent 主流程，适合审计、格式化、通知和外部日志接入
 
+### 🧩 Runtime Kernel：可观察、可拦截、可回放
+
+v0.1.8 把 Agent 运行时拆成可组合的内核，执行过程不再只剩一个最终回答：
+
+- **统一事件总线**：`turn/start`、`step/end`、`tool/pre-execute`、`model/response`、`memory/write`、`subagent/completed` 等生命周期事件按优先级与作用域派发，listener 带超时与故障隔离
+- **会话事件日志**：追加式 JSONL 侧车（`schema_version` + 单调 `seq`），与 transcript 并行演进，支持保留期清理
+- **回放与评估**：`blockcell session list / replay / verify` 可重放回合、步骤、模型请求与工具调用，输出 token、时长、重试等指标；`verify` 校验事件日志投影与 transcript 是否一致
+- **Guarded Tool Pipeline**：工具开关、Policy、危险操作、路径访问、Shell 提权集中到一条管线，工具本身不再各自处理权限与审计
+- **失败语义**：区分失败 / 被拒绝 / 取消 / 超时 / 未开始 / 结果未知；结果未知时先对账再决定是否重试
+- **能力 seam**：沙箱、Shell、文件系统、浏览器、子 Agent 均以可替换接口暴露，本机实现可被替换
+
+### 🛡️ 沙箱与执行环境
+
+- 沙箱后端：macOS Seatbelt、Linux Landlock + seccomp；不可用时要求显式审批
+- **执行环境与“是否需要确认”解耦**：`exec` 家族如实声明 FullAccess，只有 `sandbox_policy=full-access` 的 `shell` 逐次确认，危险命令仍按内容把关
+- 持久 shell 会话按会话隔离，不再跨通道复用
+- 技能脚本内的嵌套工具调用同样受 Policy、危险操作判定与审计约束
+
 ### 🔐 可控执行与审计
 
-v0.1.7 进一步收紧 agent 的执行边界：
+v0.1.8 把安全边界收口到统一原语：
 
-- Tool Policy 支持工具名 glob、渠道条件、路径条件、`allow` / `ask` / `deny` 决策和规则组继承
-- 全局 Token / 成本预算按会话跟踪，避免长任务或异常循环失控消耗
-- 审计日志支持 SHA-256 hash chain 校验，并记录会话、Provider 调用和预算事件
+- Tool Policy 支持工具名 glob、渠道条件、路径条件、`allow` / `ask` / `deny` 决策和规则组继承，优先级为 **Deny > Ask > Allow**
+- 全局 Token / 成本预算按会话跟踪，子 Agent 的消耗归并到发起会话，后台代理无法绕过
+- 审计日志支持 SHA-256 hash chain 校验（跨进程互斥），记录会话、Provider 调用、预算事件，以及每次工具调用的执行环境与结论
+- 路径展开、文件名净化、Python 字符串转义、SSRF 校验、配置密钥掩码统一走共享原语，不再各模块各写一份
 - Gateway API 默认更严格，普通 API 不再接受 URL `?token=`，应使用 `Authorization: Bearer <token>`
 
 ### 🤖 多智能体与自定义 Agent
@@ -478,8 +497,9 @@ blockcell/
 ## 🔒 安全性
 
 - **路径安全**：自动验证文件系统访问
-- **沙箱执行**：Rhai 脚本在隔离环境中运行
-- **审计日志**：所有工具执行都被记录
+- **沙箱执行**：Rhai 脚本在隔离环境中运行，Shell 可运行在 Seatbelt / Landlock 后端
+- **审计日志**：所有工具执行都被记录，含执行环境与结论
+- **会话回放**：`blockcell session replay` 可回放每次执行的完整链路，便于事后审计
 - **网关认证**：API 访问支持 Bearer token
 
 在交互模式下，`~/.blockcell/workspace` 外的操作需要明确确认。

@@ -10,7 +10,7 @@
 
 [Website](https://blockcell.dev) • [Documentation](https://blockcell.dev/docs) • [中文](README.md)
 
-**Latest release**: v0.1.7 • [Download Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.7) • [Changelog](CHANGELOG.en.md)
+**Latest release**: v0.1.8 • [Download Release](https://github.com/blockcell-labs/blockcell/releases/tag/v0.1.8) • [Changelog](CHANGELOG.en.md)
 
 </div>
 
@@ -107,13 +107,32 @@ BlockCell can run local commands from `~/.blockcell/hooks.yaml` at key lifecycle
 - Template variables such as `{tool_name}`, `{session_id}`, `{cwd}`, `{command}`, `{file_path}`, and `{result}`
 - Hook failures and timeouts do not block the main agent flow, making hooks useful for auditing, formatting, notifications, and external logging
 
+### 🧩 Runtime Kernel: Observable, Interceptable, Replayable
+
+v0.1.8 splits the agent runtime into a composable kernel, so a run is no longer just a final answer:
+
+- **Unified event bus**: lifecycle events such as `turn/start`, `step/end`, `tool/pre-execute`, `model/response`, `memory/write`, and `subagent/completed` are dispatched by priority and scope, with listener timeouts and failure isolation
+- **Session event log**: an append-only JSONL sidecar (`schema_version` + monotonic `seq`) that evolves alongside the transcript and supports retention cleanup
+- **Replay and evaluation**: `blockcell session list / replay / verify` replays turns, steps, model requests, and tool calls, and reports token, duration, and retry metrics; `verify` checks that the event-log projection matches the transcript
+- **Guarded Tool Pipeline**: tool toggles, policy, dangerous operations, path access, and shell escalation are centralized in one pipeline, so individual tools no longer handle permissions or auditing themselves
+- **Failure semantics**: distinguishes failed / rejected / cancelled / timed-out / not-started / unknown; unknown outcomes are reconciled before deciding whether to retry
+- **Capability seams**: sandbox, shell, filesystem, browser, and subagent are exposed as replaceable interfaces, with native implementations behind them
+
+### 🛡️ Sandbox and Execution Environment
+
+- Sandbox backends: macOS Seatbelt and Linux Landlock + seccomp, falling back to explicit approval when unavailable
+- **Execution environment is decoupled from "needs confirmation"**: the `exec` family honestly declares FullAccess, only `shell` with `sandbox_policy=full-access` asks per call, and dangerous commands are still gated on content
+- Persistent shell sessions are isolated per session and no longer reused across channels
+- Nested tool calls inside skill scripts are subject to the same policy, dangerous-operation checks, and auditing
+
 ### 🔐 Controlled Execution and Audit
 
-v0.1.7 tightens agent execution boundaries:
+v0.1.8 converges security boundaries onto shared primitives:
 
-- Tool Policy supports tool-name globs, channel conditions, path conditions, `allow` / `ask` / `deny` decisions, and inherited rule groups
-- Global token and cost budgets are tracked per session to prevent runaway tasks
-- Audit logs support SHA-256 hash-chain verification and include session, provider-call, and budget events
+- Tool Policy supports tool-name globs, channel conditions, path conditions, `allow` / `ask` / `deny` decisions, and inherited rule groups, with **Deny > Ask > Allow** precedence
+- Global token and cost budgets are tracked per session, and subagent spend is folded into the originating session so background agents cannot bypass it
+- Audit logs support SHA-256 hash-chain verification (cross-process exclusive) and record sessions, provider calls, budget events, plus each tool call's execution environment and outcome
+- Path expansion, filename sanitization, Python string escaping, SSRF validation, and config secret masking all go through shared primitives instead of per-module copies
 - Gateway API authentication is stricter: regular APIs no longer accept URL `?token=`, so use `Authorization: Bearer <token>`
 
 ### 🤖 Multi-Agent and Custom Agents
@@ -456,8 +475,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 ## 🔒 Security
 
 - **Path safety**: Automatic validation of file system access
-- **Sandboxed execution**: Rhai scripts run in isolated environment
-- **Audit logging**: All tool executions are logged
+- **Sandboxed execution**: Rhai scripts run in isolated environment, and shells can run behind the Seatbelt / Landlock backends
+- **Audit logging**: All tool executions are logged, including execution environment and outcome
+- **Session replay**: `blockcell session replay` replays the full chain of any run for after-the-fact auditing
 - **Gateway authentication**: Bearer token support for API access
 
 In interactive mode, operations outside `~/.blockcell/workspace` require explicit confirmation.

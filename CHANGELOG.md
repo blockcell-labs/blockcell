@@ -5,9 +5,9 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
 并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [0.1.8] - 2026-10-22
 
-本批次为 Agent Runtime 架构演进：吸收新一代 Agent Runtime 的可组合、可观察、可拦截、可回放设计，同时保留 Self-Evolution / Ghost Learning 能力。
+本版本由两条主线组成：**Agent Runtime 架构演进**（吸收新一代 Agent Runtime 的可组合、可观察、可拦截、可回放设计，同时保留 Self-Evolution / Ghost Learning 能力），以及**全仓安全与正确性收口**（覆盖全部 crate 的多轮审查，把工具准入、沙箱边界、路径与凭据处理收敛到统一原语）。目标是把“能跑”提升到“可解释、可回放、可审计”。
 
 ### 新增
 
@@ -24,6 +24,9 @@
 - **压缩抽象**：压缩摘要抽象为 `ContextCompactor` 策略（`ModelSummaryCompactor` / `ExtractiveCompactor`）。
 - **`agent/pre-step` 决策门**：收拢预算、压缩与上下文注入，并支持可注册策略链改写或终止本步。
 - **进化隔离**：新增 Evolution Candidate Scope 与进化信任边界，候选技能 / 提示 / 策略只对显式进入候选评估的视图可见。
+- **审计与执行环境**：工具调用审计携带 `call_id`、执行结论与回合 `trace_id`，并记录工具声明的执行环境（`ExecutionEnvironment`），与 `tool/call` 事件同名对齐；被拒绝、超出上限、未开始的调用同样写入审计。
+- **技能版本可观测**：`skill/load` 事件记录技能当前版本，`SessionMetrics` 按 `技能@版本` 统计回合成败，`blockcell session replay` 展示技能版本与回合统计。
+- **子 Agent 预算归并**：子 Agent 的 LLM 消耗归并到发起会话的预算，后台代理不再绕过全局成本控制。
 
 ### 调整
 
@@ -34,15 +37,61 @@
 - 事件日志写入移出 async 线程（`spawn_blocking`），listener 默认 30s 超时。
 - 锁文件改为长期同步锚点，避免 unlink 破坏互斥。
 - `create_docx` 改用 `docx-rs` 原生生成，不再依赖 python-docx。
+- **执行环境与准入解耦**：`exec` / `exec_local` / `exec_skill_script` 如实声明 `FullAccess`（无沙箱运行但不逐次确认），危险命令仍由 `DangerousOperation` 按内容把关；只有 `sandbox_policy=full-access` 的 `shell` 需要逐次确认。
+- **每消息 runtime 派生**：由长生命周期 runtime 派生轻量消息级执行器，共享响应缓存、进化 worker、学习协调器、授权目录与预算跟踪，隔离 abort / steering / turn，消除每消息的磁盘重建。
+- **Layer 4 MemorySystem 提升为会话级共享**，保留跨轮追踪状态。
+- **策略引擎优先级改为 Deny > Ask > Allow**（同级按声明顺序），不再是 first-match-wins。
+- **fork 工具权限默认 fail-closed**：未显式提供 `can_use_tool` 时按 fork 声明的 `tool_schemas` 派生白名单。
+- **阻塞原语统一包装**：同步 SQLite 与跨进程锁不再直接跑在 `async fn`（`run_store_blocking` / `run_blocking`）；工具自开 SQLite 补 `WAL` 与 `busy_timeout`；cron 的 `operation_lock` 只护短临界区。
+- **外部输入处理收敛到共享原语**：Python 字符串转义、文件名净化、`~` 路径展开、渠道路径与文件名净化、响应体限读、SSRF 校验、配置密钥掩码与还原，不再各模块手写副本。
+
+### 性能
+
+- 主循环对只读工具调用并发预取（`read_file` / `list_dir` / `glob` / `grep` / `rg` / `code_search` / `session_search` / `web_fetch` / `web_search`），命中后跳过工具体执行，重叠彼此独立的 I/O 延迟。
+- MemorySystem 池改为 LRU 淘汰并提升为会话级共享，长生命周期进程不再线性增长。
+- 向量检索复用 id 映射，不再每次全表解码。
+- 热路径去重：BFS 语句复用、brief 查询合并；`reload_skills` 增加指纹门控，未变更时不再重扫。
+- 提示词缓存对齐：`prompt_cache_key` 纳入 tools 与 model 指纹，补齐 Anthropic 第四缓存断点，新增 `fork_alignment_misses` 指标。
+
+### 安全
+
+- 修复 `chart_generate` 样式字段未转义导致的 Python 脚本注入；技能脚本内嵌套工具调用不再绕过准入检查（嵌套上下文无法确认，`ask` 视为拒绝）。
+- 修复 `path_glob` 路径穿越、`exec_local` / `exec_skill_script` 路径逃逸、授权根逃逸与管理权限缺失。
+- 修复 updater 验签绕过，以及 `network_monitor` / `video_process` 绕过 SSRF 防线；出站 HTTP 统一走 `safe_client_builder()` + `ensure_url_allowed()` + 重定向策略。
+- 修复网关与 CLI 明文回显凭据（统一掩码 + 写入侧还原）、raw-key 加密泄露到 argv、`.env` 权限过宽与空模板覆盖真实环境变量、`encrypt` 工具 IV 持久化与算法声明。
+- 收紧沙箱与命令执行边界：修复 Seatbelt 敏感读 `deny` 被全局 `allow` 覆盖、持久 shell 会话跨通道串扰、复用会话时 `full-access` 声明漏判、危险命令双重确认与归属错误。
+- 补资源上限：IM 入站媒体下载、OOXML 解压、CSV 解析、Whisper 上传、工具响应体大小、非 UTF-8 安全扫描。
 
 ### 修复
 
+- 并发与一致性：并发编辑丢更新、事务升级、`fs2` 文件锁、审计哈希链跨进程互斥、进化触发互斥、能力注册表跨进程合并保存、`toggles` 与网关共享同一跨进程文件锁、确认队列发送侧超时与容量耗尽后的重放。
+- 记忆与知识库：`knowledge_forget` 逐项先写墓碑并在删除失败时撤销本次墓碑、同库遗忘用文件锁互斥、`memory restore` 同 `dedup_key` 自动顶替、记忆正文长度上限、FTS 版本门控、改为一次性去重迁移。
+- 调度：cron 周期溢出、7 字段表达式、DST 空档计算、长任务移出 `operation_lock`。
+- 技能：指纹增加流式内容哈希（避免同长度同 mtime 改写漏检）、目录符号链接不递归、`activate_skill` 快照配对、capability 历史碰撞。
+- 存储与备份：快照复制成功后再淘汰旧备份，失败时清理半成品；审计锁增加超时。
+- 配置：JSON5 环境变量注入与注释顺序保留、未知键保留、`config set` 静默丢键、`alerts` 规则文件并发写。
+- Provider 与渠道：Gemini 默认路由 404、`sender_role` 透传、通知 `security.mainSessionKey` 可指定可信目标、typed 子代理复用父 `memory_file_store`。
+- 运行时：畸形工具参数日志不再保留原文前缀；`exec_local` 仅在执行前选择解释器，运行错误与超时不再触发重跑；文本审批按工具与完整 JSON 参数匹配；预取预算收紧；`PromptOnly` 覆盖缺少 previous/system 限定词的 override 指令（仍是启发式，不是完整注入防御）。
+- 未验证读隔离前禁用不完整的 Linux Landlock 后端选择，回退到显式审批；不宣称实现 Linux 原生读隔离。
 - 工具安全检查作用于 listener 改写后的最终参数，关闭参数改写绕过 Policy / 危险操作 / 路径检查的漏洞。
 - release 构建保留 panic unwind，恢复 listener 与任务监管的 panic 隔离。
 - 清空会话时持锁删除事件日志并清理锁文件。
 - step 编号在回合内唯一且每个 step 都有 `step/end`；回合异常退出时补发 `turn/end`。
 - 工具事件统一归属到持久化会话；强制技能路由回合补发 `turn/end`。
 - 能力注册表仅兼容跳过已移除的 `dynamic_library` 条目，其余反序列化失败仍报错。
+
+### 测试与门禁
+
+- 新增本地门禁 `make test`（`cargo fmt --all --check` + `cargo test --workspace` + coding-eval + 三个基础设施脚本），`make hooks` 安装 `pre-push` 钩子。
+- 修复 coding-eval 验收可“零测试通过”的假通过。
+- 补齐 MCP client 协议级测试（真实 stdio JSON-RPC）、cron 时区 / DST / 6 与 7 字段、updater ed25519 验签与版本比较、evolution 部署链路（generate → audit → compile → contract → deploy → observe → rollback）、技能热更新四路径、提示词缓存对齐回归。
+- 沙箱升级用例改为确定性驱动，不再依赖宿主状态；迁移测试改为断言 fail-closed 行为。
+- 全仓 `cargo fmt` 与 `clippy -D warnings` 清零。
+
+### 文档
+
+- 同步 `docs/03`、`09`、`12`、`17`、`20` 与实现（含 `-v` 接线与 pool 命名）。
+- 开发过程文档（审查报告、修复计划、分解稿）不再进入版本库，仅保留正式设计文档。
 
 ### 移除
 
