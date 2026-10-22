@@ -337,10 +337,7 @@ fn generate_matplotlib_script(
     let colors_setup = if let Some(arr) = colors_json.as_array() {
         let c: Vec<String> = arr
             .iter()
-            .filter_map(|v| {
-                v.as_str()
-                    .map(|s| format!("'{}'", escape_python_string(s)))
-            })
+            .filter_map(|v| v.as_str().map(|s| format!("'{}'", escape_python_string(s))))
             .collect();
         format!("colors = [{}]", c.join(", "))
     } else {
@@ -530,10 +527,7 @@ fn generate_plotly_script(
     let colors_setup = if let Some(arr) = colors_json.as_array() {
         let c: Vec<String> = arr
             .iter()
-            .filter_map(|v| {
-                v.as_str()
-                    .map(|s| format!("'{}'", escape_python_string(s)))
-            })
+            .filter_map(|v| v.as_str().map(|s| format!("'{}'", escape_python_string(s))))
             .collect();
         format!("colors = [{}]", c.join(", "))
     } else {

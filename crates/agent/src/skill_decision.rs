@@ -22,9 +22,9 @@ impl SkillDecisionEngine {
         if selected.chars().count() < 3 {
             return None;
         }
-        let mut matches = candidates.iter().filter(|(name, _)| {
-            selected.contains(name.as_str()) || name.contains(selected)
-        });
+        let mut matches = candidates
+            .iter()
+            .filter(|(name, _)| selected.contains(name.as_str()) || name.contains(selected));
         let first = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -38,8 +38,20 @@ mod tests {
     use super::*;
     #[test]
     fn ambiguous_selection_is_rejected() {
-        let candidates = vec![("deploy".into(), "".into()), ("deploy-prod".into(), "".into())];
-        assert_eq!(SkillDecisionEngine::normalize_selected_skill_name("use deploy-prod please", &candidates), None);
-        assert_eq!(SkillDecisionEngine::normalize_selected_skill_name("dep", &candidates), None);
+        let candidates = vec![
+            ("deploy".into(), "".into()),
+            ("deploy-prod".into(), "".into()),
+        ];
+        assert_eq!(
+            SkillDecisionEngine::normalize_selected_skill_name(
+                "use deploy-prod please",
+                &candidates
+            ),
+            None
+        );
+        assert_eq!(
+            SkillDecisionEngine::normalize_selected_skill_name("dep", &candidates),
+            None
+        );
     }
 }

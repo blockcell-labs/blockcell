@@ -14,8 +14,7 @@ type ReceiptSender = oneshot::Sender<ReceiptResult>;
 const STALE_RECEIPT_TTL: Duration = Duration::from_secs(600);
 
 fn receipt_registry() -> &'static Mutex<HashMap<String, (ReceiptSender, Instant)>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, (ReceiptSender, Instant)>>> =
-        OnceLock::new();
+    static REGISTRY: OnceLock<Mutex<HashMap<String, (ReceiptSender, Instant)>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

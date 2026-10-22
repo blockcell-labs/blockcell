@@ -177,22 +177,26 @@ impl SkillDispatcher {
 
                 match exec(&name, params_json.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: name,
-                            params: params_json,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: name,
+                                params: params_json,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: name,
-                            params: params_json,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: name,
+                                params: params_json,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -212,22 +216,26 @@ impl SkillDispatcher {
 
                     match exec(&name, params_json.clone()) {
                         Ok(result) => {
-                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                                tool_name: name,
-                                params: params_json,
-                                result: result.clone(),
-                                success: true,
-                            });
+                            tc.lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(ToolCallRecord {
+                                    tool_name: name,
+                                    params: params_json,
+                                    result: result.clone(),
+                                    success: true,
+                                });
                             json_to_dynamic(&result)
                         }
                         Err(e) => {
                             let err_val = serde_json::json!({"error": format!("{}", e)});
-                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                                tool_name: name,
-                                params: params_json,
-                                result: err_val.clone(),
-                                success: false,
-                            });
+                            tc.lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(ToolCallRecord {
+                                    tool_name: name,
+                                    params: params_json,
+                                    result: err_val.clone(),
+                                    success: false,
+                                });
                             json_to_dynamic(&err_val)
                         }
                     }
@@ -328,22 +336,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"command": command});
                 match exec("exec", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "exec".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "exec".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "exec".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "exec".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -358,22 +370,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"query": query});
                 match exec("web_search", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "web_search".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "web_search".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "web_search".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "web_search".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -388,22 +404,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"url": url});
                 match exec("web_fetch", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "web_fetch".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "web_fetch".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "web_fetch".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "web_fetch".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -418,22 +438,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"path": path});
                 match exec("read_file", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "read_file".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "read_file".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "read_file".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "read_file".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -450,22 +474,26 @@ impl SkillDispatcher {
                     let params = serde_json::json!({"path": path, "content": content});
                     match exec("write_file", params.clone()) {
                         Ok(result) => {
-                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                                tool_name: "write_file".to_string(),
-                                params,
-                                result: result.clone(),
-                                success: true,
-                            });
+                            tc.lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(ToolCallRecord {
+                                    tool_name: "write_file".to_string(),
+                                    params,
+                                    result: result.clone(),
+                                    success: true,
+                                });
                             json_to_dynamic(&result)
                         }
                         Err(e) => {
                             let err_val = serde_json::json!({"error": format!("{}", e)});
-                            tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                                tool_name: "write_file".to_string(),
-                                params,
-                                result: err_val.clone(),
-                                success: false,
-                            });
+                            tc.lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(ToolCallRecord {
+                                    tool_name: "write_file".to_string(),
+                                    params,
+                                    result: err_val.clone(),
+                                    success: false,
+                                });
                             json_to_dynamic(&err_val)
                         }
                     }
@@ -481,22 +509,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"url": url, "method": "GET"});
                 match exec("http_request", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "http_request".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "http_request".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "http_request".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "http_request".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -511,22 +543,26 @@ impl SkillDispatcher {
                 let params = serde_json::json!({"content": content});
                 match exec("message", params.clone()) {
                     Ok(result) => {
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "message".to_string(),
-                            params,
-                            result: result.clone(),
-                            success: true,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "message".to_string(),
+                                params,
+                                result: result.clone(),
+                                success: true,
+                            });
                         json_to_dynamic(&result)
                     }
                     Err(e) => {
                         let err_val = serde_json::json!({"error": format!("{}", e)});
-                        tc.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(ToolCallRecord {
-                            tool_name: "message".to_string(),
-                            params,
-                            result: err_val.clone(),
-                            success: false,
-                        });
+                        tc.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(ToolCallRecord {
+                                tool_name: "message".to_string(),
+                                params,
+                                result: err_val.clone(),
+                                success: false,
+                            });
                         json_to_dynamic(&err_val)
                     }
                 }
@@ -548,8 +584,14 @@ impl SkillDispatcher {
         // Execute
         let result = engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast);
 
-        let tc = tool_calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        let out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let tc = tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let out = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
 
         match result {
             Ok(value) => {

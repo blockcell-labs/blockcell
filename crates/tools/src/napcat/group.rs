@@ -1092,11 +1092,7 @@ mod tests {
 
     fn ctx_with_role(sender_role: Option<&str>) -> ToolContext {
         let mut config = blockcell_core::Config::default();
-        config
-            .channels
-            .napcat
-            .admin_permissions
-            .default_policy = "allow".to_string();
+        config.channels.napcat.admin_permissions.default_policy = "allow".to_string();
         config
             .channels
             .napcat

@@ -46,8 +46,7 @@ impl FileOwnerLock {
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     let _ = file.set_len(0);
-                    let owner =
-                        format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+                    let owner = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
                     let _ = (&file).write_all(owner.as_bytes());
                     let _ = file.sync_all();
                     return Ok(Self { _file: file });
@@ -87,50 +86,28 @@ mod tests {
     #[test]
     fn held_lock_blocks_second_acquire_until_drop() {
         let root = test_root("mutual-exclusion");
-        let first = FileOwnerLock::acquire_with_timeout(
-            &root,
-            "ns",
-            "key",
-            Duration::from_millis(200),
-        )
-        .expect("first acquire");
+        let first =
+            FileOwnerLock::acquire_with_timeout(&root, "ns", "key", Duration::from_millis(200))
+                .expect("first acquire");
 
         // 同一 key 第二次获取必须在超时后失败（锁是互斥的）
-        let second = FileOwnerLock::acquire_with_timeout(
-            &root,
-            "ns",
-            "key",
-            Duration::from_millis(150),
-        );
+        let second =
+            FileOwnerLock::acquire_with_timeout(&root, "ns", "key", Duration::from_millis(150));
         assert!(second.is_err(), "held lock must reject second acquire");
 
         // Drop 释放 fd → OS 释放 flock → 可再获取（不存在 stale 锁文件概念）
         drop(first);
-        FileOwnerLock::acquire_with_timeout(
-            &root,
-            "ns",
-            "key",
-            Duration::from_millis(500),
-        )
-        .expect("acquire after release");
+        FileOwnerLock::acquire_with_timeout(&root, "ns", "key", Duration::from_millis(500))
+            .expect("acquire after release");
     }
 
     #[test]
     fn different_keys_are_independent() {
         let root = test_root("independent");
-        let _a = FileOwnerLock::acquire_with_timeout(
-            &root,
-            "ns",
-            "key-a",
-            Duration::from_millis(100),
-        )
-        .unwrap();
-        FileOwnerLock::acquire_with_timeout(
-            &root,
-            "ns",
-            "key-b",
-            Duration::from_millis(100),
-        )
-        .expect("different key must not block");
+        let _a =
+            FileOwnerLock::acquire_with_timeout(&root, "ns", "key-a", Duration::from_millis(100))
+                .unwrap();
+        FileOwnerLock::acquire_with_timeout(&root, "ns", "key-b", Duration::from_millis(100))
+            .expect("different key must not block");
     }
 }

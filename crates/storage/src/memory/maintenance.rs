@@ -17,12 +17,14 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-                blockcell_core::Error::Storage(format!(
-                    "Begin long-term retirement transaction error: {}",
-                    e
-                ))
-            })?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!(
+                        "Begin long-term retirement transaction error: {}",
+                        e
+                    ))
+                })?;
             let now = Utc::now().to_rfc3339();
             let mut retired_ids = Vec::new();
             for id in ids {
@@ -74,12 +76,14 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-                blockcell_core::Error::Storage(format!(
-                    "Begin soft-delete transaction error: {}",
-                    e
-                ))
-            })?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!(
+                        "Begin soft-delete transaction error: {}",
+                        e
+                    ))
+                })?;
             let now = Utc::now().to_rfc3339();
             let affected = tx
                 .execute(
@@ -145,12 +149,14 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-                blockcell_core::Error::Storage(format!(
-                    "Begin batch-delete transaction error: {}",
-                    e
-                ))
-            })?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!(
+                        "Begin batch-delete transaction error: {}",
+                        e
+                    ))
+                })?;
 
             let mut sql = "SELECT id FROM memory_items WHERE deleted_at IS NULL".to_string();
             let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -247,10 +253,7 @@ impl MemoryStore {
 
                 tx.execute(&update_sql, update_refs.as_slice())
                     .map_err(|e| {
-                        blockcell_core::Error::Storage(format!(
-                            "Batch delete update error: {}",
-                            e
-                        ))
+                        blockcell_core::Error::Storage(format!("Batch delete update error: {}", e))
                     })?;
             }
 
@@ -289,9 +292,14 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-                blockcell_core::Error::Storage(format!("Begin restore transaction error: {}", e))
-            })?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!(
+                        "Begin restore transaction error: {}",
+                        e
+                    ))
+                })?;
             // 同 (dedup_key, session_key) 若已有活动行，直接恢复会触发部分唯一索引冲突：
             // 在同一事务内先将冲突的旧活动项软删除（并入队向量删除），再恢复目标项。
             let displaced_ids: Vec<String> = {
@@ -402,12 +410,14 @@ impl MemoryStore {
                 .inner
                 .lock()
                 .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-                blockcell_core::Error::Storage(format!(
-                    "Begin maintenance transaction error: {}",
-                    e
-                ))
-            })?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    blockcell_core::Error::Storage(format!(
+                        "Begin maintenance transaction error: {}",
+                        e
+                    ))
+                })?;
 
             let now = Utc::now().to_rfc3339();
             let cutoff = (Utc::now() - chrono::Duration::days(recycle_days)).to_rfc3339();

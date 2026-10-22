@@ -243,9 +243,9 @@ impl SessionStore {
                     .enumerate()
                     .filter_map(|(i, m)| m.id.as_deref().map(|id| (id, i)))
                     .collect();
-                let anchor = messages.iter().rposition(|m| {
-                    m.id.as_deref().is_some_and(|id| disk_pos.contains_key(id))
-                });
+                let anchor = messages
+                    .iter()
+                    .rposition(|m| m.id.as_deref().is_some_and(|id| disk_pos.contains_key(id)));
                 if let Some(anchor) = anchor {
                     let cutoff = messages[anchor]
                         .id
@@ -253,10 +253,8 @@ impl SessionStore {
                         .and_then(|id| disk_pos.get(id))
                         .copied()
                         .unwrap_or(0);
-                    let incoming: std::collections::HashSet<&str> = messages
-                        .iter()
-                        .filter_map(|m| m.id.as_deref())
-                        .collect();
+                    let incoming: std::collections::HashSet<&str> =
+                        messages.iter().filter_map(|m| m.id.as_deref()).collect();
                     for msg in on_disk.into_iter().skip(cutoff + 1) {
                         if msg.id.as_deref().is_some_and(|id| !incoming.contains(id)) {
                             merged.push(msg);

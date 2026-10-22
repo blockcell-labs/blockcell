@@ -560,7 +560,10 @@ mod tests {
     fn p3_bare_tilde_matches_runtime_relative_path() {
         let workspace = std::path::Path::new("/tmp/p3-workspace");
         for path in ["~", "~foo", "~中文"] {
-            assert_eq!(resolve_path(path, workspace), workspace.join(path).display().to_string());
+            assert_eq!(
+                resolve_path(path, workspace),
+                workspace.join(path).display().to_string()
+            );
         }
     }
 

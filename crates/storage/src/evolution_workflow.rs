@@ -318,7 +318,8 @@ impl EvolutionWorkflowStore {
         // this call actually recovered. Previously the follow-up SELECT matched
         // every Requested workflow (including ones never claimed), which made
         // the "Recovered N workflows" log and the worker wake-up meaningless.
-        const RETURNING_COLS: &str = "id, capability_id, description, provider_kind, status, attempt, max_attempts,
+        const RETURNING_COLS: &str =
+            "id, capability_id, description, provider_kind, status, attempt, max_attempts,
                         priority, created_at, updated_at, lease_owner, lease_until, last_error";
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok(WorkflowRecord {
@@ -353,7 +354,9 @@ impl EvolutionWorkflowStore {
                      RETURNING {RETURNING_COLS}"
                 ))
                 .map_err(map_sqlite_error)?;
-            let rows = stmt.query_map(params![now_str], map_row).map_err(map_sqlite_error)?;
+            let rows = stmt
+                .query_map(params![now_str], map_row)
+                .map_err(map_sqlite_error)?;
             for row in rows {
                 records.push(row.map_err(map_sqlite_error)?);
             }
@@ -371,7 +374,9 @@ impl EvolutionWorkflowStore {
                      RETURNING {RETURNING_COLS}"
                 ))
                 .map_err(map_sqlite_error)?;
-            let rows = stmt.query_map(params![now_str], map_row).map_err(map_sqlite_error)?;
+            let rows = stmt
+                .query_map(params![now_str], map_row)
+                .map_err(map_sqlite_error)?;
             for row in rows {
                 records.push(row.map_err(map_sqlite_error)?);
             }
@@ -1001,7 +1006,8 @@ mod tests {
     #[test]
     fn p3_open_creates_parent_directories() {
         let dir = TempDir::new().unwrap();
-        let store = EvolutionWorkflowStore::open(&dir.path().join("nested/data/evolution.db")).unwrap();
+        let store =
+            EvolutionWorkflowStore::open(&dir.path().join("nested/data/evolution.db")).unwrap();
         store.enqueue("cap.test", "test", "process").unwrap();
     }
 
@@ -1009,9 +1015,14 @@ mod tests {
     fn p3_workflow_mapping_errors_are_not_silently_dropped() {
         let (_dir, store) = open_temp_store();
         let id = store.enqueue("cap", "description", "process").unwrap();
-        store.lock_conn().unwrap().execute(
-            "UPDATE evo_workflows SET attempt = 'corrupt' WHERE id = ?1", params![id]
-        ).unwrap();
+        store
+            .lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE evo_workflows SET attempt = 'corrupt' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
         assert!(store.list_workflows(None).is_err());
         assert!(store.list_workflows(Some("Requested")).is_err());
     }
@@ -1034,7 +1045,14 @@ mod tests {
         let recovered = store.recover_expired_leases().unwrap();
         assert_eq!(recovered.len(), 1);
         assert!(store.recover_expired_leases().unwrap().is_empty());
-        assert_eq!(store.claim_next("worker", 60, None, None).unwrap().unwrap().id, id);
+        assert_eq!(
+            store
+                .claim_next("worker", 60, None, None)
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
     }
 
     fn open_temp_store() -> (TempDir, EvolutionWorkflowStore) {
@@ -1221,9 +1239,12 @@ mod tests {
                 .expect("claim")
                 .expect("workflow should be claimable");
             assert_eq!(claimed.id, workflow_id);
-            assert!(store
-                .schedule_retry_if_owned(&workflow_id, "worker-a", Some("boom"))
-                .expect("schedule owned retry"), "round {round} should update");
+            assert!(
+                store
+                    .schedule_retry_if_owned(&workflow_id, "worker-a", Some("boom"))
+                    .expect("schedule owned retry"),
+                "round {round} should update"
+            );
 
             if round < 2 {
                 // 前两次进 RetryScheduled + 退避；测试里直接把 lease_until 拨到过去以便下一轮领取

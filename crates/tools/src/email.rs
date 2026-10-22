@@ -147,9 +147,14 @@ impl Tool for EmailTool {
             }
             "list" => {}
             "read" => {
-                if !params.get("uid").and_then(|v| v.as_u64())
-                    .is_some_and(|uid| uid > 0 && uid <= u32::MAX as u64) {
-                    return Err(Error::Validation("read requires 'uid' in 1..=4294967295".to_string()));
+                if !params
+                    .get("uid")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|uid| uid > 0 && uid <= u32::MAX as u64)
+                {
+                    return Err(Error::Validation(
+                        "read requires 'uid' in 1..=4294967295".to_string(),
+                    ));
                 }
             }
             "search" => {
@@ -1015,9 +1020,13 @@ mod tests {
         }
         for action in ["list", "search"] {
             for limit in [0, 101, u64::MAX] {
-                assert!(tool.validate(&json!({"action":action,"query":"hello","limit":limit})).is_err());
+                assert!(tool
+                    .validate(&json!({"action":action,"query":"hello","limit":limit}))
+                    .is_err());
             }
-            assert!(tool.validate(&json!({"action":action,"query":"hello","limit":100})).is_ok());
+            assert!(tool
+                .validate(&json!({"action":action,"query":"hello","limit":100}))
+                .is_ok());
         }
     }
 

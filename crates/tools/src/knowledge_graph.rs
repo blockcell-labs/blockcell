@@ -512,7 +512,8 @@ fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Valu
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let tx = db.unchecked_transaction()
+    let tx = db
+        .unchecked_transaction()
         .map_err(|e| Error::Tool(format!("Failed to begin relation transaction: {}", e)))?;
     tx.execute(
         "INSERT INTO relations (id, source_id, target_id, relation_type, properties) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -537,7 +538,8 @@ fn action_add_relation(db: &rusqlite::Connection, params: &Value) -> Result<Valu
         result["bidirectional"] = json!(true);
     }
 
-    tx.commit().map_err(|e| Error::Tool(format!("Failed to commit relation: {}", e)))?;
+    tx.commit()
+        .map_err(|e| Error::Tool(format!("Failed to commit relation: {}", e)))?;
 
     Ok(result)
 }
@@ -620,10 +622,17 @@ fn action_find_path(db: &rusqlite::Connection, params: &Value) -> Result<Value> 
     let max_depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
 
     if source_id == target_id {
-        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM entities WHERE id = ?1)", [source_id], |row| row.get(0))
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM entities WHERE id = ?1)",
+                [source_id],
+                |row| row.get(0),
+            )
             .map_err(|e| Error::Tool(format!("Query error: {}", e)))?;
         if exists {
-            return Ok(json!({"found":true,"source_id":source_id,"target_id":target_id,"path":[{"entity_id":source_id}],"length":0}));
+            return Ok(
+                json!({"found":true,"source_id":source_id,"target_id":target_id,"path":[{"entity_id":source_id}],"length":0}),
+            );
         }
     }
 
@@ -1181,11 +1190,18 @@ mod tests {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         init_schema(&db).unwrap();
         for id in ["a", "b"] {
-            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id})).unwrap();
+            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id}))
+                .unwrap();
         }
         db.execute_batch("CREATE TRIGGER reject_reverse BEFORE INSERT ON relations WHEN NEW.source_id = 'b' BEGIN SELECT RAISE(ABORT, 'reverse rejected'); END;").unwrap();
-        assert!(action_add_relation(&db, &json!({"source_id":"a","target_id":"b","relation_type":"links","bidirectional":true})).is_err());
-        let count: i64 = db.query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0)).unwrap();
+        assert!(action_add_relation(
+            &db,
+            &json!({"source_id":"a","target_id":"b","relation_type":"links","bidirectional":true})
+        )
+        .is_err());
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1193,9 +1209,20 @@ mod tests {
     fn p3_self_path_exists_only_for_existing_entity() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         init_schema(&db).unwrap();
-        action_add_entity(&db, &json!({"entity_id":"a","entity_type":"test","name":"A"})).unwrap();
-        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"a"})).unwrap()["found"], true);
-        assert_eq!(action_find_path(&db, &json!({"source_id":"missing","target_id":"missing"})).unwrap()["found"], false);
+        action_add_entity(
+            &db,
+            &json!({"entity_id":"a","entity_type":"test","name":"A"}),
+        )
+        .unwrap();
+        assert_eq!(
+            action_find_path(&db, &json!({"source_id":"a","target_id":"a"})).unwrap()["found"],
+            true
+        );
+        assert_eq!(
+            action_find_path(&db, &json!({"source_id":"missing","target_id":"missing"})).unwrap()
+                ["found"],
+            false
+        );
     }
 
     #[test]
@@ -1203,13 +1230,25 @@ mod tests {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         init_schema(&db).unwrap();
         for id in ["a", "b", "c", "d"] {
-            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id})).unwrap();
+            action_add_entity(&db, &json!({"entity_id":id,"entity_type":"test","name":id}))
+                .unwrap();
         }
-        for (a,b) in [("a","b"),("b","c"),("c","d")] {
-            action_add_relation(&db, &json!({"source_id":a,"target_id":b,"relation_type":"links"})).unwrap();
+        for (a, b) in [("a", "b"), ("b", "c"), ("c", "d")] {
+            action_add_relation(
+                &db,
+                &json!({"source_id":a,"target_id":b,"relation_type":"links"}),
+            )
+            .unwrap();
         }
-        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"d"})).unwrap()["found"], false);
-        assert_eq!(action_find_path(&db, &json!({"source_id":"a","target_id":"d","depth":3})).unwrap()["found"], true);
+        assert_eq!(
+            action_find_path(&db, &json!({"source_id":"a","target_id":"d"})).unwrap()["found"],
+            false
+        );
+        assert_eq!(
+            action_find_path(&db, &json!({"source_id":"a","target_id":"d","depth":3})).unwrap()
+                ["found"],
+            true
+        );
     }
 
     fn make_tool() -> KnowledgeGraphTool {

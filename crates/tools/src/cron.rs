@@ -105,9 +105,9 @@ fn execute_cron_action_with_paths(
                         "every_seconds must be a positive integer".to_string(),
                     ));
                 }
-                let every_ms = every.checked_mul(1000).ok_or_else(|| {
-                    Error::Validation("every_seconds is too large".to_string())
-                })?;
+                let every_ms = every
+                    .checked_mul(1000)
+                    .ok_or_else(|| Error::Validation("every_seconds is too large".to_string()))?;
                 let run_immediately = params
                     .get("run_immediately")
                     .and_then(|v| v.as_bool())
@@ -503,9 +503,12 @@ mod tests {
     fn p3_rejects_overflowing_interval() {
         let paths = temp_paths("interval_overflow");
         let result = execute_cron_action_with_paths(
-            &paths, "add",
+            &paths,
+            "add",
             &json!({"name":"test","message":"hi","every_seconds":i64::MAX}),
-            "test", "chat", None,
+            "test",
+            "chat",
+            None,
         );
         assert!(result.is_err());
         assert!(!paths.cron_jobs_file().exists());

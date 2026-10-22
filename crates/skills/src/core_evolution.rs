@@ -205,7 +205,10 @@ impl PipelineLockGuard {
         locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
         evolution_id: String,
     ) -> Self {
-        Self { locks, evolution_id }
+        Self {
+            locks,
+            evolution_id,
+        }
     }
 }
 
@@ -1251,13 +1254,14 @@ impl CoreEvolution {
             name: "expected_extension".to_string(),
             passed: ext_ok,
             message: if ext_ok {
-                format!("Artifact extension matches provider kind {:?}", record.provider_kind)
+                format!(
+                    "Artifact extension matches provider kind {:?}",
+                    record.provider_kind
+                )
             } else {
                 format!(
                     "Expected .{} artifact for {:?}, got {}",
-                    expected_ext,
-                    record.provider_kind,
-                    artifact_path
+                    expected_ext, record.provider_kind, artifact_path
                 )
             },
         });
@@ -1781,14 +1785,20 @@ mod tests {
         evo.save_record(&record).unwrap();
 
         // 未生成代码直接验证/加载 → 拒绝
-        for step in [EvolutionStep::ValidateArtifact, EvolutionStep::LoadCapability] {
+        for step in [
+            EvolutionStep::ValidateArtifact,
+            EvolutionStep::LoadCapability,
+        ] {
             let err = evo.run_step("evo-guard", step).await.unwrap_err();
             assert!(err.to_string().contains("not allowed"), "{err}");
         }
 
         // BuildPrompt 在 Requested 下允许（prompt 构建为纯计算）
         let res = evo.run_step("evo-guard", EvolutionStep::BuildPrompt).await;
-        assert!(res.is_ok(), "BuildPrompt should run from Requested: {res:?}");
+        assert!(
+            res.is_ok(),
+            "BuildPrompt should run from Requested: {res:?}"
+        );
 
         // BuildPrompt 完成后 status=Generating，重复 BuildPrompt 仍允许（重试），
         // 但 LoadCapability 依然拒绝
@@ -1889,5 +1899,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
-
 }

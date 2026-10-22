@@ -506,15 +506,14 @@ fn aes256_cbc_encrypt(key_hex: &str, plaintext: &[u8]) -> Result<(Vec<u8>, Strin
     use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
     type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
-    let key = hex::decode(key_hex)
-        .map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
+    let key = hex::decode(key_hex).map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
     if key.len() != 32 {
         return Err(Error::Tool("key must decode to 32 bytes".to_string()));
     }
     let mut iv = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
-    let ciphertext =
-        Aes256CbcEnc::new(key.as_slice().into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let ciphertext = Aes256CbcEnc::new(key.as_slice().into(), &iv.into())
+        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
     Ok((ciphertext, hex::encode(iv)))
 }
 
@@ -523,8 +522,7 @@ fn aes256_cbc_decrypt(key_hex: &str, iv_hex: &str, ciphertext: &[u8]) -> Result<
     use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-    let key = hex::decode(key_hex)
-        .map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
+    let key = hex::decode(key_hex).map_err(|_| Error::Tool("key must be valid hex".to_string()))?;
     let iv = hex::decode(iv_hex)
         .map_err(|_| Error::Tool("encrypted file has a corrupt IV header".to_string()))?;
     if iv.len() != 16 {
@@ -780,9 +778,7 @@ fn action_decode(params: &Value) -> Result<Value> {
             // Reject up-front: odd length or non-ASCII would panic on
             // out-of-range / non-boundary slicing.
             if !text.is_ascii() || text.len() % 2 != 0 {
-                return Err(Error::Tool(
-                    "Hex input must be even-length ASCII".into(),
-                ));
+                return Err(Error::Tool("Hex input must be even-length ASCII".into()));
             }
             let bytes: std::result::Result<Vec<u8>, _> = (0..text.len())
                 .step_by(2)
@@ -911,8 +907,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            action_generate_password(&json!({"action": "generate_password", "count": 100}))
-                .is_ok()
+            action_generate_password(&json!({"action": "generate_password", "count": 100})).is_ok()
         );
     }
 

@@ -29,7 +29,9 @@ pub static LOG_CONTROLLER: OnceLock<LogController> = OnceLock::new();
 /// log call site (including inside `on_event`), so poisoning is ignored:
 /// the guarded values are plain flags/paths that stay consistent.
 fn lock_logging<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 日志控制器
@@ -561,8 +563,8 @@ mod tests {
     fn clear_all_logs_truncates_active_file_instead_of_unlinking() {
         // 模拟 appender：当日活动文件被 fd 持有。unlink 会让之后经该 fd 的
         // 写入落到已删 inode（静默丢失）；truncate 则保留 fd 与路径的关联。
-        let logs_dir = std::env::temp_dir()
-            .join(format!("blockcell-logging-test-{}", uuid::Uuid::new_v4()));
+        let logs_dir =
+            std::env::temp_dir().join(format!("blockcell-logging-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&logs_dir).unwrap();
         let logs_dir = logs_dir.as_path();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -587,7 +589,9 @@ mod tests {
         drop(held);
         let content = std::fs::read(&active).unwrap();
         assert!(
-            content.windows(b"line-after-clear".len()).any(|w| w == b"line-after-clear"),
+            content
+                .windows(b"line-after-clear".len())
+                .any(|w| w == b"line-after-clear"),
             "writes through the held fd must not be lost: {content:?}"
         );
 

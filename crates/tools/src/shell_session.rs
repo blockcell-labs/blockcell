@@ -221,8 +221,8 @@ impl ShellSessionManager {
                 // 时可能真执行并改变或分叉 cwd；普通参数位（如 `echo cd`、`git commit -m "cd"`）
                 // 不会改变 shell cwd，不应误置未知。
                 const DELEGATING_HEADS: &[&str] = &[
-                    "if", "then", "else", "elif", "while", "until", "do", "sudo", "env",
-                    "command", "builtin", "eval", "time", "nohup",
+                    "if", "then", "else", "elif", "while", "until", "do", "sudo", "env", "command",
+                    "builtin", "eval", "time", "nohup",
                 ];
                 if DELEGATING_HEADS.contains(&head)
                     && tokens.any(|t| {
@@ -260,9 +260,8 @@ impl ShellSessionManager {
                 }
                 (_, "-") | ("pushd", "") => *state = None,
                 (_, t) if t == "~" || t.starts_with("~/") => {
-                    *state = dirs::home_dir().map(|h| {
-                        normalize_lexically(&h.join(t.strip_prefix("~/").unwrap_or("")))
-                    });
+                    *state = dirs::home_dir()
+                        .map(|h| normalize_lexically(&h.join(t.strip_prefix("~/").unwrap_or(""))));
                 }
                 (_, t) if t.starts_with('/') => {
                     *state = Some(normalize_lexically(&PathBuf::from(t)));
@@ -1303,7 +1302,11 @@ mod tests {
         );
 
         manager
-            .run_command(&session_id, "mkdir nested && cd nested", Duration::from_secs(2))
+            .run_command(
+                &session_id,
+                "mkdir nested && cd nested",
+                Duration::from_secs(2),
+            )
             .await
             .expect("cd into subdirectory");
         assert_eq!(

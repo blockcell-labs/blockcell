@@ -632,11 +632,8 @@ fn strategy_context_aware(content: &str, old_string: &str) -> Vec<MatchSpan> {
         let mut sum_sim = 0.0f64;
         for (cl, expected_counts) in window.iter().zip(old_profiles.iter()) {
             let candidate = cl.trim();
-            let sim = similarity_against_counts(
-                candidate,
-                candidate.chars().count(),
-                expected_counts,
-            );
+            let sim =
+                similarity_against_counts(candidate, candidate.chars().count(), expected_counts);
             if sim < 0.8 {
                 min_line_sim = sim;
                 break;

@@ -1197,10 +1197,7 @@ impl SkillManager {
         let mut xml = String::from("<skills>\n");
 
         for skill in self.skills.values() {
-            xml.push_str(&format!(
-                "  <skill available=\"{}\">\n",
-                skill.available
-            ));
+            xml.push_str(&format!("  <skill available=\"{}\">\n", skill.available));
             xml.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
             xml.push_str(&format!(
                 "    <description>{}</description>\n",

@@ -699,7 +699,9 @@ mod tests {
             calls
                 .iter()
                 .filter(|params| params.get("scope").and_then(|v| v.as_str()) == Some("short_term"))
-                .all(|params| params.get("session_key").and_then(|v| v.as_str()) == Some("cli:test")),
+                .all(
+                    |params| params.get("session_key").and_then(|v| v.as_str()) == Some("cli:test")
+                ),
             "all short-term prune/sweep/garden queries must be scoped to the caller session_key"
         );
         assert!(recent_query.get("days").is_none());

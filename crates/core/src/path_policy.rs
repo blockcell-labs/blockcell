@@ -264,8 +264,7 @@ impl PathPolicy {
             let op_matches = rule.ops.contains(&op)
                 || (action == PolicyAction::Deny
                     && op == PathOp::Exec
-                    && (rule.ops.contains(&PathOp::Read)
-                        || rule.ops.contains(&PathOp::Write)));
+                    && (rule.ops.contains(&PathOp::Read) || rule.ops.contains(&PathOp::Write)));
             if !op_matches {
                 continue;
             }

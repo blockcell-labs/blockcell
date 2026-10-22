@@ -767,7 +767,8 @@ impl CapabilityRegistry {
         let mut merged: HashMap<String, CapabilityDescriptor> = HashMap::new();
         if registry_file.exists() {
             if let Ok(existing_json) = std::fs::read_to_string(&registry_file) {
-                if let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&existing_json) {
+                if let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&existing_json)
+                {
                     for entry in entries {
                         if entry.get("provider_kind").and_then(|k| k.as_str())
                             == Some("dynamic_library")
@@ -1322,10 +1323,8 @@ mod tests {
 
     #[test]
     fn save_preserves_descriptors_registered_by_other_instances() {
-        let dir = std::env::temp_dir().join(format!(
-            "test_cap_registry_merge_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("test_cap_registry_merge_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut reg_a = CapabilityRegistry::new(dir.clone());

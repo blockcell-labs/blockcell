@@ -94,9 +94,14 @@ impl MemoryStore {
             .inner
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| {
-            blockcell_core::Error::Storage(format!("Begin reindex intent transaction error: {}", e))
-        })?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| {
+                blockcell_core::Error::Storage(format!(
+                    "Begin reindex intent transaction error: {}",
+                    e
+                ))
+            })?;
         for item in items {
             Self::enqueue_vector_sync_on_conn(&tx, &item.id, VECTOR_SYNC_OP_UPSERT, 0, None)?;
         }

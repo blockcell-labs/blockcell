@@ -60,9 +60,9 @@ impl Default for ExecTool {
 /// whitespace-normalized, case-insensitive form of the command.
 static DENY_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
-        r"(?i)\bdd\b.*\bof=/dev/",                  // dd writing to a block device
+        r"(?i)\bdd\b.*\bof=/dev/", // dd writing to a block device
         r"(?i)\bdd\b.*\bif=/dev/(sd|hd|nvme|disk|vda|md|loop|ram|zram)", // dd reading a raw disk
-        r"(?i)\bmkfs(\.|\b)",                       // make filesystem
+        r"(?i)\bmkfs(\.|\b)",      // make filesystem
         r"(?i)\bshutdown\b",
         r"(?i)\breboot\b",
         r"(?i)\bhalt\b",
@@ -90,8 +90,20 @@ fn is_root_like_target(target: &str) -> bool {
     let t = target.trim_matches(['"', '\'', '`', ')', ';', '|', '&']);
     matches!(
         t,
-        "/" | "//" | "/./" | "/*" | "*" | "~" | "~/" | "~/*" | "$HOME" | "$HOME/" | "$HOME/*"
-            | "." | "./" | "./*" | ".."
+        "/" | "//"
+            | "/./"
+            | "/*"
+            | "*"
+            | "~"
+            | "~/"
+            | "~/*"
+            | "$HOME"
+            | "$HOME/"
+            | "$HOME/*"
+            | "."
+            | "./"
+            | "./*"
+            | ".."
     ) || t.ends_with("/..")
 }
 

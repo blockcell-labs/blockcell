@@ -259,7 +259,10 @@ impl EvolutionService {
 
     /// 扫描 records 目录找出该技能处于进行中状态的 evolution_id。
     /// 纯同步磁盘 IO；async 路径调用方应包 `spawn_blocking`。
-    fn find_in_progress_record_in_dir(records_dir: &std::path::Path, skill_name: &str) -> Option<String> {
+    fn find_in_progress_record_in_dir(
+        records_dir: &std::path::Path,
+        skill_name: &str,
+    ) -> Option<String> {
         let records = Self::load_records_from_dir(records_dir);
         records
             .into_iter()
@@ -1825,11 +1828,7 @@ impl EvolutionService {
         let records_root = self.evolution.records_dir();
         let skill_owned = skill_name.to_string();
         tokio::task::spawn_blocking(move || {
-            crate::file_owner_lock::FileOwnerLock::acquire(
-                &records_root,
-                "trigger",
-                &skill_owned,
-            )
+            crate::file_owner_lock::FileOwnerLock::acquire(&records_root, "trigger", &skill_owned)
         })
         .await
         .map_err(|e| Error::Evolution(format!("Trigger lock task join error: {e}")))?
@@ -2535,8 +2534,7 @@ mod tests {
         write(&mk("fresh_terminal", EvolutionStatus::Failed, now));
         write(&mk("old_inflight", EvolutionStatus::Triggered, old));
 
-        let records =
-            EvolutionService::load_records_from_dir(&records_dir);
+        let records = EvolutionService::load_records_from_dir(&records_dir);
         let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
         // 终态且超过保留期：文件被删除且不再出现在列表。
         assert!(!ids.contains(&"old_terminal"));

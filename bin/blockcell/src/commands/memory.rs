@@ -345,7 +345,6 @@ pub async fn search(
     Ok(())
 }
 
-
 /// Run maintenance (clean expired + purge recycle bin).
 pub async fn maintenance(recycle_days: i64) -> anyhow::Result<()> {
     let paths = Paths::new_configured();
@@ -518,4 +517,3 @@ mod canonical_migration_tests {
         assert_eq!(rerun.retired, 0);
     }
 }
-

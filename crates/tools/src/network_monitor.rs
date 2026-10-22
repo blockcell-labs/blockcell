@@ -13,7 +13,6 @@ const MAX_PING_COUNT: u64 = 100;
 const MAX_TRACEROUTE_HOPS: u64 = 64;
 const MAX_PORT_SCAN_CONCURRENCY: u64 = 256;
 
-
 /// Network monitoring and diagnostics tool.
 ///
 /// Actions:
