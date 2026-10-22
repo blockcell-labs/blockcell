@@ -107,6 +107,8 @@ __pycache__/
 # 开发过程产物：review 复核对账报告与过程性设计稿，不进仓库
 /*-RECHECK-*.md
 /docs/design/*-review-*.md
+/docs/design/review-decomposition-*.md
+/docs/reviews/2026-07-24*
 /docs/design/hermes-memory-system-comparison.md
 /docs/design/per-message-runtime-rebuild-design.md
 # Added by code-review-graph
