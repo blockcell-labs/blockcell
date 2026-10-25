@@ -13,15 +13,50 @@ fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
     }
 }
 
-fn is_verification_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
+fn is_verification_tool_call(tool_name: &str, args: &serde_json::Value, result: &str) -> bool {
     match tool_name {
         "exec" => true,
+        "shell_run" | "shell_poll" => true,
+        "job_output" => serde_json::from_str::<serde_json::Value>(result)
+            .is_ok_and(|value| value["running"] == false && value["exit_code"].as_i64() == Some(0)),
         "shell" => matches!(
             args.get("action").and_then(serde_json::Value::as_str),
             None | Some("run" | "poll" | "exec" | "execute" | "start")
         ),
         _ => false,
     }
+}
+
+const CODING_CORE_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "grep",
+    "glob",
+    "exec",
+    "job_output",
+    "job_kill",
+    "shell_run",
+    "shell_poll",
+    "shell_input",
+    "shell_close",
+    "update_plan",
+    "file_ops",
+    "web_fetch",
+    "web_search",
+    "agent",
+    "tool_search",
+];
+
+fn extract_tool_search_revealed_tools(result: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|value| value["matches"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect()
 }
 
 pub(super) fn hide_runtime_handle_tools(
@@ -39,6 +74,8 @@ impl AgentRuntime {
         let session_key = msg.session_key();
         let cron_deliver_target = resolve_cron_deliver_target(&msg);
         let persist_session_key = persist_session_key_for(&msg);
+        let _job_turn =
+            blockcell_tools::exec_jobs::JobTurnGuard::new(&session_key, &persist_session_key);
         info!(session_key = %session_key, channel = %msg.channel, "Processing message");
         info!(target: "chat::user", content = %msg.content, "User input");
         self.update_main_session_target(&msg).await;
@@ -473,15 +510,28 @@ impl AgentRuntime {
         }
 
         // Get tool schemas from resolved tool names
+        let searchable_names: Vec<String> = tool_names
+            .iter()
+            .filter(|name| !disabled_tools.contains(*name))
+            .cloned()
+            .collect();
+        let search_entries = self.tool_registry.tool_search_entries(&searchable_names);
+        blockcell_tools::tool_search::set_tool_search_catalog(&session_key, search_entries);
+
         let mut tools = if tool_names.is_empty() {
             // Chat mode: no tools
             vec![]
         } else {
             let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
-            let mut schemas = self.tool_registry.get_tiered_schemas(
-                &tool_name_refs,
-                blockcell_tools::registry::GLOBAL_CORE_TOOL_NAMES,
-            );
+            let mut schemas = if decision.mode == InteractionMode::Coding {
+                self.tool_registry
+                    .get_tiered_schemas_core_only(&tool_name_refs, CODING_CORE_TOOL_NAMES)
+            } else {
+                let core_names = global_core_tool_names();
+                let core_refs: Vec<&str> = core_names.iter().map(String::as_str).collect();
+                self.tool_registry
+                    .get_tiered_schemas(&tool_name_refs, &core_refs)
+            };
 
             if !disabled_tools.is_empty() {
                 schemas.retain(|schema| {
@@ -493,6 +543,16 @@ impl AgentRuntime {
                     !disabled_tools.contains(name)
                 });
             }
+            for activated in blockcell_tools::tool_search::activated_tool_schemas(&session_key) {
+                if !tool_names.contains(&activated) || disabled_tools.contains(&activated) {
+                    continue;
+                }
+                if let Some(schema) = self.tool_registry.full_model_schema(&activated) {
+                    schemas.retain(|current| current["function"]["name"] != activated);
+                    schemas.push(schema);
+                }
+            }
+            self.tool_registry.sort_model_schemas(&mut schemas);
             schemas
         };
 
@@ -1021,7 +1081,10 @@ impl AgentRuntime {
                         }
                     }
                     let tool_timer = ScopedTimer::new();
-                    let tool_output = if tool_names.iter().any(|allowed| allowed == &tool_call.name)
+                    let legacy_shell_call =
+                        tool_call.name == "shell" && available_tools.contains("shell");
+                    let tool_output = if legacy_shell_call
+                        || tool_names.iter().any(|allowed| allowed == &tool_call.name)
                     {
                         match loop_guard.admit(&tool_call.name) {
                             Ok(()) => {
@@ -1060,7 +1123,8 @@ impl AgentRuntime {
                         if is_mutating_tool_call(&tool_call.name, &tool_call.arguments) {
                             last_mutation_idx = Some(current_tool_call_index);
                         }
-                        if is_verification_tool_call(&tool_call.name, &tool_call.arguments) {
+                        if is_verification_tool_call(&tool_call.name, &tool_call.arguments, &result)
+                        {
                             last_verification_idx = Some(current_tool_call_index);
                         }
                     }
@@ -1096,6 +1160,32 @@ impl AgentRuntime {
                                 info!(tool = %revealed_tool, "Revealed MCP tool from progressive discovery search");
                             }
                         }
+                    }
+
+                    if tool_call.name == "tool_search" {
+                        for revealed_tool in extract_tool_search_revealed_tools(&result) {
+                            if disabled_tools.contains(&revealed_tool)
+                                || !tool_names.iter().any(|name| name == &revealed_tool)
+                            {
+                                continue;
+                            }
+                            let Some(schema) = self.tool_registry.full_model_schema(&revealed_tool)
+                            else {
+                                continue;
+                            };
+                            blockcell_tools::tool_search::activate_tool_schema(
+                                &session_key,
+                                &revealed_tool,
+                            );
+                            if !tools
+                                .iter()
+                                .any(|current| current["function"]["name"] == revealed_tool)
+                            {
+                                tools.push(schema);
+                                _schema_cache_dirty = true;
+                            }
+                        }
+                        self.tool_registry.sort_model_schemas(&mut tools);
                     }
 
                     // Collect media paths from tool results for WebUI display.
@@ -1170,6 +1260,12 @@ impl AgentRuntime {
                                         .unwrap_or(false)
                             });
                             if !already_full {
+                                if tool_names.iter().any(|name| name == &tool_call.name) {
+                                    blockcell_tools::tool_search::activate_tool_schema(
+                                        &session_key,
+                                        &tool_call.name,
+                                    );
+                                }
                                 // Replace lightweight schema with full schema
                                 tools.retain(|t| {
                                     t.get("function")
@@ -1178,6 +1274,7 @@ impl AgentRuntime {
                                         != Some(&tool_call.name)
                                 });
                                 tools.push(schema_val);
+                                self.tool_registry.sort_model_schemas(&mut tools);
                                 _schema_cache_dirty = true;
                                 info!(tool = %tool_call.name, "Dynamically supplemented tool with full schema");
                                 // Commit a retry-hint result for this call rather
@@ -1210,6 +1307,30 @@ impl AgentRuntime {
                                     tool_results.push(skip_msg);
                                 }
                                 break;
+                            }
+                        }
+                    }
+                    if tool_names.iter().any(|name| name == &tool_call.name) {
+                        let already_full = tools.iter().any(|schema| {
+                            schema["function"]["name"] == tool_call.name
+                                && schema["function"]["parameters"]["properties"]
+                                    .as_object()
+                                    .is_some_and(|properties| !properties.is_empty())
+                        });
+                        if !already_full {
+                            if let Some(schema) =
+                                self.tool_registry.full_model_schema(&tool_call.name)
+                            {
+                                blockcell_tools::tool_search::activate_tool_schema(
+                                    &session_key,
+                                    &tool_call.name,
+                                );
+                                tools.retain(|current| {
+                                    current["function"]["name"] != tool_call.name
+                                });
+                                tools.push(schema);
+                                self.tool_registry.sort_model_schemas(&mut tools);
+                                _schema_cache_dirty = true;
                             }
                         }
                     }

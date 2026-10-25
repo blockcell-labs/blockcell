@@ -21,6 +21,7 @@ use crate::email::EmailTool;
 use crate::encrypt::EncryptTool;
 use crate::evolution_workflow::EvolutionWorkflowTool;
 use crate::exec::ExecTool;
+use crate::exec_jobs::{JobKillTool, JobOutputTool};
 use crate::exec_local::ExecLocalTool;
 use crate::exec_skill_script::ExecSkillScriptTool;
 use crate::file_ops::FileOpsTool;
@@ -39,6 +40,7 @@ use crate::plan::UpdatePlanTool;
 use crate::send_message::SendMessageTool;
 use crate::session_recall::SessionRecallTool;
 use crate::session_search::SessionSearchTool;
+use crate::shell_actions::ShellActionTool;
 use crate::shell_session::ShellTool;
 use crate::skills::{ListSkillsTool, SkillManageTool, SkillViewTool};
 use crate::spawn::SpawnTool;
@@ -47,6 +49,7 @@ use crate::system_info::{CapabilityEvolveTool, SystemInfoTool};
 use crate::tasks::ListTasksTool;
 use crate::termux_api::TermuxApiTool;
 use crate::toggle_manage::ToggleManageTool;
+use crate::tool_search::{ToolSearchEntry, ToolSearchTool};
 use crate::tts::TtsTool;
 use crate::video_process::VideoProcessTool;
 use crate::web::{WebFetchTool, WebSearchTool};
@@ -150,6 +153,13 @@ impl ToolRegistry {
         // Exec tool
         registry.register(Arc::new(ExecTool::default()));
         registry.register(Arc::new(ShellTool));
+        registry.register(Arc::new(JobOutputTool));
+        registry.register(Arc::new(JobKillTool));
+        registry.register(Arc::new(ShellActionTool::run()));
+        registry.register(Arc::new(ShellActionTool::poll()));
+        registry.register(Arc::new(ShellActionTool::input()));
+        registry.register(Arc::new(ShellActionTool::close()));
+        registry.register(Arc::new(ToolSearchTool));
         registry.register(Arc::new(ExecLocalTool));
         registry.register(Arc::new(ExecSkillScriptTool));
 
@@ -412,6 +422,40 @@ impl ToolRegistry {
     /// 单个工具的完整 model-facing schema（渐进发现、schema 补全时使用）。
     pub fn full_model_schema(&self, name: &str) -> Option<Value> {
         self.get(name).map(|tool| self.model_schema(&tool, true))
+    }
+
+    pub fn tool_search_entries(&self, names: &[String]) -> Vec<ToolSearchEntry> {
+        names
+            .iter()
+            .filter_map(|name| {
+                let schema = self.full_model_schema(name)?;
+                Some(ToolSearchEntry {
+                    name: name.clone(),
+                    description: schema["function"]["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn sort_model_schemas(&self, schemas: &mut [Value]) {
+        self.sort_schemas(schemas);
+    }
+
+    pub fn get_tiered_schemas_core_only(&self, names: &[&str], core_tools: &[&str]) -> Vec<Value> {
+        let mut schemas: Vec<Value> = self
+            .effective_tools()
+            .iter()
+            .filter(|(name, _)| names.contains(&name.as_str()))
+            .map(|(name, tool)| self.model_schema(tool, core_tools.contains(&name.as_str())))
+            .collect();
+        self.sort_schemas(&mut schemas);
+        schemas
     }
 
     /// 按展示排序（order 小者在前，相同时按名称）。
@@ -705,6 +749,27 @@ mod tests {
         )));
         assert_sorted(reg.tool_names());
         assert_sorted(reg.model_visible_tool_names());
+    }
+
+    #[test]
+    fn strict_tiering_only_expands_the_coding_core_set() {
+        let reg = ToolRegistry::with_defaults();
+        let names = reg.tool_names();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let core = ["read_file", "write_file", "exec", "tool_search"];
+        let schemas = reg.get_tiered_schemas_core_only(&refs, &core);
+        for schema in schemas {
+            let name = schema["function"]["name"].as_str().unwrap();
+            let properties = schema["function"]["parameters"]["properties"]
+                .as_object()
+                .unwrap();
+            if !properties.is_empty() {
+                assert!(
+                    core.contains(&name),
+                    "{name} unexpectedly has a full schema"
+                );
+            }
+        }
     }
 
     #[test]

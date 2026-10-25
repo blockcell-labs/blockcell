@@ -31,6 +31,8 @@ static SHELL_SESSIONS: Lazy<ShellSessionManager> = Lazy::new(ShellSessionManager
 #[derive(Debug, Clone)]
 pub(crate) struct ShellCommandOutput {
     pub output: String,
+    pub stdout: String,
+    pub stderr: String,
     pub exit_code: Option<i32>,
     pub running: bool,
     pub truncated: bool,
@@ -41,6 +43,14 @@ struct SharedOutput {
     start_offset: u64,
     end_offset: u64,
     truncated: bool,
+    stderr_bytes: VecDeque<u8>,
+    stderr_start_offset: u64,
+    stderr_end_offset: u64,
+    stderr_truncated: bool,
+    combined_bytes: VecDeque<u8>,
+    combined_start_offset: u64,
+    combined_end_offset: u64,
+    combined_truncated: bool,
 }
 
 impl SharedOutput {
@@ -50,16 +60,46 @@ impl SharedOutput {
             start_offset: 0,
             end_offset: 0,
             truncated: false,
+            stderr_bytes: VecDeque::new(),
+            stderr_start_offset: 0,
+            stderr_end_offset: 0,
+            stderr_truncated: false,
+            combined_bytes: VecDeque::new(),
+            combined_start_offset: 0,
+            combined_end_offset: 0,
+            combined_truncated: false,
         }
     }
 
-    fn append(&mut self, chunk: &[u8]) {
-        self.bytes.extend(chunk.iter().copied());
-        self.end_offset = self.end_offset.saturating_add(chunk.len() as u64);
-        while self.bytes.len() > MAX_SESSION_OUTPUT_BYTES {
-            self.bytes.pop_front();
-            self.start_offset = self.start_offset.saturating_add(1);
-            self.truncated = true;
+    fn append(&mut self, chunk: &[u8], stderr: bool) {
+        let (bytes, start_offset, end_offset, truncated) = if stderr {
+            (
+                &mut self.stderr_bytes,
+                &mut self.stderr_start_offset,
+                &mut self.stderr_end_offset,
+                &mut self.stderr_truncated,
+            )
+        } else {
+            (
+                &mut self.bytes,
+                &mut self.start_offset,
+                &mut self.end_offset,
+                &mut self.truncated,
+            )
+        };
+        bytes.extend(chunk.iter().copied());
+        *end_offset = end_offset.saturating_add(chunk.len() as u64);
+        while bytes.len() > MAX_SESSION_OUTPUT_BYTES {
+            bytes.pop_front();
+            *start_offset = start_offset.saturating_add(1);
+            *truncated = true;
+        }
+        self.combined_bytes.extend(chunk.iter().copied());
+        self.combined_end_offset = self.combined_end_offset.saturating_add(chunk.len() as u64);
+        while self.combined_bytes.len() > MAX_SESSION_OUTPUT_BYTES {
+            self.combined_bytes.pop_front();
+            self.combined_start_offset = self.combined_start_offset.saturating_add(1);
+            self.combined_truncated = true;
         }
     }
 }
@@ -67,6 +107,8 @@ impl SharedOutput {
 struct ActiveCommand {
     marker: String,
     delivered_offset: u64,
+    stderr_delivered_offset: u64,
+    combined_delivered_offset: u64,
 }
 
 struct ShellSession {
@@ -341,6 +383,26 @@ impl ShellSessionManager {
         task_manager: Option<crate::TaskManagerHandle>,
         writable_roots: Vec<PathBuf>,
     ) -> Result<String> {
+        self.create_with_task_manager_and_sandbox(
+            workspace,
+            sandbox_policy,
+            owner,
+            task_manager,
+            writable_roots,
+            self.current_sandbox(),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_with_task_manager_and_sandbox(
+        &self,
+        workspace: &Path,
+        sandbox_policy: SandboxPolicy,
+        owner: SessionOwner<'_>,
+        task_manager: Option<crate::TaskManagerHandle>,
+        writable_roots: Vec<PathBuf>,
+        sandbox: Arc<dyn SandboxProvider>,
+    ) -> Result<String> {
         let request = SandboxRequest {
             agent_id: owner.agent_id.to_string(),
             session_id: owner.session_id.to_string(),
@@ -353,7 +415,6 @@ impl ShellSessionManager {
             program: String::new(),
             args: Vec::new(),
         };
-        let sandbox = self.current_sandbox();
         #[cfg(unix)]
         let (mut command, command_input, child_control) =
             build_interactive_shell(sandbox.as_ref(), request).await?;
@@ -387,8 +448,8 @@ impl ShellSessionManager {
             .take()
             .ok_or_else(|| Error::Tool("Shell stderr pipe unavailable".to_string()))?;
         let output = Arc::new(Mutex::new(SharedOutput::new()));
-        tokio::spawn(drain_shell_stream(stdout, Arc::clone(&output)));
-        tokio::spawn(drain_shell_stream(stderr, Arc::clone(&output)));
+        tokio::spawn(drain_shell_stream(stdout, Arc::clone(&output), false));
+        tokio::spawn(drain_shell_stream(stderr, Arc::clone(&output), true));
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         if let (Some(tm), Some(pid)) = (task_manager.as_ref(), pid) {
@@ -554,6 +615,33 @@ impl ShellSessionManager {
         command: &str,
         timeout: Duration,
     ) -> Result<ShellCommandOutput> {
+        self.run_command_impl(session_id, command, timeout, false)
+            .await
+    }
+
+    pub(crate) async fn run_exec_command(
+        &self,
+        session_id: &str,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<ShellCommandOutput> {
+        let mut output = self
+            .run_command_impl(session_id, command, timeout, true)
+            .await?;
+        if !output.running {
+            trim_exec_marker_newline(&mut output.stdout);
+            trim_exec_marker_newline(&mut output.output);
+        }
+        Ok(output)
+    }
+
+    async fn run_command_impl(
+        &self,
+        session_id: &str,
+        command: &str,
+        timeout: Duration,
+        exec_compatibility_shell: bool,
+    ) -> Result<ShellCommandOutput> {
         let session = self.get(session_id).await?;
         let combined = self.preview_stdin(session_id, command);
         if crate::exec::is_dangerous_command(command)
@@ -571,8 +659,23 @@ impl ShellSessionManager {
                 )));
             }
             let marker = format!("__BLOCKCELL_SHELL_DONE_{}__", uuid::Uuid::new_v4().simple());
-            let delivered_offset = session.output.lock().await.end_offset;
-            let payload = build_command_payload(command, &marker);
+            let (delivered_offset, stderr_delivered_offset, combined_delivered_offset) = {
+                let output = session.output.lock().await;
+                (
+                    output.end_offset,
+                    output.stderr_end_offset,
+                    output.combined_end_offset,
+                )
+            };
+            #[cfg(unix)]
+            let shell_command = if exec_compatibility_shell {
+                format!("sh -c {}", shell_quote_argument(command))
+            } else {
+                command.to_string()
+            };
+            #[cfg(windows)]
+            let shell_command = command.to_string();
+            let payload = build_command_payload(&shell_command, &marker);
             #[cfg(unix)]
             let command_writer = &mut session.command_input;
             #[cfg(windows)]
@@ -588,10 +691,14 @@ impl ShellSessionManager {
             session.active = Some(ActiveCommand {
                 marker,
                 delivered_offset,
+                stderr_delivered_offset,
+                combined_delivered_offset,
             });
         }
         self.clear_stdin_buffer(session_id);
-        self.track_cd(session_id, command);
+        if !exec_compatibility_shell {
+            self.track_cd(session_id, command);
+        }
         self.poll(session_id, timeout).await
     }
 
@@ -605,14 +712,21 @@ impl ShellSessionManager {
         // 以来新到的字节，并推进"已交付"游标。因此必须把每一轮都累积起来——只返回最后一轮会
         // 静默丢掉先到的输出（`echo a; sleep 1; echo b` 会只剩 b）。
         let mut output = String::new();
+        let mut stdout = String::new();
+        let mut stderr = String::new();
         let mut truncated = false;
         loop {
             let polled = self.poll_once(session_id).await?;
-            let capped = append_capped(&mut output, &polled.output);
-            truncated = truncated || capped || polled.truncated;
+            let capped_output = append_capped(&mut output, &polled.output);
+            let capped_stdout = append_capped(&mut stdout, &polled.stdout);
+            let capped_stderr = append_capped(&mut stderr, &polled.stderr);
+            truncated =
+                truncated || capped_output || capped_stdout || capped_stderr || polled.truncated;
             if !polled.running || tokio::time::Instant::now() >= deadline {
                 return Ok(ShellCommandOutput {
                     output,
+                    stdout,
+                    stderr,
                     exit_code: polled.exit_code,
                     running: polled.running,
                     truncated,
@@ -642,6 +756,8 @@ impl ShellSessionManager {
             }
             return Ok(ShellCommandOutput {
                 output: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
                 exit_code: session.exit_code,
                 running: false,
                 truncated: false,
@@ -649,31 +765,73 @@ impl ShellSessionManager {
         };
         let marker = active.marker.clone();
         let delivered_offset = active.delivered_offset;
+        let stderr_delivered_offset = active.stderr_delivered_offset;
+        let combined_delivered_offset = active.combined_delivered_offset;
         let mut shared = session.output.lock().await;
         let bytes: Vec<u8> = shared.bytes.iter().copied().collect();
+        let stderr_bytes: Vec<u8> = shared.stderr_bytes.iter().copied().collect();
+        let combined_bytes: Vec<u8> = shared.combined_bytes.iter().copied().collect();
         let marker_prefix = format!("{marker}:");
         let text = String::from_utf8_lossy(&bytes);
+        let combined_text = String::from_utf8_lossy(&combined_bytes);
         let marker_position = text.find(&marker_prefix);
+        let combined_marker_position = combined_text.find(&marker_prefix);
         let available_start = delivered_offset.max(shared.start_offset);
         let relative_start = available_start.saturating_sub(shared.start_offset) as usize;
+        let stderr_start = stderr_delivered_offset.max(shared.stderr_start_offset);
+        let stderr_relative_start =
+            stderr_start.saturating_sub(shared.stderr_start_offset) as usize;
+        let combined_start = combined_delivered_offset.max(shared.combined_start_offset);
+        let combined_relative_start =
+            combined_start.saturating_sub(shared.combined_start_offset) as usize;
 
         if let Some(marker_start) = marker_position {
             let status_start = marker_start + marker_prefix.len();
             if let Some(line_end) = text[status_start..].find(['\r', '\n']) {
                 let status_text = &text[status_start..status_start + line_end];
                 let exit_code = status_text.trim().parse::<i32>().ok();
-                let output =
+                let mut stdout =
                     String::from_utf8_lossy(&bytes[relative_start.min(marker_start)..marker_start])
                         .trim_start_matches(['\r', '\n'])
                         .to_string();
-                let truncated = shared.truncated || delivered_offset < shared.start_offset;
+                if stdout.ends_with('\n') {
+                    stdout.pop();
+                }
+                let stderr = if stderr_relative_start < stderr_bytes.len() {
+                    String::from_utf8_lossy(&stderr_bytes[stderr_relative_start..]).to_string()
+                } else {
+                    String::new()
+                };
+                let output = if let Some(combined_marker_start) = combined_marker_position {
+                    String::from_utf8_lossy(
+                        &combined_bytes[combined_relative_start.min(combined_marker_start)
+                            ..combined_marker_start],
+                    )
+                    .to_string()
+                } else {
+                    format!("{stdout}{stderr}")
+                };
+                let truncated = shared.truncated
+                    || delivered_offset < shared.start_offset
+                    || shared.stderr_truncated
+                    || stderr_delivered_offset < shared.stderr_start_offset
+                    || shared.combined_truncated
+                    || combined_delivered_offset < shared.combined_start_offset;
                 shared.bytes.clear();
                 shared.start_offset = shared.end_offset;
                 shared.truncated = false;
+                shared.stderr_bytes.clear();
+                shared.stderr_start_offset = shared.stderr_end_offset;
+                shared.stderr_truncated = false;
+                shared.combined_bytes.clear();
+                shared.combined_start_offset = shared.combined_end_offset;
+                shared.combined_truncated = false;
                 drop(shared);
                 session.active = None;
                 return Ok(ShellCommandOutput {
                     output,
+                    stdout,
+                    stderr,
                     exit_code,
                     running: false,
                     truncated,
@@ -681,16 +839,35 @@ impl ShellSessionManager {
             }
         }
 
-        let output = if relative_start < bytes.len() {
+        let stdout = if relative_start < bytes.len() {
             String::from_utf8_lossy(&bytes[relative_start..]).to_string()
         } else {
             String::new()
         };
-        let truncated = shared.truncated || delivered_offset < shared.start_offset;
+        let stderr = if stderr_relative_start < stderr_bytes.len() {
+            String::from_utf8_lossy(&stderr_bytes[stderr_relative_start..]).to_string()
+        } else {
+            String::new()
+        };
+        let output = if combined_relative_start < combined_bytes.len() {
+            String::from_utf8_lossy(&combined_bytes[combined_relative_start..]).to_string()
+        } else {
+            String::new()
+        };
+        let truncated = shared.truncated
+            || delivered_offset < shared.start_offset
+            || shared.stderr_truncated
+            || stderr_delivered_offset < shared.stderr_start_offset
+            || shared.combined_truncated
+            || combined_delivered_offset < shared.combined_start_offset;
         let end_offset = shared.end_offset;
+        let stderr_end_offset = shared.stderr_end_offset;
+        let combined_end_offset = shared.combined_end_offset;
         drop(shared);
         if let Some(active) = session.active.as_mut() {
             active.delivered_offset = end_offset;
+            active.stderr_delivered_offset = stderr_end_offset;
+            active.combined_delivered_offset = combined_end_offset;
         }
 
         if session.exited_at.is_none() {
@@ -713,9 +890,15 @@ impl ShellSessionManager {
             let mut shared = session.output.lock().await;
             shared.bytes.clear();
             shared.bytes.shrink_to_fit();
+            shared.stderr_bytes.clear();
+            shared.stderr_bytes.shrink_to_fit();
+            shared.combined_bytes.clear();
+            shared.combined_bytes.shrink_to_fit();
             drop(shared);
             return Ok(ShellCommandOutput {
                 output,
+                stdout,
+                stderr,
                 exit_code: session.exit_code,
                 running: false,
                 truncated,
@@ -724,6 +907,8 @@ impl ShellSessionManager {
 
         Ok(ShellCommandOutput {
             output,
+            stdout,
+            stderr,
             exit_code: None,
             running: true,
             truncated,
@@ -834,6 +1019,93 @@ pub fn session_cwd(session_id: &str) -> Option<Option<PathBuf>> {
 /// 时，参数本身看不出会话是否以 full-access 运行，只能查这份创建时的快照。
 pub fn session_sandbox_policy(session_id: &str) -> Option<SandboxPolicy> {
     SHELL_SESSIONS.policy_snapshot(session_id)
+}
+
+pub(crate) struct ExecShellRequest<'a> {
+    pub working_dir: &'a Path,
+    pub policy: SandboxPolicy,
+    pub agent_id: &'a str,
+    pub owner_session_id: &'a str,
+    pub task_manager: Option<crate::TaskManagerHandle>,
+    pub writable_roots: Vec<PathBuf>,
+    pub sandbox: Arc<dyn SandboxProvider>,
+    pub command: &'a str,
+    pub timeout: Duration,
+}
+
+pub(crate) async fn start_exec_shell_session(
+    request: ExecShellRequest<'_>,
+) -> Result<(String, ShellCommandOutput)> {
+    let owner = SessionOwner {
+        agent_id: request.agent_id,
+        session_id: request.owner_session_id,
+    };
+    let session_id = SHELL_SESSIONS
+        .create_with_task_manager_and_sandbox(
+            request.working_dir,
+            request.policy,
+            owner,
+            request.task_manager,
+            request.writable_roots,
+            request.sandbox,
+        )
+        .await?;
+    match SHELL_SESSIONS
+        .run_exec_command(&session_id, request.command, request.timeout)
+        .await
+    {
+        Ok(output) => Ok((session_id, output)),
+        Err(error) => {
+            let _ = SHELL_SESSIONS.close(&session_id).await;
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn poll_exec_shell_session(
+    session_id: &str,
+    agent_id: &str,
+    owner_session_id: &str,
+    timeout: Duration,
+) -> Result<ShellCommandOutput> {
+    SHELL_SESSIONS
+        .verify_owner(
+            session_id,
+            SessionOwner {
+                agent_id,
+                session_id: owner_session_id,
+            },
+        )
+        .await?;
+    let mut output = SHELL_SESSIONS.poll(session_id, timeout).await?;
+    if !output.running {
+        trim_exec_marker_newline(&mut output.stdout);
+        trim_exec_marker_newline(&mut output.output);
+    }
+    Ok(output)
+}
+
+fn trim_exec_marker_newline(output: &mut String) {
+    if output.ends_with('\n') {
+        output.pop();
+    }
+}
+
+pub(crate) async fn close_exec_shell_session(
+    session_id: &str,
+    agent_id: &str,
+    owner_session_id: &str,
+) -> Result<()> {
+    SHELL_SESSIONS
+        .verify_owner(
+            session_id,
+            SessionOwner {
+                agent_id,
+                session_id: owner_session_id,
+            },
+        )
+        .await?;
+    SHELL_SESSIONS.close(session_id).await
 }
 
 /// 注入全局持久 `shell` 会话使用的 [`SandboxProvider`]（如自定义容器 / 远程沙箱）。
@@ -1236,7 +1508,7 @@ fn shell_quote_argument(argument: &str) -> String {
     }
 }
 
-async fn drain_shell_stream<R>(mut reader: R, output: Arc<Mutex<SharedOutput>>)
+async fn drain_shell_stream<R>(mut reader: R, output: Arc<Mutex<SharedOutput>>, stderr: bool)
 where
     R: AsyncRead + Unpin,
 {
@@ -1244,7 +1516,7 @@ where
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
-            Ok(read) => output.lock().await.append(&buffer[..read]),
+            Ok(read) => output.lock().await.append(&buffer[..read], stderr),
         }
     }
 }

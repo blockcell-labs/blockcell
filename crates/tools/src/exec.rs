@@ -197,7 +197,7 @@ impl Tool for ExecTool {
         ToolSchema {
             name: "exec".to_string(),
             description: format!(
-                "Execute a shell command with a timeout of {} seconds; for commands that may exceed it (builds, test suites, servers) use `shell` — timed-out shell commands keep running and can be polled.",
+                "Execute a shell command with a timeout of {} seconds. Commands exceeding the timeout keep running as jobs; use `job_output` to wait/read output and `job_kill` to stop them. Use `shell_run`/`shell_poll` for persistent interactive sessions.",
                 self.timeout_secs
             ),
             parameters: json!({
@@ -273,6 +273,19 @@ impl Tool for ExecTool {
             Vec::new()
         };
 
+        if let Some(sandbox) = self.executor.sandbox_provider() {
+            return crate::exec_jobs::execute_exec_job(
+                ctx.clone(),
+                command,
+                working_dir.clone(),
+                policy,
+                writable_roots.clone(),
+                timeout_secs,
+                sandbox,
+            )
+            .await;
+        }
+
         let result = self
             .executor
             .execute(ShellRequest {
@@ -338,9 +351,7 @@ mod tests {
         let schema = tool.schema();
         assert_eq!(schema.name, "exec");
         assert!(schema.description.contains("timeout of"));
-        assert!(schema.description.contains(
-            "for commands that may exceed it (builds, test suites, servers) use `shell` — timed-out shell commands keep running and can be polled"
-        ));
+        assert!(schema.description.contains("job_output"));
     }
 
     #[test]

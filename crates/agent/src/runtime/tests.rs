@@ -38,6 +38,9 @@ struct BoundaryMemoryProvider;
 struct ProviderToolCaptureProvider {
     seen_tools: Mutex<Vec<Vec<serde_json::Value>>>,
 }
+struct JobCompletionNotificationProvider {
+    calls: Mutex<Vec<Vec<ChatMessage>>>,
+}
 struct RuntimeProviderTool {
     calls: Mutex<Vec<serde_json::Value>>,
 }
@@ -483,6 +486,65 @@ impl blockcell_providers::Provider for ProviderToolCaptureProvider {
                 thought_signature: None,
             }],
             finish_reason: "tool_calls".to_string(),
+            usage: serde_json::Value::Null,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for JobCompletionNotificationProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        let call_index = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(messages.to_vec());
+            calls.len() - 1
+        };
+
+        let tool_call = match call_index {
+            0 => Some(ToolCallRequest {
+                id: "job-notification-exec".to_string(),
+                name: "exec".to_string(),
+                arguments: serde_json::json!({
+                    "command": "sleep 1.2; printf job-notification-marker"
+                }),
+                thought_signature: None,
+            }),
+            1 => {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let job_id = messages
+                    .iter()
+                    .rev()
+                    .filter(|message| message.role == "tool")
+                    .find_map(|message| {
+                        let value =
+                            serde_json::from_str::<serde_json::Value>(&chat_message_text(message))
+                                .ok()?;
+                        value.get("job_id")?.as_str().map(str::to_string)
+                    })
+                    .expect("exec timeout should return a job id");
+                Some(ToolCallRequest {
+                    id: "job-notification-output".to_string(),
+                    name: "job_output".to_string(),
+                    arguments: serde_json::json!({"job_id": job_id, "wait_secs": 1}),
+                    thought_signature: None,
+                })
+            }
+            _ => None,
+        };
+
+        Ok(LLMResponse {
+            content: tool_call.is_none().then(|| "finished".to_string()),
+            reasoning_content: None,
+            tool_calls: tool_call.into_iter().collect(),
+            finish_reason: if call_index < 2 {
+                "tool_calls".to_string()
+            } else {
+                "stop".to_string()
+            },
             usage: serde_json::Value::Null,
         })
     }
@@ -2569,7 +2631,10 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         "list_dir",
         "grep",
         "glob",
-        "shell",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
         "exec",
         "update_plan",
         "file_ops",
@@ -2595,11 +2660,15 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         "grep",
         "glob",
         "get_context_remaining",
-        "shell",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
         "update_plan",
     ] {
         assert!(tools.contains(&required.to_string()), "missing {required}");
     }
+    assert!(!tools.contains(&"shell".to_string()));
     assert_eq!(
         tools.contains(&"exec".to_string()),
         !super::shell_runs_unattended(&Config::default())
@@ -2664,6 +2733,13 @@ fn coding_tool_defaults_filter_niche_tools_by_user_message() {
         "memory_query",
         "skill",
         "agent",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
+        "job_output",
+        "job_kill",
+        "tool_search",
     ];
     let available_tools: HashSet<String> = niche
         .iter()
@@ -2708,6 +2784,26 @@ fn coding_tool_defaults_filter_niche_tools_by_user_message() {
         "Fix the bug",
     );
     assert_eq!(general_tools, before);
+}
+
+#[test]
+fn coding_tool_names_replace_legacy_shell_with_single_purpose_tools() {
+    let available: HashSet<String> = [
+        "shell",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let mut names = vec!["shell".to_string()];
+    super::replace_legacy_shell_tool(&mut names, &available);
+    assert!(!names.iter().any(|name| name == "shell"));
+    for name in ["shell_run", "shell_poll", "shell_input", "shell_close"] {
+        assert!(names.iter().any(|current| current == name));
+    }
 }
 
 #[test]
@@ -7596,6 +7692,62 @@ async fn pre_step_policy_can_rewrite_input_or_stop_the_step() {
         .iter()
         .any(|event| event.kind == SessionEventKind::ModelRequest));
     assert_steps_balanced(&events);
+}
+
+#[tokio::test]
+async fn completed_exec_job_is_injected_at_the_next_pre_step() {
+    let provider = Arc::new(JobCompletionNotificationProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.tools.exec.timeout = 1;
+    config.tools.exec.restrict_to_workspace = false;
+    config.tools.exec.approval_policy = Some("workspace-auto".to_string());
+    let intent_router = config
+        .intent_router
+        .as_mut()
+        .expect("default intent router is configured");
+    intent_router.enabled = false;
+    intent_router.load_all_tools = true;
+
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "blockcell-job-notification-runtime-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let paths = Paths::with_base(base);
+    let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
+        "test/mock",
+        "test",
+        provider.clone(),
+    );
+    let mut tools = blockcell_tools::ToolRegistry::with_defaults();
+    tools.register(Arc::new(blockcell_tools::exec::ExecTool::from_config(
+        &config.tools.exec,
+    )));
+    let mut runtime =
+        AgentRuntime::new(config, paths, provider_pool, tools).expect("create runtime");
+    runtime.set_agent_id(Some("default".to_string()));
+
+    assert_eq!(
+        runtime
+            .process_message(test_main_session_inbound("cli", "job-notification"))
+            .await
+            .unwrap(),
+        "finished"
+    );
+
+    let calls = provider.calls.lock().unwrap();
+    assert!(calls.iter().any(|messages| {
+        messages.iter().any(|message| {
+            let text = chat_message_text(message);
+            text.contains("[job ")
+                && text.contains("finished: exit 0")
+                && text.contains("job-notification-marker")
+        })
+    }));
 }
 
 #[tokio::test]

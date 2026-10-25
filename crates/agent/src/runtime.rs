@@ -1521,6 +1521,7 @@ fn global_core_tool_names() -> Vec<String> {
         .chain(std::iter::once(
             blockcell_tools::mcp::search::MCP_SEARCH_TOOL_NAME.to_string(),
         ))
+        .chain(std::iter::once("tool_search".to_string()))
         .collect()
 }
 
@@ -1531,11 +1532,30 @@ const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "list_dir",
     "grep",
     "glob",
-    "shell",
+    "shell_run",
+    "shell_poll",
+    "shell_input",
+    "shell_close",
+    "job_output",
+    "job_kill",
+    "tool_search",
     "update_plan",
     "file_ops",
     "get_context_remaining",
+    "web_search",
 ];
+
+fn replace_legacy_shell_tool(tool_names: &mut Vec<String>, available_tools: &HashSet<String>) {
+    if !tool_names.iter().any(|name| name == "shell") {
+        return;
+    }
+    tool_names.retain(|name| name != "shell");
+    for name in ["shell_run", "shell_poll", "shell_input", "shell_close"] {
+        if available_tools.contains(name) && !tool_names.iter().any(|current| current == name) {
+            tool_names.push(name.to_string());
+        }
+    }
+}
 
 fn shell_runs_unattended_for_backend(
     backend: SandboxBackend,
@@ -1739,6 +1759,7 @@ fn resolve_effective_tool_names(
                 &mut tool_names,
                 user_message,
             );
+            replace_legacy_shell_tool(&mut tool_names, available_tools);
             tool_names.sort();
             tool_names.dedup();
             return tool_names;
@@ -1780,6 +1801,8 @@ fn resolve_effective_tool_names(
         &mut tool_names,
         user_message,
     );
+
+    replace_legacy_shell_tool(&mut tool_names, available_tools);
 
     tool_names.sort();
     tool_names.dedup();

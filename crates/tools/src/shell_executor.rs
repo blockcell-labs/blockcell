@@ -48,6 +48,10 @@ impl ShellResult {
 #[async_trait]
 pub trait ShellExecutor: Send + Sync {
     async fn execute(&self, request: ShellRequest) -> Result<ShellResult>;
+
+    fn sandbox_provider(&self) -> Option<Arc<dyn SandboxProvider>> {
+        None
+    }
 }
 
 /// 在本机启动 shell，隔离由 [`SandboxProvider`] 负责。
@@ -99,6 +103,10 @@ impl ShellExecutor for LocalShellExecutor {
             stderr: output.stderr,
             truncated: output.truncated,
         })
+    }
+
+    fn sandbox_provider(&self) -> Option<Arc<dyn SandboxProvider>> {
+        Some(Arc::clone(&self.sandbox))
     }
 }
 

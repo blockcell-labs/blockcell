@@ -150,6 +150,12 @@ impl AgentRuntime {
         history: Option<&mut Vec<ChatMessage>>,
         throttle: Option<std::time::Duration>,
     ) {
+        for notification in blockcell_tools::exec_jobs::take_finished_job_notifications(session_key)
+        {
+            messages.push(ChatMessage::user(&format!(
+                "<runtime-context>\n{notification}\n</runtime-context>"
+            )));
+        }
         // 计划由 plan 工具按来源会话写入。
         if let Some(plan) = blockcell_tools::plan::take_changed_plan_context(&msg.session_key()) {
             messages.push(ChatMessage::user(&format!(

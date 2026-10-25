@@ -33,6 +33,40 @@ fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> {
     }
 }
 
+fn canonicalize_shell_tool_call(call: &ToolCallRequest) -> ToolCallRequest {
+    let Some(args) =
+        blockcell_tools::shell_actions::canonical_shell_args(&call.name, &call.arguments)
+    else {
+        return call.clone();
+    };
+    let mut canonical = call.clone();
+    canonical.name = "shell".to_string();
+    canonical.arguments = args;
+    canonical
+}
+
+#[cfg(test)]
+mod shell_wrapper_tests {
+    use super::canonicalize_shell_tool_call;
+    use blockcell_core::types::ToolCallRequest;
+    use serde_json::json;
+
+    #[test]
+    fn canonicalization_keeps_call_id_for_original_wrapper_result() {
+        let original = ToolCallRequest {
+            id: "call-123".to_string(),
+            name: "shell_run".to_string(),
+            arguments: json!({"command":"echo hi"}),
+            thought_signature: None,
+        };
+        let canonical = canonicalize_shell_tool_call(&original);
+        assert_eq!(canonical.id, original.id);
+        assert_eq!(canonical.name, "shell");
+        assert_eq!(canonical.arguments["action"], "run");
+        assert_eq!(original.name, "shell_run");
+    }
+}
+
 /// 单次工具调用在管线中流动的状态。
 pub(crate) struct ToolInvocation<'a> {
     pub(crate) call: &'a ToolCallRequest,
@@ -193,6 +227,7 @@ impl AgentRuntime {
         active_skill_dir: Option<PathBuf>,
         prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolCallOutput {
+        let original_name = tool_call.name.clone();
         // 预取阶段已触发过 tool/pre-execute：以（可能被 listener 改写后的）
         // 预取参数为准并跳过重复触发，保证 hook 每次调用只执行一次且
         // 后续准入检查作用于同一组参数。
@@ -201,6 +236,14 @@ impl AgentRuntime {
             .as_ref()
             .map(|prefetched| prefetched.args.clone())
             .unwrap_or_else(|| tool_call.arguments.clone());
+        if let Some(canonical_args) =
+            blockcell_tools::shell_actions::canonical_shell_args(&original_name, &args)
+        {
+            args = canonical_args;
+        }
+        let mut canonical_call = canonicalize_shell_tool_call(tool_call);
+        canonical_call.arguments = args.clone();
+        let tool_call = &canonical_call;
         if tool_call.name == "shell" {
             args = blockcell_tools::shell_session::normalize_shell_args(args);
         }
