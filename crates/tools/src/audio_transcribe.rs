@@ -704,6 +704,7 @@ mod tests {
     fn p3_tilde_prefix_is_a_relative_filename() {
         let ctx = crate::ToolContext {
             workspace: std::env::temp_dir(),
+            sandbox_writable_roots: None,
             base: std::env::temp_dir(),
             builtin_skills_dir: None,
             active_skill_dir: None,

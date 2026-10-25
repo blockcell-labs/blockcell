@@ -84,6 +84,7 @@ mod tests {
     fn tool_context(search: Option<Arc<dyn crate::SessionSearchOps + Send + Sync>>) -> ToolContext {
         ToolContext {
             workspace: PathBuf::from("/tmp/workspace"),
+            sandbox_writable_roots: None,
             base: PathBuf::from("/tmp/blockcell"),
             builtin_skills_dir: None,
             active_skill_dir: None,

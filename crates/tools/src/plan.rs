@@ -231,6 +231,7 @@ mod tests {
         let workspace = std::env::temp_dir();
         ToolContext {
             workspace: workspace.clone(),
+            sandbox_writable_roots: None,
             base: workspace,
             builtin_skills_dir: None,
             active_skill_dir: None,

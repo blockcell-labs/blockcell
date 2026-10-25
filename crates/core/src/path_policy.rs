@@ -250,6 +250,26 @@ impl PathPolicy {
         self.config.default_policy
     }
 
+    /// Paths explicitly allowed for writes, resolved for use as sandbox roots.
+    pub fn allowed_write_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        for rule in &self.config.rules {
+            if rule.action != PolicyAction::Allow || !rule.ops.contains(&PathOp::Write) {
+                continue;
+            }
+            for path in &rule.paths {
+                let root = resolve_for_policy(&expand_tilde(path));
+                if root.parent().is_some()
+                    && self.evaluate(&root, PathOp::Write) == PolicyAction::Allow
+                    && !roots.contains(&root)
+                {
+                    roots.push(root);
+                }
+            }
+        }
+        roots
+    }
+
     /// Returns the prefix length (in bytes) of the best-matching rule for the given
     /// action type, or `None` if no rule matches.
     fn best_match_len(&self, resolved: &Path, op: PathOp, action: PolicyAction) -> Option<usize> {

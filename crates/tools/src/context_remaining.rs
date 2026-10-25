@@ -71,6 +71,7 @@ mod tests {
     fn context(config: Config) -> crate::ToolContext {
         crate::ToolContext {
             workspace: std::env::temp_dir(),
+            sandbox_writable_roots: None,
             base: std::env::temp_dir(),
             builtin_skills_dir: None,
             active_skill_dir: None,

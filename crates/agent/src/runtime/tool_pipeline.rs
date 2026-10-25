@@ -3,7 +3,7 @@
 //! ```text
 //! ToolCall
 //!  → admission: Toggle → tool/pre-execute（listener 可改写参数或拒绝）
-//!               → Policy → DangerousOperation → PathAccess → ExplicitConfirmation
+//!               → Policy → DangerousOperation → PathAccess → FileObservation → ExplicitConfirmation
 //!  → tool/call（任一阶段拒绝则直接记录 outcome=rejected 的 tool/result）
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
@@ -18,6 +18,20 @@ use super::tool_exec::{
     full_access_retry_args, shell_action_is_run, shell_sandbox_escalation_reason,
 };
 use super::*;
+use blockcell_core::config::ApprovalPolicy;
+use blockcell_core::path_policy::{resolve_for_policy, PathOp, PolicyAction};
+use blockcell_tools::tool_guard::requires_human_confirmation;
+
+fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(FileVersion {
+            len: metadata.len(),
+            modified: metadata.modified()?,
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
 
 /// 单次工具调用在管线中流动的状态。
 pub(crate) struct ToolInvocation<'a> {
@@ -58,20 +72,48 @@ enum AdmissionStage {
     Policy,
     DangerousOperation,
     PathAccess,
+    FileObservation,
     /// 工具声明 [`blockcell_tools::Tool::requires_confirmation`] 时要求用户显式确认（P2-3）。
     /// 判定依据是"是否需要确认"这一声明，而非执行环境，也不是硬编码的工具名。
     ExplicitConfirmation,
 }
 
 /// pre-execute 必须先于所有安全检查，确保检查的是 listener 改写后的最终参数。
-const ADMISSION_STAGES: [AdmissionStage; 6] = [
+const ADMISSION_STAGES: [AdmissionStage; 7] = [
     AdmissionStage::Toggle,
     AdmissionStage::PreExecute,
     AdmissionStage::Policy,
     AdmissionStage::DangerousOperation,
     AdmissionStage::PathAccess,
+    AdmissionStage::FileObservation,
     AdmissionStage::ExplicitConfirmation,
 ];
+
+fn workspace_auto_command(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    let field = |key: &str| args.get(key).and_then(|value| value.as_str()).unwrap_or("");
+    match tool_name {
+        "exec" => args
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        "shell" => match args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("run")
+        {
+            "run" => args
+                .get("command")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            "write_stdin" => Some(blockcell_tools::shell_session::preview_session_stdin(
+                field("session_id"),
+                field("input"),
+            )),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 // Registered memory-writing tools. `auto_memory` is a background subsystem,
 // not a tool in the registry, so it must not appear here (a dead entry makes
@@ -155,13 +197,35 @@ impl AgentRuntime {
         // 预取参数为准并跳过重复触发，保证 hook 每次调用只执行一次且
         // 后续准入检查作用于同一组参数。
         let pre_execute_done = prefetched.is_some();
+        let mut args = prefetched
+            .as_ref()
+            .map(|prefetched| prefetched.args.clone())
+            .unwrap_or_else(|| tool_call.arguments.clone());
+        if tool_call.name == "shell" {
+            args = blockcell_tools::shell_session::normalize_shell_args(args);
+        }
+        if tool_call.name == "shell"
+            && args
+                .get("action")
+                .and_then(|value| value.as_str())
+                .unwrap_or("run")
+                == "run"
+        {
+            if let Some(object) = args.as_object_mut() {
+                if !object.contains_key("sandbox_policy") {
+                    if let Some(policy) = &self.config.tools.exec.sandbox_policy {
+                        object.insert(
+                            "sandbox_policy".to_string(),
+                            serde_json::Value::String(policy.clone()),
+                        );
+                    }
+                }
+            }
+        }
         let mut inv = ToolInvocation {
             call: tool_call,
             msg,
-            args: prefetched
-                .as_ref()
-                .map(|prefetched| prefetched.args.clone())
-                .unwrap_or_else(|| tool_call.arguments.clone()),
+            args,
             policy_confirmed: false,
             dangerous_confirmed: false,
         };
@@ -183,7 +247,20 @@ impl AgentRuntime {
         )
         .await;
 
-        let ctx = self.build_tool_context(msg, active_skill_dir);
+        let mut ctx = self.build_tool_context(msg, active_skill_dir);
+        if inv.call.name == "exec" {
+            if let Some(working_dir) = inv.args.get("working_dir").and_then(|value| value.as_str())
+            {
+                let root = resolve_for_policy(&self.resolve_path(working_dir));
+                if self.path_policy.evaluate(&root, PathOp::Write) != PolicyAction::Deny {
+                    if let Some(roots) = ctx.sandbox_writable_roots.as_mut() {
+                        if !roots.contains(&root) {
+                            roots.push(root);
+                        }
+                    }
+                }
+            }
+        }
         let outcome = self.execute_guarded_tool(&mut inv, ctx, prefetched).await;
 
         self.after_tool_execute(&inv, &outcome).await;
@@ -218,6 +295,7 @@ impl AgentRuntime {
                 AdmissionStage::Policy => self.guard_tool_policy(inv).await,
                 AdmissionStage::DangerousOperation => self.guard_dangerous_operation(inv).await,
                 AdmissionStage::PathAccess => self.guard_path_access(inv).await,
+                AdmissionStage::FileObservation => self.guard_file_observation(inv),
                 AdmissionStage::ExplicitConfirmation => self.guard_explicit_confirmation(inv).await,
             }?;
         }
@@ -400,7 +478,28 @@ impl AgentRuntime {
             return Ok(());
         }
         let tool_name = inv.call.name.as_str();
+        let approval_policy =
+            ApprovalPolicy::parse(self.config.tools.exec.approval_policy.as_deref())
+                .map_err(|error| error.to_string())?;
+        let workspace_auto = approval_policy == ApprovalPolicy::WorkspaceAuto
+            && matches!(tool_name, "exec" | "shell" | "file_ops");
         let mut items = dangerous_operation_items(tool_name, &inv.args);
+        if workspace_auto {
+            if workspace_auto_command(tool_name, &inv.args)
+                .as_deref()
+                .is_some_and(requires_human_confirmation)
+                || self.workspace_auto_deletes_root(inv)
+            {
+                return Err(self.workspace_auto_denial(tool_name));
+            }
+            if items.is_empty() {
+                return Ok(());
+            }
+            if self.workspace_auto_can_approve(inv) {
+                return Ok(());
+            }
+            return Err(self.workspace_auto_denial(tool_name));
+        }
         if items.is_empty() {
             return Ok(());
         }
@@ -445,11 +544,90 @@ impl AgentRuntime {
         .map_err(|reason| crate::error::path_access_denied(&inv.call.name, &reason))
     }
 
+    fn guard_file_observation(&self, inv: &ToolInvocation<'_>) -> GuardResult {
+        if !matches!(inv.call.name.as_str(), "edit_file" | "write_file") {
+            return Ok(());
+        }
+        let Some(path_str) = inv.args.get("path").and_then(serde_json::Value::as_str) else {
+            return Ok(());
+        };
+        let path = self.resolve_observed_file_path(path_str);
+        let current = file_version(&path);
+        if inv.call.name == "write_file" && current.as_ref().is_ok_and(|version| version.is_none())
+        {
+            return Ok(());
+        }
+
+        let key = (inv.msg.session_key(), path.clone());
+        let observed = self
+            .file_observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entries
+            .get(&key)
+            .copied();
+        match observed {
+            None => Err(serde_json::json!({
+                "error": format!(
+                    "FS_NOT_OBSERVED: {} has not been read in this session — read_file it, then retry",
+                    path.display()
+                ),
+                "code": "FS_NOT_OBSERVED"
+            })
+            .to_string()),
+            Some(observed) if current.ok().flatten() != Some(observed) => {
+                Err(serde_json::json!({
+                    "error": format!(
+                        "FS_STALE_VERSION: {} changed since you last read it — read_file it again, then retry",
+                        path.display()
+                    ),
+                    "code": "FS_STALE_VERSION"
+                })
+                .to_string())
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    fn resolve_observed_file_path(&self, path: &str) -> PathBuf {
+        let path = self.resolve_path(path);
+        path.canonicalize().unwrap_or(path)
+    }
+
+    fn update_file_observation(&self, session_key: &str, path: &str) {
+        const MAX_FILE_OBSERVATIONS: usize = 4096;
+
+        let path = self.resolve_observed_file_path(path);
+        let Ok(Some(version)) = file_version(&path) else {
+            return;
+        };
+        let key = (session_key.to_string(), path);
+        let mut state = self
+            .file_observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.order.retain(|existing| existing != &key);
+        state.order.push_back(key.clone());
+        state.entries.insert(key, version);
+        while state.entries.len() > MAX_FILE_OBSERVATIONS {
+            if let Some(oldest) = state.order.pop_front() {
+                state.entries.remove(&oldest);
+            }
+        }
+    }
+
     /// 工具声明"本次调用需要用户显式确认"（如 `sandbox_policy=full-access` 的 shell）时，
     /// 先确认再执行。判定依据来自工具自身的 [`blockcell_tools::Tool::requires_confirmation`]
     /// 声明，而非执行环境，也不是硬编码工具名——环境是描述性的，只有需要确认才拦截。
     async fn guard_explicit_confirmation(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
         if inv.policy_confirmed || inv.dangerous_confirmed {
+            return Ok(());
+        }
+        if matches!(inv.call.name.as_str(), "exec" | "shell")
+            && ApprovalPolicy::parse(self.config.tools.exec.approval_policy.as_deref())
+                .map_err(|error| error.to_string())?
+                == ApprovalPolicy::WorkspaceAuto
+        {
             return Ok(());
         }
         if !self
@@ -494,6 +672,100 @@ impl AgentRuntime {
         }
     }
 
+    fn workspace_auto_can_approve(&self, inv: &ToolInvocation<'_>) -> bool {
+        let accesses = super::path_security::extract_path_accesses(&inv.call.name, &inv.args);
+        if accesses.is_empty() {
+            return false;
+        }
+        let session_key = persist_session_key_for(inv.msg);
+        accesses.iter().all(|access| {
+            let resolved = self.resolve_path(&access.path);
+            let action = self.path_policy.evaluate(&resolved, access.op);
+            action != PolicyAction::Deny
+                && (self.is_path_safe(&resolved)
+                    || self.is_path_authorized(&resolved, access.op, &session_key)
+                    || action == PolicyAction::Allow)
+        })
+    }
+
+    fn workspace_auto_deletes_root(&self, inv: &ToolInvocation<'_>) -> bool {
+        let tool_name = inv.call.name.as_str();
+        let mut targets = Vec::new();
+        match tool_name {
+            "file_ops"
+                if inv.args.get("action").and_then(|value| value.as_str()) == Some("delete") =>
+            {
+                if let Some(path) = inv.args.get("path").and_then(|value| value.as_str()) {
+                    targets.push((path.to_string(), PathOp::Write));
+                }
+                if let Some(paths) = inv.args.get("paths").and_then(|value| value.as_array()) {
+                    targets.extend(paths.iter().filter_map(|value| {
+                        value.as_str().map(|path| (path.to_string(), PathOp::Read))
+                    }));
+                }
+            }
+            "exec" | "shell" => {
+                let Some(command) = workspace_auto_command(tool_name, &inv.args) else {
+                    return false;
+                };
+                if !command
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|word| matches!(word, "rm" | "rmdir" | "trash" | "unlink"))
+                {
+                    return false;
+                }
+                let mut accesses =
+                    super::path_security::extract_path_accesses(tool_name, &inv.args);
+                if tool_name == "exec"
+                    && inv
+                        .args
+                        .get("working_dir")
+                        .and_then(|value| value.as_str())
+                        .is_some()
+                    && !accesses.is_empty()
+                {
+                    accesses.remove(0);
+                }
+                targets.extend(accesses.into_iter().map(|access| (access.path, access.op)));
+            }
+            _ => return false,
+        }
+
+        let workspace_root = resolve_for_policy(&self.paths.workspace());
+        let session_key = persist_session_key_for(inv.msg);
+        let authorized_dirs = self
+            .authorized_dirs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        targets.into_iter().any(|(path, op)| {
+            let resolved = resolve_for_policy(&self.resolve_path(&path));
+            resolved == workspace_root
+                || authorized_dirs.iter().any(|(key, root, authorized_op)| {
+                    key == &session_key && *authorized_op == op && root == &resolved
+                })
+        })
+    }
+
+    fn workspace_auto_denial(&self, tool_name: &str) -> String {
+        let denial = if matches!(tool_name, "exec" | "shell") {
+            dangerous_exec_denied(tool_name, self.confirm_tx.is_some())
+        } else {
+            dangerous_file_ops_denied()
+        };
+        let mut payload = serde_json::from_str::<serde_json::Value>(&denial)
+            .unwrap_or_else(|_| serde_json::json!({"error": denial}));
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "hint".to_string(),
+                serde_json::Value::String(
+                    "approvalPolicy=workspace-auto only auto-approves workspace-internal operations; use workspace paths or ask the user."
+                        .to_string(),
+                ),
+            );
+        }
+        payload.to_string()
+    }
+
     async fn dispatch_tool_pre_execute(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
         let mut event = AgentEvent::ToolPreExecute {
             tool_name: inv.call.name.clone(),
@@ -520,6 +792,33 @@ impl AgentRuntime {
             })
             .to_string()),
         }
+    }
+
+    pub(super) fn sandbox_writable_roots_for_session(&self, session_key: &str) -> Vec<PathBuf> {
+        let mut roots = vec![resolve_for_policy(&self.paths.workspace())];
+        roots.extend(self.path_policy.allowed_write_roots());
+        let authorized_dirs = self
+            .authorized_dirs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        roots.extend(
+            authorized_dirs
+                .iter()
+                .filter(|(key, _, op)| {
+                    key == session_key && matches!(op, PathOp::Write | PathOp::Exec)
+                })
+                .map(|(_, root, _)| root.clone())
+                .filter(|root| {
+                    self.path_policy.evaluate(root, PathOp::Write) != PolicyAction::Deny
+                }),
+        );
+        roots.retain(|root| {
+            root.parent().is_some()
+                && self.path_policy.evaluate(root, PathOp::Write) != PolicyAction::Deny
+        });
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
     pub(crate) fn build_tool_context(
@@ -561,6 +860,9 @@ impl AgentRuntime {
 
         blockcell_tools::ToolContext {
             workspace: self.paths.workspace(),
+            sandbox_writable_roots: Some(
+                self.sandbox_writable_roots_for_session(&persist_session_key_for(msg)),
+            ),
             base: self.paths.base.clone(),
             builtin_skills_dir: Some(self.paths.builtin_skills_dir()),
             active_skill_dir,
@@ -724,6 +1026,15 @@ impl AgentRuntime {
 
         if outcome.is_error() {
             return;
+        }
+
+        if matches!(
+            tool_call.name.as_str(),
+            "read_file" | "write_file" | "edit_file"
+        ) {
+            if let Some(path) = inv.args.get("path").and_then(serde_json::Value::as_str) {
+                self.update_file_observation(&inv.msg.session_key(), path);
+            }
         }
 
         // Detect writes to the skills directory and trigger hot-reload + Dashboard refresh

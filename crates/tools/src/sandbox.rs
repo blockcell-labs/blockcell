@@ -1,10 +1,11 @@
 use blockcell_core::{Error, Result};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command as StdCommand;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -43,6 +44,7 @@ impl SandboxPolicy {
 pub enum SandboxBackend {
     FullAccess,
     MacOsSeatbelt,
+    LinuxBubblewrap,
     LinuxLandlockSeccomp,
     ApprovalRequired,
 }
@@ -50,6 +52,7 @@ pub enum SandboxBackend {
 pub fn select_backend(
     os: &str,
     seatbelt_available: bool,
+    bwrap_available: bool,
     _landlock_abi: Option<i32>,
     policy: SandboxPolicy,
 ) -> SandboxBackend {
@@ -58,19 +61,18 @@ pub fn select_backend(
     }
     match os {
         "macos" if seatbelt_available => SandboxBackend::MacOsSeatbelt,
-        // The current Landlock rules constrain writes but do not protect
-        // credential reads. Do not advertise this as an enforced sandbox.
-        // Use the existing explicit-approval fallback until read isolation is
-        // implemented and verified on Linux.
+        "linux" if bwrap_available => SandboxBackend::LinuxBubblewrap,
         "linux" => SandboxBackend::ApprovalRequired,
         _ => SandboxBackend::ApprovalRequired,
     }
 }
 
 pub fn native_backend(policy: SandboxPolicy) -> SandboxBackend {
+    let bwrap_available = policy != SandboxPolicy::FullAccess && *BWRAP_AVAILABLE;
     select_backend(
         std::env::consts::OS,
         *SEATBELT_AVAILABLE,
+        bwrap_available,
         landlock_abi(),
         policy,
     )
@@ -93,6 +95,38 @@ static SEATBELT_AVAILABLE: Lazy<bool> = Lazy::new(|| {
     }
 });
 
+static BWRAP_AVAILABLE: Lazy<bool> = Lazy::new(|| {
+    #[cfg(target_os = "linux")]
+    {
+        let available = StdCommand::new("bwrap")
+            .args([
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "true",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !available {
+            tracing::warn!(
+                "Bubblewrap is unavailable; install bubblewrap to enable Linux workspace-write sandboxing"
+            );
+        }
+        available
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+});
+
 pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf]) -> Result<String> {
     // 行序即优先级：SBPL 中**后出现的匹配规则胜出**（见 com.apple.writeconfig.sb /
     // CryptegraftService.sb 等 Apple 官方 profile 的写法），所以必须
@@ -108,17 +142,7 @@ pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf])
     );
     profile.push_str(&seatbelt_sensitive_read_denies()?);
     if policy == SandboxPolicy::WorkspaceWrite {
-        let mut temp_roots = vec![PathBuf::from("/private/tmp"), PathBuf::from("/tmp")];
-        let env_temp = std::env::temp_dir();
-        if let Ok(canon_temp) = env_temp.canonicalize() {
-            if !temp_roots.contains(&canon_temp) {
-                temp_roots.push(canon_temp);
-            }
-        }
-        if !temp_roots.contains(&env_temp) {
-            temp_roots.push(env_temp);
-        }
-        for temp_root in &temp_roots {
+        for temp_root in &workspace_write_temp_roots() {
             let escaped = escape_seatbelt_path(temp_root)?;
             profile.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
@@ -135,16 +159,16 @@ pub fn build_seatbelt_profile(policy: SandboxPolicy, writable_roots: &[PathBuf])
     Ok(profile)
 }
 
-/// 受限策略（ReadOnly / WorkspaceWrite）下禁止读取的凭据与敏感系统文件。
-/// 对应 `PathPolicy::builtin_sensitive_paths` 中的凭据目录，以及 shadow/sudoers 等
-/// 系统密钥文件——全局 `(allow file-read*)` 只放行其余非敏感路径。
-fn seatbelt_sensitive_read_denies() -> Result<String> {
-    let mut rules = String::new();
-    let mut subpaths: Vec<PathBuf> = Vec::new();
-    let mut literals: Vec<PathBuf> = vec![
-        PathBuf::from("/etc/shadow"),
-        PathBuf::from("/etc/sudoers"),
-        PathBuf::from("/etc/master.passwd"),
+enum SensitiveReadPath {
+    Directory(PathBuf),
+    File(PathBuf),
+}
+
+fn sensitive_read_paths() -> Vec<SensitiveReadPath> {
+    let mut paths = vec![
+        SensitiveReadPath::File(PathBuf::from("/etc/shadow")),
+        SensitiveReadPath::File(PathBuf::from("/etc/sudoers")),
+        SensitiveReadPath::File(PathBuf::from("/etc/master.passwd")),
     ];
     if let Some(home) = dirs::home_dir() {
         for dir in [
@@ -155,23 +179,107 @@ fn seatbelt_sensitive_read_denies() -> Result<String> {
             ".azure",
             ".config/gcloud",
         ] {
-            subpaths.push(home.join(dir));
+            paths.push(SensitiveReadPath::Directory(home.join(dir)));
         }
-        literals.push(home.join(".netrc"));
+        paths.push(SensitiveReadPath::File(home.join(".netrc")));
     }
-    for path in &subpaths {
-        rules.push_str(&format!(
-            "(deny file-read* (subpath \"{}\"))\n",
-            escape_seatbelt_path(path)?
-        ));
-    }
-    for path in &literals {
-        rules.push_str(&format!(
-            "(deny file-read* (literal \"{}\"))\n",
-            escape_seatbelt_path(path)?
-        ));
+    paths
+}
+
+/// 受限策略（ReadOnly / WorkspaceWrite）下禁止读取的凭据与敏感系统文件。
+/// 对应 `PathPolicy::builtin_sensitive_paths` 中的凭据目录，以及 shadow/sudoers 等
+/// 系统密钥文件——全局 `(allow file-read*)` 只放行其余非敏感路径。
+fn seatbelt_sensitive_read_denies() -> Result<String> {
+    let mut rules = String::new();
+    for sensitive_path in sensitive_read_paths() {
+        match sensitive_path {
+            SensitiveReadPath::Directory(path) => rules.push_str(&format!(
+                "(deny file-read* (subpath \"{}\"))\n",
+                escape_seatbelt_path(&path)?
+            )),
+            SensitiveReadPath::File(path) => rules.push_str(&format!(
+                "(deny file-read* (literal \"{}\"))\n",
+                escape_seatbelt_path(&path)?
+            )),
+        }
     }
     Ok(rules)
+}
+
+fn workspace_write_temp_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/private/tmp"), PathBuf::from("/tmp")];
+    let env_temp = std::env::temp_dir();
+    if !roots.contains(&env_temp) {
+        roots.push(env_temp.clone());
+    }
+    if let Ok(canonical) = env_temp.canonicalize() {
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
+fn build_bubblewrap_args(
+    policy: SandboxPolicy,
+    writable_roots: &[PathBuf],
+    sensitive_paths: &[SensitiveReadPath],
+) -> Vec<OsString> {
+    let mut args = [
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--die-with-parent",
+        "--unshare-net",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+
+    if policy == SandboxPolicy::WorkspaceWrite {
+        let mut roots = workspace_write_temp_roots()
+            .into_iter()
+            .filter(|root| root.exists())
+            .collect::<Vec<_>>();
+        roots.extend_from_slice(writable_roots);
+        let mut mounted_roots = Vec::new();
+        for root in roots {
+            if !mounted_roots.contains(&root) {
+                mounted_roots.push(root.clone());
+            }
+            if let Ok(canonical) = root.canonicalize() {
+                if !mounted_roots.contains(&canonical) {
+                    mounted_roots.push(canonical);
+                }
+            }
+        }
+        mounted_roots.sort_by_key(|root| root.components().count());
+        for root in mounted_roots {
+            args.push(OsString::from("--bind"));
+            args.push(root.as_os_str().to_os_string());
+            args.push(root.into_os_string());
+        }
+    }
+
+    for sensitive_path in sensitive_paths {
+        let path = match sensitive_path {
+            SensitiveReadPath::Directory(path) | SensitiveReadPath::File(path) => path,
+        };
+        if path.is_dir() {
+            args.push(OsString::from("--tmpfs"));
+            args.push(path.as_os_str().to_os_string());
+        } else if path.is_file() {
+            args.push(OsString::from("--ro-bind"));
+            args.push(OsString::from("/dev/null"));
+            args.push(path.as_os_str().to_os_string());
+        }
+    }
+
+    args
 }
 
 fn append_seatbelt_writable_root(profile: &mut String, root: &Path) -> Result<()> {
@@ -214,7 +322,7 @@ impl SandboxBackend {
     pub fn enforces(self, policy: SandboxPolicy) -> bool {
         match self {
             Self::FullAccess => policy == SandboxPolicy::FullAccess,
-            Self::MacOsSeatbelt | Self::LinuxLandlockSeccomp => true,
+            Self::MacOsSeatbelt | Self::LinuxBubblewrap | Self::LinuxLandlockSeccomp => true,
             Self::ApprovalRequired => false,
         }
     }
@@ -265,7 +373,7 @@ pub async fn prepare_sandboxed(
     Ok(handle)
 }
 
-/// 本机原生沙箱：macOS Seatbelt / Linux Landlock + seccomp；不可用时要求审批。
+/// 本机原生沙箱：macOS Seatbelt / Linux Bubblewrap；不可用时要求审批。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeSandboxProvider;
 
@@ -294,6 +402,19 @@ impl SandboxProvider for NativeSandboxProvider {
                 let profile = build_seatbelt_profile(policy, &writable_roots)?;
                 let mut command = Command::new("/usr/bin/sandbox-exec");
                 command.arg("-p").arg(profile).arg(&program).args(&args);
+                command
+            }
+            SandboxBackend::LinuxBubblewrap => {
+                let mut command = Command::new("bwrap");
+                command
+                    .args(build_bubblewrap_args(
+                        policy,
+                        &writable_roots,
+                        &sensitive_read_paths(),
+                    ))
+                    .arg("--")
+                    .arg(&program)
+                    .args(&args);
                 command
             }
             SandboxBackend::LinuxLandlockSeccomp => {
@@ -738,27 +859,38 @@ fn apply_network_seccomp() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
 
     #[test]
     fn native_backend_selection_degrades_to_approval_when_unavailable() {
         assert_eq!(
-            select_backend("macos", true, None, SandboxPolicy::WorkspaceWrite),
+            select_backend("macos", true, false, None, SandboxPolicy::WorkspaceWrite),
             SandboxBackend::MacOsSeatbelt
         );
         assert_eq!(
-            select_backend("linux", false, Some(3), SandboxPolicy::WorkspaceWrite),
+            select_backend("linux", false, true, Some(3), SandboxPolicy::WorkspaceWrite),
+            SandboxBackend::LinuxBubblewrap
+        );
+        assert_eq!(
+            select_backend(
+                "linux",
+                false,
+                false,
+                Some(3),
+                SandboxPolicy::WorkspaceWrite
+            ),
             SandboxBackend::ApprovalRequired
         );
         assert_eq!(
-            select_backend("windows", false, None, SandboxPolicy::WorkspaceWrite),
+            select_backend("windows", false, false, None, SandboxPolicy::WorkspaceWrite),
             SandboxBackend::ApprovalRequired
         );
         assert_eq!(
-            select_backend("macos", false, None, SandboxPolicy::WorkspaceWrite),
+            select_backend("macos", false, true, None, SandboxPolicy::WorkspaceWrite),
             SandboxBackend::ApprovalRequired
         );
         assert_eq!(
-            select_backend("linux", false, None, SandboxPolicy::FullAccess),
+            select_backend("linux", false, false, None, SandboxPolicy::FullAccess),
             SandboxBackend::FullAccess
         );
     }
@@ -803,6 +935,190 @@ mod tests {
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
         }
+    }
+
+    fn workspace_write_request(command: &str, workspace: &Path) -> ShellRequest {
+        ShellRequest {
+            agent_id: "sandbox-test".into(),
+            session_id: "sandbox-test".into(),
+            command: command.to_string(),
+            working_dir: workspace.to_path_buf(),
+            policy: SandboxPolicy::WorkspaceWrite,
+            writable_roots: vec![workspace.to_path_buf()],
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4096,
+        }
+    }
+
+    fn bubblewrap_available_for_test() -> bool {
+        if native_backend(SandboxPolicy::WorkspaceWrite) == SandboxBackend::LinuxBubblewrap {
+            true
+        } else {
+            eprintln!("skipping Bubblewrap integration test: Linux Bubblewrap backend unavailable");
+            false
+        }
+    }
+
+    fn contains_args(args: &[OsString], expected: &[&str]) -> bool {
+        args.windows(expected.len()).any(|window| {
+            window
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual == expected)
+        })
+    }
+
+    #[test]
+    fn bubblewrap_sandbox_args_bind_workspace_and_mask_sensitive_paths() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let sensitive_dir = tempfile::tempdir().expect("sensitive directory");
+        let sensitive_file = tempfile::NamedTempFile::new().expect("sensitive file");
+        let sensitive_paths = [
+            SensitiveReadPath::Directory(sensitive_dir.path().to_path_buf()),
+            SensitiveReadPath::File(sensitive_file.path().to_path_buf()),
+        ];
+        let args = build_bubblewrap_args(
+            SandboxPolicy::WorkspaceWrite,
+            &[workspace.path().to_path_buf()],
+            &sensitive_paths,
+        );
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        let sensitive_dir = sensitive_dir.path().to_string_lossy().into_owned();
+        let sensitive_file = sensitive_file.path().to_string_lossy().into_owned();
+
+        assert!(contains_args(
+            &args,
+            &["--bind", workspace.as_str(), workspace.as_str()]
+        ));
+        assert!(contains_args(&args, &["--tmpfs", sensitive_dir.as_str()]));
+        assert!(contains_args(
+            &args,
+            &["--ro-bind", "/dev/null", sensitive_file.as_str()]
+        ));
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(args.iter().any(|arg| arg == "--die-with-parent"));
+    }
+
+    #[tokio::test]
+    async fn linux_bubblewrap_sandbox_allows_writes_inside_workspace() {
+        if !bubblewrap_available_for_test() {
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let target = workspace.path().join("inside.txt");
+        let command = format!("printf inside > '{}'", target.display());
+        let output = LocalShellExecutor::default()
+            .execute(workspace_write_request(&command, workspace.path()))
+            .await
+            .expect("execute in Bubblewrap");
+
+        assert_eq!(
+            output.exit_code,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).expect("read workspace output"),
+            "inside"
+        );
+    }
+
+    #[tokio::test]
+    async fn linux_bubblewrap_sandbox_denies_writes_outside_workspace() {
+        if !bubblewrap_available_for_test() {
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let home = dirs::home_dir().expect("home directory");
+        let outside = tempfile::tempdir_in(home).expect("temp dir outside workspace");
+        let target = outside.path().join("outside-xyz");
+        let command = format!("printf outside > '{}'", target.display());
+        let output = LocalShellExecutor::default()
+            .execute(workspace_write_request(&command, workspace.path()))
+            .await
+            .expect("execute outside-write check");
+
+        assert_ne!(
+            output.exit_code,
+            Some(0),
+            "outside write unexpectedly succeeded"
+        );
+        assert!(!target.exists(), "outside target was created");
+    }
+
+    #[tokio::test]
+    async fn linux_bubblewrap_exec_can_write_only_to_additional_root() {
+        if !bubblewrap_available_for_test() {
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let home = dirs::home_dir().expect("home directory");
+        let allowed = tempfile::tempdir_in(&home).expect("allowed root outside workspace");
+        let denied = tempfile::tempdir_in(home).expect("denied root outside workspace");
+        let allowed_target = allowed.path().join("result.csv");
+        let denied_target = denied.path().join("outside-xyz");
+        let command = format!(
+            "printf result > '{}' && printf denied > '{}'",
+            allowed_target.display(),
+            denied_target.display()
+        );
+        let output = LocalShellExecutor::default()
+            .execute(ShellRequest {
+                agent_id: "sandbox-test".into(),
+                session_id: "sandbox-test-extra-root".into(),
+                command,
+                working_dir: allowed.path().to_path_buf(),
+                policy: SandboxPolicy::WorkspaceWrite,
+                writable_roots: vec![workspace.path().to_path_buf(), allowed.path().to_path_buf()],
+                timeout: std::time::Duration::from_secs(5),
+                max_output_bytes: 4096,
+            })
+            .await
+            .expect("execute additional-root check");
+
+        assert_ne!(
+            output.exit_code,
+            Some(0),
+            "non-allowed write unexpectedly succeeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(allowed_target).expect("read allowed output"),
+            "result"
+        );
+        assert!(!denied_target.exists(), "non-allowed target was created");
+    }
+
+    #[tokio::test]
+    async fn linux_bubblewrap_sandbox_masks_sensitive_files() {
+        if !bubblewrap_available_for_test() {
+            return;
+        }
+        let sensitive = Path::new("/etc/shadow");
+        if !sensitive.is_file()
+            || std::fs::metadata(sensitive)
+                .map(|metadata| metadata.len() == 0)
+                .unwrap_or(true)
+        {
+            eprintln!("skipping sensitive-file check: /etc/shadow is unavailable or empty");
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let output = LocalShellExecutor::default()
+            .execute(workspace_write_request(
+                "if [ -s /etc/shadow ]; then printf readable; else printf masked; fi",
+                workspace.path(),
+            ))
+            .await
+            .expect("execute sensitive-file check");
+
+        assert_eq!(
+            output.exit_code,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "masked");
     }
 
     #[tokio::test]

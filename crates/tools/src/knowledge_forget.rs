@@ -491,6 +491,7 @@ mod tests {
     ) -> ToolContext {
         ToolContext {
             workspace: paths.workspace(),
+            sandbox_writable_roots: None,
             base: paths.base.clone(),
             builtin_skills_dir: None,
             active_skill_dir: None,

@@ -19,7 +19,7 @@ use crate::ToolContext;
 
 static DANGEROUS_EXEC_DIRECT_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
-        r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)(?:rm|trash|unlink)\b",
+        r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)(?:trash|unlink)\b",
         r"(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:sudo|env)\s+\\*)rmdir\b",
         r"\bfind\b[\s\S]*\s-delete\b",
         r"\bfind\b[\s\S]*\s-exec\s+rm\b",
@@ -41,6 +41,14 @@ static DANGEROUS_EXEC_RM_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static DANGEROUS_EXEC_KILL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bkill\s+\S").expect("dangerous exec kill regex is valid"));
+static ALWAYS_CONFIRM_DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(^|[;&|]\s*|\$\(\s*|`\s*|\\+\s*|\b(?:env)\s+\\*)(?:rm|rmdir|trash|unlink)\b([^;&|]*)",
+    )
+    .expect("always-confirm delete regex is valid")
+});
+static SUDO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsudo\b").expect("sudo regex is valid"));
 
 pub fn is_dangerous_exec_command(command: &str) -> bool {
     let c = command.to_lowercase();
@@ -67,19 +75,21 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
                             && flags.chars().any(|flag| flag == 'r' || flag == 'R')
                     })
             });
-            let has_force = tokens.iter().any(|token| {
-                *token == "--force"
-                    || token.strip_prefix('-').is_some_and(|flags| {
-                        !flags.starts_with('-') && flags.chars().any(|flag| flag == 'f')
-                    })
-            });
             let has_target = tokens
                 .iter()
                 .any(|token| !token.starts_with('-') && !token.is_empty());
-            if has_target && (has_recursive || has_force) {
+            let targets: Vec<&str> = tokens
+                .iter()
+                .copied()
+                .filter(|token| !token.starts_with('-') && !token.is_empty())
+                .collect();
+            if has_recursive || !has_target {
                 return true;
             }
-            if has_target && suffix.contains("../") {
+            if targets
+                .iter()
+                .any(|target| !is_plain_relative_rm_target(target))
+            {
                 return true;
             }
         }
@@ -100,6 +110,60 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
     ];
 
     dangerous.iter().any(|p| c.contains(p))
+}
+
+pub fn requires_human_confirmation(command: &str) -> bool {
+    let command = command.to_lowercase();
+    if SUDO_RE.is_match(&command)
+        || DANGEROUS_EXEC_KILL_RE.is_match(&command)
+        || [
+            "pkill",
+            "killall",
+            "taskkill",
+            "systemctl stop",
+            "service stop",
+            "launchctl bootout",
+            "launchctl kill",
+        ]
+        .iter()
+        .any(|pattern| command.contains(pattern))
+    {
+        return true;
+    }
+
+    ALWAYS_CONFIRM_DELETE_RE
+        .captures_iter(&command)
+        .any(|caps| {
+            caps.get(2)
+                .map(|suffix| suffix.as_str())
+                .unwrap_or("")
+                .split_whitespace()
+                .filter(|target| !target.starts_with('-'))
+                .any(is_always_confirm_delete_target)
+        })
+}
+
+fn is_plain_relative_rm_target(target: &str) -> bool {
+    let target = target.trim_matches(|c| c == '\'' || c == '"');
+    !target.starts_with('/')
+        && !target.starts_with('~')
+        && !target.contains("..")
+        && target != "."
+        && target != "*"
+        && !target
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']'))
+        && !target.contains('$')
+        && !target.contains('`')
+}
+
+fn is_always_confirm_delete_target(target: &str) -> bool {
+    let target = target.trim_matches(|c| c == '\'' || c == '"');
+    matches!(target, "/" | "~" | "." | ".." | "./" | "*" | "/*")
+        || target.starts_with("~/")
+        || target.contains("..")
+        || target.contains('$')
+        || target.contains('`')
 }
 
 pub fn is_sensitive_filename(path: &str) -> bool {
@@ -323,6 +387,7 @@ mod tests {
     fn tool_context(base: &std::path::Path) -> ToolContext {
         ToolContext {
             workspace: base.to_path_buf(),
+            sandbox_writable_roots: None,
             base: base.to_path_buf(),
             builtin_skills_dir: None,
             active_skill_dir: None,
@@ -430,6 +495,43 @@ mod tests {
                 "expected `{cmd}` to require confirmation"
             );
         }
+    }
+
+    #[test]
+    fn dangerous_exec_classifier_allows_plain_nonrecursive_force_rm() {
+        for command in ["rm -f build.log", "rm -f a/b.txt", "rm build.log"] {
+            assert!(
+                !is_dangerous_exec_command(command),
+                "unexpectedly dangerous: {command}"
+            );
+        }
+
+        for command in [
+            "rm -rf dist",
+            "rm -f ../x",
+            "rm -f /etc/x",
+            "rm -f ~/x",
+            "rm -f $X",
+            "kill 123",
+        ] {
+            assert!(
+                is_dangerous_exec_command(command),
+                "expected dangerous: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn human_confirmation_classifier_catches_unbounded_operations() {
+        for command in [
+            "rm -rf /", "rm -rf ~", "rm -rf .", "rm -rf *", "sudo ls", "pkill x",
+        ] {
+            assert!(
+                requires_human_confirmation(command),
+                "expected human confirmation: {command}"
+            );
+        }
+        assert!(!requires_human_confirmation("rm -rf dist"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ async fn execute_memory_create_via_tool(
 
     let ctx = blockcell_tools::ToolContext {
         workspace: agent_paths.workspace(),
+        sandbox_writable_roots: None,
         base: agent_paths.base.clone(),
         builtin_skills_dir: Some(state.paths.builtin_skills_dir()),
         active_skill_dir: None,

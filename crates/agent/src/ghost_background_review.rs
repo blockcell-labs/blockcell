@@ -713,6 +713,7 @@ fn review_tool_context_with_stores(
 ) -> Result<ToolContext> {
     Ok(ToolContext {
         workspace: paths.workspace(),
+        sandbox_writable_roots: None,
         base: paths.base.clone(),
         builtin_skills_dir: Some(paths.builtin_skills_dir()),
         active_skill_dir: None,

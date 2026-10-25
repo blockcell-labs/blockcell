@@ -242,6 +242,34 @@ fn apply_skill_fallback_response_keeps_non_empty_output() {
     );
 }
 
+#[tokio::test]
+async fn skill_tool_trace_summary_replaces_fallback_for_empty_response() {
+    let runtime = test_runtime_with_provider(Arc::new(SuccessfulFallbackProvider));
+    let trace = vec![ChatMessage::tool_result("call-1", "completed successfully")];
+    let summary = runtime
+        .summarize_skill_tool_trace("complete the task", &trace)
+        .await
+        .expect("non-empty summary");
+
+    assert_eq!(
+        apply_skill_fallback_response(summary, Some("fallback message")),
+        "fallback answer"
+    );
+}
+
+#[tokio::test]
+async fn skill_tool_trace_summary_keeps_fallback_without_tool_results() {
+    let runtime = test_runtime_with_provider(Arc::new(SuccessfulFallbackProvider));
+    assert!(runtime
+        .summarize_skill_tool_trace("complete the task", &[])
+        .await
+        .is_none());
+    assert_eq!(
+        apply_skill_fallback_response(String::new(), Some("fallback message")),
+        "fallback message"
+    );
+}
+
 #[test]
 fn extract_mcp_search_revealed_tools_reads_search_result_names() {
     let result = serde_json::json!({
@@ -1104,6 +1132,120 @@ fn test_runtime_with_path_policy(policy: &str) -> AgentRuntime {
     test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config)
 }
 
+#[test]
+fn sandbox_writable_roots_include_allowed_and_authorized_dirs_but_not_denied_paths() {
+    use blockcell_core::path_policy::PathOp;
+
+    let temp = tempfile::tempdir().expect("create sandbox roots temp dir");
+    let allowed = temp.path().join("allowed");
+    let authorized = temp.path().join("authorized");
+    let denied = temp.path().join("denied");
+    for path in [&allowed, &authorized, &denied] {
+        std::fs::create_dir_all(path).expect("create sandbox root");
+    }
+    let policy = serde_json::json!({
+        "version": 1,
+        "default_policy": "confirm",
+        "cache_confirmed_dirs": false,
+        "builtin_protected_paths": false,
+        "rules": [
+            {
+                "name": "allow-task-output",
+                "action": "allow",
+                "ops": ["write"],
+                "paths": [allowed],
+            },
+            {
+                "name": "deny-task-secret",
+                "action": "deny",
+                "ops": ["write"],
+                "paths": [denied],
+            }
+        ]
+    });
+    let mut runtime = test_runtime_with_path_policy(&policy.to_string());
+    let session_key = "cli:sandbox-writable-roots";
+    runtime.authorize_directory(&authorized, PathOp::Write, session_key);
+
+    let roots = runtime.sandbox_writable_roots_for_session(session_key);
+    assert!(roots.contains(&allowed));
+    assert!(roots.contains(&authorized));
+    assert!(!roots.contains(&denied));
+}
+
+#[tokio::test]
+async fn exec_uses_path_approved_working_dir_as_bubblewrap_writable_root() {
+    if blockcell_tools::sandbox::native_backend(
+        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
+    ) != blockcell_tools::sandbox::SandboxBackend::LinuxBubblewrap
+    {
+        eprintln!("skipping exec working-dir integration test: Bubblewrap unavailable");
+        return;
+    }
+
+    let temp = tempfile::tempdir_in("/tmp").expect("create temp root");
+    let allowed = temp.path().join("allowed-workdir");
+    std::fs::create_dir_all(&allowed).expect("create allow-write working directory");
+    let paths = Paths::with_base(temp.path().join("blockcell"));
+    paths.ensure_dirs().expect("create runtime paths");
+    let policy = serde_json::json!({
+        "version": 1,
+        "default_policy": "confirm",
+        "cache_confirmed_dirs": false,
+        "builtin_protected_paths": false,
+        "rules": [{
+            "name": "allow-working-directory-exec",
+            "action": "allow",
+            "ops": ["exec"],
+            "paths": [allowed],
+        }]
+    });
+    let policy_file = paths.path_access_file();
+    std::fs::write(&policy_file, policy.to_string()).expect("write path policy");
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.security.path_access.policy_file = policy_file.to_string_lossy().to_string();
+    let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
+        "test/mock",
+        "test",
+        Arc::new(TestProvider),
+    );
+    let mut runtime = AgentRuntime::new(
+        config,
+        paths,
+        provider_pool,
+        blockcell_tools::ToolRegistry::with_defaults(),
+    )
+    .expect("create runtime");
+    runtime.set_agent_id(Some("default".to_string()));
+
+    let msg = test_main_session_inbound("cli", "exec-working-dir-bwrap");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call_with_id(
+                "exec-working-dir",
+                "exec",
+                serde_json::json!({
+                    "command": "printf result > result.csv",
+                    "working_dir": allowed,
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+
+    let result_json: serde_json::Value =
+        serde_json::from_str(&result.text).expect("parse exec result");
+    assert_eq!(result_json["exit_code"], 0, "exec result: {}", result.text);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("allowed-workdir/result.csv"))
+            .expect("read allowed output"),
+        "result"
+    );
+}
+
 fn read_deny_write_allow_policy(path: &Path) -> String {
     format!(
         r#"{{
@@ -1530,6 +1672,7 @@ fn test_active_tool_names_for_skill_include_kernel_and_declared_tools() {
         Some(&skill),
         &[IntentCategory::Unknown],
         &available,
+        "",
     );
 
     assert!(tool_names.contains(&"finance_api".to_string()));
@@ -1570,6 +1713,7 @@ fn test_tool_context_supports_optional_event_emitter() {
 
     let ctx = ToolContext {
         workspace: PathBuf::from("/tmp/workspace"),
+        sandbox_writable_roots: None,
         base: PathBuf::from("/tmp/blockcell"),
         builtin_skills_dir: None,
         active_skill_dir: None,
@@ -2442,6 +2586,7 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         None,
         &[IntentCategory::Coding],
         &available,
+        "",
     );
 
     for required in [
@@ -2455,7 +2600,114 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
     ] {
         assert!(tools.contains(&required.to_string()), "missing {required}");
     }
-    assert!(!tools.contains(&"exec".to_string()));
+    assert_eq!(
+        tools.contains(&"exec".to_string()),
+        !super::shell_runs_unattended(&Config::default())
+    );
+}
+
+#[test]
+fn coding_exec_availability_uses_backend_and_approval_policy() {
+    use blockcell_core::config::ApprovalPolicy;
+    use blockcell_tools::sandbox::SandboxBackend;
+
+    assert!(!super::shell_runs_unattended_for_backend(
+        SandboxBackend::ApprovalRequired,
+        ApprovalPolicy::Ask
+    ));
+    assert!(super::shell_runs_unattended_for_backend(
+        SandboxBackend::LinuxLandlockSeccomp,
+        ApprovalPolicy::Ask
+    ));
+    assert!(super::shell_runs_unattended_for_backend(
+        SandboxBackend::LinuxBubblewrap,
+        ApprovalPolicy::Ask
+    ));
+    assert!(!super::shell_runs_unattended_for_backend(
+        SandboxBackend::FullAccess,
+        ApprovalPolicy::Ask
+    ));
+    assert!(super::shell_runs_unattended_for_backend(
+        SandboxBackend::FullAccess,
+        ApprovalPolicy::WorkspaceAuto
+    ));
+}
+
+#[test]
+fn coding_tool_defaults_filter_niche_tools_by_user_message() {
+    let niche = [
+        "termux_api",
+        "alert_rule",
+        "video_process",
+        "knowledge_graph",
+        "stream_subscribe",
+        "encrypt",
+        "email",
+        "camera_capture",
+        "app_control",
+        "tts",
+        "ocr",
+        "audio_transcribe",
+        "image_understand",
+        "chart_generate",
+        "network_monitor",
+        "community_hub",
+        "office_write",
+        "browse",
+    ];
+    let retained = [
+        "data_process",
+        "http_request",
+        "web_search",
+        "web_fetch",
+        "cron",
+        "memory_query",
+        "skill",
+        "agent",
+    ];
+    let available_tools: HashSet<String> = niche
+        .iter()
+        .chain(retained.iter())
+        .map(|name| (*name).to_string())
+        .collect();
+    let mut coding_tools: Vec<String> = available_tools.iter().cloned().collect();
+    super::apply_coding_tool_defaults(
+        &Config::default(),
+        InteractionMode::Coding,
+        None,
+        &available_tools,
+        &mut coding_tools,
+        "Fix the bug",
+    );
+    for name in niche {
+        assert!(!coding_tools.iter().any(|tool| tool == name), "{name}");
+    }
+    for name in retained {
+        assert!(coding_tools.iter().any(|tool| tool == name), "{name}");
+    }
+
+    let mut mentioned = vec!["termux_api".to_string()];
+    super::apply_coding_tool_defaults(
+        &Config::default(),
+        InteractionMode::Coding,
+        None,
+        &available_tools,
+        &mut mentioned,
+        "Use termux_api for this task",
+    );
+    assert!(mentioned.iter().any(|tool| tool == "termux_api"));
+
+    let mut general_tools: Vec<String> = available_tools.iter().cloned().collect();
+    let before = general_tools.clone();
+    super::apply_coding_tool_defaults(
+        &Config::default(),
+        InteractionMode::General,
+        None,
+        &available_tools,
+        &mut general_tools,
+        "Fix the bug",
+    );
+    assert_eq!(general_tools, before);
 }
 
 #[test]
@@ -4332,6 +4584,7 @@ fn test_napcat_tools_hidden_when_disabled() {
         None,
         &[IntentCategory::Communication],
         &available,
+        "",
     );
 
     // napcat tools should be filtered out
@@ -4370,6 +4623,7 @@ fn test_napcat_tools_visible_when_enabled() {
         None,
         &[IntentCategory::Communication],
         &available,
+        "",
     );
 
     // napcat tools should be visible
@@ -4517,6 +4771,7 @@ fn test_resolve_effective_tool_names_load_all_applies_deny_tools() {
         None,
         &[IntentCategory::Unknown],
         &available,
+        "",
     );
 
     // exec 被 deny_tools 过滤，napcat_send 被 napcat.enabled=false 过滤
@@ -4563,6 +4818,7 @@ fn test_resolve_effective_tool_names_load_all_applies_napcat_filter() {
         None,
         &[IntentCategory::Unknown],
         &available,
+        "",
     );
 
     // napcat 工具应可用（enabled=true）
@@ -4616,6 +4872,7 @@ fn test_resolve_effective_tool_names_load_all_extends_skill_tools() {
         Some(&skill),
         &[IntentCategory::Unknown],
         &available,
+        "",
     );
 
     // 应包含 available tools + skill.tools
@@ -4663,6 +4920,7 @@ fn test_resolve_effective_tool_names_enabled_true_uses_intent_classification() {
         None,
         &[IntentCategory::FileOps],
         &available,
+        "",
     );
     assert_eq!(tools.len(), 2);
     assert!(tools.contains(&"read_file".to_string()));
@@ -5880,6 +6138,539 @@ async fn tool_policy_ask_uses_existing_confirmation_flow() {
 
     let result = handle.await.expect("policy ask task should finish");
     assert!(result.contains("用户拒绝") || result.contains("denied"));
+}
+
+struct WorkspaceAutoTestTool {
+    name: &'static str,
+    calls: Arc<Mutex<Vec<serde_json::Value>>>,
+    requires_confirmation: bool,
+}
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for WorkspaceAutoTestTool {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: self.name.to_string(),
+            description: "workspace-auto test tool".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    fn requires_confirmation(&self, _params: &serde_json::Value) -> bool {
+        self.requires_confirmation
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.calls.lock().unwrap().push(params);
+        Ok(serde_json::json!({"output": "workspace-auto-executed"}))
+    }
+}
+
+fn workspace_auto_runtime(
+    approval_policy: &str,
+    tool_name: &'static str,
+) -> (AgentRuntime, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let mut runtime = test_runtime();
+    runtime.config.tools.exec.approval_policy = Some(approval_policy.to_string());
+    runtime.config.tools.exec.sandbox_policy = Some("full-access".to_string());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .tool_registry
+        .register(Arc::new(WorkspaceAutoTestTool {
+            name: tool_name,
+            calls: Arc::clone(&calls),
+            requires_confirmation: true,
+        }));
+    (runtime, calls)
+}
+
+#[tokio::test]
+async fn workspace_auto_shell_run_inherits_sandbox_policy_without_confirmation() {
+    let (mut runtime, calls) = workspace_auto_runtime("workspace-auto", "shell");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("shell", serde_json::json!({"command": "ls"})),
+            &test_main_session_inbound("cli", "workspace-auto-shell"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(result.contains("workspace-auto-executed"), "{result}");
+    let explicit_result = runtime
+        .execute_tool_call(
+            &tool_call(
+                "shell",
+                serde_json::json!({"command": "ls", "sandbox_policy": "read-only"}),
+            ),
+            &test_main_session_inbound("cli", "workspace-auto-shell-explicit"),
+            None,
+        )
+        .await
+        .text;
+    assert!(
+        explicit_result.contains("workspace-auto-executed"),
+        "{explicit_result}"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0]["sandbox_policy"], "full-access");
+    assert_eq!(calls[1]["sandbox_policy"], "read-only");
+}
+
+#[tokio::test]
+async fn workspace_auto_approves_dangerous_exec_with_workspace_target() {
+    let (mut runtime, calls) = workspace_auto_runtime("workspace-auto", "exec");
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(workspace.join("dist")).expect("create dist");
+    let command = format!("rm -rf {}", workspace.join("dist").display());
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": command})),
+            &test_main_session_inbound("cli", "workspace-auto-internal"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(result.contains("workspace-auto-executed"), "{result}");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn workspace_auto_denies_dangerous_exec_outside_workspace_with_hint() {
+    let (mut runtime, calls) = workspace_auto_runtime("workspace-auto", "exec");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call(
+                "exec",
+                serde_json::json!({"command": "rm -rf /tmp/outside-xyz"}),
+            ),
+            &test_main_session_inbound("cli", "workspace-auto-outside"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(result.contains("approvalPolicy=workspace-auto"), "{result}");
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ask_policy_keeps_dangerous_exec_denial() {
+    let (mut runtime, calls) = workspace_auto_runtime("ask", "exec");
+    let workspace = runtime.paths.workspace();
+    std::fs::create_dir_all(workspace.join("dist")).expect("create dist");
+    let command = format!("rm -rf {}", workspace.join("dist").display());
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": command})),
+            &test_main_session_inbound("cli", "ask-dangerous-exec"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(
+        result.contains("dangerous exec command requires explicit user confirmation"),
+        "{result}"
+    );
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn workspace_auto_rejects_deleting_the_workspace_root() {
+    let (mut runtime, calls) = workspace_auto_runtime("workspace-auto", "exec");
+    let workspace = runtime.paths.workspace();
+    let command = format!("rm -rf {}", workspace.display());
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": command})),
+            &test_main_session_inbound("cli", "workspace-auto-root"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(result.contains("approvalPolicy=workspace-auto"), "{result}");
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+fn file_observation_error(result: &ToolCallOutput, code: &str) {
+    assert_eq!(result.outcome, ToolOutcome::Rejected);
+    let value: serde_json::Value =
+        serde_json::from_str(&result.text).expect("file observation denial is JSON");
+    assert_eq!(value["code"], code);
+}
+
+struct VerificationGateProvider {
+    calls: AtomicUsize,
+    hint_calls: AtomicUsize,
+    path: String,
+    verification_after_edit: bool,
+}
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for VerificationGateProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        const HINT: &str =
+            "You modified files but have not run any verification after the last change.";
+        if messages.iter().any(|message| {
+            message
+                .content
+                .as_str()
+                .is_some_and(|content| content.contains(HINT))
+        }) {
+            self.hint_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let tool_call = |name: &str, arguments: serde_json::Value| ToolCallRequest {
+            id: format!("verification-gate-{index}"),
+            name: name.to_string(),
+            arguments,
+            thought_signature: None,
+        };
+        let tool_calls = match index {
+            0 => vec![tool_call(
+                "read_file",
+                serde_json::json!({"path": self.path.clone()}),
+            )],
+            1 => vec![tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": self.path.clone(),
+                    "old_text": "before",
+                    "new_text": "after"
+                }),
+            )],
+            2 if self.verification_after_edit => vec![tool_call(
+                "shell",
+                serde_json::json!({"command": "echo verified"}),
+            )],
+            _ => Vec::new(),
+        };
+        Ok(LLMResponse {
+            content: Some("The requested work is done.".to_string()),
+            reasoning_content: None,
+            finish_reason: if tool_calls.is_empty() {
+                "stop".to_string()
+            } else {
+                "tool_calls".to_string()
+            },
+            tool_calls,
+            usage: serde_json::Value::Null,
+        })
+    }
+}
+
+struct VerificationGateShell;
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for VerificationGateShell {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: "shell".to_string(),
+            description: "verification gate test shell".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({"output": "verified"}))
+    }
+}
+
+fn verification_gate_runtime(
+    verification_after_edit: bool,
+) -> (AgentRuntime, Arc<VerificationGateProvider>, PathBuf) {
+    let base = std::env::temp_dir().join(format!(
+        "blockcell-verification-gate-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&base).expect("create runtime dir");
+    let paths = Paths::with_base(base);
+    let file_path = paths.workspace().join("gate.rs");
+    std::fs::create_dir_all(paths.workspace()).expect("create workspace");
+    std::fs::write(&file_path, "before").expect("write fixture");
+    let provider = Arc::new(VerificationGateProvider {
+        calls: AtomicUsize::new(0),
+        hint_calls: AtomicUsize::new(0),
+        path: file_path.display().to_string(),
+        verification_after_edit,
+    });
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    let router = config.intent_router.get_or_insert_with(Default::default);
+    router.enabled = false;
+    router.load_all_tools = true;
+    let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
+        "test/mock",
+        "test",
+        provider.clone(),
+    );
+    let mut runtime = AgentRuntime::new(
+        config,
+        paths,
+        provider_pool,
+        blockcell_tools::ToolRegistry::with_defaults(),
+    )
+    .expect("create runtime");
+    runtime
+        .tool_registry
+        .register(Arc::new(VerificationGateShell));
+    runtime.set_agent_id(Some("default".to_string()));
+    (runtime, provider, file_path)
+}
+
+#[tokio::test]
+async fn coding_verification_gate_fires_once_after_edit_before_final() {
+    let (mut runtime, provider, _) = verification_gate_runtime(false);
+    let mut msg = test_main_session_inbound("cli", "verification-gate-once");
+    msg.content = "Please edit this code file and make a code change.".to_string();
+    runtime.process_message(msg).await.expect("process message");
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn coding_verification_gate_skips_when_shell_succeeds_after_edit() {
+    let (mut runtime, provider, _) = verification_gate_runtime(true);
+    let mut msg = test_main_session_inbound("cli", "verification-gate-shell");
+    msg.content = "Please edit this code file and make a code change.".to_string();
+    runtime.process_message(msg).await.expect("process message");
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn non_coding_turn_does_not_trigger_verification_gate() {
+    let (mut runtime, provider, _) = verification_gate_runtime(false);
+    let mut msg = test_main_session_inbound("cli", "verification-gate-general");
+    msg.content = "What will the weather be like tomorrow?".to_string();
+    runtime.process_message(msg).await.expect("process message");
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn absent_runtime_handle_hides_agent_but_keeps_spawn_available() {
+    let mut tools = vec![
+        "agent".to_string(),
+        "spawn".to_string(),
+        "read_file".to_string(),
+    ];
+    super::process_message_inner::hide_runtime_handle_tools(&mut tools, false);
+    assert_eq!(tools, vec!["spawn".to_string(), "read_file".to_string()]);
+}
+
+#[tokio::test]
+async fn edit_file_requires_a_prior_read_in_the_same_session() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("unread.txt");
+    std::fs::write(&path, "before").expect("write fixture");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "before",
+                    "new_text": "after"
+                }),
+            ),
+            &test_main_session_inbound("cli", "unread-edit"),
+            None,
+        )
+        .await;
+
+    file_observation_error(&result, "FS_NOT_OBSERVED");
+}
+
+#[tokio::test]
+async fn partial_read_then_edit_succeeds() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("partial.txt");
+    std::fs::write(&path, "before\nsecond line\n").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "partial-read-edit");
+    let read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "read_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "offset": 1,
+                    "limit": 1
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+
+    let edit = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "before",
+                    "new_text": "after"
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(edit.outcome, ToolOutcome::Succeeded, "{}", edit.text);
+}
+
+#[tokio::test]
+async fn edit_file_rejects_a_stale_observation() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("stale.txt");
+    std::fs::write(&path, "original").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "stale-edit");
+    let read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "read_file",
+                serde_json::json!({"path": path.display().to_string()}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+
+    let previous_mtime = std::fs::metadata(&path)
+        .expect("fixture metadata")
+        .modified()
+        .expect("fixture modification time");
+    std::fs::write(&path, "external").expect("modify fixture externally");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open modified fixture");
+    file.set_times(
+        std::fs::FileTimes::new().set_modified(previous_mtime + std::time::Duration::from_secs(5)),
+    )
+    .expect("bump modification time");
+
+    let edit = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "external",
+                    "new_text": "modified"
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    file_observation_error(&edit, "FS_STALE_VERSION");
+}
+
+#[tokio::test]
+async fn write_file_allows_creation_but_rejects_unread_overwrite() {
+    let mut runtime = test_runtime_with_default_tools();
+    let workspace = runtime.paths.workspace();
+    let new_path = workspace.join("new-file.txt");
+    let created = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({
+                    "path": new_path.display().to_string(),
+                    "content": "created"
+                }),
+            ),
+            &test_main_session_inbound("cli", "write-new"),
+            None,
+        )
+        .await;
+    assert_eq!(created.outcome, ToolOutcome::Succeeded, "{}", created.text);
+
+    let existing_path = workspace.join("existing-file.txt");
+    std::fs::write(&existing_path, "existing").expect("write fixture");
+    let overwritten = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({
+                    "path": existing_path.display().to_string(),
+                    "content": "overwrite"
+                }),
+            ),
+            &test_main_session_inbound("cli", "write-existing"),
+            None,
+        )
+        .await;
+    file_observation_error(&overwritten, "FS_NOT_OBSERVED");
+}
+
+#[tokio::test]
+async fn successful_edit_refreshes_the_file_observation() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("successive-edits.txt");
+    std::fs::write(&path, "before").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "successive-edits");
+    let read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "read_file",
+                serde_json::json!({"path": path.display().to_string()}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+
+    for (old_text, new_text) in [("before", "first"), ("first", "second")] {
+        let edit = runtime
+            .execute_tool_call(
+                &tool_call(
+                    "edit_file",
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "old_text": old_text,
+                        "new_text": new_text
+                    }),
+                ),
+                &msg,
+                None,
+            )
+            .await;
+        assert_eq!(edit.outcome, ToolOutcome::Succeeded, "{}", edit.text);
+    }
 }
 
 #[tokio::test]

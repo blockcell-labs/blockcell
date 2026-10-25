@@ -511,6 +511,7 @@ mod tests {
     fn tool_context(store: Arc<dyn crate::SkillFileStoreOps + Send + Sync>) -> ToolContext {
         ToolContext {
             workspace: PathBuf::from("/tmp/workspace"),
+            sandbox_writable_roots: None,
             base: PathBuf::from("/tmp/blockcell"),
             builtin_skills_dir: None,
             active_skill_dir: None,
@@ -549,6 +550,7 @@ mod tests {
     ) -> ToolContext {
         ToolContext {
             workspace: workspace.clone(),
+            sandbox_writable_roots: None,
             base: workspace,
             builtin_skills_dir: None,
             active_skill_dir: None,

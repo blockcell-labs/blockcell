@@ -274,6 +274,7 @@ mod tests {
         let workspace = std::env::temp_dir().join("blockcell-browse-tool-test");
         ToolContext {
             workspace: workspace.clone(),
+            sandbox_writable_roots: None,
             base: workspace,
             builtin_skills_dir: None,
             active_skill_dir: None,

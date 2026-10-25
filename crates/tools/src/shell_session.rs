@@ -323,8 +323,14 @@ impl ShellSessionManager {
         sandbox_policy: SandboxPolicy,
         owner: SessionOwner<'_>,
     ) -> Result<String> {
-        self.create_with_task_manager(workspace, sandbox_policy, owner, None)
-            .await
+        self.create_with_task_manager(
+            workspace,
+            sandbox_policy,
+            owner,
+            None,
+            vec![workspace.to_path_buf()],
+        )
+        .await
     }
 
     pub(crate) async fn create_with_task_manager(
@@ -333,12 +339,17 @@ impl ShellSessionManager {
         sandbox_policy: SandboxPolicy,
         owner: SessionOwner<'_>,
         task_manager: Option<crate::TaskManagerHandle>,
+        writable_roots: Vec<PathBuf>,
     ) -> Result<String> {
         let request = SandboxRequest {
             agent_id: owner.agent_id.to_string(),
             session_id: owner.session_id.to_string(),
             policy: sandbox_policy,
-            writable_roots: vec![workspace.to_path_buf()],
+            writable_roots: if sandbox_policy == SandboxPolicy::WorkspaceWrite {
+                writable_roots
+            } else {
+                Vec::new()
+            },
             program: String::new(),
             args: Vec::new(),
         };
@@ -556,7 +567,7 @@ impl ShellSessionManager {
             let mut session = session.lock().await;
             if session.active.is_some() {
                 return Err(Error::Validation(format!(
-                    "Shell session {session_id} already has a running command; poll it or write stdin first"
+                    "Shell session {session_id} already has a running command; use action=poll with this session_id {session_id}, or omit session_id to start a new session"
                 )));
             }
             let marker = format!("__BLOCKCELL_SHELL_DONE_{}__", uuid::Uuid::new_v4().simple());
@@ -860,18 +871,32 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "shell".to_string(),
-            description: "Run commands in a persistent shell session. Reuse session_id to preserve cwd, environment variables, and activated virtual environments. Timed-out commands keep running and can be polled or sent stdin.".to_string(),
+            description: "Run commands in a persistent shell session. Reuse session_id to preserve cwd, environment variables, and activated virtual environments. Accepts command, cmd, commands, or args as command inputs; exec, execute, and start are aliases for run. Timed-out commands keep running and can be polled or sent stdin.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["run", "poll", "write_stdin", "close"],
-                        "description": "Action to perform. Defaults to run."
+                        "enum": ["run", "exec", "execute", "start", "poll", "write_stdin", "close"],
+                        "description": "Action to perform. Defaults to run; exec, execute, and start are aliases."
                     },
                     "command": {
                         "type": "string",
                         "description": "Command to run. Required for action=run."
+                    },
+                    "cmd": {
+                        "type": "string",
+                        "description": "Alias for command."
+                    },
+                    "commands": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Commands to join with && and run."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Shell command arguments; -c or -lc prefixes are stripped."
                     },
                     "session_id": {
                         "type": "string",
@@ -898,6 +923,7 @@ impl Tool for ShellTool {
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
+        let params = normalize_shell_args(params.clone());
         let action = params
             .get("action")
             .and_then(Value::as_str)
@@ -909,16 +935,21 @@ impl Tool for ShellTool {
                     .get("command")
                     .and_then(Value::as_str)
                     .filter(|command| !command.trim().is_empty())
-                    .ok_or_else(|| Error::Validation("action=run requires command".to_string()))?;
+                    .ok_or_else(|| {
+                        Error::Validation(
+                            "action=run requires command; example: {\"action\":\"run\",\"command\":\"python3 -m pytest -q\"}"
+                                .to_string(),
+                        )
+                    })?;
                 if crate::exec::is_dangerous_command(command) {
                     return Err(Error::PermissionDenied(
                         "Command matches dangerous pattern and is blocked".to_string(),
                     ));
                 }
             }
-            "poll" | "close" => require_session_id(params, action)?,
+            "poll" | "close" => require_session_id(&params, action)?,
             "write_stdin" => {
-                require_session_id(params, action)?;
+                require_session_id(&params, action)?;
                 let session_id = params
                     .get("session_id")
                     .and_then(Value::as_str)
@@ -941,6 +972,7 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
+        let params = normalize_shell_args(params);
         let action = params
             .get("action")
             .and_then(Value::as_str)
@@ -966,25 +998,55 @@ impl Tool for ShellTool {
         match action {
             "run" => {
                 let command = params["command"].as_str().unwrap_or_default();
-                let session_id = if let Some(session_id) =
+                let writable_roots = ctx
+                    .sandbox_writable_roots
+                    .clone()
+                    .unwrap_or_else(|| vec![ctx.workspace.clone()]);
+                let mut note = None;
+                let session_id = if let Some(requested_session_id) =
                     params.get("session_id").and_then(Value::as_str)
                 {
-                    SHELL_SESSIONS
-                        .verify_owner(session_id, caller_owner)
-                        .await?;
-                    if params.get("sandbox_policy").is_some() {
-                        let requested = SandboxPolicy::parse(
-                            params.get("sandbox_policy").and_then(Value::as_str),
-                        )?;
-                        let (_, existing) = SHELL_SESSIONS.session_metadata(session_id).await?;
-                        if requested != existing {
-                            return Err(Error::Validation(format!(
-                                "Shell session {session_id} already uses sandbox_policy={} and cannot be changed",
-                                existing.as_str()
-                            )));
+                    match SHELL_SESSIONS
+                        .verify_owner(requested_session_id, caller_owner)
+                        .await
+                    {
+                        Ok(()) => {
+                            if params.get("sandbox_policy").is_some() {
+                                let requested = SandboxPolicy::parse(
+                                    params.get("sandbox_policy").and_then(Value::as_str),
+                                )?;
+                                let (_, existing) = SHELL_SESSIONS
+                                    .session_metadata(requested_session_id)
+                                    .await?;
+                                if requested != existing {
+                                    return Err(Error::Validation(format!(
+                                        "Shell session {requested_session_id} already uses sandbox_policy={} and cannot be changed",
+                                        existing.as_str()
+                                    )));
+                                }
+                            }
+                            requested_session_id.to_string()
                         }
+                        Err(Error::NotFound(_)) => {
+                            let policy = SandboxPolicy::parse(
+                                params.get("sandbox_policy").and_then(Value::as_str),
+                            )?;
+                            let session_id = SHELL_SESSIONS
+                                .create_with_task_manager(
+                                    &ctx.workspace,
+                                    policy,
+                                    caller_owner,
+                                    ctx.task_manager.clone(),
+                                    writable_roots.clone(),
+                                )
+                                .await?;
+                            note = Some(format!(
+                                "session_id {requested_session_id} not found; started new session {session_id}"
+                            ));
+                            session_id
+                        }
+                        Err(error) => return Err(error),
                     }
-                    session_id.to_string()
                 } else {
                     let policy =
                         SandboxPolicy::parse(params.get("sandbox_policy").and_then(Value::as_str))?;
@@ -994,6 +1056,7 @@ impl Tool for ShellTool {
                             policy,
                             caller_owner,
                             ctx.task_manager.clone(),
+                            writable_roots,
                         )
                         .await?
                 };
@@ -1007,7 +1070,12 @@ impl Tool for ShellTool {
                         task_manager.unregister_shell_process(&session_id);
                     }
                 }
-                Ok(shell_output_json(&session_id, policy, output))
+                Ok(shell_output_json(
+                    &session_id,
+                    policy,
+                    output,
+                    note.as_deref(),
+                ))
             }
             "poll" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
@@ -1022,7 +1090,7 @@ impl Tool for ShellTool {
                         task_manager.unregister_shell_process(session_id);
                     }
                 }
-                Ok(shell_output_json(session_id, policy, output))
+                Ok(shell_output_json(session_id, policy, output, None))
             }
             "write_stdin" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
@@ -1039,7 +1107,7 @@ impl Tool for ShellTool {
                         task_manager.unregister_shell_process(session_id);
                     }
                 }
-                Ok(shell_output_json(session_id, policy, output))
+                Ok(shell_output_json(session_id, policy, output, None))
             }
             "close" => {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
@@ -1085,15 +1153,87 @@ fn append_capped(accumulated: &mut String, chunk: &str) -> bool {
     true
 }
 
-fn shell_output_json(session_id: &str, policy: SandboxPolicy, output: ShellCommandOutput) -> Value {
-    json!({
+fn shell_output_json(
+    session_id: &str,
+    policy: SandboxPolicy,
+    output: ShellCommandOutput,
+    note: Option<&str>,
+) -> Value {
+    let mut result = json!({
         "session_id": session_id,
         "sandbox_policy": policy.as_str(),
         "output": output.output,
         "exit_code": output.exit_code,
         "running": output.running,
         "truncated": output.truncated,
-    })
+    });
+    if let Some(note) = note {
+        result["note"] = json!(note);
+    }
+    result
+}
+
+pub fn normalize_shell_args(mut params: Value) -> Value {
+    let Some(object) = params.as_object_mut() else {
+        return params;
+    };
+    if !object.contains_key("command") {
+        let command = object
+            .get("cmd")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                object
+                    .get("commands")
+                    .and_then(Value::as_array)
+                    .map(|commands| {
+                        commands
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" && ")
+                    })
+            })
+            .or_else(|| {
+                object.get("args").and_then(Value::as_array).map(|args| {
+                    let args = args.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                    match args.first().copied() {
+                        Some("-lc" | "-c") => args[1..].join(" "),
+                        _ => args
+                            .iter()
+                            .map(|argument| shell_quote_argument(argument))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    }
+                })
+            });
+        if let Some(command) = command {
+            object.insert("command".to_string(), json!(command));
+        }
+    }
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if action
+        .as_deref()
+        .is_some_and(|action| matches!(action, "exec" | "execute" | "start"))
+    {
+        object.insert("action".to_string(), json!("run"));
+    }
+    params
+}
+
+fn shell_quote_argument(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_@%+=:,./-".contains(character))
+    {
+        argument.to_string()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\\''"))
+    }
 }
 
 async fn drain_shell_stream<R>(mut reader: R, output: Arc<Mutex<SharedOutput>>)
@@ -1204,6 +1344,7 @@ fn terminate_process_group(pid: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockcell_core::Config;
     use std::time::Duration;
 
     #[test]
@@ -1213,12 +1354,136 @@ mod tests {
         assert_eq!(schema.name, "shell");
         assert_eq!(
             schema.parameters["properties"]["action"]["enum"],
-            serde_json::json!(["run", "poll", "write_stdin", "close"])
+            serde_json::json!([
+                "run",
+                "exec",
+                "execute",
+                "start",
+                "poll",
+                "write_stdin",
+                "close"
+            ])
         );
         assert_eq!(
             schema.parameters["properties"]["sandbox_policy"]["enum"],
             serde_json::json!(["read-only", "workspace-write", "full-access"])
         );
+    }
+
+    #[test]
+    fn shell_arguments_are_normalized_before_validation() {
+        let command_alias = normalize_shell_args(json!({"cmd": "echo hi"}));
+        assert_eq!(command_alias["command"], "echo hi");
+
+        let commands = normalize_shell_args(json!({"commands": ["cd X", "pytest"]}));
+        assert_eq!(commands["command"], "cd X && pytest");
+
+        let shell_args = normalize_shell_args(json!({"args": ["-lc", "cd X && pytest"]}));
+        assert_eq!(shell_args["command"], "cd X && pytest");
+
+        let quoted_args = normalize_shell_args(json!({"args": ["printf", "%s\\n", "hello world"]}));
+        assert_eq!(quoted_args["command"], "printf '%s\\n' 'hello world'");
+
+        for alias in ["exec", "execute", "start"] {
+            let normalized = normalize_shell_args(json!({"action": alias, "command": "echo hi"}));
+            assert_eq!(normalized["action"], "run");
+            assert!(ShellTool.validate(&normalized).is_ok());
+        }
+    }
+
+    #[test]
+    fn shell_missing_command_error_includes_example() {
+        let error = ShellTool
+            .validate(&json!({"sandbox_policy": "full-access"}))
+            .expect_err("missing command should fail");
+        assert!(error
+            .to_string()
+            .contains("{\"action\":\"run\",\"command\":\"python3 -m pytest -q\"}"));
+    }
+
+    #[tokio::test]
+    async fn shell_run_replaces_unknown_session_id_and_explains_running_sessions() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let session_key = format!("shell-test-{}", uuid::Uuid::new_v4());
+        let ctx = ToolContext {
+            workspace: workspace.path().to_path_buf(),
+            sandbox_writable_roots: None,
+            base: workspace.path().to_path_buf(),
+            builtin_skills_dir: None,
+            active_skill_dir: None,
+            session_key,
+            channel: "cli".to_string(),
+            account_id: None,
+            sender_id: None,
+            sender_role: None,
+            chat_id: "shell-session-test".to_string(),
+            config: Config::default(),
+            permissions: blockcell_core::types::PermissionSet::new(),
+            task_manager: None,
+            memory_store: None,
+            memory_file_store: None,
+            ghost_memory_lifecycle: None,
+            skill_file_store: None,
+            session_search: None,
+            outbound_tx: None,
+            spawn_handle: None,
+            capability_registry: None,
+            core_evolution: None,
+            event_emitter: None,
+            channel_contacts_file: None,
+            response_cache: None,
+            runtime_handle: None,
+            agent_identity: None,
+            skill_mutex: None,
+            agent_type_registry: None,
+            evolution_workflow_store: None,
+        };
+        let requested_id = "model-invented-session-id";
+        let result = ShellTool
+            .execute(
+                ctx.clone(),
+                json!({
+                    "action": "run",
+                    "command": "sleep 5",
+                    "session_id": requested_id,
+                    "timeout_secs": 0,
+                    "sandbox_policy": "full-access"
+                }),
+            )
+            .await
+            .expect("run should create a new session");
+        let new_session_id = result["session_id"].as_str().expect("generated session id");
+        assert_ne!(new_session_id, requested_id);
+        assert_eq!(
+            result["note"],
+            format!("session_id {requested_id} not found; started new session {new_session_id}")
+        );
+
+        let error = ShellTool
+            .execute(
+                ctx.clone(),
+                json!({
+                    "action": "run",
+                    "command": "echo not-run",
+                    "session_id": new_session_id,
+                    "sandbox_policy": "full-access"
+                }),
+            )
+            .await
+            .expect_err("second run should be rejected while command is active");
+        let message = error.to_string();
+        assert!(message.contains(&format!(
+            "action=poll with this session_id {new_session_id}"
+        )));
+        assert!(message.contains("omit session_id to start a new session"));
+
+        ShellTool
+            .execute(
+                ctx,
+                json!({"action": "close", "session_id": new_session_id}),
+            )
+            .await
+            .expect("close shell session");
     }
 
     #[cfg(unix)]
@@ -1247,6 +1512,74 @@ mod tests {
         // SAFETY: fstat succeeded, so the stat structure is initialized.
         let stat = unsafe { stat.assume_init() };
         assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFIFO);
+    }
+
+    #[tokio::test]
+    async fn bubblewrap_sandbox_shell_session_supports_poll_stdin_and_close() {
+        if crate::sandbox::native_backend(SandboxPolicy::WorkspaceWrite)
+            != crate::sandbox::SandboxBackend::LinuxBubblewrap
+        {
+            eprintln!("skipping Bubblewrap shell-session test: backend unavailable");
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let manager = ShellSessionManager::new();
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::WorkspaceWrite,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create Bubblewrap shell session");
+
+        let started = manager
+            .run_command(
+                &session_id,
+                "printf 'first\\n'; sleep 0.2; printf 'done\\n'",
+                Duration::from_millis(10),
+            )
+            .await
+            .expect("start command");
+        assert!(started.running, "{started:?}");
+        let finished = manager
+            .poll(&session_id, Duration::from_secs(5))
+            .await
+            .expect("poll command");
+        assert!(!finished.running, "{finished:?}");
+        let output = format!("{}{}", started.output, finished.output);
+        assert!(output.contains("first"), "{output:?}");
+        assert!(output.contains("done"), "{output:?}");
+
+        let waiting = manager
+            .run_command(
+                &session_id,
+                "read value; printf 'stdin:%s\\n' \"$value\"",
+                Duration::from_millis(10),
+            )
+            .await
+            .expect("start stdin command");
+        assert!(waiting.running, "{waiting:?}");
+        manager
+            .write_stdin(&session_id, "bubblewrap-input\n")
+            .await
+            .expect("write session stdin");
+        let received = manager
+            .poll(&session_id, Duration::from_secs(5))
+            .await
+            .expect("poll stdin command");
+        assert!(!received.running, "{received:?}");
+        assert!(
+            received.output.contains("stdin:bubblewrap-input"),
+            "{received:?}"
+        );
+
+        let running = manager
+            .run_command(&session_id, "sleep 30", Duration::from_millis(10))
+            .await
+            .expect("start close test command");
+        assert!(running.running, "{running:?}");
+        manager.close(&session_id).await.expect("close session");
     }
 
     #[tokio::test]
@@ -1768,6 +2101,7 @@ mod tests {
                 SandboxPolicy::FullAccess,
                 SessionOwner::default(),
                 Some(task_manager),
+                Vec::new(),
             )
             .await
             .expect("create shell session");

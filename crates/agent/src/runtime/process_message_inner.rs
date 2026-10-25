@@ -1,5 +1,38 @@
 use super::*;
 
+const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run the relevant tests/build now, or if verification is impossible, state why in your final answer.";
+
+fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
+    match tool_name {
+        "write_file" | "edit_file" => true,
+        "file_ops" => matches!(
+            args.get("action").and_then(serde_json::Value::as_str),
+            Some("delete" | "rename" | "move" | "copy" | "compress" | "decompress")
+        ),
+        _ => false,
+    }
+}
+
+fn is_verification_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
+    match tool_name {
+        "exec" => true,
+        "shell" => matches!(
+            args.get("action").and_then(serde_json::Value::as_str),
+            None | Some("run" | "poll" | "exec" | "execute" | "start")
+        ),
+        _ => false,
+    }
+}
+
+pub(super) fn hide_runtime_handle_tools(
+    tool_names: &mut Vec<String>,
+    runtime_handle_available: bool,
+) {
+    if !runtime_handle_available {
+        tool_names.retain(|name| name != "agent");
+    }
+}
+
 impl AgentRuntime {
     pub(crate) async fn process_message_inner(&mut self, msg: InboundMessage) -> Result<String> {
         let mut metrics = ProcessingMetrics::new();
@@ -254,6 +287,7 @@ impl AgentRuntime {
             decision.active_skill.as_ref(),
             &decision.chat_intents,
             &available_tools,
+            &msg.content,
         );
 
         if tool_names.is_empty() && !matches!(decision.mode, InteractionMode::Chat) {
@@ -289,6 +323,7 @@ impl AgentRuntime {
         {
             tool_names.push(ACTIVATE_SKILL_TOOL_NAME.to_string());
         }
+        hide_runtime_handle_tools(&mut tool_names, self.runtime_handle.is_some());
 
         let provider_tool_schemas = ghost_memory_provider_tool_schemas(
             self.ghost_memory_lifecycle.as_deref(),
@@ -511,6 +546,10 @@ impl AgentRuntime {
         let mut loop_guard = ToolLoopGuard::new(max_iterations, tools_max_iterations.clone());
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
+        let mut tool_call_index = 0usize;
+        let mut last_mutation_idx = None;
+        let mut last_verification_idx = None;
+        let mut verification_gate_fired = false;
 
         // Layer 1: 消息级别预算检查
         // 如果工具结果总和超过预算，持久化最大的结果
@@ -1015,6 +1054,16 @@ impl AgentRuntime {
                     };
                     let is_error = tool_call_failed(&tool_output);
                     let result = tool_output.text;
+                    let current_tool_call_index = tool_call_index;
+                    tool_call_index = tool_call_index.saturating_add(1);
+                    if matches!(tool_output.outcome, ToolOutcome::Succeeded) {
+                        if is_mutating_tool_call(&tool_call.name, &tool_call.arguments) {
+                            last_mutation_idx = Some(current_tool_call_index);
+                        }
+                        if is_verification_tool_call(&tool_call.name, &tool_call.arguments) {
+                            last_verification_idx = Some(current_tool_call_index);
+                        }
+                    }
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
@@ -1432,7 +1481,23 @@ impl AgentRuntime {
                 )
                 .await;
                 // No tool calls, we have the final response
-                final_response = response.content.unwrap_or_default();
+                let response_content = response.content.unwrap_or_default();
+                if decision.mode == InteractionMode::Coding
+                    && !verification_gate_fired
+                    && last_mutation_idx.is_some_and(|mutation_idx| {
+                        last_verification_idx
+                            .is_none_or(|verification_idx| verification_idx <= mutation_idx)
+                    })
+                {
+                    verification_gate_fired = true;
+                    current_messages.push(ChatMessage::assistant_with_reasoning(
+                        &response_content,
+                        response.reasoning_content.clone(),
+                    ));
+                    current_messages.push(ChatMessage::user(CODING_VERIFICATION_HINT));
+                    continue;
+                }
+                final_response = response_content;
 
                 // 保留 reasoning_content，避免 DeepSeek thinking mode 400 错误
                 history.push(ChatMessage::assistant_with_reasoning(

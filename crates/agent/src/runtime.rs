@@ -1,3 +1,4 @@
+use blockcell_core::config::ApprovalPolicy;
 use blockcell_core::path_policy::{resolve_for_policy, PathPolicy};
 use blockcell_core::system_event::{EventPriority, EventScope, SessionSummary, SystemEvent};
 use blockcell_core::tool_policy::{
@@ -15,16 +16,18 @@ use blockcell_providers::{CallResult, Provider, ProviderPool, RoutingContext, Se
 use blockcell_skills::SkillCard;
 use blockcell_storage::ghost_ledger::{GhostEpisodeSource, NewGhostEpisode};
 use blockcell_storage::{AuditLogger, GhostLedger, SessionStore};
+use blockcell_tools::sandbox::{native_backend, SandboxBackend, SandboxPolicy};
 use blockcell_tools::tool_guard::{dangerous_operation_items, is_dangerous_exec_command};
 use blockcell_tools::{
     CapabilityRegistryHandle, CoreEvolutionHandle, EventEmitterHandle, MemoryStoreHandle,
     SessionSearchOps, SpawnHandle, SystemEventEmitter, TaskManagerHandle, ToolRegistry,
 };
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::SystemTime;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
@@ -1534,17 +1537,44 @@ const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "get_context_remaining",
 ];
 
+fn shell_runs_unattended_for_backend(
+    backend: SandboxBackend,
+    approval_policy: ApprovalPolicy,
+) -> bool {
+    match backend {
+        SandboxBackend::FullAccess => approval_policy == ApprovalPolicy::WorkspaceAuto,
+        SandboxBackend::MacOsSeatbelt
+        | SandboxBackend::LinuxBubblewrap
+        | SandboxBackend::LinuxLandlockSeccomp => true,
+        SandboxBackend::ApprovalRequired => false,
+    }
+}
+
+fn shell_runs_unattended(config: &Config) -> bool {
+    let Ok(policy) = SandboxPolicy::parse(config.tools.exec.sandbox_policy.as_deref()) else {
+        return false;
+    };
+    let Ok(approval_policy) = ApprovalPolicy::parse(config.tools.exec.approval_policy.as_deref())
+    else {
+        return false;
+    };
+    shell_runs_unattended_for_backend(native_backend(policy), approval_policy)
+}
+
 fn apply_coding_tool_defaults(
     config: &Config,
     mode: InteractionMode,
     agent_id: Option<&str>,
     available_tools: &HashSet<String>,
     tool_names: &mut Vec<String>,
+    user_message: &str,
 ) {
     if !matches!(mode, InteractionMode::Coding) {
         return;
     }
-    tool_names.retain(|name| name != "exec");
+    if shell_runs_unattended(config) {
+        tool_names.retain(|name| name != "exec");
+    }
     let denied = config
         .intent_router
         .as_ref()
@@ -1561,6 +1591,31 @@ fn apply_coding_tool_defaults(
             && !tool_names.iter().any(|tool_name| tool_name == name)
         {
             tool_names.push((*name).to_string());
+        }
+    }
+    const NICHE_TOOLS: &[&str] = &[
+        "termux_api",
+        "alert_rule",
+        "video_process",
+        "knowledge_graph",
+        "stream_subscribe",
+        "encrypt",
+        "email",
+        "camera_capture",
+        "app_control",
+        "tts",
+        "ocr",
+        "audio_transcribe",
+        "image_understand",
+        "chart_generate",
+        "network_monitor",
+        "community_hub",
+        "office_write",
+        "browse",
+    ];
+    for name in NICHE_TOOLS {
+        if !user_message.contains(name) {
+            tool_names.retain(|tool_name| tool_name != name);
         }
     }
 }
@@ -1632,6 +1687,7 @@ fn resolve_effective_tool_names(
     active_skill: Option<&ActiveSkillContext>,
     intents: &[IntentCategory],
     available_tools: &HashSet<String>,
+    user_message: &str,
 ) -> Vec<String> {
     // 1. 先检查 intent_router.enabled
     let router_enabled = config
@@ -1675,7 +1731,14 @@ fn resolve_effective_tool_names(
             if let Some(skill) = active_skill {
                 tool_names.extend(skill.tools.iter().cloned());
             }
-            apply_coding_tool_defaults(config, mode, agent_id, available_tools, &mut tool_names);
+            apply_coding_tool_defaults(
+                config,
+                mode,
+                agent_id,
+                available_tools,
+                &mut tool_names,
+                user_message,
+            );
             tool_names.sort();
             tool_names.dedup();
             return tool_names;
@@ -1709,7 +1772,14 @@ fn resolve_effective_tool_names(
         tool_names.retain(|name| !name.starts_with("napcat_"));
     }
 
-    apply_coding_tool_defaults(config, mode, agent_id, available_tools, &mut tool_names);
+    apply_coding_tool_defaults(
+        config,
+        mode,
+        agent_id,
+        available_tools,
+        &mut tool_names,
+        user_message,
+    );
 
     tool_names.sort();
     tool_names.dedup();
@@ -2200,6 +2270,18 @@ fn load_path_policy(config: &Config, paths: &Paths) -> PathPolicy {
 
 type TogglesCache = HashMap<PathBuf, (std::time::SystemTime, u64, serde_json::Value)>;
 
+#[derive(Default)]
+struct FileObservationState {
+    entries: HashMap<(String, PathBuf), FileVersion>,
+    order: VecDeque<(String, PathBuf)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileVersion {
+    len: u64,
+    modified: SystemTime,
+}
+
 /// Cached parsed toggles.json keyed by file mtime+len: per-call sites on the tool
 /// hot path only pay a `stat` syscall unless the file actually changed.
 fn cached_toggles_json(path: &Path) -> Option<serde_json::Value> {
@@ -2280,6 +2362,7 @@ pub struct AgentRuntime {
     /// Entries are keyed by session key so an authorization granted in one
     /// session cannot leak into another session/user on a shared runtime.
     authorized_dirs: Arc<Mutex<HashSet<(String, PathBuf, blockcell_core::path_policy::PathOp)>>>,
+    file_observations: Arc<Mutex<FileObservationState>>,
     /// 非交互通道的文本确认消费记录：用户原文的"确认执行"只允许放行**一个**
     /// 危险操作，而非本回合所有危险操作（逐操作确认在无交互通道的最强近似）。
     /// 键 = channel + sender + timestamp_ms，按消息去重；跨 clone 共享。
@@ -2488,6 +2571,7 @@ impl AgentRuntime {
             inbound_tx: None,
             confirm_tx: None,
             authorized_dirs: Arc::new(Mutex::new(HashSet::new())),
+            file_observations: Arc::new(Mutex::new(FileObservationState::default())),
             consumed_text_confirmations: Arc::new(Mutex::new(HashSet::new())),
             task_manager: TaskManager::new(),
             agent_id: None,
@@ -2582,6 +2666,7 @@ impl AgentRuntime {
             inbound_tx: self.inbound_tx.clone(),
             confirm_tx: self.confirm_tx.clone(),
             authorized_dirs: Arc::clone(&self.authorized_dirs),
+            file_observations: Arc::clone(&self.file_observations),
             consumed_text_confirmations: Arc::clone(&self.consumed_text_confirmations),
             task_manager: self.task_manager.clone(),
             agent_id: self.agent_id.clone(),

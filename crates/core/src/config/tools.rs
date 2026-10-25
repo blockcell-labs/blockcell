@@ -33,6 +33,25 @@ fn default_max_results() -> u32 {
     5
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApprovalPolicy {
+    #[default]
+    Ask,
+    WorkspaceAuto,
+}
+
+impl ApprovalPolicy {
+    pub fn parse(value: Option<&str>) -> crate::Result<Self> {
+        match value.unwrap_or("ask") {
+            "ask" => Ok(Self::Ask),
+            "workspace-auto" => Ok(Self::WorkspaceAuto),
+            other => Err(crate::Error::Validation(format!(
+                "Invalid approval_policy '{other}'; expected ask or workspace-auto"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecConfig {
@@ -42,6 +61,8 @@ pub struct ExecConfig {
     pub restrict_to_workspace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
 }
 
 impl Default for ExecConfig {
@@ -50,6 +71,7 @@ impl Default for ExecConfig {
             timeout: default_exec_timeout(),
             restrict_to_workspace: true,
             sandbox_policy: None,
+            approval_policy: None,
         }
     }
 }
@@ -90,6 +112,32 @@ impl Default for ToolsConfig {
 
 fn default_tick_interval() -> u32 {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ApprovalPolicy, ExecConfig};
+
+    #[test]
+    fn approval_policy_parses_supported_values() {
+        assert_eq!(ApprovalPolicy::parse(None).unwrap(), ApprovalPolicy::Ask);
+        assert_eq!(
+            ApprovalPolicy::parse(Some("ask")).unwrap(),
+            ApprovalPolicy::Ask
+        );
+        assert_eq!(
+            ApprovalPolicy::parse(Some("workspace-auto")).unwrap(),
+            ApprovalPolicy::WorkspaceAuto
+        );
+        assert!(ApprovalPolicy::parse(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn exec_config_deserializes_camel_case_approval_policy() {
+        let config: ExecConfig =
+            serde_json::from_str(r#"{"approvalPolicy":"workspace-auto"}"#).unwrap();
+        assert_eq!(config.approval_policy.as_deref(), Some("workspace-auto"));
+    }
 }
 
 /// Configuration for the path-access policy system.

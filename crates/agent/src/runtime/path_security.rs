@@ -141,11 +141,18 @@ pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -
             // (~/.ssh, /etc, ...) are enforced for `exec`, not just for
             // its working directory.
             if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                let cwd = if command_mutates_cwd(cmd) {
+                    Some(None)
+                } else {
+                    args.get("working_dir")
+                        .and_then(|value| value.as_str())
+                        .map(|path| Some(PathBuf::from(path)))
+                };
                 accesses.extend(
                     extract_command_paths(cmd)
                         .into_iter()
                         .map(|path| PathAccess {
-                            path,
+                            path: resolve_shell_access_path(&path, &cwd),
                             op: PathOp::Exec,
                         }),
                 );
@@ -628,7 +635,7 @@ fn extract_command_paths(command: &str) -> Vec<String> {
                     } else {
                         normalized
                     };
-                    if !out.contains(&entry) {
+                    if !is_pseudo_device_path(&entry) && !out.contains(&entry) {
                         out.push(entry);
                     }
                 }
@@ -651,13 +658,26 @@ fn extract_command_paths(command: &str) -> Vec<String> {
             } else {
                 seg
             };
-            if !out.contains(&entry) {
+            if !is_pseudo_device_path(&entry) && !out.contains(&entry) {
                 out.push(entry);
             }
         }
     }
 
     out
+}
+
+fn is_pseudo_device_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev/null"
+            | "/dev/zero"
+            | "/dev/stdout"
+            | "/dev/stderr"
+            | "/dev/stdin"
+            | "/dev/tty"
+            | "/dev/fd"
+    ) || path.starts_with("/dev/fd/")
 }
 
 /// token 是否就是单独一个 `$VAR` / `${VAR}`（不含其他字符）。
@@ -994,6 +1014,35 @@ mod tests {
         assert_eq!(
             extract_command_paths("ls ./build ../out"),
             vec!["./build".to_string(), "../out".to_string()]
+        );
+    }
+
+    #[test]
+    fn exec_command_paths_skip_pseudo_devices() {
+        let accesses = extract_path_accesses("exec", &json!({"command": "cmd 2>/dev/null"}));
+        assert!(
+            accesses.iter().all(|access| access.path != "/dev/null"),
+            "{accesses:?}"
+        );
+    }
+
+    #[test]
+    fn exec_relative_command_paths_resolve_against_working_dir() {
+        let accesses = extract_path_accesses(
+            "exec",
+            &json!({"working_dir": "/w", "command": "cat sub/a.txt"}),
+        );
+        assert!(accesses.iter().any(|access| access.path == "/w/sub/a.txt"));
+    }
+
+    #[test]
+    fn exec_paths_after_cwd_mutation_use_unknown_cwd() {
+        let accesses = extract_path_accesses("exec", &json!({"command": "cd /etc && cat x/y"}));
+        assert!(
+            accesses
+                .iter()
+                .any(|access| access.path == "/__unknown_shell_cwd__/x/y"),
+            "{accesses:?}"
         );
     }
 

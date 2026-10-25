@@ -986,6 +986,7 @@ mod tests {
     fn test_ctx(workspace: &std::path::Path) -> ToolContext {
         ToolContext {
             workspace: workspace.to_path_buf(),
+            sandbox_writable_roots: None,
             base: workspace.to_path_buf(),
             builtin_skills_dir: None,
             active_skill_dir: None,

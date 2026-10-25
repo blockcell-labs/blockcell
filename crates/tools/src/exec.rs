@@ -17,20 +17,33 @@ use crate::{Tool, ToolContext, ToolSchema};
 pub struct ExecTool {
     executor: Arc<dyn ShellExecutor>,
     policy: SandboxPolicy,
+    timeout_secs: u32,
 }
 
 impl ExecTool {
     pub fn new(executor: Arc<dyn ShellExecutor>) -> Self {
-        Self::with_policy(executor, SandboxPolicy::WorkspaceWrite)
+        Self {
+            executor,
+            policy: SandboxPolicy::WorkspaceWrite,
+            timeout_secs: blockcell_core::config::ExecConfig::default().timeout,
+        }
     }
 
     pub fn with_policy(executor: Arc<dyn ShellExecutor>, policy: SandboxPolicy) -> Self {
-        Self { executor, policy }
+        Self {
+            executor,
+            policy,
+            timeout_secs: blockcell_core::config::ExecConfig::default().timeout,
+        }
     }
 
     pub fn from_config(config: &blockcell_core::config::ExecConfig) -> Self {
         let policy = Self::resolve_config_policy(config).unwrap_or(SandboxPolicy::WorkspaceWrite);
-        Self::with_policy(Arc::new(LocalShellExecutor::default()), policy)
+        Self {
+            executor: Arc::new(LocalShellExecutor::default()),
+            policy,
+            timeout_secs: config.timeout,
+        }
     }
 
     pub fn resolve_config_policy(
@@ -183,7 +196,10 @@ impl Tool for ExecTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "exec".to_string(),
-            description: "Execute a shell command".to_string(),
+            description: format!(
+                "Execute a shell command with a timeout of {} seconds; for commands that may exceed it (builds, test suites, servers) use `shell` — timed-out shell commands keep running and can be polled.",
+                self.timeout_secs
+            ),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -250,7 +266,9 @@ impl Tool for ExecTool {
         // 策略在构造时（from_config / with_policy）固定，声明与执行使用同一份值。
         let policy = self.current_policy();
         let writable_roots = if policy == SandboxPolicy::WorkspaceWrite {
-            vec![ctx.workspace.clone()]
+            ctx.sandbox_writable_roots
+                .clone()
+                .unwrap_or_else(|| vec![ctx.workspace.clone()])
         } else {
             Vec::new()
         };
@@ -319,6 +337,19 @@ mod tests {
         let tool = ExecTool::default();
         let schema = tool.schema();
         assert_eq!(schema.name, "exec");
+        assert!(schema.description.contains("timeout of"));
+        assert!(schema.description.contains(
+            "for commands that may exceed it (builds, test suites, servers) use `shell` — timed-out shell commands keep running and can be polled"
+        ));
+    }
+
+    #[test]
+    fn test_exec_schema_uses_configured_timeout() {
+        let tool = ExecTool::from_config(&blockcell_core::config::ExecConfig {
+            timeout: 31,
+            ..Default::default()
+        });
+        assert!(tool.schema().description.contains("timeout of 31 seconds"));
     }
 
     #[test]
@@ -463,6 +494,7 @@ mod tests {
             timeout: 60,
             restrict_to_workspace: false,
             sandbox_policy: None,
+            approval_policy: None,
         };
         let unrestricted_tool = ExecTool::from_config(&unrestricted_cfg);
         assert_eq!(
@@ -474,6 +506,7 @@ mod tests {
             timeout: 60,
             restrict_to_workspace: false,
             sandbox_policy: Some("read-only".to_string()),
+            approval_policy: None,
         };
         let readonly_tool = ExecTool::from_config(&readonly_cfg);
         assert_eq!(

@@ -902,6 +902,8 @@ impl Config {
 
     /// Validate config values and return self if valid.
     fn validate(self) -> Result<Self> {
+        tools::ApprovalPolicy::parse(self.tools.exec.approval_policy.as_deref())?;
+
         // Validate cron_tick_interval_secs
         if self.cron_tick_interval_secs < MIN_CRON_TICK_INTERVAL_SECS {
             tracing::warn!(
@@ -1238,6 +1240,24 @@ impl Config {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn validate_rejects_invalid_approval_policy() {
+        let config = Config {
+            tools: ToolsConfig {
+                exec: tools::ExecConfig {
+                    approval_policy: Some("bogus".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(crate::Error::Validation(_))
+        ));
+    }
 
     #[test]
     fn memory_recall_policy_deserializes_per_mode_and_internal_channel() {

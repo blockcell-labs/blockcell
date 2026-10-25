@@ -123,6 +123,15 @@ impl AgentRuntime {
             }
         }
 
+        if final_response.trim().is_empty() {
+            if let Some(summary) = self
+                .summarize_skill_tool_trace(&msg.content, &prompt_result.trace_messages)
+                .await
+            {
+                final_response = summary;
+            }
+        }
+
         final_response =
             apply_skill_fallback_response(final_response, active_skill.fallback_message.as_deref());
 
@@ -131,6 +140,32 @@ impl AgentRuntime {
             prompt_result.trace_messages,
             session_metadata,
         ))
+    }
+
+    pub(super) async fn summarize_skill_tool_trace(
+        &self,
+        user_content: &str,
+        trace_messages: &[ChatMessage],
+    ) -> Option<String> {
+        if !trace_messages.iter().any(|message| message.role == "tool") {
+            return None;
+        }
+        let mut messages = vec![
+            ChatMessage::system(
+                "Summarize for the user, in the user's language, what was done and the results/outcome of the tool calls below; if the task failed say exactly what failed. Do not call tools.",
+            ),
+            ChatMessage::user(user_content),
+        ];
+        messages.extend_from_slice(trace_messages);
+        match self.chat_with_provider(&messages, &[]).await {
+            Ok((response, _)) => response
+                .content
+                .filter(|content| !content.trim().is_empty()),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to summarize skill tool results");
+                None
+            }
+        }
     }
 
     pub(crate) async fn deliver_skill_response(
@@ -289,6 +324,7 @@ impl AgentRuntime {
 
                 let ctx = blockcell_tools::ToolContext {
                     workspace: paths.workspace(),
+                    sandbox_writable_roots: None,
                     base: paths.base.clone(),
                     builtin_skills_dir: Some(paths.builtin_skills_dir()),
                     active_skill_dir: None,

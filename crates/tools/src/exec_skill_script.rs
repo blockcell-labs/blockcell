@@ -326,6 +326,7 @@ mod tests {
         let workspace = skill_dir.clone();
         ToolContext {
             workspace,
+            sandbox_writable_roots: None,
             base: std::env::temp_dir().join("blockcell"),
             builtin_skills_dir: None,
             active_skill_dir: Some(skill_dir),

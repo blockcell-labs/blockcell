@@ -83,6 +83,7 @@ pub async fn tool(tool_name: &str, params_json: &str, agent: Option<&str>) -> an
 
     let ctx = blockcell_tools::ToolContext {
         workspace: paths.workspace(),
+        sandbox_writable_roots: None,
         base: paths.base.clone(),
         builtin_skills_dir: Some(paths.builtin_skills_dir()),
         active_skill_dir: None,
