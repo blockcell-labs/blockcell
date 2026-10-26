@@ -84,12 +84,12 @@ pub(crate) fn path_access_denied(tool_name: &str, path: &str) -> String {
 }
 
 /// Format the user-friendly LLM error message after all retries are exhausted.
-pub(crate) fn llm_exhausted_error(max_retries: u32, error: &blockcell_core::Error) -> String {
+pub(crate) fn llm_exhausted_error(retry_count: u32, error: &blockcell_core::Error) -> String {
     format!(
         "抱歉，我在处理你的请求时遇到了问题（已重试 {} 次）。\n\n\
          错误信息：{}\n\n\
          这可能是临时的网络或服务问题，请稍后再试。如果问题持续，我会自动学习并改进。",
-        max_retries, error
+        retry_count, error
     )
 }
 

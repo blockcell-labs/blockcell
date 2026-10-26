@@ -10,11 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::client::build_http_client;
+use crate::client::{build_http_client, HTTP_REQUEST_TIMEOUT};
 use crate::security::{
     consume_error_body, http_status_error_with_retry_after, read_response_limited, redact_url,
     request_error, StreamGuard, MAX_PROVIDER_RESPONSE_BYTES,
@@ -223,13 +222,7 @@ impl OpenAIProvider {
             .unwrap_or("https://api.openai.com/v1")
             .trim_end_matches('/')
             .to_string();
-        let client = build_http_client(
-            provider_proxy,
-            global_proxy,
-            no_proxy,
-            &resolved_base,
-            Duration::from_secs(120),
-        )?;
+        let client = build_http_client(provider_proxy, global_proxy, no_proxy, &resolved_base)?;
         Ok(Self {
             client,
             api_key: api_key.to_string(),
@@ -413,6 +406,7 @@ impl OpenAIProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .body(request_body)

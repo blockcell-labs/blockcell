@@ -5,11 +5,10 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-use crate::client::build_http_client;
+use crate::client::{build_http_client, HTTP_REQUEST_TIMEOUT};
 use crate::security::{
     consume_error_body, http_status_error_with_retry_after, read_response_limited, request_error,
     StreamGuard, MAX_PROVIDER_RESPONSE_BYTES,
@@ -73,13 +72,7 @@ impl GeminiProvider {
             .unwrap_or(GEMINI_API_BASE)
             .trim_end_matches('/')
             .to_string();
-        let client = build_http_client(
-            provider_proxy,
-            global_proxy,
-            no_proxy,
-            &resolved_base,
-            Duration::from_secs(120),
-        )?;
+        let client = build_http_client(provider_proxy, global_proxy, no_proxy, &resolved_base)?;
         Ok(Self {
             client,
             api_key: api_key.to_string(),
@@ -362,6 +355,7 @@ impl Provider for GeminiProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .header("x-goog-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)

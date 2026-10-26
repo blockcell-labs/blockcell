@@ -1,6 +1,45 @@
 use super::*;
 
 const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run the relevant tests/build now, or if verification is impossible, state why in your final answer.";
+const BLOCKCELL_WORKSPACE_ENTRIES: &[&str] = &[
+    "agents",
+    "downloads",
+    "evo_workflow.db",
+    "evolved_tools",
+    "ghost",
+    "logs",
+    "memory",
+    "skill_evolution_workflow.db",
+    "skills",
+    "tool_artifacts",
+    "tool_evolution_records",
+    "import_staging",
+    "toggles.json",
+    ".skills_prompt_snapshot.json",
+];
+
+fn is_blockcell_workspace_entry(name: &str) -> bool {
+    BLOCKCELL_WORKSPACE_ENTRIES.contains(&name)
+        || name.starts_with("evo_workflow.db")
+        || name.starts_with("skill_evolution_workflow.db")
+}
+
+fn is_blockcell_workspace_status_line(line: &str) -> bool {
+    let path = line
+        .get(3..)
+        .unwrap_or_default()
+        .trim()
+        .split(" -> ")
+        .last()
+        .unwrap_or_default()
+        .trim_matches('"');
+    let first_component = std::path::Path::new(path)
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .unwrap_or_default();
+    is_blockcell_workspace_entry(first_component)
+}
 
 async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<String>) {
     const SKIP_DIRS: &[&str] = &[
@@ -12,22 +51,6 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
         ".venv",
         "dist",
         "build",
-    ];
-    const BLOCKCELL_WORKSPACE_ENTRIES: &[&str] = &[
-        "agents",
-        "downloads",
-        "evo_workflow.db",
-        "evolved_tools",
-        "ghost",
-        "logs",
-        "memory",
-        "skill_evolution_workflow.db",
-        "skills",
-        "tool_artifacts",
-        "tool_evolution_records",
-        "import_staging",
-        "toggles.json",
-        ".skills_prompt_snapshot.json",
     ];
     const TEXT_EXTENSIONS: &[&str] = &[
         "rs", "py", "go", "js", "ts", "tsx", "java", "c", "cpp", "h", "rb", "php", "swift", "kt",
@@ -60,8 +83,7 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
                 continue;
             };
             let name = entry.file_name().to_string_lossy().into_owned();
-            if blockcell_owned && depth == 0 && BLOCKCELL_WORKSPACE_ENTRIES.contains(&name.as_str())
-            {
+            if blockcell_owned && depth == 0 && is_blockcell_workspace_entry(&name) {
                 continue;
             }
             scanned += 1;
@@ -122,7 +144,11 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
         if let Ok(Ok(output)) = status {
             if output.status.success() {
                 let status_output = String::from_utf8_lossy(&output.stdout);
-                let lines = status_output.lines().take(30).collect::<Vec<_>>();
+                let lines = status_output
+                    .lines()
+                    .filter(|line| !blockcell_owned || !is_blockcell_workspace_status_line(line))
+                    .take(30)
+                    .collect::<Vec<_>>();
                 snapshot.push_str("\nGit status --short:\n");
                 if lines.is_empty() {
                     snapshot.push_str("(clean)\n");
@@ -225,6 +251,10 @@ fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
         ),
         _ => false,
     }
+}
+
+fn should_auto_add_activate_skill(mode: InteractionMode, active_skill: bool) -> bool {
+    !matches!(mode, InteractionMode::Coding) || active_skill
 }
 
 fn shell_command_segments(command: &str) -> Vec<&str> {
@@ -543,6 +573,7 @@ pub(super) fn hide_runtime_handle_tools(
 
 impl AgentRuntime {
     pub(crate) async fn process_message_inner(&mut self, msg: InboundMessage) -> Result<String> {
+        self.last_turn_llm_failed = None;
         let mut metrics = ProcessingMetrics::new();
         let session_key = msg.session_key();
         let cron_deliver_target = resolve_cron_deliver_target(&msg);
@@ -828,7 +859,8 @@ impl AgentRuntime {
             }
         }
 
-        if !skill_cards.is_empty()
+        if should_auto_add_activate_skill(decision.mode, decision.active_skill.is_some())
+            && !skill_cards.is_empty()
             && !tool_names
                 .iter()
                 .any(|name| name == ACTIVATE_SKILL_TOOL_NAME)
@@ -1081,8 +1113,13 @@ impl AgentRuntime {
             }
         }
 
-        if let Some(schema) = build_activate_skill_tool_schema(&skill_cards) {
-            tools.push(schema);
+        if tool_names
+            .iter()
+            .any(|name| name == ACTIVATE_SKILL_TOOL_NAME)
+        {
+            if let Some(schema) = build_activate_skill_tool_schema(&skill_cards) {
+                tools.push(schema);
+            }
         }
         tools.extend(provider_tool_schemas);
         info!(
@@ -1273,6 +1310,7 @@ impl AgentRuntime {
 
             // Call LLM with extracted sub-function (#15)
             let llm_timer = ScopedTimer::new();
+            let mut requests_sent = 0;
             let llm_result = self
                 .call_llm_with_retry(
                     &current_messages,
@@ -1281,6 +1319,7 @@ impl AgentRuntime {
                     ghost_recall_context_block.as_deref(),
                     loop_guard.call_counts(),
                     &mut saw_rate_limit_this_turn,
+                    &mut requests_sent,
                 )
                 .await;
             metrics.record_llm_call(llm_timer.elapsed_ms());
@@ -1317,8 +1356,10 @@ impl AgentRuntime {
                     self.end_step(&msg, &persist_session_key, step, 0).await;
                     llm_failed_after_retries = true;
                     let max_retries = self.config.agents.defaults.llm_max_retries;
-                    warn!(error = %e, iteration = ?loop_guard.call_counts(), retries = max_retries, "LLM call failed after all retries");
-                    final_response = llm_exhausted_error(max_retries, &e);
+                    let retry_count = requests_sent.saturating_sub(1);
+                    self.last_turn_llm_failed = Some(e.to_string());
+                    warn!(error = %e, iteration = ?loop_guard.call_counts(), retries = retry_count, max_retries, "LLM call failed after all retries");
+                    final_response = llm_exhausted_error(retry_count, &e);
                     if let Some(evo_service) = self.context_builder.evolution_service() {
                         if let Ok(report) = evo_service
                             .report_error("__llm_provider__", &format!("{}", e), None, vec![])
@@ -2848,7 +2889,10 @@ impl AgentRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{coding_workspace_snapshot, verification_command};
+    use super::{
+        coding_workspace_snapshot, should_auto_add_activate_skill, verification_command,
+        InteractionMode,
+    };
 
     #[tokio::test]
     async fn coding_snapshot_filters_blockcell_runtime_files_and_suggests_tests() {
@@ -2871,6 +2915,15 @@ mod tests {
             .expect("write runtime skill");
         std::fs::write(workspace.path().join("evo_workflow.db"), "database")
             .expect("write runtime database");
+        for sidecar in [
+            "evo_workflow.db-wal",
+            "evo_workflow.db-shm",
+            "skill_evolution_workflow.db-wal",
+            "skill_evolution_workflow.db-shm",
+        ] {
+            std::fs::write(workspace.path().join(sidecar), "database sidecar")
+                .expect("write runtime database sidecar");
+        }
         std::fs::write(
             workspace.path().join("skill_evolution_workflow.db"),
             "database",
@@ -2883,6 +2936,14 @@ mod tests {
             .expect("write cache module");
         std::fs::write(workspace.path().join("test_cache.py"), "TEST_CONTENT")
             .expect("write test module");
+        std::fs::write(workspace.path().join("agents/runtime.md"), "runtime agent")
+            .expect("write runtime agent");
+        let git_status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("initialize test repository");
+        assert!(git_status.success());
 
         let (snapshot, observed) = coding_workspace_snapshot(workspace.path()).await;
         let files_section = snapshot
@@ -2903,6 +2964,12 @@ mod tests {
         assert!(observed.iter().any(|path| path.ends_with("/cache.py")));
         assert!(observed.iter().any(|path| path.ends_with("/test_cache.py")));
         assert!(snapshot.contains("Suggested test command: `python -m unittest -q`"));
+        assert!(snapshot.contains("Git status --short:"));
+        assert!(!snapshot.contains("agents/"));
+        assert!(!snapshot.contains("evo_workflow.db-wal"));
+        assert!(!snapshot.contains("evo_workflow.db-shm"));
+        assert!(!snapshot.contains("skill_evolution_workflow.db-wal"));
+        assert!(!snapshot.contains("skill_evolution_workflow.db-shm"));
     }
 
     #[tokio::test]
@@ -2949,5 +3016,21 @@ mod tests {
         );
         assert_eq!(check("cat check.txt"), None);
         assert_eq!(check("grep -rn build ."), None);
+    }
+
+    #[test]
+    fn coding_does_not_auto_add_skill_activation_without_an_active_skill() {
+        assert!(!should_auto_add_activate_skill(
+            InteractionMode::Coding,
+            false
+        ));
+        assert!(should_auto_add_activate_skill(
+            InteractionMode::Coding,
+            true
+        ));
+        assert!(should_auto_add_activate_skill(
+            InteractionMode::General,
+            false
+        ));
     }
 }

@@ -35,10 +35,11 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 - Follow safety and approval policies; never expose secrets or discard user changes.
 - Read files before editing and make minimal, focused diffs.
 - Batch related reads with `read_file(paths)` and commands with one `shell_run`; write all new-project files in one `write_file(files)` call.
+- `edit_file`: `old_text` must match exactly (read first). `read_file`/`write_file`: use `paths`/`files` for up to 10; never call any tool with `{}`.
 - Shell cwd and environment persist; do not `cd` to the absolute workspace path.
 - Run relevant tests. After they pass, stop with a brief summary; do not reread files or rerun passing tests.
 - Keep public function signatures, return types and error types unchanged unless the task asks; match how existing callers and tests use them.
-- If shell execution is unavailable, say "unverified". Use `tool_search` to activate other tools; call `activate_skill` alone for skills.
+- If shell execution is unavailable, say "unverified". Use `tool_search` to activate other tools.
 "#;
 
 #[derive(Debug, Clone)]
@@ -1093,18 +1094,7 @@ impl ContextBuilder {
             {
                 let git_lines = environment
                     .lines()
-                    .filter(|line| {
-                        let line = line.trim_start();
-                        line.to_ascii_lowercase().contains("git")
-                            || line.starts_with("??")
-                            || line.starts_with(" M")
-                            || line.starts_with("M ")
-                            || line.starts_with("A ")
-                            || line.starts_with("D ")
-                            || line.starts_with("R ")
-                            || line.starts_with("Dirty files")
-                            || line.starts_with("... ")
-                    })
+                    .filter(|line| line.starts_with("Git branch:"))
                     .collect::<Vec<_>>();
                 if !git_lines.is_empty() {
                     runtime_rules.push_str(&git_lines.join("\n"));
@@ -2093,7 +2083,10 @@ description: deploy demo
         let first_context = test_chat_message_text(&first[first.len() - 2]);
         assert!(!first_context.contains("## Project Environment"));
         assert!(first_context.contains("Git branch: main"));
-        assert!(first_context.contains("Cargo.toml"));
+        assert!(first_context.contains("Current time:"));
+        assert!(first_context.contains("Workspace:"));
+        assert!(!first_context.contains("Dirty files"));
+        assert!(!first_context.contains("Cargo.toml"));
         assert!(!first_context.contains("cargo test"));
         assert!(!first_context.contains("npm test"));
         assert!(!first_context.contains("npm run build"));
@@ -2111,7 +2104,8 @@ description: deploy demo
         let changed = build();
         let changed_context = test_chat_message_text(&changed[changed.len() - 2]);
         assert!(!changed_context.contains("## Project Environment"));
-        assert!(changed_context.contains("src.rs"));
+        assert!(!changed_context.contains("Dirty files"));
+        assert!(!changed_context.contains("src.rs"));
         assert!(!changed_context.contains("npm run lint"));
     }
 
@@ -2141,7 +2135,7 @@ description: deploy demo
             &[],
             "edit files",
             &[],
-            InteractionMode::Coding,
+            InteractionMode::General,
             None,
             &HashSet::new(),
             &HashSet::new(),
@@ -2611,6 +2605,7 @@ description: deploy demo
         assert!(prompt.contains("Read files before editing"));
         assert!(prompt.contains("minimal, focused diffs"));
         assert!(prompt.contains("read_file(paths)"));
+        assert!(prompt.contains("`edit_file`: `old_text` must match exactly (read first)."));
         assert!(prompt.contains("cwd and environment persist"));
         assert!(prompt.contains("Run relevant tests"));
         assert!(prompt.contains("do not reread files or rerun passing tests"));
@@ -2619,8 +2614,7 @@ description: deploy demo
         ));
         assert!(prompt.contains("unverified"));
         assert!(prompt.contains("tool_search"));
-        assert!(prompt.contains("activate_skill"));
-        assert!(prompt.contains("alone for skills"));
+        assert!(!prompt.contains("activate_skill"));
     }
 }
 #[test]

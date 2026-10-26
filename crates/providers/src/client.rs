@@ -106,21 +106,23 @@ fn resolve_proxy(
     ProxyResolution::None
 }
 
+pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// 构建带代理配置的 reqwest::Client。
 ///
 /// - `provider_proxy`: 来自 `ProviderConfig.proxy`（None=未配置，Some("")=强制直连，Some("http://...")=使用代理）
 /// - `global_proxy`: 来自 `Config.network.proxy`
 /// - `no_proxy`: 来自 `Config.network.no_proxy`
 /// - `api_base`: provider 的 api_base URL，用于 no_proxy 匹配
-/// - `timeout`: HTTP 超时时长
 pub fn build_http_client(
     provider_proxy: Option<&str>,
     global_proxy: Option<&str>,
     no_proxy: &[String],
     api_base: &str,
-    timeout: Duration,
 ) -> Result<Client> {
-    let mut builder = Client::builder().timeout(timeout);
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(300));
 
     match resolve_proxy(provider_proxy, global_proxy, no_proxy, api_base) {
         ProxyResolution::UseProxy(proxy_url) => match Proxy::all(&proxy_url) {
@@ -284,13 +286,7 @@ mod tests {
     #[test]
     fn test_build_http_client_no_proxy() {
         // 能正常构建出 Client
-        let _client = build_http_client(
-            None,
-            None,
-            &[],
-            "https://api.openai.com/v1",
-            Duration::from_secs(30),
-        )
-        .expect("build_http_client should succeed in test");
+        let _client = build_http_client(None, None, &[], "https://api.openai.com/v1")
+            .expect("build_http_client should succeed in test");
     }
 }

@@ -321,6 +321,11 @@ pub async fn run(
 
         let response = runtime.process_message(inbound).await?;
         runtime.wait_for_background_tasks().await;
+        if let Some(error) = runtime.take_last_turn_llm_failure() {
+            event_handler.abort();
+            eprintln!("[blockcell] llm_failed: {error}");
+            std::process::exit(2);
+        }
         if let Some(command) = runtime.last_verification_command() {
             eprintln!("[blockcell] verification: verified ({command}, exit 0)");
         } else {

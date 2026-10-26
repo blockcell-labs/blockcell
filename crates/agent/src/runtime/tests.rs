@@ -3349,6 +3349,7 @@ async fn connection_phase_failure_falls_back_to_next_provider_without_retry_budg
     runtime.set_agent_id(Some("default".to_string()));
     let msg = test_main_session_inbound("ws", "fallback-chat");
     let mut saw_rate_limit = false;
+    let mut requests_sent = 0;
 
     let (response, served_by) = runtime
         .call_llm_with_retry(
@@ -3358,6 +3359,7 @@ async fn connection_phase_failure_falls_back_to_next_provider_without_retry_budg
             None,
             &HashMap::new(),
             &mut saw_rate_limit,
+            &mut requests_sent,
         )
         .await
         .expect("fallback provider should answer");
@@ -3396,6 +3398,7 @@ async fn explicit_stream_done_reports_provider_success() {
     runtime.set_agent_id(Some("default".to_string()));
     let msg = test_main_session_inbound("ws", "stream-success-chat");
     let mut saw_rate_limit = false;
+    let mut requests_sent = 0;
 
     runtime
         .call_llm_with_retry(
@@ -3405,6 +3408,7 @@ async fn explicit_stream_done_reports_provider_success() {
             None,
             &HashMap::new(),
             &mut saw_rate_limit,
+            &mut requests_sent,
         )
         .await
         .expect("explicit stream completion should succeed");
@@ -8112,6 +8116,10 @@ struct FailingStreamProvider {
     calls: Arc<AtomicUsize>,
 }
 
+struct RateLimitThenSuccessProvider {
+    calls: Arc<AtomicUsize>,
+}
+
 #[async_trait::async_trait]
 impl blockcell_providers::Provider for FailingStreamProvider {
     async fn chat(
@@ -8130,6 +8138,77 @@ impl blockcell_providers::Provider for FailingStreamProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(blockcell_core::Error::Provider(self.error.to_string()))
     }
+}
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for RateLimitThenSuccessProvider {
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        Ok(LLMResponse {
+            content: Some("recovered answer".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+            usage: serde_json::Value::Null,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<mpsc::Receiver<StreamChunk>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(blockcell_core::Error::Provider(
+                "HTTP_STATUS=429 rate limited".to_string(),
+            ));
+        }
+
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(StreamChunk::Done {
+            response: LLMResponse {
+                content: Some("recovered answer".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                finish_reason: "stop".to_string(),
+                usage: serde_json::Value::Null,
+            },
+        })
+        .await
+        .expect("send successful retry response");
+        Ok(rx)
+    }
+}
+
+#[tokio::test]
+async fn single_provider_rate_limit_is_retried_with_a_cooling_probe() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.llm_max_retries = 2;
+    config.agents.defaults.llm_retry_delay_ms = 1;
+    let base = std::env::temp_dir().join(format!("blockcell-429-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(RateLimitThenSuccessProvider {
+            calls: calls.clone(),
+        }),
+        config,
+    );
+
+    let response = runtime
+        .process_message(test_main_session_inbound("cli", "single-provider-429"))
+        .await
+        .expect("retry should succeed");
+
+    assert_eq!(response, "recovered answer");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(runtime.take_last_turn_llm_failure().is_none());
 }
 
 async fn llm_stream_calls_for(error: &'static str) -> usize {
@@ -8321,6 +8400,59 @@ async fn llm_retry_follows_failure_kind() {
         llm_stream_calls_for("model returned malformed payload").await,
         2
     );
+}
+
+#[tokio::test]
+async fn exhausted_rate_limits_report_actual_retry_count_and_set_failure_flag() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn blockcell_providers::Provider> = Arc::new(FailingStreamProvider {
+        error: "HTTP_STATUS=429 rate limited",
+        calls: calls.clone(),
+    });
+    let provider_pool = ProviderPool::from_entries(vec![
+        blockcell_providers::ProviderPoolEntry {
+            model: "primary".to_string(),
+            provider_name: "test".to_string(),
+            weight: 1,
+            priority: 1,
+            provider: Arc::clone(&provider),
+        },
+        blockcell_providers::ProviderPoolEntry {
+            model: "fallback".to_string(),
+            provider_name: "test".to_string(),
+            weight: 1,
+            priority: 1,
+            provider,
+        },
+    ]);
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.llm_max_retries = 1;
+    config.agents.defaults.llm_retry_delay_ms = 1;
+    let base =
+        std::env::temp_dir().join(format!("blockcell-429-exhausted-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = AgentRuntime::new(
+        config,
+        Paths::with_base(base),
+        provider_pool,
+        blockcell_tools::ToolRegistry::new(),
+    )
+    .expect("create runtime");
+    runtime.set_agent_id(Some("default".to_string()));
+
+    let response = runtime
+        .process_message(test_main_session_inbound("cli", "all-providers-429"))
+        .await
+        .expect("LLM exhaustion is returned as a response");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(response.contains("已重试 2 次"), "{response}");
+    assert!(!response.contains("已重试 1 次"), "{response}");
+    assert!(runtime
+        .take_last_turn_llm_failure()
+        .is_some_and(|error| error.contains("HTTP_STATUS=429")));
 }
 
 /// 有副作用且总是超时的工具。

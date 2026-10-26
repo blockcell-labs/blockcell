@@ -2528,6 +2528,7 @@ pub struct AgentRuntime {
     background_tasks_enabled: bool,
     background_task_handles: Vec<tokio::task::JoinHandle<()>>,
     last_verification_command: Option<String>,
+    last_turn_llm_failed: Option<String>,
     forced_interaction_mode: Option<InteractionMode>,
     one_shot_cli_auto_coding: bool,
 }
@@ -2557,6 +2558,10 @@ impl AgentRuntime {
 
     pub fn last_verification_command(&self) -> Option<&str> {
         self.last_verification_command.as_deref()
+    }
+
+    pub fn take_last_turn_llm_failure(&mut self) -> Option<String> {
+        self.last_turn_llm_failed.take()
     }
 
     pub async fn wait_for_background_tasks(&mut self) {
@@ -2749,6 +2754,7 @@ impl AgentRuntime {
             background_tasks_enabled: true,
             background_task_handles: Vec::new(),
             last_verification_command: None,
+            last_turn_llm_failed: None,
             forced_interaction_mode: None,
             one_shot_cli_auto_coding: false,
         };
@@ -2832,6 +2838,7 @@ impl AgentRuntime {
             background_tasks_enabled: self.background_tasks_enabled,
             background_task_handles: Vec::new(),
             last_verification_command: None,
+            last_turn_llm_failed: None,
             forced_interaction_mode: self.forced_interaction_mode,
             one_shot_cli_auto_coding: self.one_shot_cli_auto_coding,
         };

@@ -45,6 +45,7 @@ fn retry_after_delay_ms(error: &blockcell_core::Error) -> Option<u64> {
 impl AgentRuntime {
     /// Extracted sub-function (#15): Call LLM with streaming and retry on transient errors.
     /// Returns the LLM response on success, or the last error on exhaustion.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_llm_with_retry(
         &mut self,
         current_messages: &[ChatMessage],
@@ -53,6 +54,7 @@ impl AgentRuntime {
         ghost_recall_context_block: Option<&str>,
         iteration: &HashMap<String, u32>,
         saw_rate_limit_this_turn: &mut bool,
+        requests_sent: &mut u32,
     ) -> std::result::Result<(LLMResponse, ServedBy), blockcell_core::Error> {
         let max_retries = self.config.agents.defaults.llm_max_retries;
         let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
@@ -101,11 +103,25 @@ impl AgentRuntime {
             let mut excluded_provider_indices = Vec::new();
 
             loop {
-                let (pool_idx, provider) = match self.provider_pool.acquire_with_strategy_excluding(
-                    self.config.agents.defaults.routing_strategy,
-                    &routing_context,
-                    &excluded_provider_indices,
-                ) {
+                let provider_candidate = self
+                    .provider_pool
+                    .acquire_with_strategy_excluding(
+                        self.config.agents.defaults.routing_strategy,
+                        &routing_context,
+                        &excluded_provider_indices,
+                    )
+                    .or_else(|| {
+                        (attempt > 0 && excluded_provider_indices.is_empty())
+                            .then(|| {
+                                self.provider_pool.acquire_probe_excluding(
+                                    self.config.agents.defaults.routing_strategy,
+                                    &routing_context,
+                                    &excluded_provider_indices,
+                                )
+                            })
+                            .flatten()
+                    });
+                let (pool_idx, provider) = match provider_candidate {
                     Some(p) => p,
                     None => {
                         if last_error.is_none() {
@@ -117,6 +133,7 @@ impl AgentRuntime {
                     }
                 };
 
+                *requests_sent = (*requests_sent).saturating_add(1);
                 match provider.chat_stream(&api_messages, tools).await {
                     Ok(mut stream_rx) => {
                         if attempt > 0 {

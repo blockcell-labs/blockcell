@@ -304,6 +304,36 @@ impl ProviderPool {
         }
     }
 
+    /// Acquire a healthy provider if one is available, otherwise probe the cooling
+    /// provider whose cooldown began earliest.
+    pub fn acquire_probe_excluding(
+        &self,
+        strategy: RoutingStrategy,
+        context: &RoutingContext,
+        excluded: &[usize],
+    ) -> Option<(usize, Arc<dyn Provider>)> {
+        if let Some(provider) = self.acquire_with_strategy_excluding(strategy, context, excluded) {
+            return Some(provider);
+        }
+
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("ProviderPool 状态 Mutex 被污染，正在恢复");
+            poisoned.into_inner()
+        });
+        self.recover_cooling_entries(&mut state);
+
+        let selected = (0..self.entries.len())
+            .filter(|idx| !excluded.contains(idx))
+            .filter_map(|idx| match state.health.get(&idx) {
+                Some(EntryHealth::Cooling(since)) => Some((idx, *since)),
+                _ => None,
+            })
+            .min_by_key(|(_, since)| *since)
+            .map(|(idx, _)| idx)?;
+
+        Some((selected, Arc::clone(&self.entries[selected].provider)))
+    }
+
     fn acquire_excluding(&self, excluded: &[usize]) -> Option<(usize, Arc<dyn Provider>)> {
         let mut state = self.state.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("ProviderPool 状态 Mutex 被污染，正在恢复");
@@ -490,6 +520,7 @@ impl ProviderPool {
                 let stats = state.stats.entry(idx).or_default();
                 stats.success_count += 1;
                 stats.transient_fail_count = 0; // 成功后重置连续失败计数
+                state.health.insert(idx, EntryHealth::Healthy);
             }
             CallResult::RateLimit => {
                 warn!(idx, model = %self.entries[idx].model, "ProviderPool: rate limited, entering cooldown");
@@ -810,6 +841,46 @@ mod tests {
         };
 
         assert!(pool.acquire().is_none());
+    }
+
+    #[test]
+    fn rate_limited_provider_is_available_as_a_probe_after_normal_acquire_fails() {
+        let pool = ProviderPool::from_single_provider("model-a", "test", Arc::new(DummyProvider));
+        pool.report(0, CallResult::RateLimit);
+        let context = RoutingContext::default();
+
+        assert!(pool
+            .acquire_with_strategy(RoutingStrategy::Manual, &context)
+            .is_none());
+        assert_eq!(
+            pool.acquire_probe_excluding(RoutingStrategy::Manual, &context, &[])
+                .map(|(idx, _)| idx),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn dead_provider_is_never_returned_as_a_probe() {
+        let pool = ProviderPool::from_single_provider("model-a", "test", Arc::new(DummyProvider));
+        pool.report(0, CallResult::AuthError);
+
+        assert!(pool
+            .acquire_probe_excluding(RoutingStrategy::Manual, &RoutingContext::default(), &[])
+            .is_none());
+    }
+
+    #[test]
+    fn successful_probe_restores_provider_health() {
+        let pool = ProviderPool::from_single_provider("model-a", "test", Arc::new(DummyProvider));
+        pool.report(0, CallResult::RateLimit);
+        let (idx, _) = pool
+            .acquire_probe_excluding(RoutingStrategy::Manual, &RoutingContext::default(), &[])
+            .expect("cooling provider should be probeable");
+
+        pool.report(idx, CallResult::Success);
+
+        assert_eq!(pool.status_summary()[0].health, "healthy");
+        assert!(pool.acquire().is_some());
     }
 
     #[test]

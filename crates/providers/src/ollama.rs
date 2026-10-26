@@ -5,11 +5,13 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::client::build_http_client;
+
+/// Ollama 本地推理较慢，非流式请求保留更长的超时。
+const OLLAMA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 use crate::security::{
     consume_error_body, http_status_error_with_retry_after, read_response_limited, redact_url,
     request_error, StreamGuard, MAX_PROVIDER_RESPONSE_BYTES,
@@ -49,14 +51,7 @@ impl OllamaProvider {
             .unwrap_or(DEFAULT_OLLAMA_BASE)
             .trim_end_matches('/')
             .to_string();
-        // Ollama 本地推理使用更长的超时时间
-        let client = build_http_client(
-            provider_proxy,
-            global_proxy,
-            no_proxy,
-            &resolved_base,
-            Duration::from_secs(300),
-        )?;
+        let client = build_http_client(provider_proxy, global_proxy, no_proxy, &resolved_base)?;
         Ok(Self {
             client,
             api_base: resolved_base,
@@ -231,6 +226,7 @@ impl OllamaProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(OLLAMA_REQUEST_TIMEOUT)
             .json(&request)
             .send()
             .await
@@ -365,6 +361,7 @@ impl OllamaProvider {
         let response = self
             .client
             .post(&url)
+            .timeout(OLLAMA_REQUEST_TIMEOUT)
             .json(&request)
             .send()
             .await
