@@ -92,7 +92,10 @@ class CodingEvalRunnerTests(unittest.TestCase):
                     "tool_calls": 10,
                     "input_tokens": 100,
                     "output_tokens": 50,
+                    "background_usage": 25,
+                    "tool_errors": 1,
                     "failure_category": None,
+                    "verified_by_tests": True,
                 },
                 {
                     "task_id": "b",
@@ -100,6 +103,8 @@ class CodingEvalRunnerTests(unittest.TestCase):
                     "tool_calls": 20,
                     "input_tokens": 200,
                     "output_tokens": 100,
+                    "background_usage": 0,
+                    "tool_errors": 0,
                     "failure_category": "editing_failure",
                 },
             ]
@@ -109,7 +114,9 @@ class CodingEvalRunnerTests(unittest.TestCase):
         self.assertEqual(report["tasks_passed"], 1)
         self.assertEqual(report["completion_rate"], 0.5)
         self.assertEqual(report["average_tool_calls"], 15.0)
-        self.assertEqual(report["average_tokens"], 225.0)
+        self.assertEqual(report["average_tokens"], 237.5)
+        self.assertEqual(report["tool_error_rate"], 0.0333)
+        self.assertEqual(report["verified_tasks"], 1)
         self.assertEqual(report["failure_categories"], {"editing_failure": 1})
 
     def test_parse_tests_run_reads_unittest_summary(self):

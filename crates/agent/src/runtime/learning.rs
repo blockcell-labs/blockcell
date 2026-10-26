@@ -558,18 +558,20 @@ impl super::AgentRuntime {
     pub async fn mount_mcp_servers(&mut self) {}
 
     pub(super) fn ghost_learning_enabled(&self) -> bool {
-        self.config.memory.learning_system.enabled()
+        self.background_tasks_enabled
+            && self.config.memory.learning_system.enabled()
             && self.config.agents.ghost.learning.capture_enabled()
     }
 
-    pub(super) fn spawn_pending_ghost_background_reviews(&self) {
+    pub(super) fn spawn_pending_ghost_background_reviews(&mut self) {
         if self.ghost_learning_enabled() {
-            spawn_pending_background_reviews(
-                self.paths.clone(),
-                Arc::clone(&self.provider_pool),
-                8,
-                self.config.clone(),
-            );
+            self.background_task_handles
+                .push(spawn_pending_background_reviews(
+                    self.paths.clone(),
+                    Arc::clone(&self.provider_pool),
+                    8,
+                    self.config.clone(),
+                ));
         }
     }
 

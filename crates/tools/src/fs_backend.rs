@@ -89,17 +89,13 @@ impl FilesystemBackend for LocalFilesystem {
                 }
                 Err(error) => return Err(error.into()),
             };
-            let mut lock_name = std::ffi::OsString::from(".");
-            lock_name.push(
-                canonical
-                    .file_name()
-                    .ok_or_else(|| Error::Validation("File has no name".into()))?,
-            );
-            lock_name.push(".blockcell-write.lock");
-            blockcell_core::file_store::ExclusiveFileLock::acquire(
-                &canonical.with_file_name(lock_name),
-            )
-            .map_err(Error::from)
+            let lock_dir = std::env::temp_dir().join("blockcell-write-locks");
+            std::fs::create_dir_all(&lock_dir)?;
+            let lock_path = lock_dir.join(format!(
+                "{:016x}.lock",
+                stable_path_hash(canonical.to_string_lossy().as_bytes())
+            ));
+            blockcell_core::file_store::ExclusiveFileLock::acquire(&lock_path).map_err(Error::from)
         })
         .await
         .map_err(|error| Error::Tool(format!("File lock task failed: {error}")))??;
@@ -157,6 +153,12 @@ impl FilesystemBackend for LocalFilesystem {
     }
 }
 
+fn stable_path_hash(path: &[u8]) -> u64 {
+    path.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
 fn file_type_kind(file_type: std::fs::FileType) -> FsEntryKind {
     if file_type.is_dir() {
         FsEntryKind::Directory
@@ -177,7 +179,14 @@ mod tests {
         let path = dir.path().join("item.txt");
         let fs = LocalFilesystem;
         let held = fs.lock_for_write(&path).await.unwrap();
-        let lock_path = dir.path().join(".item.txt.blockcell-write.lock");
+        let canonical = std::fs::canonicalize(dir.path()).unwrap().join("item.txt");
+        let lock_path = std::env::temp_dir()
+            .join("blockcell-write-locks")
+            .join(format!(
+                "{:016x}.lock",
+                stable_path_hash(canonical.to_string_lossy().as_bytes())
+            ));
+        assert!(!dir.path().join(".item.txt.blockcell-write.lock").exists());
         let error =
             blockcell_core::file_store::ExclusiveFileLock::try_acquire(&lock_path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);

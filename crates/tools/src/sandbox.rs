@@ -9,7 +9,7 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use tokio::process::Command;
 
-const APPROVAL_REQUIRED: &str = "native sandbox unavailable; approval required";
+const APPROVAL_REQUIRED: &str = "{\"error\":\"native sandbox unavailable; approval required\",\"code\":\"SANDBOX_UNAVAILABLE\",\"alternative\":\"Do not retry shell commands. Install bubblewrap (for example: sudo apt install bubblewrap), or use the available filesystem tools.\"}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -76,6 +76,14 @@ pub fn native_backend(policy: SandboxPolicy) -> SandboxBackend {
         landlock_abi(),
         policy,
     )
+}
+
+pub fn native_sandbox_available() -> bool {
+    match std::env::consts::OS {
+        "linux" => *BWRAP_AVAILABLE,
+        "macos" => *SEATBELT_AVAILABLE,
+        _ => false,
+    }
 }
 
 static SEATBELT_AVAILABLE: Lazy<bool> = Lazy::new(|| {

@@ -129,6 +129,7 @@ pub async fn message(msg: &str, session: &str, agent: Option<&str>) -> anyhow::R
         Some(session.to_string()),
         None,
         None,
+        false,
     )
     .await
 }

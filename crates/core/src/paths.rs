@@ -355,7 +355,6 @@ impl Paths {
         std::fs::create_dir_all(self.sessions_dir())?;
         std::fs::create_dir_all(self.audit_dir())?;
         std::fs::create_dir_all(self.cron_dir())?;
-        std::fs::create_dir_all(self.workspace().join("media"))?;
         std::fs::create_dir_all(self.workspace().join("downloads"))?;
         std::fs::create_dir_all(self.update_dir())?;
         std::fs::create_dir_all(self.bridge_dir())?;
@@ -363,7 +362,6 @@ impl Paths {
         std::fs::create_dir_all(self.mcp_dir())?;
         std::fs::create_dir_all(self.memory_dir())?;
         std::fs::create_dir_all(self.skills_dir())?;
-        std::fs::create_dir_all(self.import_staging_skills_dir())?;
         std::fs::create_dir_all(self.evolved_tools_dir())?;
         std::fs::create_dir_all(self.tool_artifacts_dir())?;
         std::fs::create_dir_all(self.tool_evolution_records_dir())?;
@@ -476,18 +474,20 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_dirs_creates_media_cleanup_targets() {
+    fn test_ensure_dirs_does_not_create_lazy_workspace_directories() {
         let base = std::env::temp_dir().join(format!("blockcell-paths-{}", uuid::Uuid::new_v4()));
         let paths = Paths::with_base(base.clone());
 
         paths.ensure_dirs().expect("ensure dirs");
 
-        let media_exists = paths.media_dir().is_dir();
+        let media_exists = paths.media_dir().exists();
         let downloads_exists = paths.workspace().join("downloads").is_dir();
+        let import_staging_exists = paths.import_staging_skills_dir().exists();
 
         std::fs::remove_dir_all(base).expect("remove temp dirs");
 
-        assert!(media_exists);
+        assert!(!media_exists);
+        assert!(!import_staging_exists);
         assert!(downloads_exists);
     }
 

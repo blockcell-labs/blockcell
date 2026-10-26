@@ -610,6 +610,22 @@ impl AgentRuntime {
             .get(&key)
             .copied();
         match observed {
+            None if inv.call.name == "write_file" => Ok(()),
+            None if inv.call.name == "edit_file" && path.is_file() => {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                self.update_file_observation(&inv.msg.session_key(), path_str);
+                let content: String = content.chars().take(8000).collect();
+                Err(serde_json::json!({
+                    "error": format!(
+                        "FS_NOT_OBSERVED: current contents of {} follow; retry the edit using this content:\n{}",
+                        path.display(),
+                        content
+                    ),
+                    "code": "FS_NOT_OBSERVED",
+                    "current_content": content
+                })
+                .to_string())
+            }
             None => Err(serde_json::json!({
                 "error": format!(
                     "FS_NOT_OBSERVED: {} has not been read in this session — read_file it, then retry",
@@ -1077,6 +1093,13 @@ impl AgentRuntime {
         ) {
             if let Some(path) = inv.args.get("path").and_then(serde_json::Value::as_str) {
                 self.update_file_observation(&inv.msg.session_key(), path);
+            }
+            if tool_call.name == "read_file" {
+                if let Some(paths) = inv.args.get("paths").and_then(serde_json::Value::as_array) {
+                    for path in paths.iter().filter_map(serde_json::Value::as_str) {
+                        self.update_file_observation(&inv.msg.session_key(), path);
+                    }
+                }
             }
         }
 

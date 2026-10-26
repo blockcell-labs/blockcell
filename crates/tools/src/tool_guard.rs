@@ -83,12 +83,19 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
                 .copied()
                 .filter(|token| !token.starts_with('-') && !token.is_empty())
                 .collect();
-            if has_recursive || !has_target {
+            if !has_target {
                 return true;
             }
             if targets
                 .iter()
                 .any(|target| !is_plain_relative_rm_target(target))
+            {
+                return true;
+            }
+            if has_recursive
+                && targets
+                    .iter()
+                    .any(|target| !is_safe_recursive_cleanup_target(target))
             {
                 return true;
             }
@@ -110,6 +117,23 @@ pub fn is_dangerous_exec_command(command: &str) -> bool {
     ];
 
     dangerous.iter().any(|p| c.contains(p))
+}
+
+fn is_safe_recursive_cleanup_target(target: &str) -> bool {
+    let target = target.trim_matches(|c| c == '\'' || c == '"');
+    let final_component = target.rsplit('/').next().unwrap_or(target);
+    matches!(
+        final_component,
+        "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+            | ".ruff_cache"
+            | ".coverage"
+            | "build"
+            | "dist"
+    ) || final_component.ends_with(".egg-info")
+        || final_component.starts_with('.') && final_component.ends_with(".blockcell-write.lock")
+        || target == ".*.blockcell-write.lock"
 }
 
 pub fn requires_human_confirmation(command: &str) -> bool {
@@ -145,6 +169,9 @@ pub fn requires_human_confirmation(command: &str) -> bool {
 
 fn is_plain_relative_rm_target(target: &str) -> bool {
     let target = target.trim_matches(|c| c == '\'' || c == '"');
+    if matches!(target, ".*.blockcell-write.lock" | "*.egg-info") {
+        return true;
+    }
     !target.starts_with('/')
         && !target.starts_with('~')
         && !target.contains("..")
@@ -446,18 +473,18 @@ mod tests {
     fn dangerous_items_cover_exec_and_destructive_file_ops() {
         assert_eq!(
             dangerous_operation_items("exec", &json!({"command": "rm -rf build"})),
-            vec!["command: rm -rf build"]
+            Vec::<String>::new()
         );
         assert_eq!(
             dangerous_operation_items("shell", &json!({"command": "rm -rf build"})),
-            vec!["command: rm -rf build"]
+            Vec::<String>::new()
         );
         assert_eq!(
             dangerous_operation_items(
                 "shell",
                 &json!({"action": "write_stdin", "session_id": "s1", "input": "rm -rf build\n"})
             ),
-            vec!["command: rm -rf build\n"]
+            Vec::<String>::new()
         );
         assert!(dangerous_operation_items("exec", &json!({"command": "ls"})).is_empty());
         assert!(dangerous_operation_items("shell", &json!({"command": "ls"})).is_empty());
@@ -499,7 +526,16 @@ mod tests {
 
     #[test]
     fn dangerous_exec_classifier_allows_plain_nonrecursive_force_rm() {
-        for command in ["rm -f build.log", "rm -f a/b.txt", "rm build.log"] {
+        for command in [
+            "rm -f build.log",
+            "rm -f a/b.txt",
+            "rm build.log",
+            "rm -rf __pycache__",
+            "rm -rf src/.pytest_cache",
+            "rm -rf dist",
+            "rm -rf *.egg-info",
+            "rm -f .*.blockcell-write.lock",
+        ] {
             assert!(
                 !is_dangerous_exec_command(command),
                 "unexpectedly dangerous: {command}"
@@ -507,7 +543,9 @@ mod tests {
         }
 
         for command in [
-            "rm -rf dist",
+            "rm -rf src",
+            "rm -rf /",
+            "rm -rf ../x",
             "rm -f ../x",
             "rm -f /etc/x",
             "rm -f ~/x",

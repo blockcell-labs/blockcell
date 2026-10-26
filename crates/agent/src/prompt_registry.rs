@@ -419,6 +419,29 @@ impl PromptSection for GhostLearningSection {
 
 struct ToolsSection;
 
+fn is_coding_tool_rule(rule: &str) -> bool {
+    [
+        "edit_file",
+        "glob",
+        "grep",
+        "job_kill",
+        "job_output",
+        "list_dir",
+        "read_file",
+        "shell_close",
+        "shell_input",
+        "shell_poll",
+        "shell_run",
+        "tool_search",
+        "update_plan",
+        "write_file",
+        "activate_skill",
+        "exec",
+    ]
+    .iter()
+    .any(|name| rule.starts_with(&format!("- **{name}**")))
+}
+
 impl PromptSection for ToolsSection {
     fn id(&self) -> &'static str {
         "tools"
@@ -444,6 +467,9 @@ impl PromptSection for ToolsSection {
             prompt.push_str("- The current callable tools are defined by the attached tool schemas. When asked about capabilities, answer only from those schemas.\n");
         }
         for rule in ctx.tool_prompt_rules {
+            if matches!(ctx.mode, InteractionMode::Coding) && !is_coding_tool_rule(rule) {
+                continue;
+            }
             let rule = truncate_to_token_budget(rule, MAX_TOOL_RULE_TOKENS);
             prompt.push_str(&rule);
             if !rule.ends_with('\n') {

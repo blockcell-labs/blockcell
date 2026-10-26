@@ -197,6 +197,19 @@ pub async fn run() -> anyhow::Result<()> {
     let mut warn_count = 0u32;
     let mut err_count = 0u32;
 
+    if cfg!(target_os = "linux") {
+        if blockcell_tools::sandbox::native_sandbox_available() {
+            print_ok("Bubblewrap sandbox available", "");
+            ok_count += 1;
+        } else {
+            print_warn(
+                "Bubblewrap sandbox unavailable",
+                "Install with `sudo apt install bubblewrap` (or use dnf/pacman)",
+            );
+            warn_count += 1;
+        }
+    }
+
     // --- 1. Config ---
     println!("📋 Configuration");
     let config_exists = paths.config_file().exists();

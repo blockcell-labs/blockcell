@@ -62,7 +62,10 @@ pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -
         .unwrap_or("");
 
     match tool_name {
-        "read_file" => push_path(&mut accesses, args, "path", PathOp::Read),
+        "read_file" => {
+            push_path(&mut accesses, args, "path", PathOp::Read);
+            push_paths(&mut accesses, args, "paths", PathOp::Read);
+        }
         "write_file" | "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
         "list_dir" => push_path(&mut accesses, args, "path", PathOp::List),
         "file_ops" => {
@@ -218,7 +221,24 @@ impl super::AgentRuntime {
 
     /// Check if a resolved path is inside the safe workspace directory.
     pub(super) fn is_path_safe(&self, resolved: &std::path::Path) -> bool {
-        is_path_within_base(&self.paths.workspace(), resolved)
+        if is_path_within_base(&self.paths.workspace(), resolved) {
+            return true;
+        }
+        let canonical = resolved
+            .canonicalize()
+            .unwrap_or_else(|_| resolved.to_path_buf());
+        let temp_dir = std::env::temp_dir();
+        let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
+        if is_path_within_base(&temp_dir, &canonical) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let tmp = std::path::Path::new("/tmp");
+            tmp.exists() && is_path_within_base(tmp, &canonical)
+        }
+        #[cfg(not(unix))]
+        false
     }
 
     /// Check whether a resolved path falls within a directory authorized in
@@ -345,6 +365,17 @@ impl super::AgentRuntime {
             }
             return Ok(());
         }
+        let mut effective_args = args.clone();
+        if tool_name == "shell_run"
+            && effective_args
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            effective_args["session_id"] =
+                serde_json::Value::String(format!("default-{}", msg.session_key()));
+        }
+        let args = &effective_args;
         let path_accesses = self.extract_path_accesses(tool_name, args);
         if path_accesses.is_empty() {
             return Ok(());
@@ -477,7 +508,12 @@ impl super::AgentRuntime {
                 tool = tool_name,
                 "No confirmation channel, denying access to paths outside workspace"
             );
-            Err("path requires confirmation but no confirmation channel is available".to_string())
+            Err(serde_json::json!({
+                "error": "path requires confirmation but no confirmation channel is available",
+                "code": "NEEDS_CONFIRMATION_NONINTERACTIVE",
+                "paths": confirm_paths.iter().map(|access| access.path.clone()).collect::<Vec<_>>(),
+                "alternative": "use a path inside the workspace (e.g. ./.tmp/) or the system temp dir"
+            }).to_string())
         }
     }
 
@@ -965,6 +1001,10 @@ mod tests {
     #[test]
     fn path_extraction_ignores_non_string_fields() {
         assert!(extract_path_accesses("read_file", &json!({"path": 42})).is_empty());
+        assert_eq!(
+            extract_path_accesses("read_file", &json!({"paths": ["a.txt", "b.txt"]})).len(),
+            2
+        );
         assert!(extract_path_accesses("message", &json!({"media": "not-an-array"})).is_empty());
         assert!(extract_path_accesses("message", &json!({"media": [1, 2]})).is_empty());
     }

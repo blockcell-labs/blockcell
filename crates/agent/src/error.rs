@@ -51,13 +51,13 @@ pub(crate) fn dangerous_exec_denied(tool_name: &str, has_confirm_channel: bool) 
     } else {
         "This channel cannot show an interactive confirm prompt. Approval must name the exact tool and JSON arguments; a generic confirmation cannot authorize execution."
     };
-    tool_denied_json(
-        tool_name,
-        &format!(
-            "Permission denied: dangerous {tool_name} command requires explicit user confirmation."
-        ),
-        hint,
-    )
+    json!({
+        "error": format!("Permission denied: dangerous {tool_name} command requires explicit user confirmation."),
+        "tool": tool_name,
+        "code": "NEEDS_CONFIRMATION_NONINTERACTIVE",
+        "hint": hint,
+        "alternative": "use a path inside the workspace (e.g. ./.tmp/) or the system temp dir"
+    }).to_string()
 }
 
 /// Build a permission-denied error for dangerous file_ops.
@@ -71,6 +71,11 @@ pub(crate) fn dangerous_file_ops_denied() -> String {
 
 /// Build a path-access denied error.
 pub(crate) fn path_access_denied(tool_name: &str, path: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(path) {
+        if value.get("code").is_some() {
+            return value.to_string();
+        }
+    }
     tool_denied_json(
         tool_name,
         &format!("Path access denied by security policy: {}", path),

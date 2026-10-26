@@ -1403,10 +1403,9 @@ async fn test_workspace_internal_deny_rule_is_enforced() {
 async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
     // 危险命令批准（dangerous_confirmed → confirmed=true, cache=false）跳过 Confirm
     // 弹窗，但不得把路径写入会话授权缓存——与策略级确认（cache=true）区分开。
-    // 注意不能用 std::env::temp_dir()：macOS 上它在 /private/var 下，会命中内置
-    // 敏感路径 Deny。/tmp → /private/tmp 在内置列表之外，evaluate 为 Confirm。
+    // The target is outside the workspace and outside the system temporary directory.
     let outside = std::path::PathBuf::from(format!(
-        "/tmp/blockcell-dangerous-scope-{}",
+        "/var/tmp/blockcell-dangerous-scope-{}",
         uuid::Uuid::new_v4()
     ));
     let args = serde_json::json!({"command": format!("cat {}", outside.display())});
@@ -4343,7 +4342,7 @@ async fn test_orchestrator_tick_emits_event_tx_for_immediate_notifications() {
 
 #[tokio::test]
 async fn system_event_delivery_failure_keeps_pending() {
-    let runtime = test_runtime();
+    let mut runtime = test_runtime();
     let mut event = SystemEvent::new_main_session(
         "task.failed",
         "task_manager",
@@ -4364,7 +4363,7 @@ async fn system_event_delivery_failure_keeps_pending() {
 
 #[tokio::test]
 async fn summary_delivery_failure_keeps_items() {
-    let runtime = test_runtime();
+    let mut runtime = test_runtime();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut event = SystemEvent::new_main_session(
         "task.completed",
@@ -4564,7 +4563,7 @@ async fn test_cron_agent_persists_to_deliver_session_not_cron_job_session() {
 
 #[tokio::test]
 async fn test_orchestrator_tick_gracefully_handles_missing_dispatchers() {
-    let runtime = test_runtime();
+    let mut runtime = test_runtime();
 
     let event = SystemEvent::new_main_session(
         "task.failed",
@@ -6348,7 +6347,7 @@ async fn workspace_auto_denies_dangerous_exec_outside_workspace_with_hint() {
         .execute_tool_call(
             &tool_call(
                 "exec",
-                serde_json::json!({"command": "rm -rf /tmp/outside-xyz"}),
+                serde_json::json!({"command": "rm -rf /var/tmp/outside-xyz"}),
             ),
             &test_main_session_inbound("cli", "workspace-auto-outside"),
             None,
@@ -6453,7 +6452,7 @@ impl blockcell_providers::Provider for VerificationGateProvider {
             )],
             2 if self.verification_after_edit => vec![tool_call(
                 "shell",
-                serde_json::json!({"command": "echo verified"}),
+                serde_json::json!({"command": "cargo test"}),
             )],
             _ => Vec::new(),
         };
@@ -6492,7 +6491,7 @@ impl blockcell_tools::Tool for VerificationGateShell {
         _ctx: blockcell_tools::ToolContext,
         _params: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        Ok(serde_json::json!({"output": "verified"}))
+        Ok(serde_json::json!({"output": "verified", "exit_code": 0}))
     }
 }
 
@@ -6584,7 +6583,7 @@ fn absent_runtime_handle_hides_agent_but_keeps_spawn_available() {
 }
 
 #[tokio::test]
-async fn edit_file_requires_a_prior_read_in_the_same_session() {
+async fn edit_file_unobserved_error_includes_contents_for_retry() {
     let mut runtime = test_runtime_with_default_tools();
     let path = runtime.paths.workspace().join("unread.txt");
     std::fs::write(&path, "before").expect("write fixture");
@@ -6604,6 +6603,23 @@ async fn edit_file_requires_a_prior_read_in_the_same_session() {
         .await;
 
     file_observation_error(&result, "FS_NOT_OBSERVED");
+    assert!(result.text.contains("before"));
+
+    let retry = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "before",
+                    "new_text": "after"
+                }),
+            ),
+            &test_main_session_inbound("cli", "unread-edit"),
+            None,
+        )
+        .await;
+    assert_eq!(retry.outcome, ToolOutcome::Succeeded, "{}", retry.text);
 }
 
 #[tokio::test]
@@ -6695,7 +6711,7 @@ async fn edit_file_rejects_a_stale_observation() {
 }
 
 #[tokio::test]
-async fn write_file_allows_creation_but_rejects_unread_overwrite() {
+async fn write_file_allows_creation_and_unobserved_overwrite() {
     let mut runtime = test_runtime_with_default_tools();
     let workspace = runtime.paths.workspace();
     let new_path = workspace.join("new-file.txt");
@@ -6729,7 +6745,16 @@ async fn write_file_allows_creation_but_rejects_unread_overwrite() {
             None,
         )
         .await;
-    file_observation_error(&overwritten, "FS_NOT_OBSERVED");
+    assert_eq!(
+        overwritten.outcome,
+        ToolOutcome::Succeeded,
+        "{}",
+        overwritten.text
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing_path).expect("read overwritten file"),
+        "overwrite"
+    );
 }
 
 #[tokio::test]
@@ -7617,7 +7642,7 @@ async fn every_proposed_tool_call_ends_with_a_tool_result_outcome() {
         .iter()
         .map(|(_, outcome)| outcome.as_str())
         .collect();
-    assert_eq!(outcomes, vec!["rejected", "rejected"], "{results:?}");
+    assert_eq!(outcomes, vec!["failed", "rejected"], "{results:?}");
     let rejected = events
         .iter()
         .rev()

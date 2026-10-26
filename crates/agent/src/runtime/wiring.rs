@@ -705,7 +705,7 @@ impl AgentRuntime {
         false
     }
 
-    pub(crate) async fn process_system_event_tick(&self, now_ms: i64) -> HeartbeatDecision {
+    pub(crate) async fn process_system_event_tick(&mut self, now_ms: i64) -> HeartbeatDecision {
         let decision = self.system_event_orchestrator.process_tick(now_ms);
         let mut delivered_event_ids = decision.ack_event_ids.clone();
 

@@ -51,6 +51,7 @@ pub async fn run(
     session: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    background: bool,
 ) -> anyhow::Result<()> {
     let mut root_paths = Paths::new();
     super::env_file::ensure_and_load_blockcell_env(&root_paths)?;
@@ -73,6 +74,15 @@ pub async fn run(
     // 与 root_paths 不同，媒体文件应下载到该 agent 自己的 workspace/media。
     std::env::set_var("BLOCKCELL_WORKSPACE", paths.workspace());
     let mut config = resolved.config;
+    let sandbox_needed = config.tools.exec.sandbox_policy.as_deref() != Some("full-access");
+    let sandbox_unavailable = cfg!(target_os = "linux")
+        && sandbox_needed
+        && !blockcell_tools::sandbox::native_sandbox_available();
+    if sandbox_unavailable {
+        eprintln!(
+            "Warning: Linux sandbox unavailable; install bubblewrap with `sudo apt install bubblewrap` (or use dnf/pacman). Shell execution will require approval."
+        );
+    }
     let mcp_manager = Arc::new(McpManager::load(&root_paths).await?);
     let provider_pool = build_pool_with_overrides(&mut config, model, provider)?;
 
@@ -169,6 +179,8 @@ pub async fn run(
             Arc::clone(&provider_pool),
             tool_registry,
         )?;
+        runtime.set_background_tasks_enabled(background);
+        runtime.set_shell_execution_unavailable(sandbox_unavailable);
         runtime.validate_intent_router()?;
         runtime.set_agent_id(Some(agent_id.clone()));
         runtime.set_task_manager(TaskManager::new());
@@ -305,6 +317,12 @@ pub async fn run(
         };
 
         let response = runtime.process_message(inbound).await?;
+        runtime.wait_for_background_tasks().await;
+        if let Some(command) = runtime.last_verification_command() {
+            eprintln!("[blockcell] verification: verified ({command}, exit 0)");
+        } else {
+            eprintln!("[blockcell] verification: unverified");
+        }
         // Event handler already printed streaming output, just print final newline if needed
         if !response.is_empty() {
             println!();
@@ -315,7 +333,7 @@ pub async fn run(
         // 单次模式驱动 skill evolution pipeline tick，
         // 确保消息处理期间触发的 notify() 有消费者，pipeline 能推进。
         // Bounded loop：单次消息可能触发多个 evolution workflow，drain 到无可 claim 为止。
-        {
+        if background {
             let skill_evo_worker_clone = skill_evo_worker_arc.clone();
             let _ = tokio::spawn(async move {
                 let max_ticks = 10; // 防止无限循环
@@ -481,6 +499,7 @@ pub async fn run(
             Arc::clone(&provider_pool),
             tool_registry,
         )?;
+        runtime.set_shell_execution_unavailable(sandbox_unavailable);
         runtime.validate_intent_router()?;
 
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider

@@ -2482,9 +2482,45 @@ pub struct AgentRuntime {
     steering_sender: SteeringSender,
     /// Shared gateway-visible registry of active steering senders.
     active_steering_registry: Option<SteeringRegistry>,
+    background_tasks_enabled: bool,
+    background_task_handles: Vec<tokio::task::JoinHandle<()>>,
+    last_verification_command: Option<String>,
 }
 
 impl AgentRuntime {
+    pub fn set_background_tasks_enabled(&mut self, enabled: bool) {
+        self.background_tasks_enabled = enabled;
+        self.context_builder.set_ghost_learning_enabled(
+            enabled
+                && self.config.memory.learning_system.enabled()
+                && self.config.agents.ghost.learning.capture_enabled(),
+        );
+    }
+
+    pub fn set_shell_execution_unavailable(&mut self, unavailable: bool) {
+        self.context_builder
+            .set_shell_execution_unavailable(unavailable);
+    }
+
+    pub fn last_verification_command(&self) -> Option<&str> {
+        self.last_verification_command.as_deref()
+    }
+
+    pub async fn wait_for_background_tasks(&mut self) {
+        let handles = std::mem::take(&mut self.background_task_handles);
+        let wait = async move {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+            .await
+            .is_err()
+        {
+            warn!("Timed out waiting for background tasks after 30 seconds");
+        }
+    }
+
     pub fn new(
         config: Config,
         paths: Paths,
@@ -2657,6 +2693,9 @@ impl AgentRuntime {
             steering,
             steering_sender,
             active_steering_registry: None,
+            background_tasks_enabled: true,
+            background_task_handles: Vec::new(),
+            last_verification_command: None,
         };
         runtime.sync_tool_scope_view("");
         Ok(runtime)
@@ -2735,6 +2774,9 @@ impl AgentRuntime {
             steering,
             steering_sender,
             active_steering_registry: None,
+            background_tasks_enabled: self.background_tasks_enabled,
+            background_task_handles: Vec::new(),
+            last_verification_command: None,
         };
         if runtime.memory_file_store.is_none() {
             if let Err(e) = runtime.init_memory_file_store() {

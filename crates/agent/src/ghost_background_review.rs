@@ -447,9 +447,9 @@ pub fn spawn_pending_background_reviews(
     provider_pool: Arc<ProviderPool>,
     limit: usize,
     config: Config,
-) {
+) -> tokio::task::JoinHandle<()> {
     if limit == 0 {
-        return;
+        return tokio::spawn(async {});
     }
 
     tokio::spawn(async move {
@@ -468,7 +468,7 @@ pub fn spawn_pending_background_reviews(
                 );
             }
         }
-    });
+    })
 }
 
 async fn run_restricted_review_tool_loop(

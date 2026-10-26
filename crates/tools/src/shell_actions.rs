@@ -82,10 +82,10 @@ impl Tool for ShellActionTool {
     fn schema(&self) -> ToolSchema {
         let (description, properties, required) = match self.0 {
             ShellAction::Run => (
-                "Run a command in a persistent shell session. Reuse session_id to preserve cwd and environment; timed-out commands keep running.",
+                "Run commands in the persistent per-conversation default shell when session_id is omitted; cwd and environment persist. Use session_id to address a specific shell; timed-out commands keep running.",
                 json!({
                     "command": {"type": "string", "description": "Command to run"},
-                    "session_id": {"type": "string", "description": "Existing session; omit to create one"},
+                    "session_id": {"type": "string", "description": "Optional explicit session; if omitted, reuse this conversation's default shell"},
                     "timeout_secs": {"type": "integer", "minimum": 0, "maximum": 3600}
                 }),
                 vec!["command"],
@@ -125,7 +125,18 @@ impl Tool for ShellActionTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        ShellTool.execute(ctx, self.canonical_args(&params)).await
+        let mut args = self.canonical_args(&params);
+        if matches!(self.0, ShellAction::Run)
+            && args.get("session_id").and_then(Value::as_str).is_none()
+        {
+            if let Some(object) = args.as_object_mut() {
+                object.insert(
+                    "session_id".to_string(),
+                    Value::String(format!("default-{}", ctx.session_key)),
+                );
+            }
+        }
+        ShellTool.execute(ctx, args).await
     }
 }
 

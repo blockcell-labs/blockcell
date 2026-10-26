@@ -798,6 +798,17 @@ mod tests {
     }
 
     #[test]
+    fn coding_eval_prompts_classify_as_coding() {
+        let classifier = IntentClassifier::new();
+        assert!(classifier
+            .classify("fix the bug in slug.py")
+            .contains(&IntentCategory::Coding));
+        assert!(classifier
+            .classify("CI 挂了，帮我看一下修好。")
+            .contains(&IntentCategory::Coding));
+    }
+
+    #[test]
     fn test_lifestyle_classification() {
         let c = IntentClassifier::new();
         assert_eq!(

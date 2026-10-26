@@ -13,18 +13,47 @@ fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
     }
 }
 
-fn is_verification_tool_call(tool_name: &str, args: &serde_json::Value, result: &str) -> bool {
-    match tool_name {
-        "exec" => true,
-        "shell_run" | "shell_poll" => true,
-        "job_output" => serde_json::from_str::<serde_json::Value>(result)
-            .is_ok_and(|value| value["running"] == false && value["exit_code"].as_i64() == Some(0)),
-        "shell" => matches!(
-            args.get("action").and_then(serde_json::Value::as_str),
-            None | Some("run" | "poll" | "exec" | "execute" | "start")
-        ),
-        _ => false,
+fn verification_command(tool_name: &str, args: &serde_json::Value, result: &str) -> Option<String> {
+    if !matches!(
+        tool_name,
+        "exec" | "shell_run" | "shell_poll" | "shell" | "job_output"
+    ) {
+        return None;
     }
+    let command = args
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| args.get("cmd").and_then(serde_json::Value::as_str))?;
+    let lower = command.to_ascii_lowercase();
+    if ![
+        "test",
+        "pytest",
+        "unittest",
+        "cargo test",
+        "go test",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "verify",
+        "check",
+        "clippy",
+        "build",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return None;
+    }
+    let exit_zero = serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .is_some_and(|value| {
+            value["exit_code"].as_i64() == Some(0)
+                && (value.get("running").is_none() || value["running"] == false)
+        })
+        || result.contains("exit 0")
+        || result.contains("exit_code\":0")
+        || result.contains("exit_code\": 0");
+    exit_zero.then(|| command.to_string())
 }
 
 const CODING_CORE_TOOL_NAMES: &[&str] = &[
@@ -48,6 +77,8 @@ const CODING_CORE_TOOL_NAMES: &[&str] = &[
     "agent",
     "tool_search",
 ];
+
+const CODING_SCHEMA_EXCLUDED_TOOLS: &[&str] = &["web_search", "file_ops", "get_context_remaining"];
 
 fn extract_tool_search_revealed_tools(result: &str) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(result)
@@ -79,21 +110,23 @@ impl AgentRuntime {
         info!(session_key = %session_key, channel = %msg.channel, "Processing message");
         info!(target: "chat::user", content = %msg.content, "User input");
         self.update_main_session_target(&msg).await;
-        if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
-            // cron 投递场景下使用 persist_session_key（目标会话），
-            // 确保学习/召回归属到目标会话而非源会话
-            let turn_number = self
-                .session_store
-                .load(&persist_session_key)
-                .map(|history| {
-                    history
-                        .iter()
-                        .filter(|message| message.role == "user")
-                        .count() as u32
-                        + 1
-                })
-                .unwrap_or(1);
-            manager.on_turn_start(turn_number, &msg.content, &persist_session_key);
+        if self.background_tasks_enabled {
+            if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
+                // cron 投递场景下使用 persist_session_key（目标会话），
+                // 确保学习/召回归属到目标会话而非源会话
+                let turn_number = self
+                    .session_store
+                    .load(&persist_session_key)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .filter(|message| message.role == "user")
+                            .count() as u32
+                            + 1
+                    })
+                    .unwrap_or(1);
+                manager.on_turn_start(turn_number, &msg.content, &persist_session_key);
+            }
         }
 
         // Learning Coordinator: record user turn (replaces skill_nudge_engine.record_user_turn)
@@ -439,7 +472,7 @@ impl AgentRuntime {
                 &tool_names,
                 &tool_prompt_rules,
             );
-        if decision.active_skill.is_none() {
+        if decision.mode != InteractionMode::Coding && decision.active_skill.is_none() {
             inject_skill_cards_into_system_prompt(
                 &mut messages,
                 &skill_cards,
@@ -522,7 +555,22 @@ impl AgentRuntime {
             // Chat mode: no tools
             vec![]
         } else {
-            let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
+            let schema_names: Vec<&String> = if decision.mode == InteractionMode::Coding {
+                tool_names
+                    .iter()
+                    .filter(|name| {
+                        !CODING_SCHEMA_EXCLUDED_TOOLS.contains(&name.as_str())
+                            && (CODING_DEFAULT_TOOL_NAMES.contains(&name.as_str())
+                                || name.as_str() == "exec"
+                                || decision.active_skill.as_ref().is_some_and(|skill| {
+                                    skill.tools.iter().any(|tool| tool == *name)
+                                }))
+                    })
+                    .collect()
+            } else {
+                tool_names.iter().collect()
+            };
+            let tool_name_refs: Vec<&str> = schema_names.iter().map(|name| name.as_str()).collect();
             let mut schemas = if decision.mode == InteractionMode::Coding {
                 self.tool_registry
                     .get_tiered_schemas_core_only(&tool_name_refs, CODING_CORE_TOOL_NAMES)
@@ -610,6 +658,7 @@ impl AgentRuntime {
         let mut last_mutation_idx = None;
         let mut last_verification_idx = None;
         let mut verification_gate_fired = false;
+        self.last_verification_command = None;
 
         // Layer 1: 消息级别预算检查
         // 如果工具结果总和超过预算，持久化最大的结果
@@ -1122,10 +1171,13 @@ impl AgentRuntime {
                     if matches!(tool_output.outcome, ToolOutcome::Succeeded) {
                         if is_mutating_tool_call(&tool_call.name, &tool_call.arguments) {
                             last_mutation_idx = Some(current_tool_call_index);
+                            self.last_verification_command = None;
                         }
-                        if is_verification_tool_call(&tool_call.name, &tool_call.arguments, &result)
+                        if let Some(command) =
+                            verification_command(&tool_call.name, &tool_call.arguments, &result)
                         {
                             last_verification_idx = Some(current_tool_call_index);
+                            self.last_verification_command = Some(command);
                         }
                     }
 
@@ -1917,7 +1969,7 @@ impl AgentRuntime {
             // 执行顺序：先 spawn 提取任务（clone 历史），再同步执行 Compact。
 
             // 1. Session Memory 提取
-            if actions.session_memory {
+            if self.background_tasks_enabled && actions.session_memory {
                 info!("[post-sampling] Spawning Session Memory extraction task");
 
                 // 先确保 session memory 文件存在于磁盘上，
@@ -1994,7 +2046,7 @@ impl AgentRuntime {
                     // 可靠性说明：journal 仅用于 stale marker 检测，不是可靠恢复队列。
                     // 进程退出时正在运行的任务会丢失，只能通过 stale 机制清理。
                     // 原子 pending marker 防止并发重复提取。
-                    let _handle = tokio::spawn(async move {
+                    self.background_task_handles.push(tokio::spawn(async move {
                         let _marker_guard = crate::memory_system::ExtractionMarkerGuard::new(
                             session_marker_path,
                             session_journal_path,
@@ -2067,7 +2119,7 @@ impl AgentRuntime {
                                 }
                             }
                         }
-                    });
+                    }));
 
                     // 注意：不将提取句柄加入 background_tasks，避免 runtime drop 时 abort
                     // 导致状态永远无法落盘。后台任务自行写状态文件 + 清标记，对 runtime
@@ -2076,7 +2128,7 @@ impl AgentRuntime {
             }
 
             // 2. Auto Memory 提取
-            if !actions.auto_memory_types.is_empty() {
+            if self.background_tasks_enabled && !actions.auto_memory_types.is_empty() {
                 info!(
                     memory_types = ?actions.auto_memory_types,
                     "[post-sampling] Spawning Auto Memory extraction tasks"
@@ -2162,7 +2214,7 @@ impl AgentRuntime {
                         }
                     }
 
-                    let _handle = tokio::spawn(async move {
+                    self.background_task_handles.push(tokio::spawn(async move {
                         // marker 已在 spawn 前原子创建；守卫确保错误和 panic 路径也会清理。
                         let mut marker_guard = crate::memory_system::ExtractionMarkerGuard::new(
                             auto_marker_path,
@@ -2245,7 +2297,7 @@ impl AgentRuntime {
                                 "[layer5] Auto Memory extraction failed"
                             );
                         }
-                    });
+                    }));
 
                     // 注意：不将 Auto Memory 提取句柄加入 background_tasks，
                     // 避免短生命周期 runtime drop 时 abort 导致游标状态无法保存。
@@ -2330,9 +2382,11 @@ impl AgentRuntime {
 
         // cron 投递场景下 Ghost sync/prefetch 使用 persist_session_key（目标会话），
         // 确保学习/召回归属到目标会话而非源会话
-        if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
-            manager.sync_all(&msg.content, &delivered_response, &persist_session_key);
-            manager.queue_prefetch_all(&msg.content, &persist_session_key);
+        if self.background_tasks_enabled {
+            if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
+                manager.sync_all(&msg.content, &delivered_response, &persist_session_key);
+                manager.queue_prefetch_all(&msg.content, &persist_session_key);
+            }
         }
 
         self.spawn_pending_ghost_background_reviews();

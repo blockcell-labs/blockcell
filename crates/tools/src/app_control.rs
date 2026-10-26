@@ -142,6 +142,11 @@ impl Tool for AppControlTool {
                     "app_{}.png",
                     chrono::Utc::now().format("%Y%m%d_%H%M%S")
                 ));
+                std::fs::create_dir_all(
+                    default_path
+                        .parent()
+                        .expect("generated media path always has a parent"),
+                )?;
                 let path = params
                     .get("screenshot_path")
                     .and_then(|v| v.as_str())

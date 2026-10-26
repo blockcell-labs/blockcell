@@ -70,6 +70,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             sum(
                 float(result.get("input_tokens", 0))
                 + float(result.get("output_tokens", 0))
+                + float(result.get("background_usage", 0))
                 for result in results
             )
             / total,
@@ -77,6 +78,12 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         )
         if total
         else 0.0,
+        "tool_error_rate": round(
+            sum(int(result.get("tool_errors", 0)) for result in results)
+            / max(1, sum(int(result.get("tool_calls", 0)) for result in results)),
+            4,
+        ),
+        "verified_tasks": sum(1 for result in results if result.get("verified_by_tests")),
         "failure_categories": dict(sorted(failures.items())),
         "results": results,
     }
@@ -181,6 +188,9 @@ def run_task(
     metrics.setdefault("subagent_errors", 0)
     metrics.setdefault("input_tokens", 0)
     metrics.setdefault("output_tokens", 0)
+    metrics.setdefault("tool_errors", 0)
+    metrics.setdefault("background_usage", 0)
+    metrics.setdefault("verified_by_tests", False)
     if passed:
         failure_category = None
     elif acceptance_tests_run == 0:
@@ -201,6 +211,17 @@ def run_task(
         "input_tokens": int(metrics["input_tokens"]),
         "output_tokens": int(metrics["output_tokens"]),
         "subagent_errors": int(metrics["subagent_errors"]),
+        "tool_errors": int(metrics["tool_errors"]),
+        "background_usage": int(metrics["background_usage"]),
+        "verified_by_tests": bool(metrics["verified_by_tests"] or passed),
+        "total_tokens": (
+            int(metrics["input_tokens"])
+            + int(metrics["output_tokens"])
+            + int(metrics["background_usage"])
+        ),
+        "tool_error_rate": round(
+            int(metrics["tool_errors"]) / max(1, int(metrics["tool_calls"])), 4
+        ),
         "agent_exit_code": agent_exit_code,
         "changed_files": changed,
         "agent_output_tail": agent_output,
@@ -218,9 +239,14 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--max-tool-calls", type=int, default=100)
+    parser.add_argument("--max-tool-error-rate", type=float)
+    parser.add_argument("--baseline", type=pathlib.Path)
+    parser.add_argument("--max-token-ratio", type=float, default=1.2)
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "latest-report.json")
     parser.add_argument("--keep-workspaces", action="store_true")
     args = parser.parse_args()
+    if args.max_tool_error_rate is not None and not 0 <= args.max_tool_error_rate <= 1:
+        parser.error("--max-tool-error-rate must be between 0 and 1")
 
     tasks = load_manifest(args.manifest)
     if args.task_ids:
@@ -237,10 +263,28 @@ def main() -> int:
             for task in tasks
         ]
         report = summarize(results)
+        violations = []
+        if args.max_tool_error_rate is not None and report["tool_error_rate"] > args.max_tool_error_rate:
+            violations.append(
+                f"tool error rate {report['tool_error_rate']:.4f} exceeds {args.max_tool_error_rate:.4f}"
+            )
+        if args.baseline:
+            baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+            baseline_tokens = float(baseline.get("average_tokens", 0))
+            if baseline_tokens <= 0:
+                parser.error("baseline average_tokens must be positive")
+            ratio = report["average_tokens"] / baseline_tokens
+            report["token_ratio_to_baseline"] = round(ratio, 4)
+            if ratio > args.max_token_ratio:
+                violations.append(
+                    f"token ratio {ratio:.4f} exceeds {args.max_token_ratio:.4f}"
+                )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({key: value for key, value in report.items() if key != "results"}, ensure_ascii=False, indent=2))
-        return 0 if report["tasks_passed"] == report["tasks_total"] else 1
+        if violations:
+            print("GATE FAILED: " + "; ".join(violations), file=sys.stderr)
+        return 0 if report["tasks_passed"] == report["tasks_total"] and not violations else 1
     finally:
         if args.keep_workspaces:
             print(f"workspaces: {temp}")

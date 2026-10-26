@@ -87,6 +87,10 @@ enum Commands {
         /// Override LLM provider for this session
         #[arg(long)]
         provider: Option<String>,
+
+        /// Enable background learning and review tasks in one-shot mode
+        #[arg(long)]
+        background: bool,
     },
 
     /// Start the gateway (long-running daemon)
@@ -917,8 +921,9 @@ async fn main() -> anyhow::Result<()> {
             session,
             model,
             provider,
+            background,
         } => {
-            commands::agent::run(message, agent, session, model, provider).await?;
+            commands::agent::run(message, agent, session, model, provider, background).await?;
         }
         Commands::Gateway { port, host } => {
             commands::gateway::run(host, port).await?;

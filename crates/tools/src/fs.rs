@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::fs_backend::{FilesystemBackend, FsEntryKind, LocalFilesystem};
@@ -47,13 +48,20 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Read the contents of a local file. REQUIRED: always provide string parameter `path`; do not call this tool with `{}`. `path` may be an absolute path, `~/...`, or a workspace-relative file path such as `xhs_feeds.json` or `notes/todo.md`. Supports text files and Office documents (.xlsx, .xls, .docx, .pptx) — binary Office files are automatically parsed and returned as readable text/markdown.".to_string(),
+            description: "Read one local file with `path`, or batch up to 10 files with `paths` (mutually exclusive); do not call this tool with `{}`. Paths may be absolute, `~/...`, or workspace-relative. Supports text and Office documents (.xlsx, .xls, .docx, .pptx).".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Path to the file to read. Supports text files and Office formats (xlsx, xls, docx, pptx)."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "description": "Read up to 10 files in one call; mutually exclusive with path."
                     },
                     "offset": {
                         "type": "integer",
@@ -66,20 +74,30 @@ impl Tool for ReadFileTool {
                         "description": "Optional maximum number of lines to return"
                     }
                 },
-                "required": ["path"]
             }),
         }
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **read_file**: Always pass `path` explicitly. Never call `read_file` with `{}`. Use a concrete file path such as `{\"path\":\"xhs_feeds.json\"}` or `{\"path\":\"/absolute/path/file.md\"}`.".to_string())
+        Some("- **read_file**: Pass exactly one of `path` or `paths`; batch related reads with `paths` (up to 10 files). Never call `read_file` with `{}`.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        if params.get("path").and_then(|v| v.as_str()).is_none() {
+        let path_key_present = params.get("path").is_some();
+        let path = params.get("path").and_then(Value::as_str);
+        let paths = params.get("paths").and_then(Value::as_array);
+        if path_key_present == paths.is_some() || (path_key_present && path.is_none()) {
             return Err(Error::Validation(
-                "Missing required parameter: path".to_string(),
+                "Provide exactly one of path or paths".to_string(),
             ));
+        }
+        if let Some(paths) = paths {
+            if paths.is_empty() || paths.len() > 10 || paths.iter().any(|value| !value.is_string())
+            {
+                return Err(Error::Validation(
+                    "paths must contain between 1 and 10 strings".to_string(),
+                ));
+            }
         }
         if params
             .get("offset")
@@ -101,51 +119,76 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let path_str = params["path"].as_str().unwrap();
-        let path = expand_path(path_str, &ctx.workspace);
+        let paths: Vec<&str> = if let Some(path) = params.get("path").and_then(Value::as_str) {
+            vec![path]
+        } else {
+            params["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|path| path.as_str().unwrap())
+                .collect()
+        };
+        let mut results = Vec::with_capacity(paths.len());
+        for path in paths {
+            results.push(
+                read_file_result(
+                    self.fs.as_ref(),
+                    &ctx.workspace,
+                    path,
+                    params.get("offset").and_then(Value::as_u64),
+                    params.get("limit").and_then(Value::as_u64),
+                )
+                .await?,
+            );
+        }
+        if params.get("path").is_some() {
+            Ok(results.pop().unwrap())
+        } else {
+            Ok(json!({"files": results}))
+        }
+    }
+}
 
-        match self.fs.kind(&path).await? {
-            None => {
-                return Err(Error::NotFound(format!(
-                    "File not found: {}",
-                    path.display()
+async fn read_file_result(
+    fs: &dyn FilesystemBackend,
+    workspace: &Path,
+    path_str: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<Value> {
+    let path = expand_path(path_str, workspace);
+    match fs.kind(&path).await? {
+        None => {
+            return Err(Error::NotFound(format!(
+                "File not found: {}",
+                path.display()
+            )))
+        }
+        Some(FsEntryKind::File) => {}
+        Some(_) => return Err(Error::Tool(format!("Not a file: {}", path.display()))),
+    }
+
+    if !crate::office::is_office_file(&path) {
+        const MAX_READ_BYTES: u64 = 32 * 1024 * 1024;
+        if let Some(size) = fs.size(&path).await? {
+            if size > MAX_READ_BYTES {
+                return Err(Error::Validation(format!(
+                    "File is too large to read as text ({} bytes, limit {}). \
+                     Use grep/code_search or read a slice with another tool.",
+                    size, MAX_READ_BYTES
                 )));
             }
-            Some(FsEntryKind::File) => {}
-            Some(_) => return Err(Error::Tool(format!("Not a file: {}", path.display()))),
         }
-
-        // Non-Office files are read whole; refuse oversized inputs instead of
-        // letting a multi-GB log/text file exhaust memory. Office documents
-        // have their own (higher) limits inside `office::read_office_file`.
-        if !crate::office::is_office_file(&path) {
-            const MAX_READ_BYTES: u64 = 32 * 1024 * 1024;
-            if let Some(size) = self.fs.size(&path).await? {
-                if size > MAX_READ_BYTES {
-                    return Err(Error::Validation(format!(
-                        "File is too large to read as text ({} bytes, limit {}). \
-                         Use grep/code_search or read a slice with another tool.",
-                        size, MAX_READ_BYTES
-                    )));
-                }
-            }
-        }
-
-        let content = self.fs.read_document(&path).await?;
-        // Office 文件（xlsx, xls, docx, pptx）由 backend 转为文本，结果中标注原始格式。
-        let format = crate::office::is_office_file(&path).then(|| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("unknown")
-        });
-        Ok(read_result(
-            &path,
-            content,
-            params.get("offset").and_then(Value::as_u64),
-            params.get("limit").and_then(Value::as_u64),
-            format,
-        ))
     }
+
+    let content = fs.read_document(&path).await?;
+    let format = crate::office::is_office_file(&path).then(|| {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("unknown")
+    });
+    Ok(read_result(&path, content, offset, limit, format))
 }
 
 fn read_result(
@@ -552,6 +595,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_batches_multiple_paths() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("one.txt"), "first").unwrap();
+        std::fs::write(dir.path().join("two.txt"), "second").unwrap();
+
+        let result = ReadFileTool::default()
+            .execute(
+                tool_context(dir.path()),
+                json!({"paths": ["one.txt", "two.txt"]}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["files"].as_array().unwrap().len(), 2);
+        assert_eq!(result["files"][0]["content"], "first");
+        assert_eq!(result["files"][1]["content"], "second");
+    }
+
+    #[tokio::test]
     async fn edit_file_accepts_old_string_and_new_string_aliases() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sample.txt");
@@ -768,6 +830,14 @@ mod tests {
     fn test_read_file_validate() {
         let tool = ReadFileTool::default();
         assert!(tool.validate(&json!({"path": "/tmp/test.txt"})).is_ok());
+        assert!(tool.validate(&json!({"paths": ["a", "b"]})).is_ok());
+        assert!(tool
+            .validate(&json!({"path": "a", "paths": ["b"]}))
+            .is_err());
+        assert!(tool.validate(&json!({"paths": []})).is_err());
+        assert!(tool
+            .validate(&json!({"paths": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]}))
+            .is_err());
         assert!(tool.validate(&json!({})).is_err());
     }
 

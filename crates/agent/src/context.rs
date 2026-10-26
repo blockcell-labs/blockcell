@@ -42,6 +42,10 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 ## Verification Discipline
 - After every meaningful edit, run the most relevant test, lint, or build command.
 - If verification fails, diagnose and fix it before claiming completion. Report any verification that could not be run.
+- Batch related reads with `read_file(paths)` and related commands into one `shell_run`.
+- Shell cwd persists; do not `cd` to the absolute workspace path.
+- After the change and tests pass, stop with a brief summary; do not reread files or rerun passing tests.
+- If shell execution is unavailable, say the change is unverified.
 
 ## Plan Discipline
 - For tasks with three or more steps, call `update_plan` before implementation.
@@ -121,6 +125,7 @@ pub struct ContextBuilder {
     /// 跨消息共享的 SkillManager 快照，确保某条消息内热重载或配置更新后后续派生消息立即可见
     shared_skill_manager: Arc<RwLock<Option<SkillManager>>>,
     ghost_learning_enabled: bool,
+    shell_execution_unavailable: bool,
     memory_recall_enabled: bool,
     memory_recall_policy: MemoryRecallConfig,
     prompt_budget: blockcell_core::config::PromptBudgetConfig,
@@ -383,6 +388,7 @@ impl ContextBuilder {
             shared_skill_manager,
             ghost_learning_enabled: config.memory.learning_system.enabled()
                 && config.agents.ghost.learning.capture_enabled(),
+            shell_execution_unavailable: false,
             memory_recall_enabled: config.agents.ghost.learning.recall_enabled(),
             memory_recall_policy: config.memory.effective_memory_recall(),
             prompt_budget: config.memory.effective_prompt_budget(),
@@ -418,6 +424,7 @@ impl Clone for ContextBuilder {
             skill_manager,
             shared_skill_manager: Arc::clone(&self.shared_skill_manager),
             ghost_learning_enabled: self.ghost_learning_enabled,
+            shell_execution_unavailable: self.shell_execution_unavailable,
             memory_recall_enabled: self.memory_recall_enabled,
             memory_recall_policy: self.memory_recall_policy.clone(),
             prompt_budget: self.prompt_budget.clone(),
@@ -435,6 +442,14 @@ impl Clone for ContextBuilder {
 }
 
 impl ContextBuilder {
+    pub fn set_ghost_learning_enabled(&mut self, enabled: bool) {
+        self.ghost_learning_enabled = enabled;
+    }
+
+    pub fn set_shell_execution_unavailable(&mut self, unavailable: bool) {
+        self.shell_execution_unavailable = unavailable;
+    }
+
     pub fn prompt_registry(&self) -> &PromptRegistry {
         &self.prompt_registry
     }
@@ -1083,6 +1098,41 @@ impl ContextBuilder {
             now.format("%Y-%m-%d %H:%M"),
             self.paths.workspace().display()
         );
+
+        if matches!(mode, InteractionMode::Coding) {
+            if self.shell_execution_unavailable {
+                runtime_rules.push_str(
+                    "Shell execution is unavailable because the native sandbox is not installed.\n",
+                );
+            }
+            if let Some(environment) =
+                session_key.and_then(|key| self.incremental_project_environment(key))
+            {
+                let git_lines = environment
+                    .lines()
+                    .filter(|line| {
+                        let line = line.trim_start();
+                        line.to_ascii_lowercase().contains("git")
+                            || line.starts_with("??")
+                            || line.starts_with(" M")
+                            || line.starts_with("M ")
+                            || line.starts_with("A ")
+                            || line.starts_with("D ")
+                            || line.starts_with("R ")
+                            || line.starts_with("Dirty files")
+                            || line.starts_with("... ")
+                    })
+                    .collect::<Vec<_>>();
+                if !git_lines.is_empty() {
+                    runtime_rules.push_str(&git_lines.join("\n"));
+                    runtime_rules.push('\n');
+                }
+            }
+            return format!(
+                "<runtime-context>\n{}</runtime-context>",
+                runtime_rules.trim()
+            );
+        }
 
         if let Some(plan) = session_key.and_then(blockcell_tools::plan::take_changed_plan_context) {
             runtime_rules.push('\n');
@@ -2058,12 +2108,12 @@ description: deploy demo
 
         let first = build();
         let first_context = test_chat_message_text(&first[first.len() - 2]);
-        assert!(first_context.contains("## Project Environment"));
+        assert!(!first_context.contains("## Project Environment"));
         assert!(first_context.contains("Git branch: main"));
         assert!(first_context.contains("Cargo.toml"));
-        assert!(first_context.contains("cargo test"));
-        assert!(first_context.contains("npm test"));
-        assert!(first_context.contains("npm run build"));
+        assert!(!first_context.contains("cargo test"));
+        assert!(!first_context.contains("npm test"));
+        assert!(!first_context.contains("npm run build"));
 
         let second = build();
         let second_context = test_chat_message_text(&second[second.len() - 2]);
@@ -2077,7 +2127,7 @@ description: deploy demo
         .unwrap();
         let changed = build();
         let changed_context = test_chat_message_text(&changed[changed.len() - 2]);
-        assert!(changed_context.contains("## Project Environment"));
+        assert!(!changed_context.contains("## Project Environment"));
         assert!(changed_context.contains("src.rs"));
         assert!(!changed_context.contains("npm run lint"));
     }

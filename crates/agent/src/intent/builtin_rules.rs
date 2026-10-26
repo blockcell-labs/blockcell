@@ -14,11 +14,11 @@ pub(super) fn builtin_rules() -> Vec<IntentRule> {
             IntentRule {
                 category: IntentCategory::Coding,
                 keywords: vec![
-                    "修复代码", "修改代码", "创建代码", "实现功能", "新增功能", "代码重构", "调试代码",
+                    "修复代码", "修改代码", "创建代码", "实现功能", "新增功能", "代码重构", "调试代码", "修好",
                     "写测试", "跑测试", "运行测试", "编译项目", "构建项目", "代码审查",
                     "fix bug", "fix the bug", "modify code", "edit code", "create code", "implement feature",
                     "add feature", "refactor", "debug code", "write tests", "run tests",
-                    "code review", "cargo test", "go test", "pytest", "npm test",
+                    "code review", "cargo test", "go test", "pytest", "npm test", "ci",
                 ],
                 patterns: vec![
                     Regex::new(r"(?i)(修复|修改|编辑|创建|实现|新增|重构|调试|测试|编译|构建|fix|modify|edit|create|implement|add|refactor|debug|test|build).{0,80}([A-Za-z0-9_./\\-]+\.(rs|py|go|js|jsx|ts|tsx|java|kt|c|cc|cpp|h|hpp|rb|php|swift|toml|yaml|yml|json|md|sh)|\b(cargo|npm|pnpm|yarn|pytest|make|cmake)\b)").unwrap(),

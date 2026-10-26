@@ -12,7 +12,7 @@ python3 tests/coding_eval/runner.py \
   --output tests/coding_eval/latest-report.json
 ```
 
-Wrapper 应在 `BLOCKCELL_EVAL_WORKSPACE` 指向的仓库中执行 BlockCell，并可选写入 `.blockcell-eval-metrics.json`：
+Wrapper 应在 `BLOCKCELL_EVAL_WORKSPACE` 指向的仓库中执行 BlockCell（默认不传 `--background`），并可选写入 `.blockcell-eval-metrics.json`：
 
 ```json
 {
@@ -20,8 +20,11 @@ Wrapper 应在 `BLOCKCELL_EVAL_WORKSPACE` 指向的仓库中执行 BlockCell，�
   "tests_run": 2,
   "input_tokens": 12000,
   "output_tokens": 3400,
-  "subagent_errors": 0
+  "subagent_errors": 0,
+  "tool_errors": 1,
+  "background_usage": 0,
+  "verified_by_tests": true
 }
 ```
 
-报告包含完成率、平均工具调用数、平均 token，以及失败归因：`editing_failure`、`navigation`、`verification_missing`、`subagent_coordination`。建议固定模型与配置每周运行一次，并将 JSON 报告纳入版本化的实验记录。
+报告包含完成率、平均工具调用数、平均 token、工具错误率和已验证任务数，以及失败归因：`editing_failure`、`navigation`、`verification_missing`、`subagent_coordination`。可用 `--max-tool-error-rate 0.02` 和 `--baseline summary.json --max-token-ratio 1.2` 设置回归门槛。建议固定模型与配置每周运行一次，并将 JSON 报告纳入版本化的实验记录。
