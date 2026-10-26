@@ -53,7 +53,7 @@ Traditional software dies the moment it ships. BlockCell is meant to be **alive*
 
 ## ✨ Key Features
 
-### 🛠️ 50+ Built-in Tools
+### 🛠️ 60+ Built-in Tools
 
 - **Files & System**: Read/write files, execute commands, process Excel/Word/PDF
 - **Web & Browser**: Web scraping, headless Chrome automation (CDP), HTTP requests
@@ -92,9 +92,9 @@ BlockCell can retain durable lessons from real usage:
 When multiple models are configured, BlockCell can choose the right provider by policy:
 
 - `manual`: keep Provider Pool priority and weighted selection
-- `cost_optimized`: prefer lower-cost models for short contexts and return to primary models for long contexts
+- `cost_optimized`: prefer lower-cost models for short contexts (≤4 messages) and return to primary models for long contexts
 - `quality_first`: prefer higher-priority primary models
-- `latency_first`: reserved for latency-focused routing; currently approximated using availability history
+- `latency_first`: prefer entries with the best recent fast-success signal, falling back to priority selection
 
 Main LLM calls also support connection-phase fallback. If the preferred provider fails before streaming starts, BlockCell can try the next available provider. Once streaming has started, it will not mix partial output from one model with another model's response.
 
@@ -103,7 +103,7 @@ Main LLM calls also support connection-phase fallback. If the preferred provider
 BlockCell can run local commands from `~/.blockcell/hooks.yaml` at key lifecycle events:
 
 - `pre_tool_use` / `post_tool_use` around tool execution, with tool-name glob matching
-- `session_start` / `user_prompt` / `agent_stop` for session and message lifecycle events
+- `session_start` / `session_end` / `user_prompt` / `agent_stop` / `compaction` for session, message, and compaction lifecycle events
 - Template variables such as `{tool_name}`, `{session_id}`, `{cwd}`, `{command}`, `{file_path}`, and `{result}`
 - Hook failures and timeouts do not block the main agent flow, making hooks useful for auditing, formatting, notifications, and external logging
 
@@ -218,8 +218,7 @@ curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/insta
 This installs `blockcell` to `~/.local/bin`. To customize the location:
 
 ```bash
-BLOCKCELL_INSTALL_DIR="$HOME/bin" \
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/install.sh | BLOCKCELL_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ### Build from Source
@@ -254,6 +253,22 @@ blockcell gateway
 - **WebUI**: `http://localhost:18791`
 - **Default routing**: CLI / WebUI / WebSocket go to the `default` agent; external channels first check `channelAccountOwners.<channel>.<accountId>` and fall back to `channelOwners.<channel>`
 
+### Common Commands
+
+| Command | Description |
+| --- | --- |
+| `blockcell setup` | Interactive wizard: initialize config, pick a provider, optionally set up channels |
+| `blockcell agent` | Interactive chat; `-m <msg>` for a one-shot run |
+| `blockcell gateway` | Daemon mode: API + WebUI + external channels |
+| `blockcell status` / `doctor` | Show config status / run environment diagnostics |
+| `blockcell config` | Inspect, edit, or open `config.json5` |
+| `blockcell tools` / `mcp` | Manage built-in tool toggles and MCP servers |
+| `blockcell session list/replay/verify` | List, replay, and verify session event logs |
+| `blockcell memory` / `skills` / `cron` | Manage memory, skills, and scheduled tasks |
+| `blockcell upgrade` | Upgrade to the latest release |
+
+See the [CLI reference](docs/en/17_cli_reference.md) for the full command list.
+
 ---
 
 ## 📸 Screenshots
@@ -265,6 +280,8 @@ blockcell gateway
 
 ### WebUI Interface
 ![WebUI Chat](screenshot/webui-chat.png)
+
+![WebUI Login](screenshot/webui-login.png)
 
 </div>
 
@@ -293,7 +310,10 @@ Minimal configuration example (`~/.blockcell/config.json5`):
 }
 ```
 
-To enable multi-agent routing plus external channels, extend it using the structure currently supported by the codebase. For example, this is a valid "2 agents + 2 Telegram accounts" layout:
+To enable multi-agent routing plus external channels, extend it using the structure currently supported by the codebase:
+
+<details>
+<summary>Expand the example: a complete "2 agents + 2 Telegram accounts" config</summary>
 
 ```json
 {
@@ -380,6 +400,8 @@ To enable multi-agent routing plus external channels, extend it using the struct
 }
 ```
 
+</details>
+
 Notes:
 
 - `agents.list` should use fields actually supported by the code, such as `id`, `enabled`, `name`, `intentProfile`, and `maxToolIterations`
@@ -400,6 +422,10 @@ Notes:
 - **Kimi/Moonshot**
 - **MiniMax** ([MiniMax M3](https://www.minimaxi.com/))
 - **Zhipu AI** ([GLM-5](https://bigmodel.cn/))
+- **Qwen**
+- **xAI** (Grok)
+- **Mistral**
+- **Groq**
 - **SiliconFlow** ([SiliconFlow](https://siliconflow.cn/))
 - **Ollama** (local models, fully offline)
 - **OpenRouter** (unified access to 200+ models)
@@ -430,11 +456,15 @@ For full functionality, install these tools:
 - [Memory System](docs/en/05_memory_system.md)
 - [Ghost Native Learning Design (Chinese)](docs/27_ghost_learning_design.md)
 - [ModelRouter and Fallback (Chinese)](docs/28_model_router.md)
+- [Provider Pool](docs/en/20_provider_pool.md)
+- [Intent Router and Profiles](docs/en/21_intent_router_profiles.md)
 - [Hook Lifecycle Events (Chinese)](docs/29_hook_system.md)
+- [MCP Servers](docs/en/19_mcp_servers.md)
 - [Channel Configuration](docs/en/06_channels.md)
 - [Browser Automation](docs/en/07_browser_automation.md)
 - [Gateway Mode](docs/en/08_gateway_mode.md)
 - [Self-Evolution](docs/en/09_self_evolution.md)
+- [Path Access Policy](docs/en/22_path_access_policy.md)
 - [CLI Reference](docs/en/17_cli_reference.md)
 
 ---
@@ -444,16 +474,20 @@ For full functionality, install these tools:
 ```
 blockcell/
 ├── bin/blockcell/          # CLI entry point
-└── crates/
-    ├── core/               # Config, paths, shared types
-    ├── agent/              # Agent runtime and safety
-    ├── tools/              # 50+ built-in tools
-    ├── skills/             # Skill loading, OpenClaw compatibility & evolution
-    ├── storage/            # SQLite memory, sessions & RabitQ vector index
-    ├── channels/           # Messaging adapters
-    ├── providers/          # LLM provider clients
-    ├── scheduler/          # Cron & heartbeat
-    └── updater/            # Self-upgrade system
+├── crates/
+│   ├── core/               # Config, paths, shared types
+│   ├── agent/              # Agent runtime and safety
+│   ├── tools/              # 60+ built-in tools
+│   ├── skills/             # Skill loading, OpenClaw compatibility & evolution
+│   ├── storage/            # SQLite memory, sessions & RabitQ vector index
+│   ├── channels/           # Messaging channel adapters
+│   ├── providers/          # LLM provider clients and routing
+│   ├── scheduler/          # Cron & heartbeat
+│   └── updater/            # Self-upgrade system
+├── skills/                 # Built-in skills (Markdown / Rhai / Python)
+├── webui/                  # Web console (Vite + React)
+├── docs/                   # Chinese & English docs
+└── tests/                  # E2E and coding-ability evals
 ```
 
 ---
@@ -517,7 +551,7 @@ In interactive mode, operations outside `~/.blockcell/workspace` require explici
 - **GitHub**: [blockcell-labs/blockcell](https://github.com/blockcell-labs/blockcell)
 - **Website**: [blockcell.dev](https://blockcell.dev)
 - **Discord**: [Join our community](https://discord.gg/E8TXuHk9QZ)
-- **Twitter**: [@blockcell_dev](https://twitter.com/@blockcell_ai)
+- **Twitter/X**: [@blockcell_ai](https://x.com/blockcell_ai)
 
 ---
 
@@ -535,8 +569,8 @@ BlockCell stands on the shoulders of giants:
 - [Rhai](https://rhai.rs/) - Embedded scripting engine
 - [Tokio](https://tokio.rs/) - Async runtime
 - [SQLite](https://www.sqlite.org/) - Embedded database
-- [OpenClaw](https://github.com/openclaw/openclaw) - OpenClaw
-- [NonaClaw](https://github.com/nonaclaw) - python openclaw
+- [OpenClaw](https://github.com/openclaw/openclaw) - Source of the compatible skill format
+- [NanoClaw](https://github.com/nanocoai/nanoclaw) - A lightweight OpenClaw alternative
 
 ---
 

@@ -53,7 +53,7 @@ BlockCell: ✓ 设置监控 → ✓ 每小时检查价格 → ✓ 发送 Telegra
 
 ## ✨ 核心特性
 
-### 🛠️ 内置 50+ 工具
+### 🛠️ 内置 60+ 工具
 
 - **文件与系统**：读写文件、执行命令、处理 Excel/Word/PDF
 - **网页与浏览器**：网页抓取、无头 Chrome 自动化（CDP）、HTTP 请求
@@ -92,9 +92,9 @@ BlockCell 可以在真实使用中沉淀长期有效的经验：
 当你配置多个模型时，BlockCell 可以按策略选择合适的 Provider：
 
 - `manual`：沿用 Provider Pool 的优先级 + 权重选择
-- `cost_optimized`：短上下文优先使用低成本模型，长上下文回到主力模型
+- `cost_optimized`：短上下文（≤4 条消息）优先使用低成本模型，长上下文回到主力模型
 - `quality_first`：优先使用高优先级主力模型
-- `latency_first`：为延迟优先策略预留入口，当前按可用条目的成功历史做稳定性近似
+- `latency_first`：优先选择近期快速成功的条目，无历史数据时回退到优先级选择
 
 主对话 LLM 调用还支持**连接阶段自动降级**：如果首选 Provider 在建立流之前出现连接、超时、DNS 等错误，会立即尝试下一个可用 Provider；一旦流式输出已经开始，中途错误不会切换模型，避免把部分输出和另一个模型的结果混在一起。
 
@@ -103,7 +103,7 @@ BlockCell 可以在真实使用中沉淀长期有效的经验：
 BlockCell 可以通过 `~/.blockcell/hooks.yaml` 在关键生命周期事件上执行本机命令：
 
 - `pre_tool_use` / `post_tool_use`：工具实际执行前后触发，支持按工具名 glob 匹配
-- `session_start` / `user_prompt` / `agent_stop`：会话和消息级事件
+- `session_start` / `session_end` / `user_prompt` / `agent_stop` / `compaction`：会话、消息与压缩级事件
 - 支持 `{tool_name}`、`{session_id}`、`{cwd}`、`{command}`、`{file_path}`、`{result}` 等模板变量
 - Hook 失败或超时不会阻断 agent 主流程，适合审计、格式化、通知和外部日志接入
 
@@ -218,8 +218,7 @@ curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/insta
 这会将 `blockcell` 安装到 `~/.local/bin`。自定义安装位置：
 
 ```bash
-BLOCKCELL_INSTALL_DIR="$HOME/bin" \
-curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/blockcell-labs/blockcell/main/install.sh | BLOCKCELL_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ### 从源码构建
@@ -254,6 +253,22 @@ blockcell gateway
 - **WebUI**：`http://localhost:18791`
 - **默认路由**：CLI / WebUI / WebSocket 进入 `default` agent；外部渠道优先按 `channelAccountOwners.<channel>.<accountId>` 路由，未命中时回退到 `channelOwners.<channel>`
 
+### 常用命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `blockcell setup` | 交互式向导：初始化配置、选择 provider、可选配置渠道 |
+| `blockcell agent` | 交互式对话；`-m <msg>` 单次执行 |
+| `blockcell gateway` | 守护进程：API + WebUI + 外部渠道接入 |
+| `blockcell status` / `doctor` | 查看配置状态 / 环境诊断 |
+| `blockcell config` | 查看、修改或打开 `config.json5` |
+| `blockcell tools` / `mcp` | 管理内置工具开关与 MCP 服务器 |
+| `blockcell session list/replay/verify` | 列出、回放、校验会话事件日志 |
+| `blockcell memory` / `skills` / `cron` | 记忆、技能与定时任务管理 |
+| `blockcell upgrade` | 升级到最新 Release |
+
+完整命令参考见 [CLI 参考](docs/17_cli_reference.md)。
+
 ---
 
 ## 📸 项目截图
@@ -265,6 +280,8 @@ blockcell gateway
 
 ### WebUI 界面
 ![WebUI 对话](screenshot/webui-chat.png)
+
+![WebUI 登录](screenshot/webui-login.png)
 
 </div>
 
@@ -315,7 +332,10 @@ blockcell gateway
 
 `cost_optimized` 会让短对话优先使用低优先级的便宜条目，复杂长上下文仍优先使用主力模型。更多策略与降级细节见 [ModelRouter 智能路由与自动降级](docs/28_model_router.md)。
 
-如果要启用多 agent 与外部渠道，建议按代码当前支持的结构补充，例如下面这个“2 个 agent + 2 个 Telegram 账号”的配置：
+如果要启用多 agent 与外部渠道，建议按代码当前支持的结构补充：
+
+<details>
+<summary>展开示例：“2 个 agent + 2 个 Telegram 账号”的完整配置</summary>
 
 ```json
 {
@@ -402,6 +422,8 @@ blockcell gateway
 }
 ```
 
+</details>
+
 这里要注意：
 
 - `agents.list` 里的字段要使用代码实际支持的字段，例如 `id`、`enabled`、`name`、`intentProfile`、`maxToolIterations`
@@ -422,6 +444,10 @@ blockcell gateway
 - **Kimi/Moonshot**（月之暗面）
 - **MiniMax**（[MiniMax M3](https://www.minimaxi.com/)）
 - **智谱 AI**（[GLM-5](https://bigmodel.cn/)）
+- **通义千问**（Qwen）
+- **xAI**（Grok）
+- **Mistral**
+- **Groq**
 - **硅基流动**（[SiliconFlow](https://siliconflow.cn/)）
 - **Ollama**（本地模型，完全离线）
 - **OpenRouter**（统一访问 200+ 模型）
@@ -452,11 +478,15 @@ blockcell gateway
 - [记忆系统](docs/05_memory_system.md)
 - [Ghost Native 学习闭环](docs/27_ghost_learning_design.md)
 - [ModelRouter 智能路由与自动降级](docs/28_model_router.md)
+- [Provider Pool](docs/20_provider_pool.md)
+- [Intent Router 与 Profile](docs/21_intent_router_profiles.md)
 - [Hook 生命周期事件系统](docs/29_hook_system.md)
+- [MCP 服务器](docs/19_mcp_servers.md)
 - [渠道配置](docs/06_channels.md)
 - [浏览器自动化](docs/07_browser_automation.md)
 - [Gateway 模式](docs/08_gateway_mode.md)
 - [自我进化](docs/09_self_evolution.md)
+- [路径访问策略](docs/22_path_access_policy.md)
 - [CLI 参考](docs/17_cli_reference.md)
 
 ---
@@ -466,16 +496,20 @@ blockcell gateway
 ```
 blockcell/
 ├── bin/blockcell/          # CLI 入口
-└── crates/
-    ├── core/               # 配置、路径、共享类型
-    ├── agent/              # Agent 运行时和安全
-    ├── tools/              # 50+ 内置工具
-    ├── skills/             # 技能加载、OpenClaw 兼容与进化
-    ├── storage/            # SQLite 记忆、会话、RabitQ 向量索引
-    ├── channels/           # 消息适配器
-    ├── providers/          # LLM 提供商客户端
-    ├── scheduler/          # Cron 与心跳
-    └── updater/            # 自升级系统
+├── crates/
+│   ├── core/               # 配置、路径、共享类型
+│   ├── agent/              # Agent 运行时和安全
+│   ├── tools/              # 60+ 内置工具
+│   ├── skills/             # 技能加载、OpenClaw 兼容与进化
+│   ├── storage/            # SQLite 记忆、会话、RabitQ 向量索引
+│   ├── channels/           # 消息渠道适配器
+│   ├── providers/          # LLM 提供商客户端与路由
+│   ├── scheduler/          # Cron 与心跳
+│   └── updater/            # 自升级系统
+├── skills/                 # 内置技能（Markdown / Rhai / Python）
+├── webui/                  # Web 控制台（Vite + React）
+├── docs/                   # 中英文档
+└── tests/                  # 端到端与编码能力评测
 ```
 
 ---
@@ -539,7 +573,7 @@ blockcell/
 - **GitHub**：[blockcell-labs/blockcell](https://github.com/blockcell-labs/blockcell)
 - **官网**：[blockcell.dev](https://blockcell.dev)
 - **Discord**：[加入我们的社区](https://discord.gg/E8TXuHk9QZ)
-- **Twitter**：[@blockcell_dev](https://twitter.com/@blockcell_ai)
+- **Twitter/X**：[@blockcell_ai](https://x.com/blockcell_ai)
 
 ---
 
@@ -557,8 +591,8 @@ BlockCell 站在巨人的肩膀上：
 - [Rhai](https://rhai.rs/) - 嵌入式脚本引擎
 - [Tokio](https://tokio.rs/) - 异步运行时
 - [SQLite](https://www.sqlite.org/) - 嵌入式数据库
-- [OpenClaw](https://github.com/openclaw/openclaw) - OpenClaw
-- [NonaClaw](https://github.com/nonaclaw) - python版本Claw
+- [OpenClaw](https://github.com/openclaw/openclaw) - 技能格式兼容来源
+- [NanoClaw](https://github.com/nanocoai/nanoclaw) - 轻量化的 OpenClaw 替代实现
 
 ---
 
