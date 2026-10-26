@@ -11,6 +11,7 @@ use crate::{Tool, ToolContext, ToolSchema};
 const DEFAULT_MAX_RESULTS: usize = 200;
 const MAX_RESULTS: usize = 2_000;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_OUTPUT_CHARS: usize = 4_000;
 
 pub struct GrepTool;
 
@@ -68,6 +69,30 @@ fn estimated_json_bytes(value: &Value) -> usize {
         .unwrap_or(0)
 }
 
+fn capped_grep_result(mut matches: Vec<Value>, total_matches: usize) -> Value {
+    loop {
+        let omitted = total_matches.saturating_sub(matches.len());
+        let match_count = matches.len();
+        let mut result = json!({
+            "matches": matches.clone(),
+            "count": match_count,
+            "truncated": omitted > 0,
+        });
+        if omitted > 0 {
+            result["note"] = json!(format!(
+                "[truncated: {omitted} more matches; refine the pattern]"
+            ));
+        }
+        let chars = serde_json::to_string(&result)
+            .map(|serialized| serialized.chars().count())
+            .unwrap_or(usize::MAX);
+        if chars <= MAX_OUTPUT_CHARS || matches.is_empty() {
+            return result;
+        }
+        matches.pop();
+    }
+}
+
 fn grep_sync(root: PathBuf, params: Value) -> Result<Value> {
     let pattern = required_string(&params, "pattern")?;
     let regex = Regex::new(pattern)
@@ -80,10 +105,9 @@ fn grep_sync(root: PathBuf, params: Value) -> Result<Value> {
         .min(50) as usize;
     let result_limit = max_results(&params);
     let mut matches = Vec::new();
-    let mut output_bytes = 0usize;
-    let mut truncated = false;
+    let mut total_matches = 0usize;
 
-    'files: for entry in walker(&root) {
+    for entry in walker(&root) {
         let entry = match entry {
             Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_file()) => entry,
             _ => continue,
@@ -113,6 +137,7 @@ fn grep_sync(root: PathBuf, params: Value) -> Result<Value> {
             if !regex.is_match(line) {
                 continue;
             }
+            total_matches += 1;
             let before_start = index.saturating_sub(context);
             let after_end = (index + context + 1).min(lines.len());
             let item = json!({
@@ -122,23 +147,13 @@ fn grep_sync(root: PathBuf, params: Value) -> Result<Value> {
                 "before": lines[before_start..index],
                 "after": lines[index + 1..after_end],
             });
-            let item_bytes = estimated_json_bytes(&item);
-            if matches.len() >= result_limit
-                || output_bytes.saturating_add(item_bytes) > MAX_OUTPUT_BYTES
-            {
-                truncated = true;
-                break 'files;
+            if matches.len() < result_limit && estimated_json_bytes(&item) <= MAX_OUTPUT_CHARS {
+                matches.push(item);
             }
-            output_bytes += item_bytes;
-            matches.push(item);
         }
     }
 
-    Ok(json!({
-        "matches": matches,
-        "count": matches.len(),
-        "truncated": truncated,
-    }))
+    Ok(capped_grep_result(matches, total_matches))
 }
 
 fn glob_sync(root: PathBuf, params: Value) -> Result<Value> {
@@ -214,13 +229,13 @@ impl Tool for GrepTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".to_string(),
-            description: "Search text files with a regular expression. Respects .gitignore and returns paths, line numbers, and optional context lines.".to_string(),
+            description: "Search with regex.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regular expression to search for"},
-                    "glob": {"type": "string", "description": "Optional file glob such as src/**/*.rs"},
-                    "context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Lines before and after each match"},
+                    "pattern": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "context": {"type": "integer", "minimum": 0, "maximum": 50},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS}
                 },
                 "required": ["pattern"]
@@ -374,6 +389,11 @@ mod tests {
         assert_eq!(result["matches"].as_array().unwrap().len(), 1);
         assert_eq!(result["matches"][0]["path"], "src/lib.rs");
         assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["note"],
+            "[truncated: 1 more matches; refine the pattern]"
+        );
+        assert!(serde_json::to_string(&result).unwrap().chars().count() <= MAX_OUTPUT_CHARS);
     }
 
     #[tokio::test]

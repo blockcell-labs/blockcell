@@ -53,7 +53,7 @@ impl Tool for ToolSearchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "tool_search".to_string(),
-            description: "Find allowed tools by name or description; matching schemas are activated for this session.".to_string(),
+            description: "Find tools.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},

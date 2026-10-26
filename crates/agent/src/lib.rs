@@ -81,7 +81,7 @@ pub use compact::{
     CompactSummarySection, CompactionRequest, CompactionSummary, ContextCompactor,
     ExtractiveCompactor, ModelSummaryCompactor, PostCompactHook, PreCompactHook, RecoveryBudget,
 };
-pub use context::ContextBuilder;
+pub use context::{ContextBuilder, InteractionMode};
 pub use forked::{
     create_auto_mem_can_use_tool, create_cache_safe_params, create_cache_safe_params_with_tools,
     create_compact_can_use_tool, create_dream_can_use_tool, create_memory_file_can_use_tool,

@@ -422,6 +422,7 @@ impl ShellSessionManager {
         let mut command = build_interactive_shell(sandbox.as_ref(), request).await?;
         command
             .current_dir(workspace)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

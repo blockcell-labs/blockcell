@@ -427,11 +427,17 @@ impl AgentRuntime {
             });
         }
 
-        let mode = if chat_intents.contains(&IntentCategory::Coding) {
-            InteractionMode::Coding
-        } else {
-            InteractionMode::General
-        };
+        let code_workspace_fallback = self.one_shot_cli_auto_coding
+            && self.forced_interaction_mode.is_none()
+            && !chat_intents.contains(&IntentCategory::Coding)
+            && !(chat_intents.len() == 1 && matches!(chat_intents[0], IntentCategory::Chat))
+            && super::workspace_looks_like_code(&self.paths.workspace());
+        let mode = super::resolve_interaction_mode(
+            false,
+            &chat_intents,
+            self.forced_interaction_mode,
+            code_workspace_fallback,
+        );
         info!(
             mode = ?mode,
             intents = ?chat_intents,

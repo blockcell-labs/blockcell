@@ -66,7 +66,15 @@ pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -
             push_path(&mut accesses, args, "path", PathOp::Read);
             push_paths(&mut accesses, args, "paths", PathOp::Read);
         }
-        "write_file" | "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
+        "write_file" => {
+            push_path(&mut accesses, args, "path", PathOp::Write);
+            if let Some(files) = args.get("files").and_then(|value| value.as_array()) {
+                for file in files {
+                    push_path(&mut accesses, file, "path", PathOp::Write);
+                }
+            }
+        }
+        "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
         "list_dir" => push_path(&mut accesses, args, "path", PathOp::List),
         "file_ops" => {
             let source_op = match action {
@@ -1107,6 +1115,25 @@ mod tests {
         assert_eq!(
             extract_path_accesses("read_file", &json!({"paths": ["a.txt", "b.txt"]})).len(),
             2
+        );
+        assert_eq!(
+            extract_path_accesses(
+                "write_file",
+                &json!({"files":[
+                    {"path":"a.txt","content":"a"},
+                    {"path":"b.txt","content":"b"}
+                ]})
+            ),
+            vec![
+                PathAccess {
+                    path: "a.txt".to_string(),
+                    op: PathOp::Write
+                },
+                PathAccess {
+                    path: "b.txt".to_string(),
+                    op: PathOp::Write
+                }
+            ]
         );
         assert!(extract_path_accesses("message", &json!({"media": "not-an-array"})).is_empty());
         assert!(extract_path_accesses("message", &json!({"media": [1, 2]})).is_empty());

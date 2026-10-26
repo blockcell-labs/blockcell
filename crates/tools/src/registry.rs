@@ -523,12 +523,22 @@ impl ToolRegistry {
             .iter()
             .filter(|(name, _)| names.contains(&name.as_str()))
             .map(|(name, tool)| {
-                let has_required_params = tool
-                    .schema()
-                    .parameters
+                let parameters = tool.schema().parameters;
+                let has_required_params = parameters
                     .get("required")
                     .and_then(|required| required.as_array())
-                    .is_some_and(|required| !required.is_empty());
+                    .is_some_and(|required| !required.is_empty())
+                    || parameters
+                        .get("oneOf")
+                        .and_then(Value::as_array)
+                        .is_some_and(|alternatives| {
+                            alternatives.iter().any(|alternative| {
+                                alternative
+                                    .get("required")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|required| !required.is_empty())
+                            })
+                        });
                 // Full schema for core tools and tools that cannot be called safely
                 // without required parameters present in the model-visible schema.
                 // Lightweight schema: keep the full description but omit parameters.

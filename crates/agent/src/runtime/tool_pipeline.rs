@@ -591,9 +591,23 @@ impl AgentRuntime {
         if !matches!(inv.call.name.as_str(), "edit_file" | "write_file") {
             return Ok(());
         }
+        if inv.call.name == "write_file" {
+            if let Some(files) = inv.args.get("files").and_then(serde_json::Value::as_array) {
+                for file in files {
+                    if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
+                        self.guard_file_observation_path(inv, path)?;
+                    }
+                }
+                return Ok(());
+            }
+        }
         let Some(path_str) = inv.args.get("path").and_then(serde_json::Value::as_str) else {
             return Ok(());
         };
+        self.guard_file_observation_path(inv, path_str)
+    }
+
+    fn guard_file_observation_path(&self, inv: &ToolInvocation<'_>, path_str: &str) -> GuardResult {
         let path = self.resolve_observed_file_path(path_str);
         let current = file_version(&path);
         if inv.call.name == "write_file" && current.as_ref().is_ok_and(|version| version.is_none())
@@ -651,6 +665,12 @@ impl AgentRuntime {
     fn resolve_observed_file_path(&self, path: &str) -> PathBuf {
         let path = self.resolve_path(path);
         path.canonicalize().unwrap_or(path)
+    }
+
+    pub(super) fn record_file_observations(&self, session_key: &str, paths: &[String]) {
+        for path in paths {
+            self.update_file_observation(session_key, path);
+        }
     }
 
     fn update_file_observation(&self, session_key: &str, path: &str) {
@@ -1101,6 +1121,13 @@ impl AgentRuntime {
                     }
                 }
             }
+            if tool_call.name == "write_file" {
+                if let Some(files) = inv.args.get("files").and_then(serde_json::Value::as_array) {
+                    for path in files.iter().filter_map(|file| file["path"].as_str()) {
+                        self.update_file_observation(&inv.msg.session_key(), path);
+                    }
+                }
+            }
         }
 
         // Detect writes to the skills directory and trigger hot-reload + Dashboard refresh
@@ -1108,7 +1135,18 @@ impl AgentRuntime {
             tool_call.name.as_str(),
             "write_file" | "edit_file" | "skill_manage"
         ) {
-            if let Some(path_str) = inv.args.get("path").and_then(|v| v.as_str()) {
+            let mut changed_paths = inv
+                .args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .map(|path| vec![path])
+                .unwrap_or_default();
+            if tool_call.name == "write_file" {
+                if let Some(files) = inv.args.get("files").and_then(serde_json::Value::as_array) {
+                    changed_paths.extend(files.iter().filter_map(|file| file["path"].as_str()));
+                }
+            }
+            for path_str in changed_paths {
                 let resolved = self.resolve_path(path_str);
                 let skills_dir = self.paths.skills_dir();
                 let in_skills = resolved.starts_with(&skills_dir)

@@ -2622,6 +2622,49 @@ fn test_determine_interaction_mode_uses_coding_for_code_changes() {
 }
 
 #[test]
+fn forced_interaction_mode_overrides_intent_but_skill_still_wins() {
+    assert_eq!(
+        resolve_interaction_mode(
+            false,
+            &[IntentCategory::Chat],
+            Some(InteractionMode::Coding),
+            false,
+        ),
+        InteractionMode::Coding
+    );
+    assert_eq!(
+        resolve_interaction_mode(
+            true,
+            &[IntentCategory::Coding],
+            Some(InteractionMode::General),
+            true,
+        ),
+        InteractionMode::Skill
+    );
+}
+
+#[test]
+fn one_shot_general_intent_uses_code_workspace_fallback() {
+    assert_eq!(
+        resolve_interaction_mode(false, &[IntentCategory::Unknown], None, true),
+        InteractionMode::Coding
+    );
+    assert_eq!(
+        resolve_interaction_mode(false, &[IntentCategory::Chat], None, true),
+        InteractionMode::Chat
+    );
+
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("create src");
+    std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}").expect("write source");
+    assert!(workspace_looks_like_code(workspace.path()));
+
+    let text_workspace = tempfile::tempdir().expect("temporary text workspace");
+    std::fs::write(text_workspace.path().join("notes.txt"), "notes").expect("write notes");
+    assert!(!workspace_looks_like_code(text_workspace.path()));
+}
+
+#[test]
 fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
     let available: HashSet<String> = [
         "read_file",
@@ -2634,6 +2677,7 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         "shell_poll",
         "shell_input",
         "shell_close",
+        "tool_search",
         "exec",
         "update_plan",
         "file_ops",
@@ -2655,15 +2699,12 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
 
     for required in [
         "read_file",
+        "write_file",
         "edit_file",
         "grep",
-        "glob",
-        "get_context_remaining",
         "shell_run",
         "shell_poll",
-        "shell_input",
-        "shell_close",
-        "update_plan",
+        "tool_search",
     ] {
         assert!(tools.contains(&required.to_string()), "missing {required}");
     }
@@ -6806,6 +6847,46 @@ async fn write_file_allows_creation_and_unobserved_overwrite() {
         std::fs::read_to_string(existing_path).expect("read overwritten file"),
         "overwrite"
     );
+
+    let batch_paths = [
+        workspace.join("batch-one.txt"),
+        workspace.join("batch-two.txt"),
+    ];
+    let batch_msg = test_main_session_inbound("cli", "write-batch");
+    let batch = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({"files":[
+                    {"path":batch_paths[0].display().to_string(),"content":"one"},
+                    {"path":batch_paths[1].display().to_string(),"content":"two"}
+                ]}),
+            ),
+            &batch_msg,
+            None,
+        )
+        .await;
+    assert_eq!(batch.outcome, ToolOutcome::Succeeded, "{}", batch.text);
+    for (path, old_text, new_text) in [
+        (&batch_paths[0], "one", "ONE"),
+        (&batch_paths[1], "two", "TWO"),
+    ] {
+        let edited = runtime
+            .execute_tool_call(
+                &tool_call(
+                    "edit_file",
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "old_text": old_text,
+                        "new_text": new_text
+                    }),
+                ),
+                &batch_msg,
+                None,
+            )
+            .await;
+        assert_eq!(edited.outcome, ToolOutcome::Succeeded, "{}", edited.text);
+    }
 }
 
 #[tokio::test]
