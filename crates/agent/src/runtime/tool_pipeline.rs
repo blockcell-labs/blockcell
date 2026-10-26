@@ -767,25 +767,25 @@ impl AgentRuntime {
                 let Some(command) = workspace_auto_command(tool_name, &inv.args) else {
                     return false;
                 };
-                if !command
-                    .split(|character: char| !character.is_ascii_alphanumeric())
-                    .any(|word| matches!(word, "rm" | "rmdir" | "trash" | "unlink"))
-                {
-                    return false;
+                for segment in command.split(['&', '|', ';', '\n']) {
+                    let command_name = segment
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches(['!', '{', '('])
+                        .trim_end_matches(')');
+                    if matches!(command_name, "cd" | "pushd")
+                        || !segment
+                            .split(|character: char| !character.is_ascii_alphanumeric())
+                            .any(|word| matches!(word, "rm" | "rmdir" | "trash" | "unlink"))
+                    {
+                        continue;
+                    }
+                    let segment_args = serde_json::json!({"command": segment});
+                    let accesses =
+                        super::path_security::extract_path_accesses(tool_name, &segment_args);
+                    targets.extend(accesses.into_iter().map(|access| (access.path, access.op)));
                 }
-                let mut accesses =
-                    super::path_security::extract_path_accesses(tool_name, &inv.args);
-                if tool_name == "exec"
-                    && inv
-                        .args
-                        .get("working_dir")
-                        .and_then(|value| value.as_str())
-                        .is_some()
-                    && !accesses.is_empty()
-                {
-                    accesses.remove(0);
-                }
-                targets.extend(accesses.into_iter().map(|access| (access.path, access.op)));
             }
             _ => return false,
         }

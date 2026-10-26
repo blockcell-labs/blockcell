@@ -6399,6 +6399,57 @@ async fn workspace_auto_rejects_deleting_the_workspace_root() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn workspace_auto_ignores_cd_targets_but_denies_workspace_root_deletion() {
+    let (mut runtime, calls) = workspace_auto_runtime("workspace-auto", "exec");
+    let workspace = runtime.paths.workspace();
+    let allowed_command = format!("cd {} && rm -rf __pycache__", workspace.display());
+    let allowed_result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": allowed_command})),
+            &test_main_session_inbound("cli", "workspace-auto-cd-allowed"),
+            None,
+        )
+        .await
+        .text;
+
+    assert!(
+        allowed_result.contains("workspace-auto-executed"),
+        "{allowed_result}"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    for (session, command) in [
+        (
+            "workspace-auto-cd-rm-root",
+            format!(
+                "cd {} && rm -rf {}",
+                workspace.display(),
+                workspace.display()
+            ),
+        ),
+        (
+            "workspace-auto-tmp-rm-root",
+            format!("cd /tmp && rm -rf {}", workspace.display()),
+        ),
+        (
+            "workspace-auto-rm-root",
+            format!("rm -rf {}", workspace.display()),
+        ),
+    ] {
+        let result = runtime
+            .execute_tool_call(
+                &tool_call("exec", serde_json::json!({"command": command})),
+                &test_main_session_inbound("cli", session),
+                None,
+            )
+            .await
+            .text;
+        assert!(result.contains("approvalPolicy=workspace-auto"), "{result}");
+    }
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
 fn file_observation_error(result: &ToolCallOutput, code: &str) {
     assert_eq!(result.outcome, ToolOutcome::Rejected);
     let value: serde_json::Value =

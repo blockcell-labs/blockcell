@@ -599,9 +599,11 @@ impl super::AgentRuntime {
 /// 例外：bare `$VAR` 只在"以路径为参数"的命令上下文中才按疑似路径处理，
 /// 避免 `git commit -m "$MSG"` 这类纯文本变量被误报为路径。
 fn extract_command_paths(command: &str) -> Vec<String> {
-    let path_verb_present = command_has_path_consuming_verb(command);
+    let (command_without_heredoc_bodies, heredoc_bodies) = split_heredoc_bodies(command);
+    let path_verb_present = command_has_path_consuming_verb(&command_without_heredoc_bodies);
     let mut out = Vec::new();
-    for raw in command.split_whitespace() {
+    for raw in command_without_heredoc_bodies.split_whitespace() {
+        let single_quoted = raw.starts_with('\'');
         let pieces: Vec<&str> = if !raw.contains("://") && (raw.contains('<') || raw.contains('>'))
         {
             raw.split(['<', '>'])
@@ -641,7 +643,8 @@ fn extract_command_paths(command: &str) -> Vec<String> {
                     continue;
                 }
                 let normalized = normalize_shell_home_vars(tok);
-                let has_shell_expansion = normalized.contains('$') || normalized.contains('`');
+                let has_shell_expansion =
+                    !single_quoted && (normalized.contains('$') || normalized.contains('`'));
                 // 展开形式只在仍像路径时才触发确认：含 `/` 的组合路径、命令替换
                 // （`$(...)`、反引号），或出现在吃路径命令中的裸 `$VAR`。
                 // 纯文本变量（如 `git commit -m "$MSG"` 的 `$MSG`）不再误报。
@@ -681,7 +684,109 @@ fn extract_command_paths(command: &str) -> Vec<String> {
 
     // Also extract quoted absolute / home / escaping relative paths embedded in inline scripts
     // (e.g. `python3 -c "open('/etc/passwd').read()"` or `python3 -c "open('../secret').read()"`).
-    for segment in command.split(['\'', '"']) {
+    extract_quoted_inline_paths(&command_without_heredoc_bodies, true, &mut out);
+    for (body, quoted_delimiter) in heredoc_bodies {
+        extract_quoted_inline_paths(&body, !quoted_delimiter, &mut out);
+    }
+
+    out
+}
+
+fn split_heredoc_bodies(command: &str) -> (String, Vec<(String, bool)>) {
+    let mut command_without_bodies = String::new();
+    let mut bodies = Vec::new();
+    let mut pending_delimiters = Vec::new();
+    let mut active_body: Option<(String, bool, String)> = None;
+
+    for line in command.split_inclusive('\n') {
+        if let Some((delimiter, quoted, mut body)) = active_body.take() {
+            if line.trim() == delimiter {
+                bodies.push((body, quoted));
+            } else {
+                body.push_str(line);
+                active_body = Some((delimiter, quoted, body));
+            }
+            continue;
+        }
+
+        if let Some((delimiter, quoted)) = pending_delimiters.first().cloned() {
+            pending_delimiters.remove(0);
+            if line.trim() == delimiter {
+                bodies.push((String::new(), quoted));
+            } else {
+                active_body = Some((delimiter, quoted, line.to_string()));
+            }
+            continue;
+        }
+
+        command_without_bodies.push_str(line);
+        pending_delimiters.extend(heredoc_delimiters_in_line(line));
+    }
+
+    if let Some((_, quoted, body)) = active_body {
+        bodies.push((body, quoted));
+    }
+
+    (command_without_bodies, bodies)
+}
+
+fn heredoc_delimiters_in_line(line: &str) -> Vec<(String, bool)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut delimiters = Vec::new();
+    let mut index = 0;
+
+    while index + 1 < chars.len() {
+        if chars[index] != '<' || chars[index + 1] != '<' {
+            index += 1;
+            continue;
+        }
+        if chars.get(index + 2) == Some(&'<') {
+            index += 3;
+            continue;
+        }
+
+        index += 2;
+        if chars.get(index) == Some(&'-') {
+            index += 1;
+        }
+        while chars
+            .get(index)
+            .is_some_and(|character| character.is_whitespace())
+        {
+            index += 1;
+        }
+
+        let quote = chars
+            .get(index)
+            .copied()
+            .filter(|character| matches!(character, '\'' | '"'));
+        if quote.is_some() {
+            index += 1;
+        }
+        let start = index;
+        while let Some(character) = chars.get(index) {
+            if Some(*character) == quote
+                || (quote.is_none()
+                    && (character.is_whitespace()
+                        || matches!(character, ';' | '|' | '&' | '<' | '>')))
+            {
+                break;
+            }
+            index += 1;
+        }
+        if start < index {
+            delimiters.push((chars[start..index].iter().collect(), quote.is_some()));
+        }
+        if quote.is_some() && chars.get(index) == quote.as_ref() {
+            index += 1;
+        }
+    }
+
+    delimiters
+}
+
+fn extract_quoted_inline_paths(text: &str, allow_shell_expansion: bool, out: &mut Vec<String>) {
+    for segment in text.split(['\'', '"']) {
         let seg = normalize_shell_home_vars(segment.trim());
         let is_inline_path = seg.starts_with('/')
             || seg.starts_with("~/")
@@ -689,7 +794,7 @@ fn extract_command_paths(command: &str) -> Vec<String> {
             || seg.starts_with("./")
             || seg == "..";
         if is_inline_path && !seg.contains(' ') && !seg.contains("://") && seg.len() > 1 {
-            let entry = if seg.contains('$') || seg.contains('`') {
+            let entry = if allow_shell_expansion && (seg.contains('$') || seg.contains('`')) {
                 format!("/__unresolved_shell_var__/{}", seg.trim_start_matches('/'))
             } else {
                 seg
@@ -699,8 +804,6 @@ fn extract_command_paths(command: &str) -> Vec<String> {
             }
         }
     }
-
-    out
 }
 
 fn is_pseudo_device_path(path: &str) -> bool {
@@ -1136,6 +1239,56 @@ mod tests {
         assert!(
             extract_command_paths("python3 -c \"open('../secret').read()\"")
                 .contains(&"../secret".to_string())
+        );
+    }
+
+    #[test]
+    fn heredoc_bodies_are_not_scanned_as_shell_tokens() {
+        assert!(extract_command_paths(
+            "cd ws && python - <<'EOF'\ncases = [\"8/2/2\", \"2^3^2\"]\nEOF"
+        )
+        .is_empty());
+        assert!(extract_command_paths("cat <<-EOF\n8/2/2\n\tEOF").is_empty());
+        assert!(extract_command_paths("cat <<\"EOF\"\n[not](a)\nEOF").is_empty());
+
+        let markdown = "python - <<'EOF'\n[not](a)\n\n```\n[no](b)\n```\nEOF";
+        let paths = extract_command_paths(markdown);
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.contains("unknown") && !path.contains("unresolved")),
+            "{paths:?}"
+        );
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+
+    #[test]
+    fn single_quoted_shell_tokens_are_literal() {
+        assert_eq!(
+            extract_command_paths(r"printf '%s\n' 'text [a](u1)' '```' '[c](u3)' > /tmp/sample.md"),
+            vec!["/tmp/sample.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn heredoc_inline_paths_are_scanned_without_expanding_quoted_delimiters() {
+        assert_eq!(
+            extract_command_paths("python - <<'EOF'\nopen('/etc/passwd')\nEOF"),
+            vec!["/etc/passwd".to_string()]
+        );
+        assert!(
+            extract_command_paths("python - <<'EOF'\nopen('/$FILE/id')\nEOF")
+                .iter()
+                .all(|path| !path.contains("unresolved")),
+        );
+        assert!(
+            extract_command_paths("python - <<EOF\nopen('/$FILE/id')\nEOF")
+                .iter()
+                .any(|path| path.starts_with("/__unresolved_shell_var__/"))
+        );
+        assert_eq!(
+            extract_command_paths("cat \"$FILE\""),
+            vec!["/__unresolved_shell_var__/$FILE".to_string()]
         );
     }
 

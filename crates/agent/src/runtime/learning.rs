@@ -33,6 +33,15 @@ impl super::AgentRuntime {
         notify_channel: Option<(String, String)>,
         reservation: crate::learning_coordinator::LearningReviewReservationGuard,
     ) {
+        if !self.background_tasks_enabled {
+            drop(reservation);
+            debug!(
+                ?mode,
+                "Skipping nudge review because background tasks are disabled"
+            );
+            return;
+        }
+
         let label = match mode {
             ReviewMode::Skill => "skill_nudge_review",
             ReviewMode::Memory => "memory_nudge_review",
