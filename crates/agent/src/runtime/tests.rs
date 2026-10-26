@@ -2703,11 +2703,21 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         "edit_file",
         "grep",
         "shell_run",
-        "shell_poll",
         "tool_search",
     ] {
         assert!(tools.contains(&required.to_string()), "missing {required}");
     }
+    assert_eq!(
+        super::CODING_DEFAULT_TOOL_NAMES,
+        &[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "shell_run",
+            "grep",
+            "tool_search",
+        ]
+    );
     assert!(!tools.contains(&"shell".to_string()));
     assert_eq!(
         tools.contains(&"exec".to_string()),

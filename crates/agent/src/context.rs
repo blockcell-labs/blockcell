@@ -37,6 +37,7 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 - Batch related reads with `read_file(paths)` and commands with one `shell_run`; write all new-project files in one `write_file(files)` call.
 - Shell cwd and environment persist; do not `cd` to the absolute workspace path.
 - Run relevant tests. After they pass, stop with a brief summary; do not reread files or rerun passing tests.
+- Keep public function signatures, return types and error types unchanged unless the task asks; match how existing callers and tests use them.
 - If shell execution is unavailable, say "unverified". Use `tool_search` to activate other tools; call `activate_skill` alone for skills.
 "#;
 
@@ -2613,6 +2614,9 @@ description: deploy demo
         assert!(prompt.contains("cwd and environment persist"));
         assert!(prompt.contains("Run relevant tests"));
         assert!(prompt.contains("do not reread files or rerun passing tests"));
+        assert!(prompt.contains(
+            "Keep public function signatures, return types and error types unchanged unless the task asks; match how existing callers and tests use them."
+        ));
         assert!(prompt.contains("unverified"));
         assert!(prompt.contains("tool_search"));
         assert!(prompt.contains("activate_skill"));

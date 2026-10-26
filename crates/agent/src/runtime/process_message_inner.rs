@@ -13,10 +13,28 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
         "dist",
         "build",
     ];
+    const BLOCKCELL_WORKSPACE_ENTRIES: &[&str] = &[
+        "agents",
+        "downloads",
+        "evo_workflow.db",
+        "evolved_tools",
+        "ghost",
+        "logs",
+        "memory",
+        "skill_evolution_workflow.db",
+        "skills",
+        "tool_artifacts",
+        "tool_evolution_records",
+        "import_staging",
+        "toggles.json",
+        ".skills_prompt_snapshot.json",
+    ];
     const TEXT_EXTENSIONS: &[&str] = &[
         "rs", "py", "go", "js", "ts", "tsx", "java", "c", "cpp", "h", "rb", "php", "swift", "kt",
         "sh", "toml", "md", "txt", "json", "yaml", "yml", "ini", "cfg",
     ];
+    let blockcell_owned =
+        workspace.join("ghost").is_dir() && workspace.join("tool_artifacts").is_dir();
     let mut pending = vec![(workspace.to_path_buf(), 0usize)];
     let mut listed = Vec::new();
     let mut text_files = Vec::new();
@@ -36,13 +54,17 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
                 complete = false;
                 continue;
             };
-            scanned += 1;
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 complete = false;
                 continue;
             };
             let name = entry.file_name().to_string_lossy().into_owned();
+            if blockcell_owned && depth == 0 && BLOCKCELL_WORKSPACE_ENTRIES.contains(&name.as_str())
+            {
+                continue;
+            }
+            scanned += 1;
             if file_type.is_dir() && SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
@@ -62,7 +84,9 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
                 && path
                     .extension()
                     .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| TEXT_EXTENSIONS.contains(&extension))
+                    .is_some_and(|extension| {
+                        extension != "db" && TEXT_EXTENSIONS.contains(&extension)
+                    })
             {
                 text_files.push(path);
             }
@@ -145,7 +169,51 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
             observed.push(path.to_string_lossy().into_owned());
         }
     }
+    if let Some(command) = suggested_test_command(workspace, &listed) {
+        snapshot.push_str(&format!("\nSuggested test command: `{command}`\n"));
+    }
     (snapshot, observed)
+}
+
+fn suggested_test_command(workspace: &std::path::Path, listed: &[String]) -> Option<&'static str> {
+    if workspace.join("Cargo.toml").is_file() {
+        return Some("cargo test");
+    }
+    if workspace.join("go.mod").is_file() {
+        return Some("go test ./...");
+    }
+    if std::fs::read_to_string(workspace.join("package.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|package| {
+            package
+                .get("scripts")?
+                .get("test")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .is_some()
+    {
+        return Some("npm test");
+    }
+    let has_pytest_config = workspace.join("pytest.ini").is_file()
+        || workspace.join("conftest.py").is_file()
+        || std::fs::read_to_string(workspace.join("pyproject.toml"))
+            .is_ok_and(|content| content.contains("[tool.pytest"))
+        || std::fs::read_to_string(workspace.join("setup.cfg"))
+            .is_ok_and(|content| content.contains("[tool:pytest"));
+    if has_pytest_config {
+        return Some("python -m pytest -q");
+    }
+    let has_unittest_tests = listed.iter().any(|path| {
+        path == "tests/"
+            || path.starts_with("tests/")
+            || std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("test_") && name.ends_with(".py"))
+    });
+    has_unittest_tests.then_some("python -m unittest -q")
 }
 
 fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
@@ -155,6 +223,248 @@ fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
             args.get("action").and_then(serde_json::Value::as_str),
             Some("delete" | "rename" | "move" | "copy" | "compress" | "decompress")
         ),
+        _ => false,
+    }
+}
+
+fn shell_command_segments(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut start = 0;
+    let mut chars = command.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote != Some('\'') && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            continue;
+        }
+        if matches!(ch, ';' | '|' | '\n' | '\r')
+            || (ch == '&' && chars.peek().is_some_and(|(_, next)| *next == '&'))
+        {
+            segments.push(&command[start..index]);
+            let width = ch.len_utf8();
+            let mut end = index + width;
+            if matches!(ch, '|' | '&') && chars.peek().is_some_and(|(_, next)| *next == ch) {
+                if let Some((next_index, next)) = chars.next() {
+                    end = next_index + next.len_utf8();
+                }
+            }
+            start = end;
+        }
+    }
+    segments.push(&command[start..]);
+    segments
+}
+
+fn shell_command_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut active = false;
+    for ch in segment.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            active = true;
+            continue;
+        }
+        if quote != Some('\'') && ch == '\\' {
+            escaped = true;
+            active = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            active = true;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                active = true;
+            }
+            ch if ch.is_whitespace() => {
+                if active {
+                    words.push(std::mem::take(&mut word));
+                    active = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                active = true;
+            }
+        }
+    }
+    if escaped {
+        word.push('\\');
+    }
+    if active {
+        words.push(word);
+    }
+    words
+}
+
+fn is_environment_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+        })
+}
+
+fn strip_verification_prefixes(mut words: Vec<String>) -> Vec<String> {
+    loop {
+        while words
+            .first()
+            .is_some_and(|word| is_environment_assignment(word))
+        {
+            words.remove(0);
+        }
+        match words
+            .first()
+            .map(|word| word.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("timeout")
+                if words.get(1).is_some_and(|duration| {
+                    duration
+                        .trim_end_matches(['s', 'm', 'h', 'd'])
+                        .parse::<f64>()
+                        .is_ok()
+                }) =>
+            {
+                words.drain(..2);
+            }
+            Some("env" | "time") => {
+                words.remove(0);
+                if words.first().is_some_and(|word| word == "-p") {
+                    words.remove(0);
+                }
+            }
+            Some("uv" | "poetry")
+                if words
+                    .get(1)
+                    .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("run")) =>
+            {
+                words.drain(..2);
+            }
+            _ => return words,
+        }
+    }
+}
+
+fn is_python_executable(command: &str) -> bool {
+    command == "python"
+        || command == "python3"
+        || command.strip_prefix("python3.").is_some_and(|version| {
+            !version.is_empty()
+                && version
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '.')
+        })
+}
+
+fn verification_script_name(path: &str, keywords: &[&str]) -> bool {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|filename| keywords.iter().any(|keyword| filename.contains(keyword)))
+}
+
+fn is_verification_segment(segment: &str) -> bool {
+    let words = strip_verification_prefixes(shell_command_words(segment));
+    let Some(command) = words.first().map(|word| word.to_ascii_lowercase()) else {
+        return false;
+    };
+    if command == "cd" {
+        return false;
+    }
+    let arguments = &words[1..];
+    let first_argument = arguments.first().map(String::as_str);
+    match command.as_str() {
+        "pytest" | "ruff" | "mypy" | "tsc" | "tox" => true,
+        _ if is_python_executable(&command) => {
+            if first_argument == Some("-m") {
+                arguments.get(1).is_some_and(|module| {
+                    matches!(
+                        module.to_ascii_lowercase().as_str(),
+                        "pytest" | "unittest" | "mypy" | "py_compile" | "compileall"
+                    )
+                })
+            } else {
+                first_argument.is_some_and(|path| {
+                    verification_script_name(path, &["test", "verify", "check", "bench"])
+                })
+            }
+        }
+        "cargo" => first_argument.is_some_and(|subcommand| {
+            matches!(
+                subcommand.to_ascii_lowercase().as_str(),
+                "test" | "check" | "build" | "clippy" | "nextest"
+            )
+        }),
+        "go" => first_argument.is_some_and(|subcommand| {
+            matches!(
+                subcommand.to_ascii_lowercase().as_str(),
+                "test" | "build" | "vet"
+            )
+        }),
+        "npm" | "pnpm" | "yarn" => {
+            let action = if first_argument == Some("run") {
+                arguments.get(1).map(String::as_str)
+            } else {
+                first_argument
+            };
+            action.is_some_and(|action| {
+                matches!(
+                    action.to_ascii_lowercase().as_str(),
+                    "test" | "build" | "lint" | "check"
+                )
+            })
+        }
+        "npx" => first_argument.is_some_and(|subcommand| {
+            matches!(
+                subcommand.to_ascii_lowercase().as_str(),
+                "jest" | "vitest" | "tsc"
+            )
+        }),
+        "make" => first_argument.is_some_and(|target| {
+            matches!(
+                target.to_ascii_lowercase().as_str(),
+                "test" | "check" | "build"
+            )
+        }),
+        "mvn" => first_argument
+            .is_some_and(|goal| matches!(goal.to_ascii_lowercase().as_str(), "test" | "verify")),
+        "gradle" => first_argument
+            .is_some_and(|task| matches!(task.to_ascii_lowercase().as_str(), "test" | "build")),
+        "./gradlew" => first_argument
+            .is_some_and(|task| matches!(task.to_ascii_lowercase().as_str(), "test" | "build")),
+        "node" | "bash" | "sh" => {
+            first_argument.is_some_and(|path| verification_script_name(path, &["test"]))
+        }
         _ => false,
     }
 }
@@ -170,23 +480,9 @@ fn verification_command(tool_name: &str, args: &serde_json::Value, result: &str)
         .get("command")
         .and_then(serde_json::Value::as_str)
         .or_else(|| args.get("cmd").and_then(serde_json::Value::as_str))?;
-    let lower = command.to_ascii_lowercase();
-    if ![
-        "test",
-        "pytest",
-        "unittest",
-        "cargo test",
-        "go test",
-        "npm test",
-        "pnpm test",
-        "yarn test",
-        "verify",
-        "check",
-        "clippy",
-        "build",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    if !shell_command_segments(command)
+        .into_iter()
+        .any(is_verification_segment)
     {
         return None;
     }
@@ -2547,5 +2843,111 @@ impl AgentRuntime {
         self.spawn_pending_ghost_background_reviews();
 
         Ok(delivered_response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{coding_workspace_snapshot, verification_command};
+
+    #[tokio::test]
+    async fn coding_snapshot_filters_blockcell_runtime_files_and_suggests_tests() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        for directory in [
+            "agents",
+            "downloads",
+            "evolved_tools",
+            "ghost",
+            "logs",
+            "memory",
+            "skills",
+            "tool_artifacts",
+            "tool_evolution_records",
+            "import_staging",
+        ] {
+            std::fs::create_dir_all(workspace.path().join(directory)).expect("create runtime dir");
+        }
+        std::fs::write(workspace.path().join("skills/x.md"), "runtime skill")
+            .expect("write runtime skill");
+        std::fs::write(workspace.path().join("evo_workflow.db"), "database")
+            .expect("write runtime database");
+        std::fs::write(
+            workspace.path().join("skill_evolution_workflow.db"),
+            "database",
+        )
+        .expect("write evolution database");
+        std::fs::write(workspace.path().join("toggles.json"), "{}").expect("write runtime toggles");
+        std::fs::write(workspace.path().join(".skills_prompt_snapshot.json"), "{}")
+            .expect("write prompt snapshot");
+        std::fs::write(workspace.path().join("cache.py"), "CACHE_CONTENT")
+            .expect("write cache module");
+        std::fs::write(workspace.path().join("test_cache.py"), "TEST_CONTENT")
+            .expect("write test module");
+
+        let (snapshot, observed) = coding_workspace_snapshot(workspace.path()).await;
+        let files_section = snapshot
+            .split_once("Files (depth ≤2):\n")
+            .expect("file section")
+            .1
+            .split("\nFile contents:")
+            .next()
+            .expect("file listing");
+        let mut listed = files_section
+            .lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .collect::<Vec<_>>();
+        listed.sort_unstable();
+        assert_eq!(listed, ["cache.py", "test_cache.py"]);
+        assert!(snapshot.contains("CACHE_CONTENT"));
+        assert!(snapshot.contains("TEST_CONTENT"));
+        assert!(observed.iter().any(|path| path.ends_with("/cache.py")));
+        assert!(observed.iter().any(|path| path.ends_with("/test_cache.py")));
+        assert!(snapshot.contains("Suggested test command: `python -m unittest -q`"));
+    }
+
+    #[tokio::test]
+    async fn coding_snapshot_keeps_skills_in_non_blockcell_workspaces() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(workspace.path().join("skills")).expect("create skills dir");
+        std::fs::write(
+            workspace.path().join("skills/foo.py"),
+            "skill project module",
+        )
+        .expect("write project skill");
+
+        let (snapshot, _) = coding_workspace_snapshot(workspace.path()).await;
+
+        assert!(snapshot.contains("- skills/\n"));
+        assert!(snapshot.contains("- skills/foo.py\n"));
+    }
+
+    #[test]
+    fn verification_command_recognizes_only_verification_segments() {
+        let check = |command: &str| {
+            verification_command(
+                "shell_run",
+                &serde_json::json!({"command": command}),
+                r#"{"exit_code":0}"#,
+            )
+        };
+
+        assert_eq!(
+            check("rm -f /tmp/test_hidden_inv.py; git diff --stat"),
+            None
+        );
+        assert_eq!(
+            check("cd x && python -m unittest -v"),
+            Some("cd x && python -m unittest -v".to_string())
+        );
+        assert_eq!(
+            check("timeout 60 cargo test -p a"),
+            Some("timeout 60 cargo test -p a".to_string())
+        );
+        assert_eq!(
+            check("python test_cache.py"),
+            Some("python test_cache.py".to_string())
+        );
+        assert_eq!(check("cat check.txt"), None);
+        assert_eq!(check("grep -rn build ."), None);
     }
 }

@@ -1525,7 +1525,6 @@ const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "write_file",
     "edit_file",
     "shell_run",
-    "shell_poll",
     "grep",
     "tool_search",
 ];
