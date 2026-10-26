@@ -371,8 +371,6 @@ impl Tool for EditFileTool {
                     "path": {"type": "string"},
                     "old_text": {"type": "string"},
                     "new_text": {"type": "string"},
-                    "old_string": {"type": "string"},
-                    "new_string": {"type": "string"},
                     "edits": {
                         "type": "array",
                         "minItems": 1,
@@ -380,9 +378,7 @@ impl Tool for EditFileTool {
                             "type": "object",
                             "properties": {
                                 "old_text": {"type": "string"},
-                                "new_text": {"type": "string"},
-                                "old_string": {"type": "string"},
-                                "new_string": {"type": "string"}
+                                "new_text": {"type": "string"}
                             }
                         }
                     }
@@ -902,14 +898,36 @@ mod tests {
     }
 
     #[test]
-    fn enhanced_file_schemas_expose_ranges_aliases_and_edits() {
+    fn enhanced_file_schemas_expose_ranges_and_canonical_edits() {
         let read = ReadFileTool::default().schema();
         let edit = EditFileTool::default().schema();
         assert!(read.parameters["properties"].get("offset").is_some());
         assert!(read.parameters["properties"].get("limit").is_some());
-        assert!(edit.parameters["properties"].get("old_string").is_some());
-        assert!(edit.parameters["properties"].get("new_string").is_some());
+        assert!(edit.parameters["properties"].get("old_text").is_some());
+        assert!(edit.parameters["properties"].get("new_text").is_some());
+        assert!(edit.parameters["properties"].get("old_string").is_none());
+        assert!(edit.parameters["properties"].get("new_string").is_none());
         assert_eq!(edit.parameters["properties"]["edits"]["type"], "array");
+        assert!(
+            edit.parameters["properties"]["edits"]["items"]["properties"]
+                .get("old_text")
+                .is_some()
+        );
+        assert!(
+            edit.parameters["properties"]["edits"]["items"]["properties"]
+                .get("new_text")
+                .is_some()
+        );
+        assert!(
+            edit.parameters["properties"]["edits"]["items"]["properties"]
+                .get("old_string")
+                .is_none()
+        );
+        assert!(
+            edit.parameters["properties"]["edits"]["items"]["properties"]
+                .get("new_string")
+                .is_none()
+        );
     }
 
     #[test]

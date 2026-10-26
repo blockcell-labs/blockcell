@@ -427,21 +427,6 @@ impl PromptSection for GhostLearningSection {
 
 struct ToolsSection;
 
-fn is_coding_tool_rule(rule: &str) -> bool {
-    [
-        "edit_file",
-        "grep",
-        "read_file",
-        "shell_poll",
-        "shell_run",
-        "tool_search",
-        "write_file",
-        "exec",
-    ]
-    .iter()
-    .any(|name| rule.starts_with(&format!("- **{name}**")))
-}
-
 impl PromptSection for ToolsSection {
     fn id(&self) -> &'static str {
         "tools"
@@ -450,31 +435,23 @@ impl PromptSection for ToolsSection {
         50
     }
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String> {
-        if ctx.is_chat() {
+        if ctx.is_chat() || matches!(ctx.mode, InteractionMode::Coding) {
             return None;
         }
         let mut prompt = String::from("\n## Tools\n");
-        if matches!(ctx.mode, InteractionMode::Coding) {
-            prompt.push_str("Use tools sparingly and batch related work. Use `tool_search` to activate other tools if needed.\n");
-        } else {
-            prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
-            prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
-            prompt.push_str("- Validate tool parameters against schema.\n");
-            prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
-            prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
-            prompt.push_str(
-                "- Never hardcode credentials — ask the user or read from config/memory.\n",
-            );
-        }
-        if ctx.available_tool_names.is_empty() && !matches!(ctx.mode, InteractionMode::Coding) {
+        prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
+        prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
+        prompt.push_str("- Validate tool parameters against schema.\n");
+        prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
+        prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
+        prompt
+            .push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
+        if ctx.available_tool_names.is_empty() {
             prompt.push_str("- There are no callable tools available in the current agent scope for this interaction. Do not claim tools outside the current scope.\n");
-        } else if !matches!(ctx.mode, InteractionMode::Coding) {
+        } else {
             prompt.push_str("- The current callable tools are defined by the attached tool schemas. When asked about capabilities, answer only from those schemas.\n");
         }
         for rule in ctx.tool_prompt_rules {
-            if matches!(ctx.mode, InteractionMode::Coding) && !is_coding_tool_rule(rule) {
-                continue;
-            }
             let rule = truncate_to_token_budget(rule, MAX_TOOL_RULE_TOKENS);
             prompt.push_str(&rule);
             if !rule.ends_with('\n') {
@@ -592,7 +569,8 @@ impl PromptSection for SkillGuidanceSection {
         100
     }
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String> {
-        (!ctx.is_chat()).then(|| format!("{SKILL_GUIDANCE}\n"))
+        (!ctx.is_chat() && !matches!(ctx.mode, InteractionMode::Coding))
+            .then(|| format!("{SKILL_GUIDANCE}\n"))
     }
 }
 
@@ -892,12 +870,17 @@ mod tests {
         assert!(!chat.contains("## Tools"));
 
         let coding = render(&registry, "default", InteractionMode::Coding).rules;
-        assert!(coding.contains("## Tools"));
+        assert!(!coding.contains("## Tools"));
         assert!(coding.contains("## Coding"));
+        assert!(coding.contains("`edit_file`: `old_text` must match exactly (read first)."));
+        assert!(!coding.contains("## Skill System Guidance"));
         assert!(!coding.contains("## Core Tool Scope"));
         assert!(!coding.contains("## Agent Guidelines"));
         assert!(!coding.contains("## Personality"));
         assert!(!coding.contains("## Memory Guidance"));
-        assert!(coding.find("## Tools") < coding.find("## Coding"));
+
+        let general = render(&registry, "default", InteractionMode::General).rules;
+        assert!(general.contains("## Tools"));
+        assert!(general.contains("## Skill System Guidance"));
     }
 }
