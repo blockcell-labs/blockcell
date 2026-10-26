@@ -52,6 +52,7 @@ pub async fn run(
     model: Option<String>,
     provider: Option<String>,
     background: bool,
+    forced_interaction_mode: Option<blockcell_agent::InteractionMode>,
 ) -> anyhow::Result<()> {
     let mut root_paths = Paths::new();
     super::env_file::ensure_and_load_blockcell_env(&root_paths)?;
@@ -181,6 +182,8 @@ pub async fn run(
         )?;
         runtime.set_background_tasks_enabled(background);
         runtime.set_shell_execution_unavailable(sandbox_unavailable);
+        runtime.set_forced_interaction_mode(forced_interaction_mode);
+        runtime.set_one_shot_cli_auto_coding(true);
         runtime.validate_intent_router()?;
         runtime.set_agent_id(Some(agent_id.clone()));
         runtime.set_task_manager(TaskManager::new());
@@ -500,6 +503,7 @@ pub async fn run(
             tool_registry,
         )?;
         runtime.set_shell_execution_unavailable(sandbox_unavailable);
+        runtime.set_forced_interaction_mode(forced_interaction_mode);
         runtime.validate_intent_router()?;
 
         // 如果配置了独立的 evolution_model 或 evolution_provider，创建独立的 evolution provider

@@ -48,30 +48,26 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".to_string(),
-            description: "Read one local file with `path`, or batch up to 10 files with `paths` (mutually exclusive); do not call this tool with `{}`. Paths may be absolute, `~/...`, or workspace-relative. Supports text and Office documents (.xlsx, .xls, .docx, .pptx).".to_string(),
+            description:
+                "Read via path or up to 10 paths, not both; do not call this tool with `{}`."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read. Supports text files and Office formats (xlsx, xls, docx, pptx)."
-                    },
+                    "path": {"type": "string"},
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
                         "minItems": 1,
-                        "maxItems": 10,
-                        "description": "Read up to 10 files in one call; mutually exclusive with path."
+                        "maxItems": 10
                     },
                     "offset": {
                         "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional 1-based first line to return"
+                        "minimum": 1
                     },
                     "limit": {
                         "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional maximum number of lines to return"
+                        "minimum": 1
                     }
                 },
             }),
@@ -79,7 +75,7 @@ impl Tool for ReadFileTool {
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **read_file**: Pass exactly one of `path` or `paths`; batch related reads with `paths` (up to 10 files). Never call `read_file` with `{}`.".to_string())
+        Some("- **read_file**: Use `path` or `paths` (up to 10), not both.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
@@ -223,6 +219,21 @@ fn read_result(
     result
 }
 
+async fn write_file_result(
+    fs: &dyn FilesystemBackend,
+    workspace: &Path,
+    path_str: &str,
+    content: &str,
+) -> Result<Value> {
+    let path = expand_path(path_str, workspace);
+    let _write_guard = fs.lock_for_write(&path).await?;
+    fs.write(&path, content).await?;
+    Ok(json!({
+        "path": path.display().to_string(),
+        "bytes_written": content.len()
+    }))
+}
+
 // ============ write_file ============
 
 #[async_trait]
@@ -238,35 +249,75 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".to_string(),
-            description: "Write content to a local file, creating parent directories if needed. REQUIRED: always provide both string parameters `path` and `content`; do not call this tool with `{}` and do not omit either field. `path` may be absolute, `~/...`, or workspace-relative such as `generated/out.html`.".to_string(),
+            description: "Write one file or up to 10 files; never mix.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "files": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"}
+                            },
+                            "required": ["path", "content"]
+                        }
                     }
                 },
-                "required": ["path", "content"]
+                "oneOf": [
+                    {"required": ["path", "content"]},
+                    {"required": ["files"]}
+                ]
             }),
         }
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **write_file**: Always pass both `path` and `content`. Never call `write_file` with `{}` or with only one field. Example: `{\"path\":\"generated/out.html\",\"content\":\"<html>...</html>\"}`.".to_string())
+        Some("- **write_file**: Use `path`+`content` or up to 10 `files`; batch all new-project files. Never call with `{}`. Example: `{\"path\":\"out.txt\",\"content\":\"text\"}`.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
-        if params.get("path").and_then(|v| v.as_str()).is_none() {
+        if let Some(files) = params.get("files") {
+            if params.get("path").is_some() || params.get("content").is_some() {
+                return Err(Error::Validation(
+                    "files is mutually exclusive with path and content".to_string(),
+                ));
+            }
+            let files = files
+                .as_array()
+                .filter(|files| !files.is_empty() && files.len() <= 10)
+                .ok_or_else(|| {
+                    Error::Validation("files must contain between 1 and 10 objects".to_string())
+                })?;
+            if files.iter().any(|file| {
+                file.get("path").and_then(Value::as_str).is_none()
+                    || file.get("content").and_then(Value::as_str).is_none()
+            }) {
+                return Err(Error::Validation(
+                    "each files entry requires string path and content".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if params
+            .get("path")
+            .and_then(|value| value.as_str())
+            .is_none()
+        {
             return Err(Error::Validation(
                 "Missing required parameter: path".to_string(),
             ));
         }
-        if params.get("content").and_then(|v| v.as_str()).is_none() {
+        if params
+            .get("content")
+            .and_then(|value| value.as_str())
+            .is_none()
+        {
             return Err(Error::Validation(
                 "Missing required parameter: content".to_string(),
             ));
@@ -275,18 +326,25 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
+        if let Some(files) = params.get("files").and_then(Value::as_array) {
+            let mut results = Vec::with_capacity(files.len());
+            for file in files {
+                let path = file["path"].as_str().unwrap();
+                let content = file["content"].as_str().unwrap();
+                match write_file_result(self.fs.as_ref(), &ctx.workspace, path, content).await {
+                    Ok(result) => results.push(json!({"ok": true, "result": result})),
+                    Err(error) => results.push(json!({
+                        "ok": false,
+                        "path": path,
+                        "error": error.to_string()
+                    })),
+                }
+            }
+            return Ok(json!({"files": results}));
+        }
         let path_str = params["path"].as_str().unwrap();
         let content = params["content"].as_str().unwrap();
-        let path = expand_path(path_str, &ctx.workspace);
-
-        let bytes_written = content.len();
-        let _write_guard = self.fs.lock_for_write(&path).await?;
-        self.fs.write(&path, content).await?;
-
-        Ok(json!({
-            "path": path.display().to_string(),
-            "bytes_written": bytes_written
-        }))
+        write_file_result(self.fs.as_ref(), &ctx.workspace, path_str, content).await
     }
 }
 
@@ -305,34 +363,19 @@ impl Tool for EditFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "edit_file".to_string(),
-            description: "Edit a local file with one replacement or an atomic `edits` array; do not call this tool with `{}`. Accepts `old_text`/`new_text` and `old_string`/`new_string` aliases. Every old value must be a unique exact match; no file is written unless every edit succeeds.".to_string(),
+            description: "Replace exact old_text once; do not call this tool with `{}`."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to edit"
-                    },
-                    "old_text": {
-                        "type": "string",
-                        "description": "Text to find and replace (must match exactly)"
-                    },
-                    "new_text": {
-                        "type": "string",
-                        "description": "Text to replace old_text with"
-                    },
-                    "old_string": {
-                        "type": "string",
-                        "description": "Alias for old_text"
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "Alias for new_text"
-                    },
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
                     "edits": {
                         "type": "array",
                         "minItems": 1,
-                        "description": "Ordered replacements applied atomically",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -350,7 +393,10 @@ impl Tool for EditFileTool {
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **edit_file**: Always pass `path` plus either one `old_text`/`new_text` pair (aliases: `old_string`/`new_string`) or an `edits` array. Read the target first. Multi-edit calls are atomic: every old value must match uniquely before the file is written.".to_string())
+        Some(
+            "- **edit_file**: Read first; `old_text` must match exactly. Edits are atomic."
+                .to_string(),
+        )
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
@@ -516,6 +562,13 @@ impl Tool for ListDirTool {
             .list_dir(&path)
             .await?
             .into_iter()
+            .filter(|entry| {
+                entry.kind.as_str() != "directory"
+                    || !matches!(
+                        entry.name.as_str(),
+                        ".git" | "__pycache__" | "node_modules" | "target" | ".blockcell"
+                    )
+            })
             .map(|entry| {
                 json!({
                     "name": entry.name,
@@ -774,6 +827,20 @@ mod tests {
         let fs: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::default());
         let ctx = || tool_context(workspace);
 
+        let batch = WriteFileTool::new(fs.clone())
+            .execute(
+                ctx(),
+                json!({"files":[
+                    {"path":"notes/a.txt","content":"alpha"},
+                    {"path":"batch/b.txt","content":"bravo"}
+                ]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch["files"].as_array().unwrap().len(), 2);
+        assert_eq!(batch["files"][0]["ok"], true);
+        assert_eq!(batch["files"][1]["ok"], true);
+
         WriteFileTool::new(fs.clone())
             .execute(ctx(), json!({"path": "notes/a.txt", "content": "alpha"}))
             .await
@@ -806,6 +873,32 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("Not a file"), "{error}");
         assert!(!workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn list_dir_skips_common_noise_directories() {
+        let workspace = tempdir().unwrap();
+        for name in [
+            ".git",
+            "__pycache__",
+            "node_modules",
+            "target",
+            ".blockcell",
+            "src",
+        ] {
+            std::fs::create_dir(workspace.path().join(name)).unwrap();
+        }
+        let listed = ListDirTool::default()
+            .execute(tool_context(workspace.path()), json!({"path": "."}))
+            .await
+            .unwrap();
+        let names = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["src"]);
     }
 
     #[test]
@@ -856,6 +949,16 @@ mod tests {
             .is_ok());
         assert!(tool.validate(&json!({"path": "/tmp/t.txt"})).is_err());
         assert!(tool.validate(&json!({"content": "hi"})).is_err());
+        assert!(tool
+            .validate(&json!({"files":[{"path":"a","content":"1"}]}))
+            .is_ok());
+        assert!(tool
+            .validate(&json!({"files":[{"path":"a","content":"1"}],"path":"b","content":"2"}))
+            .is_err());
+        let too_many = (0..11)
+            .map(|index| json!({"path":format!("{index}.txt"),"content":"x"}))
+            .collect::<Vec<_>>();
+        assert!(tool.validate(&json!({"files":too_many})).is_err());
     }
 
     #[test]

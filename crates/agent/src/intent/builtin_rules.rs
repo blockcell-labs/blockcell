@@ -16,8 +16,10 @@ pub(super) fn builtin_rules() -> Vec<IntentRule> {
                 keywords: vec![
                     "修复代码", "修改代码", "创建代码", "实现功能", "新增功能", "代码重构", "调试代码", "修好",
                     "写测试", "跑测试", "运行测试", "编译项目", "构建项目", "代码审查",
+                    "从零实现", "实现", "完善", "让测试", "测试全部通过", "单元测试", "cli", "函数", "模块",
                     "fix bug", "fix the bug", "modify code", "edit code", "create code", "implement feature",
                     "add feature", "refactor", "debug code", "write tests", "run tests",
+                    "implement", "unit test", "make the tests pass",
                     "code review", "cargo test", "go test", "pytest", "npm test", "ci",
                 ],
                 patterns: vec![

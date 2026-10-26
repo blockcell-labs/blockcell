@@ -809,6 +809,23 @@ mod tests {
     }
 
     #[test]
+    fn greenfield_and_test_repair_prompts_classify_as_coding_from_keywords() {
+        let classifier = IntentClassifier::new();
+        for prompt in [
+            "从零实现 wordcount CLI、README 和单元测试，支持文件与标准输入。",
+            "从零实现可持久化的 TodoStore、README 和单元测试。",
+            "calc 包里的表达式计算器有多个问题（优先级、结合性、一元负号、错误处理），修复它让测试全部通过。",
+            "duration.py 需要支持更多格式，以测试为准把它完善好。",
+        ] {
+            assert!(
+                classifier.classify(prompt).contains(&IntentCategory::Coding),
+                "{prompt}"
+            );
+        }
+        assert_eq!(classifier.classify("你好"), vec![IntentCategory::Chat]);
+    }
+
+    #[test]
     fn test_lifestyle_classification() {
         let c = IntentClassifier::new();
         assert_eq!(

@@ -130,6 +130,7 @@ pub async fn message(msg: &str, session: &str, agent: Option<&str>) -> anyhow::R
         None,
         None,
         false,
+        None,
     )
     .await
 }

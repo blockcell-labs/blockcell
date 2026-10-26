@@ -300,6 +300,14 @@ impl PromptRegistry {
         let mut rendered = RenderedPrompt::default();
         let mut has_identity = false;
         for (specificity, _, section) in sections {
+            if matches!(ctx.mode, InteractionMode::Coding)
+                && matches!(
+                    section.id(),
+                    "agent_guidelines" | "personality" | "core_tool_scope" | "memory_guidance"
+                )
+            {
+                continue;
+            }
             if let Some(mut text) = section.render(ctx) {
                 if section.templated() {
                     text = resolve_variables(section.id(), &text, &vars, &mut rendered.issues);
@@ -422,20 +430,12 @@ struct ToolsSection;
 fn is_coding_tool_rule(rule: &str) -> bool {
     [
         "edit_file",
-        "glob",
         "grep",
-        "job_kill",
-        "job_output",
-        "list_dir",
         "read_file",
-        "shell_close",
-        "shell_input",
         "shell_poll",
         "shell_run",
         "tool_search",
-        "update_plan",
         "write_file",
-        "activate_skill",
         "exec",
     ]
     .iter()
@@ -454,16 +454,21 @@ impl PromptSection for ToolsSection {
             return None;
         }
         let mut prompt = String::from("\n## Tools\n");
-        prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
-        prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
-        prompt.push_str("- Validate tool parameters against schema.\n");
-        prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
-        prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
-        prompt
-            .push_str("- Never hardcode credentials — ask the user or read from config/memory.\n");
-        if ctx.available_tool_names.is_empty() {
-            prompt.push_str("- There are no callable tools available in the current agent scope for this interaction. Do not claim tools outside the current scope.\n");
+        if matches!(ctx.mode, InteractionMode::Coding) {
+            prompt.push_str("Use tools sparingly and batch related work. Use `tool_search` to activate other tools if needed.\n");
         } else {
+            prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
+            prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
+            prompt.push_str("- Validate tool parameters against schema.\n");
+            prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
+            prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
+            prompt.push_str(
+                "- Never hardcode credentials — ask the user or read from config/memory.\n",
+            );
+        }
+        if ctx.available_tool_names.is_empty() && !matches!(ctx.mode, InteractionMode::Coding) {
+            prompt.push_str("- There are no callable tools available in the current agent scope for this interaction. Do not claim tools outside the current scope.\n");
+        } else if !matches!(ctx.mode, InteractionMode::Coding) {
             prompt.push_str("- The current callable tools are defined by the attached tool schemas. When asked about capabilities, answer only from those schemas.\n");
         }
         for rule in ctx.tool_prompt_rules {
@@ -571,7 +576,7 @@ impl PromptSection for CoreToolScopeSection {
         90
     }
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String> {
-        matches!(ctx.mode, InteractionMode::General | InteractionMode::Coding).then(|| {
+        matches!(ctx.mode, InteractionMode::General).then(|| {
             "## Core Tool Scope\nYou currently have access to the minimal built-in tool kernel only. Specialized domain tools are activated by matching installed skills. Prefer the available core tools unless a skill is explicitly active. If the user's request would be better served by specialized domain capabilities that are not currently active, briefly remind the user that they can install the corresponding skills to extend blockcell.\n\n".to_string()
         })
     }
@@ -888,8 +893,11 @@ mod tests {
 
         let coding = render(&registry, "default", InteractionMode::Coding).rules;
         assert!(coding.contains("## Tools"));
-        assert!(coding.contains("## Editing Discipline"));
-        assert!(coding.contains("## Core Tool Scope"));
-        assert!(coding.find("## Tools") < coding.find("## Editing Discipline"));
+        assert!(coding.contains("## Coding"));
+        assert!(!coding.contains("## Core Tool Scope"));
+        assert!(!coding.contains("## Agent Guidelines"));
+        assert!(!coding.contains("## Personality"));
+        assert!(!coding.contains("## Memory Guidance"));
+        assert!(coding.find("## Tools") < coding.find("## Coding"));
     }
 }

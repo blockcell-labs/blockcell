@@ -548,19 +548,14 @@ fn build_activate_skill_tool_schema(skill_cards: &[SkillCard]) -> Option<serde_j
         "type": "function",
         "function": {
             "name": ACTIVATE_SKILL_TOOL_NAME,
-            "description": "Activate one installed skill when it is a better fit than general tools. Do not combine this with other tool calls in the same assistant turn.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "enum": skill_names,
-                        "description": "The installed skill name to activate."
+                        "enum": skill_names
                     },
-                    "goal": {
-                        "type": "string",
-                        "description": "A short execution goal for the selected skill."
-                    }
+                    "goal": {"type": "string"}
                 },
                 "required": ["skill_name", "goal"],
                 "additionalProperties": false
@@ -1529,20 +1524,10 @@ const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
-    "list_dir",
-    "grep",
-    "glob",
     "shell_run",
     "shell_poll",
-    "shell_input",
-    "shell_close",
-    "job_output",
-    "job_kill",
+    "grep",
     "tool_search",
-    "update_plan",
-    "file_ops",
-    "get_context_remaining",
-    "web_search",
 ];
 
 fn replace_legacy_shell_tool(tool_names: &mut Vec<String>, available_tools: &HashSet<String>) {
@@ -1918,13 +1903,18 @@ pub(crate) struct FinalResponseContext<'a> {
     cron_deliver_target: Option<(String, String)>,
 }
 
-#[cfg(test)]
-fn determine_interaction_mode(
+pub(crate) fn resolve_interaction_mode(
     has_active_skill: bool,
     chat_intents: &[IntentCategory],
+    forced_mode: Option<InteractionMode>,
+    code_workspace_fallback: bool,
 ) -> InteractionMode {
     if has_active_skill {
         return InteractionMode::Skill;
+    }
+
+    if let Some(mode) = forced_mode {
+        return mode;
     }
 
     if chat_intents.len() == 1 && matches!(chat_intents[0], IntentCategory::Chat) {
@@ -1935,7 +1925,61 @@ fn determine_interaction_mode(
         return InteractionMode::Coding;
     }
 
+    if code_workspace_fallback {
+        return InteractionMode::Coding;
+    }
+
     InteractionMode::General
+}
+
+#[cfg(test)]
+fn determine_interaction_mode(
+    has_active_skill: bool,
+    chat_intents: &[IntentCategory],
+) -> InteractionMode {
+    resolve_interaction_mode(has_active_skill, chat_intents, None, false)
+}
+
+pub(crate) fn workspace_looks_like_code(workspace: &Path) -> bool {
+    const SOURCE_EXTENSIONS: &[&str] = &[
+        "rs", "py", "go", "js", "ts", "tsx", "java", "c", "cpp", "h", "rb", "php", "swift", "kt",
+        "sh", "toml",
+    ];
+    if workspace.join(".git").exists() {
+        return true;
+    }
+
+    let mut pending = vec![(workspace.to_path_buf(), 0usize)];
+    let mut scanned = 0usize;
+    while let Some((directory, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if scanned >= 200 {
+                return false;
+            }
+            scanned += 1;
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let has_source_extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    let extension = extension.to_ascii_lowercase();
+                    SOURCE_EXTENSIONS.contains(&extension.as_str())
+                });
+            if file_type.is_file() && has_source_extension {
+                return true;
+            }
+            if file_type.is_dir() && depth < 2 {
+                pending.push((path, depth + 1));
+            }
+        }
+    }
+    false
 }
 
 fn user_wants_send_image(text: &str) -> bool {
@@ -2485,9 +2529,19 @@ pub struct AgentRuntime {
     background_tasks_enabled: bool,
     background_task_handles: Vec<tokio::task::JoinHandle<()>>,
     last_verification_command: Option<String>,
+    forced_interaction_mode: Option<InteractionMode>,
+    one_shot_cli_auto_coding: bool,
 }
 
 impl AgentRuntime {
+    pub fn set_forced_interaction_mode(&mut self, mode: Option<InteractionMode>) {
+        self.forced_interaction_mode = mode;
+    }
+
+    pub fn set_one_shot_cli_auto_coding(&mut self, enabled: bool) {
+        self.one_shot_cli_auto_coding = enabled;
+    }
+
     pub fn set_background_tasks_enabled(&mut self, enabled: bool) {
         self.background_tasks_enabled = enabled;
         self.context_builder.set_ghost_learning_enabled(
@@ -2696,6 +2750,8 @@ impl AgentRuntime {
             background_tasks_enabled: true,
             background_task_handles: Vec::new(),
             last_verification_command: None,
+            forced_interaction_mode: None,
+            one_shot_cli_auto_coding: false,
         };
         runtime.sync_tool_scope_view("");
         Ok(runtime)
@@ -2777,6 +2833,8 @@ impl AgentRuntime {
             background_tasks_enabled: self.background_tasks_enabled,
             background_task_handles: Vec::new(),
             last_verification_command: None,
+            forced_interaction_mode: self.forced_interaction_mode,
+            one_shot_cli_auto_coding: self.one_shot_cli_auto_coding,
         };
         if runtime.memory_file_store.is_none() {
             if let Err(e) = runtime.init_memory_file_store() {

@@ -31,31 +31,13 @@ pub enum InteractionMode {
 }
 
 pub(crate) const CODING_MODE_PROMPT: &str = r#"
-## Editing Discipline
-- Read relevant files before editing. Make the smallest coherent diff and do not modify unrelated files.
-- Preserve user changes in a dirty worktree. If an edit fails, reread the current file before retrying.
-
-## Git Discipline
-- Inspect `git status` and the relevant diff before and after changes.
-- Never discard changes you did not create. Do not use `git reset --hard` or destructive checkout commands unless the user explicitly requests them.
-
-## Verification Discipline
-- After every meaningful edit, run the most relevant test, lint, or build command.
-- If verification fails, diagnose and fix it before claiming completion. Report any verification that could not be run.
-- Batch related reads with `read_file(paths)` and related commands into one `shell_run`.
-- Shell cwd persists; do not `cd` to the absolute workspace path.
-- After the change and tests pass, stop with a brief summary; do not reread files or rerun passing tests.
-- If shell execution is unavailable, say the change is unverified.
-
-## Plan Discipline
-- For tasks with three or more steps, call `update_plan` before implementation.
-- Keep exactly one step in progress and update the plan whenever a step is completed.
-
-## Multi-Agent Orchestration
-- For complex coding tasks, use `agent(explore)` to map the code, then `agent(plan)`, and persist the accepted steps with `update_plan`.
-- Dispatch independent file scopes in parallel with `agent(coder)` and an explicit non-overlapping `workspace_scope`; collect their background task results before integration.
-- Finish with `agent(tester)` and `agent(reviewer)`. Route concrete review findings back to `agent(coder)` and repeat testing/review until both pass.
-- Do not parallelize work that touches the same file or has unresolved ordering dependencies.
+## Coding
+- Follow safety and approval policies; never expose secrets or discard user changes.
+- Read files before editing and make minimal, focused diffs.
+- Batch related reads with `read_file(paths)` and commands with one `shell_run`; write all new-project files in one `write_file(files)` call.
+- Shell cwd and environment persist; do not `cd` to the absolute workspace path.
+- Run relevant tests. After they pass, stop with a brief summary; do not reread files or rerun passing tests.
+- If shell execution is unavailable, say "unverified". Use `tool_search` to activate other tools; call `activate_skill` alone for skills.
 "#;
 
 #[derive(Debug, Clone)]
@@ -2604,7 +2586,7 @@ description: deploy demo
     }
 
     #[test]
-    fn coding_mode_prompt_contains_edit_git_verification_and_plan_disciplines() {
+    fn coding_mode_prompt_contains_concise_safety_and_verification_guidance() {
         let builder = ContextBuilder::new(
             Paths::with_base(std::env::temp_dir().join(format!(
                 "blockcell-coding-prompt-test-{}",
@@ -2624,16 +2606,17 @@ description: deploy demo
             &[],
         );
 
-        assert!(prompt.contains("## Editing Discipline"));
-        assert!(prompt.contains("## Git Discipline"));
-        assert!(prompt.contains("## Verification Discipline"));
-        assert!(prompt.contains("## Plan Discipline"));
-        assert!(prompt.contains("update_plan"));
-        assert!(prompt.contains("agent(explore)"));
-        assert!(prompt.contains("agent(coder)"));
-        assert!(prompt.contains("agent(tester)"));
-        assert!(prompt.contains("agent(reviewer)"));
-        assert!(prompt.contains("reset --hard"));
+        assert!(prompt.contains("safety and approval policies"));
+        assert!(prompt.contains("Read files before editing"));
+        assert!(prompt.contains("minimal, focused diffs"));
+        assert!(prompt.contains("read_file(paths)"));
+        assert!(prompt.contains("cwd and environment persist"));
+        assert!(prompt.contains("Run relevant tests"));
+        assert!(prompt.contains("do not reread files or rerun passing tests"));
+        assert!(prompt.contains("unverified"));
+        assert!(prompt.contains("tool_search"));
+        assert!(prompt.contains("activate_skill"));
+        assert!(prompt.contains("alone for skills"));
     }
 }
 #[test]

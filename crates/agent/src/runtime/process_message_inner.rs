@@ -2,6 +2,152 @@ use super::*;
 
 const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run the relevant tests/build now, or if verification is impossible, state why in your final answer.";
 
+async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<String>) {
+    const SKIP_DIRS: &[&str] = &[
+        ".git",
+        "__pycache__",
+        "node_modules",
+        "target",
+        ".blockcell",
+        ".venv",
+        "dist",
+        "build",
+    ];
+    const TEXT_EXTENSIONS: &[&str] = &[
+        "rs", "py", "go", "js", "ts", "tsx", "java", "c", "cpp", "h", "rb", "php", "swift", "kt",
+        "sh", "toml", "md", "txt", "json", "yaml", "yml", "ini", "cfg",
+    ];
+    let mut pending = vec![(workspace.to_path_buf(), 0usize)];
+    let mut listed = Vec::new();
+    let mut text_files = Vec::new();
+    let mut scanned = 0usize;
+    let mut complete = true;
+    while let Some((directory, depth)) = pending.pop() {
+        if scanned >= 200 {
+            complete = false;
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            complete = false;
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
+            scanned += 1;
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                complete = false;
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_dir() && SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(workspace)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            listed.push(if file_type.is_dir() {
+                format!("{relative}/")
+            } else {
+                relative.clone()
+            });
+            if file_type.is_dir() && depth < 1 {
+                pending.push((path.clone(), depth + 1));
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| TEXT_EXTENSIONS.contains(&extension))
+            {
+                text_files.push(path);
+            }
+            if scanned == 200 {
+                complete = false;
+                break;
+            }
+        }
+    }
+
+    let mut snapshot = String::from(
+        "## Workspace snapshot\nFiles shown in the workspace snapshot are already read; don't read them again.\n",
+    );
+    snapshot.push_str("Files (depth ≤2):\n");
+    for path in listed.iter().take(60) {
+        snapshot.push_str("- ");
+        snapshot.push_str(path);
+        snapshot.push('\n');
+    }
+    if listed.len() > 60 {
+        snapshot.push_str("- ...\n");
+    }
+    if workspace.join(".git").exists() {
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::process::Command::new("git")
+                .args(["status", "--short"])
+                .current_dir(workspace)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if let Ok(Ok(output)) = status {
+            if output.status.success() {
+                let status_output = String::from_utf8_lossy(&output.stdout);
+                let lines = status_output.lines().take(30).collect::<Vec<_>>();
+                snapshot.push_str("\nGit status --short:\n");
+                if lines.is_empty() {
+                    snapshot.push_str("(clean)\n");
+                } else {
+                    for line in lines {
+                        snapshot.push_str(line);
+                        snapshot.push('\n');
+                    }
+                }
+            }
+        }
+    }
+
+    let mut contents = Vec::new();
+    let mut total_chars = 0usize;
+    let mut include_contents = complete && text_files.len() <= 8;
+    if include_contents {
+        for path in &text_files {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                include_contents = false;
+                break;
+            };
+            let header = format!(
+                "\n### {}\n",
+                path.strip_prefix(workspace).unwrap_or(path).display()
+            );
+            total_chars += header.chars().count() + content.chars().count();
+            if total_chars > 12_000 {
+                include_contents = false;
+                break;
+            }
+            contents.push((path.clone(), header, content));
+        }
+    }
+    let mut observed = Vec::new();
+    if include_contents {
+        snapshot.push_str("\nFile contents:\n");
+        for (path, header, content) in contents {
+            snapshot.push_str(&header);
+            snapshot.push_str(&content);
+            if !content.ends_with('\n') {
+                snapshot.push('\n');
+            }
+            observed.push(path.to_string_lossy().into_owned());
+        }
+    }
+    (snapshot, observed)
+}
+
 fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
     match tool_name {
         "write_file" | "edit_file" => true,
@@ -456,12 +602,21 @@ impl AgentRuntime {
         self.context_builder
             .prefetch_project_environment(&persist_session_key)
             .await;
+        let mut user_content = msg.content.clone();
+        if decision.mode == InteractionMode::Coding
+            && !history.iter().any(|message| message.role == "user")
+        {
+            let (snapshot, observed) = coding_workspace_snapshot(&self.paths.workspace()).await;
+            self.record_file_observations(&persist_session_key, &observed);
+            user_content.push_str("\n\n");
+            user_content.push_str(&snapshot);
+        }
         let mut messages = self
             .context_builder
             .build_messages_for_session_mode_with_channel(
                 &persist_session_key,
                 &history,
-                &msg.content,
+                &user_content,
                 &msg.media,
                 decision.mode,
                 decision.active_skill.as_ref(),

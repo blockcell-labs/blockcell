@@ -2,7 +2,7 @@ mod commands;
 
 use blockcell_core::logging;
 use blockcell_core::Paths;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "blockcell")]
@@ -15,6 +15,13 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AgentMode {
+    Auto,
+    Coding,
+    General,
 }
 
 #[derive(Subcommand)]
@@ -91,6 +98,10 @@ enum Commands {
         /// Enable background learning and review tasks in one-shot mode
         #[arg(long)]
         background: bool,
+
+        /// Interaction mode
+        #[arg(long, value_enum, default_value = "auto")]
+        mode: AgentMode,
     },
 
     /// Start the gateway (long-running daemon)
@@ -922,8 +933,15 @@ async fn main() -> anyhow::Result<()> {
             model,
             provider,
             background,
+            mode,
         } => {
-            commands::agent::run(message, agent, session, model, provider, background).await?;
+            let mode = match mode {
+                AgentMode::Auto => None,
+                AgentMode::Coding => Some(blockcell_agent::InteractionMode::Coding),
+                AgentMode::General => Some(blockcell_agent::InteractionMode::General),
+            };
+            commands::agent::run(message, agent, session, model, provider, background, mode)
+                .await?;
         }
         Commands::Gateway { port, host } => {
             commands::gateway::run(host, port).await?;
