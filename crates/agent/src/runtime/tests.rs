@@ -6675,10 +6675,11 @@ fn absent_runtime_handle_hides_agent_but_keeps_spawn_available() {
 }
 
 #[tokio::test]
-async fn edit_file_unobserved_error_includes_contents_for_retry() {
+async fn edit_file_unobserved_unique_match_is_allowed_and_observed_after_success() {
     let mut runtime = test_runtime_with_default_tools();
     let path = runtime.paths.workspace().join("unread.txt");
     std::fs::write(&path, "before").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "unread-edit");
     let result = runtime
         .execute_tool_call(
             &tool_call(
@@ -6689,15 +6690,38 @@ async fn edit_file_unobserved_error_includes_contents_for_retry() {
                     "new_text": "after"
                 }),
             ),
-            &test_main_session_inbound("cli", "unread-edit"),
+            &msg,
             None,
         )
         .await;
 
-    file_observation_error(&result, "FS_NOT_OBSERVED");
-    assert!(result.text.contains("before"));
+    assert_eq!(result.outcome, ToolOutcome::Succeeded, "{}", result.text);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
 
     let retry = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "after",
+                    "new_text": "again"
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(retry.outcome, ToolOutcome::Succeeded, "{}", retry.text);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "again");
+}
+
+#[tokio::test]
+async fn edit_file_unobserved_requires_a_unique_old_text_match() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("ambiguous.txt");
+    std::fs::write(&path, "before before").expect("write fixture");
+    let result = runtime
         .execute_tool_call(
             &tool_call(
                 "edit_file",
@@ -6707,11 +6731,14 @@ async fn edit_file_unobserved_error_includes_contents_for_retry() {
                     "new_text": "after"
                 }),
             ),
-            &test_main_session_inbound("cli", "unread-edit"),
+            &test_main_session_inbound("cli", "ambiguous-unread-edit"),
             None,
         )
         .await;
-    assert_eq!(retry.outcome, ToolOutcome::Succeeded, "{}", retry.text);
+
+    file_observation_error(&result, "FS_NOT_OBSERVED");
+    assert!(result.text.contains("before before"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "before before");
 }
 
 #[tokio::test]
@@ -6754,7 +6781,7 @@ async fn partial_read_then_edit_succeeds() {
 }
 
 #[tokio::test]
-async fn edit_file_rejects_a_stale_observation() {
+async fn edit_file_allows_a_stale_observation_when_old_text_still_matches() {
     let mut runtime = test_runtime_with_default_tools();
     let path = runtime.paths.workspace().join("stale.txt");
     std::fs::write(&path, "original").expect("write fixture");
@@ -6799,11 +6826,61 @@ async fn edit_file_rejects_a_stale_observation() {
             None,
         )
         .await;
+    assert_eq!(edit.outcome, ToolOutcome::Succeeded, "{}", edit.text);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "modified");
+}
+
+#[tokio::test]
+async fn edit_file_rejects_a_stale_observation_when_old_text_no_longer_matches() {
+    let mut runtime = test_runtime_with_default_tools();
+    let path = runtime.paths.workspace().join("stale-mismatch.txt");
+    std::fs::write(&path, "original").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "stale-mismatch-edit");
+    let read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "read_file",
+                serde_json::json!({"path": path.display().to_string()}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+
+    let previous_mtime = std::fs::metadata(&path)
+        .expect("fixture metadata")
+        .modified()
+        .expect("fixture modification time");
+    std::fs::write(&path, "external").expect("modify fixture externally");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open modified fixture");
+    file.set_times(
+        std::fs::FileTimes::new().set_modified(previous_mtime + std::time::Duration::from_secs(5)),
+    )
+    .expect("bump modification time");
+
+    let edit = runtime
+        .execute_tool_call(
+            &tool_call(
+                "edit_file",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "old_text": "original",
+                    "new_text": "modified"
+                }),
+            ),
+            &msg,
+            None,
+        )
+        .await;
     file_observation_error(&edit, "FS_STALE_VERSION");
 }
 
 #[tokio::test]
-async fn write_file_allows_creation_and_unobserved_overwrite() {
+async fn write_file_allows_creation_and_rejects_unread_overwrite() {
     let mut runtime = test_runtime_with_default_tools();
     let workspace = runtime.paths.workspace();
     let new_path = workspace.join("new-file.txt");
@@ -6824,6 +6901,7 @@ async fn write_file_allows_creation_and_unobserved_overwrite() {
 
     let existing_path = workspace.join("existing-file.txt");
     std::fs::write(&existing_path, "existing").expect("write fixture");
+    let write_msg = test_main_session_inbound("cli", "write-existing");
     let overwritten = runtime
         .execute_tool_call(
             &tool_call(
@@ -6833,7 +6911,37 @@ async fn write_file_allows_creation_and_unobserved_overwrite() {
                     "content": "overwrite"
                 }),
             ),
-            &test_main_session_inbound("cli", "write-existing"),
+            &write_msg,
+            None,
+        )
+        .await;
+    file_observation_error(&overwritten, "FS_NOT_OBSERVED");
+    assert_eq!(
+        std::fs::read_to_string(existing_path).expect("read overwritten file"),
+        "existing"
+    );
+
+    let read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "read_file",
+                serde_json::json!({"path": workspace.join("existing-file.txt").display().to_string()}),
+            ),
+            &write_msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+    let overwritten = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({
+                    "path": workspace.join("existing-file.txt").display().to_string(),
+                    "content": "overwrite"
+                }),
+            ),
+            &write_msg,
             None,
         )
         .await;
@@ -6842,10 +6950,6 @@ async fn write_file_allows_creation_and_unobserved_overwrite() {
         ToolOutcome::Succeeded,
         "{}",
         overwritten.text
-    );
-    assert_eq!(
-        std::fs::read_to_string(existing_path).expect("read overwritten file"),
-        "overwrite"
     );
 
     let batch_paths = [
@@ -6887,6 +6991,30 @@ async fn write_file_allows_creation_and_unobserved_overwrite() {
             .await;
         assert_eq!(edited.outcome, ToolOutcome::Succeeded, "{}", edited.text);
     }
+}
+
+#[tokio::test]
+async fn sensitive_config_reads_remain_denied_after_static_cd() {
+    let mut runtime = test_runtime_with_default_tools();
+    let command = format!(
+        "cd {} && cat ~/.config/blockcell-test-denied.ini",
+        runtime.paths.workspace().display()
+    );
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": command})),
+            &test_main_session_inbound("cli", "sensitive-config-read"),
+            None,
+        )
+        .await;
+
+    assert_eq!(result.outcome, ToolOutcome::Rejected, "{}", result.text);
+    assert!(
+        result.text.contains("NEEDS_CONFIRMATION_NONINTERACTIVE")
+            && result.text.contains("~/.config/blockcell-test-denied.ini"),
+        "{}",
+        result.text
+    );
 }
 
 #[tokio::test]

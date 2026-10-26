@@ -132,7 +132,7 @@ fn default_max_tool_iterations() -> u32 {
 }
 
 fn default_llm_max_retries() -> u32 {
-    3
+    6
 }
 
 fn default_llm_retry_delay_ms() -> u64 {

@@ -11,8 +11,8 @@ use tracing::{debug, error, info};
 
 use crate::client::build_http_client;
 use crate::security::{
-    consume_error_body, http_status_error, read_response_limited, request_error, StreamGuard,
-    MAX_PROVIDER_RESPONSE_BYTES,
+    consume_error_body, http_status_error_with_retry_after, read_response_limited, request_error,
+    StreamGuard, MAX_PROVIDER_RESPONSE_BYTES,
 };
 use crate::Provider;
 
@@ -371,9 +371,19 @@ impl Provider for GeminiProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let body_len = consume_error_body(response).await;
             error!(status = %status, body_len, "Gemini API error");
-            return Err(http_status_error("Gemini", status, body_len));
+            return Err(http_status_error_with_retry_after(
+                "Gemini",
+                status,
+                body_len,
+                retry_after.as_deref(),
+            ));
         }
         let raw_bytes = read_response_limited(response, MAX_PROVIDER_RESPONSE_BYTES).await?;
         let raw_body = String::from_utf8_lossy(&raw_bytes).into_owned();
@@ -507,8 +517,18 @@ impl Provider for GeminiProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let body_len = consume_error_body(response).await;
-            return Err(http_status_error("Gemini stream", status, body_len));
+            return Err(http_status_error_with_retry_after(
+                "Gemini stream",
+                status,
+                body_len,
+                retry_after.as_deref(),
+            ));
         }
 
         let (tx, rx) = mpsc::channel(64);

@@ -196,6 +196,41 @@ fn unknown_outcome_hint(tool_name: &str) -> String {
     )
 }
 
+fn edit_old_texts_match_uniquely(content: &str, args: &serde_json::Value) -> bool {
+    let edits: Vec<&serde_json::Value> = match args.get("edits") {
+        Some(serde_json::Value::Array(edits)) => edits.iter().collect(),
+        Some(_) => return false,
+        None => vec![args],
+    };
+    if edits.is_empty() {
+        return false;
+    }
+
+    let mut content = content.to_string();
+    for edit in edits {
+        let Some(old_text) = edit
+            .get("old_text")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| edit.get("old_string").and_then(serde_json::Value::as_str))
+            .filter(|text| !text.is_empty())
+        else {
+            return false;
+        };
+        let Some(new_text) = edit
+            .get("new_text")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| edit.get("new_string").and_then(serde_json::Value::as_str))
+        else {
+            return false;
+        };
+        if content.matches(old_text).count() != 1 {
+            return false;
+        }
+        content = content.replacen(old_text, new_text, 1);
+    }
+    true
+}
+
 impl AgentRuntime {
     pub(crate) async fn execute_tool_call(
         &mut self,
@@ -624,10 +659,11 @@ impl AgentRuntime {
             .get(&key)
             .copied();
         match observed {
-            None if inv.call.name == "write_file" => Ok(()),
             None if inv.call.name == "edit_file" && path.is_file() => {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
-                self.update_file_observation(&inv.msg.session_key(), path_str);
+                if edit_old_texts_match_uniquely(&content, &inv.args) {
+                    return Ok(());
+                }
                 let content: String = content.chars().take(8000).collect();
                 Err(serde_json::json!({
                     "error": format!(
@@ -648,15 +684,24 @@ impl AgentRuntime {
                 "code": "FS_NOT_OBSERVED"
             })
             .to_string()),
-            Some(observed) if current.ok().flatten() != Some(observed) => {
-                Err(serde_json::json!({
-                    "error": format!(
-                        "FS_STALE_VERSION: {} changed since you last read it — read_file it again, then retry",
-                        path.display()
-                    ),
-                    "code": "FS_STALE_VERSION"
-                })
-                .to_string())
+            Some(observed)
+                if current.as_ref().ok().and_then(|version| *version) != Some(observed) =>
+            {
+                let still_matches = inv.call.name == "edit_file"
+                    && std::fs::read_to_string(&path)
+                        .is_ok_and(|content| edit_old_texts_match_uniquely(&content, &inv.args));
+                if still_matches {
+                    Ok(())
+                } else {
+                    Err(serde_json::json!({
+                        "error": format!(
+                            "FS_STALE_VERSION: {} changed since you last read it — read_file it again, then retry",
+                            path.display()
+                        ),
+                        "code": "FS_STALE_VERSION"
+                    })
+                    .to_string())
+                }
             }
             Some(_) => Ok(()),
         }

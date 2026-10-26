@@ -1,4 +1,46 @@
 use super::*;
+use rand::Rng;
+
+const MAX_TOTAL_RETRY_BACKOFF_MS: u64 = 60_000;
+
+fn retry_delay_ms(
+    attempt: u32,
+    base_delay_ms: u64,
+    backoff_so_far_ms: u64,
+    retry_after_ms: Option<u64>,
+    jitter: f64,
+) -> u64 {
+    let remaining_ms = MAX_TOTAL_RETRY_BACKOFF_MS.saturating_sub(backoff_so_far_ms);
+    let multiplier = 1_u64
+        .checked_shl(attempt.saturating_sub(1).min(63))
+        .unwrap_or(u64::MAX);
+    let upper_bound_ms = retry_after_ms
+        .unwrap_or_else(|| base_delay_ms.saturating_mul(multiplier))
+        .min(remaining_ms);
+
+    if retry_after_ms.is_some() {
+        upper_bound_ms
+    } else {
+        (upper_bound_ms as f64 * jitter.clamp(0.0, 1.0)) as u64
+    }
+}
+
+fn retry_after_delay_ms(error: &blockcell_core::Error) -> Option<u64> {
+    let message = error.to_string();
+    let value = message.split_once("retry_after=")?.1;
+    let value = value.split(')').next().unwrap_or(value).trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        retry_at
+            .signed_duration_since(chrono::Utc::now())
+            .num_milliseconds()
+            .max(0) as u64,
+    )
+}
 
 impl AgentRuntime {
     /// Extracted sub-function (#15): Call LLM with streaming and retry on transient errors.
@@ -16,6 +58,7 @@ impl AgentRuntime {
         let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
         let mut last_error = None;
         let mut last_failure: Option<FailureKind> = None;
+        let mut backoff_so_far_ms = 0;
         let api_messages = append_ephemeral_context_to_latest_user_message(
             current_messages,
             ghost_recall_context_block,
@@ -37,7 +80,15 @@ impl AgentRuntime {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay_ms = base_delay_ms * (1u64 << (attempt - 1).min(4));
+                let retry_after_ms = last_error.as_ref().and_then(retry_after_delay_ms);
+                let delay_ms = retry_delay_ms(
+                    attempt,
+                    base_delay_ms,
+                    backoff_so_far_ms,
+                    retry_after_ms,
+                    rand::thread_rng().gen(),
+                );
+                backoff_so_far_ms = backoff_so_far_ms.saturating_add(delay_ms);
                 warn!(
                     attempt,
                     max_retries,
@@ -394,5 +445,38 @@ impl AgentRuntime {
             }
         }
         injected
+    }
+}
+
+#[cfg(test)]
+mod retry_delay_tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_uses_full_jitter_within_exponential_bounds() {
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.0), 0);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.25), 1000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.0), 4000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.5), 4000);
+    }
+
+    #[test]
+    fn retry_after_takes_precedence_and_total_backoff_is_capped() {
+        assert_eq!(retry_delay_ms(4, 1000, 0, Some(3500), 0.0), 3500);
+        assert_eq!(retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0), 1000);
+    }
+
+    #[test]
+    fn retry_after_header_supports_seconds_and_http_dates() {
+        let seconds = blockcell_core::Error::Provider(
+            "HTTP_STATUS=429 request failed (body_len=0, retry_after=3)".to_string(),
+        );
+        assert_eq!(retry_after_delay_ms(&seconds), Some(3000));
+
+        let date = blockcell_core::Error::Provider(
+            "HTTP_STATUS=429 request failed (body_len=0, retry_after=Wed, 21 Oct 2099 07:28:00 GMT)"
+                .to_string(),
+        );
+        assert!(retry_after_delay_ms(&date).is_some_and(|delay| delay > 0));
     }
 }

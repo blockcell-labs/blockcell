@@ -152,15 +152,20 @@ pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -
             // (~/.ssh, /etc, ...) are enforced for `exec`, not just for
             // its working directory.
             if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                let cwd = if command_mutates_cwd(cmd) {
-                    Some(None)
-                } else {
-                    args.get("working_dir")
-                        .and_then(|value| value.as_str())
-                        .map(|path| Some(PathBuf::from(path)))
-                };
+                let initial_cwd = args
+                    .get("working_dir")
+                    .and_then(|value| value.as_str())
+                    .map(|path| Some(PathBuf::from(path)));
+                let cwd = infer_command_cwd(cmd, &initial_cwd).or_else(|| {
+                    if command_mutates_cwd(cmd) {
+                        Some(None)
+                    } else {
+                        initial_cwd
+                    }
+                });
+                let cmd = expand_known_pwd(cmd, &cwd);
                 accesses.extend(
-                    extract_command_paths(cmd)
+                    extract_command_paths(&cmd)
                         .into_iter()
                         .map(|path| PathAccess {
                             path: resolve_shell_access_path(&path, &cwd),
@@ -193,11 +198,15 @@ pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -
                 // external path that policy treats as Confirm. A command
                 // that itself changes directory mid-string cannot be
                 // mapped to a single cwd — treat relative paths as unknown.
-                let session_cwd = if command_mutates_cwd(&cmd) {
-                    Some(None)
-                } else {
-                    session_id.and_then(blockcell_tools::shell_session::session_cwd)
-                };
+                let initial_cwd = session_id.and_then(blockcell_tools::shell_session::session_cwd);
+                let session_cwd = infer_command_cwd(&cmd, &initial_cwd).or_else(|| {
+                    if command_mutates_cwd(&cmd) {
+                        Some(None)
+                    } else {
+                        initial_cwd
+                    }
+                });
+                let cmd = expand_known_pwd(&cmd, &session_cwd);
                 accesses.extend(
                     extract_command_paths(&cmd)
                         .into_iter()
@@ -944,6 +953,57 @@ fn resolve_shell_access_path(path: &str, session_cwd: &Option<Option<PathBuf>>) 
     }
 }
 
+fn infer_command_cwd(
+    command: &str,
+    initial_cwd: &Option<Option<PathBuf>>,
+) -> Option<Option<PathBuf>> {
+    let (before_and, _) = command.split_once("&&")?;
+    let segment = before_and.trim();
+    let rest = segment.strip_prefix("cd")?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let target = rest
+        .trim()
+        .trim_matches(|character| matches!(character, '"' | '\''));
+    if target.is_empty()
+        || target.split_whitespace().count() != 1
+        || target.contains('$')
+        || target.contains('`')
+        || target == "-"
+    {
+        return None;
+    }
+
+    let target = PathBuf::from(target);
+    if target.is_absolute() {
+        return Some(Some(target));
+    }
+
+    match initial_cwd {
+        Some(Some(cwd)) => Some(Some(cwd.join(target))),
+        Some(None) => None,
+        None => Some(Some(target)),
+    }
+}
+
+fn expand_known_pwd(command: &str, cwd: &Option<Option<PathBuf>>) -> String {
+    let Some(Some(cwd)) = cwd else {
+        return command.to_string();
+    };
+    let cwd = if cwd.is_absolute() {
+        cwd.to_string_lossy().into_owned()
+    } else {
+        ".".to_string()
+    };
+    command
+        .replace("$(pwd -P)", &cwd)
+        .replace("$(pwd)", &cwd)
+        .replace("`pwd`", &cwd)
+        .replace("${PWD}", &cwd)
+        .replace("$PWD", &cwd)
+}
+
 /// Whether a command string itself contains a `cd`/`pushd`/`popd` that could
 /// change the persistent session's cwd mid-command. Conservative: also treats
 /// subshell/grouping contexts as mutating, since a `cd` inside them does not
@@ -1206,12 +1266,61 @@ mod tests {
     }
 
     #[test]
-    fn exec_paths_after_cwd_mutation_use_unknown_cwd() {
+    fn exec_paths_after_static_cd_resolve_against_target() {
         let accesses = extract_path_accesses("exec", &json!({"command": "cd /etc && cat x/y"}));
+        assert!(
+            accesses.iter().any(|access| access.path == "/etc/x/y"),
+            "{accesses:?}"
+        );
         assert!(
             accesses
                 .iter()
-                .any(|access| access.path == "/__unknown_shell_cwd__/x/y"),
+                .all(|access| !access.path.starts_with("/__unknown_shell_cwd__/")),
+            "{accesses:?}"
+        );
+    }
+
+    #[test]
+    fn pwd_forms_resolve_after_static_cd() {
+        for suffix in ["$PWD/file.txt", "${PWD}/file.txt", "$(pwd)/file.txt"] {
+            let command = format!("cd /authorized/task && cat {suffix}");
+            let accesses = extract_path_accesses("exec", &json!({"command": command}));
+            assert!(
+                accesses
+                    .iter()
+                    .any(|access| access.path == "/authorized/task/file.txt"),
+                "{suffix}: {accesses:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_cd_resolves_pwd_against_working_directory() {
+        let accesses = extract_path_accesses(
+            "exec",
+            &json!({
+                "working_dir": "/workspace",
+                "command": "cd task && cat ${PWD}/file.txt"
+            }),
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| access.path == "/workspace/task/file.txt"),
+            "{accesses:?}"
+        );
+    }
+
+    #[test]
+    fn config_home_paths_remain_unmodified_after_static_cd() {
+        let accesses = extract_path_accesses(
+            "exec",
+            &json!({"command": "cd /authorized/task && cat ~/.config/pytest.ini"}),
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| access.path == "~/.config/pytest.ini"),
             "{accesses:?}"
         );
     }

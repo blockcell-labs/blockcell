@@ -59,6 +59,24 @@ pub(crate) fn http_status_error(
     ))
 }
 
+pub(crate) fn http_status_error_with_retry_after(
+    provider: &str,
+    status: reqwest::StatusCode,
+    body_len: usize,
+    retry_after: Option<&str>,
+) -> Error {
+    let Some(retry_after) = retry_after else {
+        return http_status_error(provider, status, body_len);
+    };
+    Error::Provider(format!(
+        "HTTP_STATUS={} {} API request failed (body_len={}, retry_after={})",
+        status.as_u16(),
+        provider,
+        body_len,
+        retry_after
+    ))
+}
+
 pub(crate) fn append_limited(data: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<()> {
     if data.len().saturating_add(chunk.len()) > max_bytes {
         return Err(Error::Provider(format!(
