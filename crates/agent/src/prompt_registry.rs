@@ -441,6 +441,9 @@ impl PromptSection for ToolsSection {
         let mut prompt = String::from("\n## Tools\n");
         prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
         prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
+        prompt.push_str("- Sample data once, then process the original file and parse back/assert output schema and key counts/totals in one script. Never infer totals from a sample or dump full datasets into the conversation.\n");
+        prompt.push_str("- Keep temporary verification artifacts unless cleanup is requested. If optional cleanup is denied, skip it; do not try equivalent deletion commands. Finish after checks pass. For shell scripts, combine `bash -n` with a small functional check.\n");
+        prompt.push_str("- State assumptions for ambiguous business boundaries in the final answer. A rejected path affects that invocation only; follow its recovery guidance with the same tool and keep a working script. Use literal workspace paths for test fixtures, including nonexistent inputs. Do not use tool_search after a path refusal; respect policy/user denials.\n");
         prompt.push_str("- Validate tool parameters against schema.\n");
         prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
         prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");

@@ -56,17 +56,18 @@ pub(crate) fn dangerous_exec_denied(tool_name: &str, has_confirm_channel: bool) 
         "tool": tool_name,
         "code": "NEEDS_CONFIRMATION_NONINTERACTIVE",
         "hint": hint,
-        "alternative": "use a path inside the workspace (e.g. ./.tmp/) or the system temp dir"
+        "alternative": "Only this operation requires approval; unrelated tool calls remain available. Do not retry it through equivalent commands or other tools. Leave artifacts in place and skip optional cleanup; request explicit approval only if the operation is necessary to the user's task."
     }).to_string()
 }
 
 /// Build a permission-denied error for dangerous file_ops.
 pub(crate) fn dangerous_file_ops_denied() -> String {
-    tool_denied_json(
-        "file_ops",
-        "Permission denied: this file operation requires explicit user confirmation.",
-        "The operation involves recursive deletion or sensitive config files. Ask the user to confirm.",
-    )
+    json!({
+        "error": "Permission denied: this file operation requires explicit user confirmation.",
+        "tool": "file_ops",
+        "code": "NEEDS_CONFIRMATION_NONINTERACTIVE",
+        "hint": "Only this operation requires approval; unrelated tool calls remain available. Do not retry it through equivalent commands or other tools. Leave artifacts in place and skip optional cleanup; request explicit approval only if the operation is necessary to the user's task.",
+    }).to_string()
 }
 
 /// Build a path-access denied error.
@@ -76,11 +77,12 @@ pub(crate) fn path_access_denied(tool_name: &str, path: &str) -> String {
             return value.to_string();
         }
     }
-    tool_denied_json(
-        tool_name,
-        &format!("Path access denied by security policy: {}", path),
-        "Check the path policy, confirmation decision, and workspace/authorized-directory configuration.",
-    )
+    json!({
+        "error": format!("Path access denied by security policy: {}", path),
+        "tool": tool_name,
+        "code": "PATH_ACCESS_DENIED",
+        "hint": "Only this invocation was rejected; the tool remains available. Do not retry the denied access. Use a different, allowed path inside the workspace (e.g. ./.tmp/) and resubmit the corrected command. Respect explicit user and policy denials.",
+    }).to_string()
 }
 
 /// Format the user-friendly LLM error message after all retries are exhausted.
@@ -102,6 +104,8 @@ pub(crate) enum ToolFailureKind {
     Transient,
     /// Permanent error — missing API key, validation failure, etc.
     Permanent,
+    /// This operation needs approval; the tool itself remains available.
+    ApprovalRequired,
     /// Domain/resource-level miss — the requested object/path/page does not exist.
     ResourceMissing,
     /// Skill context missing — need to call activate_skill first.
@@ -110,6 +114,18 @@ pub(crate) enum ToolFailureKind {
 
 /// Classify a tool error result string into transient or permanent.
 pub(crate) fn classify_tool_failure(result: &str) -> ToolFailureKind {
+    // A policy rejection describes these arguments, not tool availability.
+    // Only recognize structured runtime errors, not arbitrary matching prose.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+        if value["code"] == "PATH_ACCESS_DENIED"
+            || (value["code"] == "NEEDS_CONFIRMATION_NONINTERACTIVE" && value["paths"].is_array())
+        {
+            return ToolFailureKind::Transient;
+        }
+        if value["code"] == "NEEDS_CONFIRMATION_NONINTERACTIVE" {
+            return ToolFailureKind::ApprovalRequired;
+        }
+    }
     let lower = result.to_ascii_lowercase();
 
     // Skill context missing — needs activate_skill first
@@ -174,6 +190,53 @@ pub(crate) fn classify_tool_failure(result: &str) -> ToolFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efficiency_regression_approval_refusal_is_not_tool_unavailability() {
+        for denial in [
+            dangerous_exec_denied("shell_run", false),
+            dangerous_file_ops_denied(),
+        ] {
+            assert_ne!(classify_tool_failure(&denial), ToolFailureKind::Permanent);
+            assert_ne!(
+                classify_tool_failure(&denial),
+                ToolFailureKind::Transient,
+                "approval refusals must not invite retry"
+            );
+            let value: serde_json::Value = serde_json::from_str(&denial).unwrap();
+            assert_eq!(value["code"], "NEEDS_CONFIRMATION_NONINTERACTIVE");
+            assert!(value.to_string().contains("skip optional cleanup"));
+            assert!(!value.to_string().contains("system temp dir"));
+        }
+        assert_eq!(
+            classify_tool_failure("API key not configured"),
+            ToolFailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn bench_regression_path_rejection_does_not_disable_tool() {
+        let denied = path_access_denied("shell_run", "path access denied by policy: /outside/out");
+        let value: serde_json::Value = serde_json::from_str(&denied).unwrap();
+        assert_eq!(value["code"], "PATH_ACCESS_DENIED");
+        assert!(value["hint"].as_str().unwrap().contains("workspace"));
+        assert_eq!(classify_tool_failure(&denied), ToolFailureKind::Transient);
+        assert_eq!(
+            classify_tool_failure(
+                r#"{"code":"NEEDS_CONFIRMATION_NONINTERACTIVE","paths":["/outside/out"],"error":"no confirmation channel available"}"#
+            ),
+            ToolFailureKind::Transient
+        );
+        // Credential failures remain permanent; approval is invocation-scoped.
+        assert_eq!(
+            classify_tool_failure("API key not configured"),
+            ToolFailureKind::Permanent
+        );
+        assert_eq!(
+            classify_tool_failure(&dangerous_exec_denied("shell_run", false)),
+            ToolFailureKind::ApprovalRequired
+        );
+    }
 
     #[test]
     fn test_classify_tool_failure_permanent() {

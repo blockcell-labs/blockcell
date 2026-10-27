@@ -525,12 +525,29 @@ impl super::AgentRuntime {
                 tool = tool_name,
                 "No confirmation channel, denying access to paths outside workspace"
             );
+            // Explain conservative static analysis without weakening the guard. The
+            // sentinel is diagnostic metadata, never a path the model should create.
+            let unresolved = confirm_paths.iter().any(|access| {
+                access.path.starts_with("/__unresolved_shell_var__/")
+                    || access.path.starts_with("/__unknown_shell_cwd__/")
+            });
+            let mut alternative = String::from(
+                "Only this invocation was rejected; the tool remains available. Do not use tool_search or rewrite a working script because of this refusal. For test fixtures, use literal workspace paths such as ./.tmp/src, ./.tmp/out and ./.tmp/missing (leave missing absent for negative tests). Retry the corrected verification with the same tool. Do not retry denied access or bypass policy/user denials."
+            );
+            if unresolved {
+                alternative.push_str(" An unresolved marker is not a real filesystem path: static validation could not determine a shell variable, substitution or cwd. For your own workspace artifacts, use a Python verification script with literal workspace paths and glob/tarfile instead of shell path interpolation. Keep protected/external paths out of the retry.");
+            }
             Err(serde_json::json!({
                 "error": "path requires confirmation but no confirmation channel is available",
                 "code": "NEEDS_CONFIRMATION_NONINTERACTIVE",
                 "paths": confirm_paths.iter().map(|access| access.path.clone()).collect::<Vec<_>>(),
-                "alternative": "use a path inside the workspace (e.g. ./.tmp/) or the system temp dir"
-            }).to_string())
+                "scope": "invocation",
+                "tool_available": true,
+                "workspace": self.paths.workspace().display().to_string(),
+                "unresolved_expressions": unresolved,
+                "alternative": alternative
+            })
+            .to_string())
         }
     }
 

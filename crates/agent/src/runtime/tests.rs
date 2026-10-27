@@ -6517,6 +6517,7 @@ struct VerificationGateProvider {
     hint_calls: AtomicUsize,
     path: String,
     verification_after_edit: bool,
+    seen_messages: Mutex<Vec<Vec<ChatMessage>>>,
 }
 
 #[async_trait::async_trait]
@@ -6528,6 +6529,7 @@ impl blockcell_providers::Provider for VerificationGateProvider {
     ) -> blockcell_core::Result<LLMResponse> {
         const HINT: &str =
             "You modified files but have not run any verification after the last change.";
+        self.seen_messages.lock().unwrap().push(messages.to_vec());
         if messages.iter().any(|message| {
             message
                 .content
@@ -6604,7 +6606,14 @@ impl blockcell_tools::Tool for VerificationGateShell {
 fn verification_gate_runtime(
     verification_after_edit: bool,
 ) -> (AgentRuntime, Arc<VerificationGateProvider>, PathBuf) {
-    let base = std::env::temp_dir().join(format!(
+    // macOS's per-user temp directory is under protected /private/var.
+    // Use /tmp for this fixture so real path policy allows the test edits.
+    let temp_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let base = temp_root.join(format!(
         "blockcell-verification-gate-{}",
         uuid::Uuid::new_v4()
     ));
@@ -6618,6 +6627,7 @@ fn verification_gate_runtime(
         hint_calls: AtomicUsize::new(0),
         path: file_path.display().to_string(),
         verification_after_edit,
+        seen_messages: Mutex::new(Vec::new()),
     });
     let mut config = Config::default();
     config.agents.defaults.model = "test/mock".to_string();
@@ -6667,14 +6677,62 @@ async fn coding_verification_gate_skips_when_shell_succeeds_after_edit() {
 }
 
 #[tokio::test]
-async fn non_coding_turn_does_not_trigger_verification_gate() {
+async fn bench_regression_non_coding_file_output_triggers_verification_gate() {
     let (mut runtime, provider, _) = verification_gate_runtime(false);
+    runtime.set_forced_interaction_mode(Some(InteractionMode::General));
     let mut msg = test_main_session_inbound("cli", "verification-gate-general");
-    msg.content = "What will the weather be like tomorrow?".to_string();
+    msg.content = "Please edit this file to produce the requested report.".to_string();
     runtime.process_message(msg).await.expect("process message");
 
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
-    assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 1);
+}
+
+struct BenchRejectedShell;
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for BenchRejectedShell {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        VerificationGateShell.schema()
+    }
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({"error": "API key not configured"}))
+    }
+}
+
+#[tokio::test]
+async fn bench_regression_failed_tool_results_precede_hints() {
+    let (mut runtime, provider, _) = verification_gate_runtime(true);
+    runtime.tool_registry.register(Arc::new(BenchRejectedShell));
+    let mut msg = test_main_session_inbound("cli", "failed-round-order");
+    msg.content = "Please edit this code file and make a code change.".to_string();
+    runtime.process_message(msg).await.expect("process message");
+    let calls = provider.seen_messages.lock().unwrap();
+    let messages = &calls[3];
+    let index = messages
+        .iter()
+        .position(|m| {
+            m.tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|c| c.id == "verification-gate-2"))
+        })
+        .expect("failed assistant call");
+    assert_eq!(
+        messages[index + 1].role,
+        "tool",
+        "failure hints must follow the complete tool round"
+    );
+    assert_eq!(
+        messages[index + 1].tool_call_id.as_deref(),
+        Some("verification-gate-2")
+    );
 }
 
 #[test]
@@ -9258,4 +9316,74 @@ fn session_pool_is_bounded_and_evicts_least_recently_returned() {
     // `take` removes the entry so the session is treated as in use.
     assert_eq!(pool.take("session-1"), Some(111));
     assert!(pool.take("session-1").is_none());
+}
+
+#[tokio::test]
+async fn bench_regression_path_refusal_guides_literal_retry_without_disabling_tool() {
+    let mut runtime = test_runtime_with_default_tools();
+    // Exercise real policy/dispatch, isolating host-native sandbox availability.
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .tool_registry
+        .register(Arc::new(WorkspaceAutoTestTool {
+            name: "exec",
+            calls: Arc::clone(&calls),
+            requires_confirmation: false,
+        }));
+    let msg = test_main_session_inbound("cli", "path-recovery");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call(
+                "exec",
+                serde_json::json!({"command":
+            "printf bypass > must-not-run.txt; cat /__blockcell_external_missing_fixture__/input"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(result.outcome, ToolOutcome::Rejected, "{}", result.text);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "rejected command must not reach executor"
+    );
+    let error: serde_json::Value = serde_json::from_str(&result.text).expect("structured refusal");
+    assert_eq!(error["tool_available"], true);
+    assert_eq!(error["scope"], "invocation");
+    assert_eq!(
+        error["workspace"],
+        runtime.paths.workspace().display().to_string()
+    );
+    assert!(error["alternative"].as_str().unwrap().contains("literal"));
+    assert!(error["alternative"]
+        .as_str()
+        .unwrap()
+        .contains("tool_search"));
+    let retry = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "printf recovery-ok"})),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(retry.outcome, ToolOutcome::Succeeded, "{}", retry.text);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(retry.text.contains("workspace-auto-executed"));
+}
+
+#[tokio::test]
+async fn bench_regression_dynamic_path_refusal_explains_static_validation() {
+    let mut runtime = test_runtime_with_default_tools();
+    let result = runtime.execute_tool_call(
+        &tool_call("exec", serde_json::json!({"command": "tar -tzf \"$(find .tmp/out -name '*.tar.gz' | tail -1)\""})),
+        &test_main_session_inbound("cli", "dynamic-path-recovery"), None,
+    ).await;
+    assert_eq!(result.outcome, ToolOutcome::Rejected, "{}", result.text);
+    let error: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(error["unresolved_expressions"], true);
+    assert!(error["alternative"].as_str().unwrap().contains("Python"));
+    assert!(error["alternative"]
+        .as_str()
+        .unwrap()
+        .contains("not a real filesystem path"));
 }

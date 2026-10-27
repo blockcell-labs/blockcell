@@ -49,7 +49,7 @@ impl Tool for ReadFileTool {
         ToolSchema {
             name: "read_file".to_string(),
             description:
-                "Read via path or up to 10 paths, not both; do not call this tool with `{}`."
+                "Read via path or up to 10 paths, not both; do not call this tool with `{}`. Data files (csv/tsv/jsonl/ndjson/log) default to a 20-line, 4000-character sample; set limit explicitly for more."
                     .to_string(),
             parameters: json!({
                 "type": "object",
@@ -67,7 +67,8 @@ impl Tool for ReadFileTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "minimum": 1
+                        "minimum": 1,
+                        "description": "Maximum lines to return. Set explicitly to override default data-file sampling."
                     }
                 },
             }),
@@ -75,7 +76,7 @@ impl Tool for ReadFileTool {
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **read_file**: Use `path` or `paths` (up to 10), not both.".to_string())
+        Some("- **read_file**: Use `path` or `paths` (up to 10), not both. Data files default to a small sample; process the original file with a script, not the sample. Use explicit `offset`/`limit` only when more rows are necessary.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
@@ -194,18 +195,36 @@ fn read_result(
     limit: Option<u64>,
     format: Option<&str>,
 ) -> Value {
+    // Record-oriented data is normally processed by a script, not copied into
+    // every subsequent model request. Explicit limits retain deliberate reads.
+    let sample_data = limit.is_none()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "csv" | "tsv" | "jsonl" | "ndjson" | "log"
+                )
+            });
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
     let start_index = offset.unwrap_or(1).saturating_sub(1) as usize;
     let start_index = start_index.min(total_lines);
-    let end_index = limit
+    let effective_limit = limit.or(sample_data.then_some(20));
+    let mut end_index = effective_limit
         .map(|limit| start_index.saturating_add(limit as usize).min(total_lines))
         .unwrap_or(total_lines);
-    let selected_content = if offset.is_none() && limit.is_none() {
+    let mut selected_content = if offset.is_none() && limit.is_none() && end_index == total_lines {
         content.clone()
     } else {
         lines[start_index..end_index].join("\n")
     };
+    let char_truncated = sample_data && selected_content.chars().count() > 4000;
+    if char_truncated {
+        selected_content = crate::safe_truncate(&selected_content, 4000).to_string();
+        end_index = start_index + selected_content.lines().count();
+    }
     let mut result = json!({
         "path": path.display().to_string(),
         "content": selected_content,
@@ -215,6 +234,21 @@ fn read_result(
     });
     if let Some(format) = format {
         result["format"] = json!(format);
+    }
+    if sample_data {
+        let truncated = end_index < total_lines || char_truncated;
+        result["truncated"] = json!(truncated);
+        if truncated {
+            // Do not skip a partially returned record. An explicit limit can
+            // retrieve that whole line, even when it exceeds the sample cap.
+            let next_offset = if char_truncated && !selected_content.ends_with('\n') {
+                end_index
+            } else {
+                end_index + 1
+            };
+            result["next_offset"] = json!(next_offset);
+            result["hint"] = json!("Sample only. Process the original file with one script and validate the output there. Do not infer totals from this sample or page through all rows unnecessarily. For a required full row/range, set offset and limit explicitly; next_offset may repeat a partially returned line.");
+        }
     }
     result
 }
@@ -583,6 +617,76 @@ impl Tool for ListDirTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efficiency_regression_default_data_reads_sample_but_explicit_ranges_recover_rows() {
+        let path = std::path::Path::new("events.jsonl");
+        let content = (1..=100)
+            .map(|n| format!("{{\"id\":{n},\"name\":\"用户\"}}\n"))
+            .collect::<String>();
+        let sampled = read_result(path, content.clone(), None, None, None);
+        assert_eq!(sampled["content"].as_str().unwrap().lines().count(), 20);
+        assert_eq!(sampled["start_line"], 1);
+        assert_eq!(sampled["end_line"], 20);
+        assert_eq!(sampled["total_lines"], 100);
+        assert_eq!(sampled["truncated"], true);
+        assert_eq!(sampled["next_offset"], 21);
+        assert!(sampled["hint"].as_str().unwrap().contains("original file"));
+        let remaining = read_result(path, content.clone(), Some(21), Some(80), None);
+        let recovered = format!(
+            "{}\n{}",
+            sampled["content"].as_str().unwrap(),
+            remaining["content"].as_str().unwrap()
+        );
+        assert_eq!(recovered, content.trim_end());
+        let full = read_result(path, content.clone(), None, Some(100), None);
+        assert_eq!(full["content"], content.trim_end());
+        let offset_only = read_result(path, content, Some(21), None, None);
+        assert_eq!(offset_only["end_line"], 40);
+    }
+
+    #[test]
+    fn efficiency_regression_unicode_record_is_bounded_without_skipping_partial_line() {
+        let content = format!("{{\"message\":\"{}\"}}\n", "数".repeat(6000));
+        let sampled = read_result(
+            std::path::Path::new("records.ndjson"),
+            content.clone(),
+            None,
+            None,
+            None,
+        );
+        assert!(sampled["content"].as_str().unwrap().chars().count() <= 4000);
+        assert_eq!(sampled["truncated"], true);
+        assert_eq!(sampled["end_line"], 1);
+        assert_eq!(
+            sampled["next_offset"], 1,
+            "retry the partial line with an explicit limit"
+        );
+        let full = read_result(
+            std::path::Path::new("records.ndjson"),
+            content.clone(),
+            Some(1),
+            Some(1),
+            None,
+        );
+        assert_eq!(full["content"], content.trim_end());
+        let source = read_result(
+            std::path::Path::new("src.rs"),
+            content.clone(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(source["content"], content);
+        let small = read_result(
+            std::path::Path::new("small.csv"),
+            "id,value\n1,2\n".into(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(small["content"], "id,value\n1,2\n");
+    }
     use crate::PromptContext;
     use serde_json::json;
     use std::path::PathBuf;

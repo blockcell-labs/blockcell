@@ -38,8 +38,12 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 - `edit_file`: `old_text` must match exactly (read first). `read_file`/`write_file`: use `paths`/`files` for up to 10; never call any tool with `{}`.
 - Shell cwd and environment persist; do not `cd` to the absolute workspace path.
 - Run relevant tests. After they pass, stop with a brief summary; do not reread files or rerun passing tests.
+- Sample data once, then process the original file and parse back/assert output schema and key counts/totals in one script. Never infer totals from a sample or dump full datasets into the conversation.
+- Keep temporary verification artifacts unless cleanup is requested. If optional cleanup is denied, skip it; do not try equivalent deletion commands. Finish after checks pass. For shell scripts, combine `bash -n` with a small functional check.
+- For ambiguous business boundaries, use existing conventions and state your assumption in the final answer; ask only if blocked.
+- A rejected path affects that invocation only. Path rejection is not tool unavailability: follow its recovery guidance with the same tool, keeping a working script. Use literal workspace paths for test fixtures, including nonexistent inputs; never bypass a policy or user denial.
 - Keep public function signatures, return types and error types unchanged unless the task asks; match how existing callers and tests use them.
-- If shell execution is unavailable, say "unverified". Use `tool_search` to activate other tools.
+- If shell execution is unavailable, say "unverified". Use `tool_search` only to discover a missing tool, not after a rejected invocation.
 "#;
 
 #[derive(Debug, Clone)]
@@ -2613,6 +2617,7 @@ description: deploy demo
             "Keep public function signatures, return types and error types unchanged unless the task asks; match how existing callers and tests use them."
         ));
         assert!(prompt.contains("unverified"));
+        assert!(prompt.contains("Path rejection is not tool unavailability"));
         assert!(prompt.contains("tool_search"));
         assert!(!prompt.contains("activate_skill"));
     }

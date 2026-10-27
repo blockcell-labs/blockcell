@@ -1,6 +1,6 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run the relevant tests/build now, or if verification is impossible, state why in your final answer.";
+const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run one lightweight check now: tests/build for code, or parse/read back generated data and assert its schema and key totals/counts. Batch the check in one command. If verification is impossible, state why in your final answer.";
 const BLOCKCELL_WORKSPACE_ENTRIES: &[&str] = &[
     "agents",
     "downloads",
@@ -245,6 +245,19 @@ fn suggested_test_command(workspace: &std::path::Path, listed: &[String]) -> Opt
 fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
     match tool_name {
         "write_file" | "edit_file" => true,
+        "data_process" => args["action"] == "write_csv" || args["output_path"].is_string(),
+        "exec" | "shell_run" | "shell" => {
+            let command = args["command"]
+                .as_str()
+                .or_else(|| args["cmd"].as_str())
+                .unwrap_or_default();
+            // Conservative hints only, never a security decision. Cover common
+            // data scripts that create files without calling write_file.
+            static WRITES: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?:\bjson\.dump\s*\(|\bcsv\.writer\s*\(|\.write_(?:text|bytes)\s*\(|\bopen\s*\([^\n]*,[ \t]*(?:mode[ \t]*=[ \t]*)?['\"][wax][^'\"]*['\"]|(?:^|\s)>{1,2}\s*[^&\s])"#).expect("file mutation pattern")
+            });
+            WRITES.is_match(command)
+        }
         "file_ops" => matches!(
             args.get("action").and_then(serde_json::Value::as_str),
             Some("delete" | "rename" | "move" | "copy" | "compress" | "decompress")
@@ -434,7 +447,7 @@ fn is_verification_segment(segment: &str) -> bool {
     let arguments = &words[1..];
     let first_argument = arguments.first().map(String::as_str);
     match command.as_str() {
-        "pytest" | "ruff" | "mypy" | "tsc" | "tox" => true,
+        "pytest" | "ruff" | "mypy" | "tsc" | "tox" | "shellcheck" => true,
         _ if is_python_executable(&command) => {
             if first_argument == Some("-m") {
                 arguments.get(1).is_some_and(|module| {
@@ -442,6 +455,11 @@ fn is_verification_segment(segment: &str) -> bool {
                         module.to_ascii_lowercase().as_str(),
                         "pytest" | "unittest" | "mypy" | "py_compile" | "compileall"
                     )
+                })
+            } else if first_argument == Some("-c") {
+                arguments.get(1).is_some_and(|code| {
+                    code.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                        .any(|word| word == "assert")
                 })
             } else {
                 first_argument.is_some_and(|path| {
@@ -493,7 +511,14 @@ fn is_verification_segment(segment: &str) -> bool {
         "./gradlew" => first_argument
             .is_some_and(|task| matches!(task.to_ascii_lowercase().as_str(), "test" | "build")),
         "node" | "bash" | "sh" => {
-            first_argument.is_some_and(|path| verification_script_name(path, &["test"]))
+            let syntax_check = match command.as_str() {
+                "node" => matches!(first_argument, Some("--check" | "-c")),
+                _ => first_argument == Some("-n"),
+            };
+            (syntax_check && arguments.get(1).is_some())
+                || first_argument.is_some_and(|path| {
+                    verification_script_name(path, &["test", "verify", "check"])
+                })
         }
         _ => false,
     }
@@ -510,21 +535,25 @@ fn verification_command(tool_name: &str, args: &serde_json::Value, result: &str)
         .get("command")
         .and_then(serde_json::Value::as_str)
         .or_else(|| args.get("cmd").and_then(serde_json::Value::as_str))?;
-    if !shell_command_segments(command)
-        .into_iter()
-        .any(is_verification_segment)
-    {
+    let segments = shell_command_segments(command);
+    let heredoc_assertions = segments.iter().any(|segment| {
+        let words = strip_verification_prefixes(shell_command_words(segment));
+        words.first().is_some_and(|word| is_python_executable(word))
+            && words.get(1).is_some_and(|word| word == "-")
+            && segment.contains("<<")
+    }) && command
+        .lines()
+        .any(|line| line.trim_start().starts_with("assert "));
+    if !segments.into_iter().any(is_verification_segment) && !heredoc_assertions {
         return None;
     }
-    let exit_zero = serde_json::from_str::<serde_json::Value>(result)
-        .ok()
-        .is_some_and(|value| {
+    let exit_zero = match serde_json::from_str::<serde_json::Value>(result) {
+        Ok(value) => {
             value["exit_code"].as_i64() == Some(0)
                 && (value.get("running").is_none() || value["running"] == false)
-        })
-        || result.contains("exit 0")
-        || result.contains("exit_code\":0")
-        || result.contains("exit_code\": 0");
+        }
+        Err(_) => result.contains("exit 0"),
+    };
     exit_zero.then(|| command.to_string())
 }
 
@@ -1592,6 +1621,7 @@ impl AgentRuntime {
 
                 // Execute each tool call, with dynamic tool supplement for intent misclassification
                 let mut tool_results: Vec<ChatMessage> = Vec::new();
+                let mut tool_round_hints: Vec<ChatMessage> = Vec::new();
                 let mut wants_forced_answer = false;
                 let mut web_search_thin_results: Vec<String> = Vec::new(); // URLs from thin search results
                                                                            // 只读预取：彼此独立的只读调用并发执行，主循环按原顺序消费结果（P2-2）。
@@ -1891,6 +1921,12 @@ impl AgentRuntime {
                     if is_error {
                         let failure_kind = classify_tool_failure(&result);
                         match failure_kind {
+                            ToolFailureKind::ApprovalRequired => {
+                                // The structured result explains the refusal. Do not
+                                // turn a denied operation into a tool outage or add
+                                // a redundant user message that invites workarounds.
+                                tool_fail_counts.remove(&tool_call.name);
+                            }
                             ToolFailureKind::SkillContextMissing => {
                                 // Skill context missing — give friendly hint to activate skill first
                                 let hint = format!(
@@ -1903,7 +1939,7 @@ impl AgentRuntime {
                                     tool_call.name, tool_call.name
                                 );
                                 info!(tool = %tool_call.name, "Skill context missing — suggesting activate_skill");
-                                current_messages.push(ChatMessage::user(&hint));
+                                tool_round_hints.push(ChatMessage::user(&hint));
                             }
                             ToolFailureKind::Permanent | ToolFailureKind::Transient => {
                                 let count =
@@ -1916,7 +1952,7 @@ impl AgentRuntime {
                                         tool_call.name
                                     );
                                     warn!(tool = %tool_call.name, kind = ?failure_kind, "Permanent tool failure — injecting immediate hint");
-                                    current_messages.push(ChatMessage::user(&hint));
+                                    tool_round_hints.push(ChatMessage::user(&hint));
                                 }
                             }
                             ToolFailureKind::ResourceMissing => {
@@ -1926,7 +1962,7 @@ impl AgentRuntime {
                                         "⚠️ 工具 `{}` 报告目标资源不存在。不要重复调用同一工具重试同一个标识；直接向用户说明未找到，或请用户提供新的标识/范围。",
                                         tool_call.name
                                     );
-                                    current_messages.push(ChatMessage::user(&hint));
+                                    tool_round_hints.push(ChatMessage::user(&hint));
                                 }
                             }
                         }
@@ -1999,6 +2035,9 @@ impl AgentRuntime {
                     current_messages.push(tool_msg.clone());
                     history.push(tool_msg);
                 }
+                // Providers require assistant(tool_calls), then *all* tool
+                // results contiguously. A user hint in between loses the round.
+                current_messages.extend(tool_round_hints);
 
                 checkpoint_turn = checkpoint_turn.saturating_add(1);
                 if let Some(task_id) = runtime_task_id.as_deref() {
@@ -2147,11 +2186,10 @@ impl AgentRuntime {
                 .await;
                 // No tool calls, we have the final response
                 let response_content = response.content.unwrap_or_default();
-                if decision.mode == InteractionMode::Coding
-                    && !verification_gate_fired
+                if !verification_gate_fired
                     && last_mutation_idx.is_some_and(|mutation_idx| {
                         last_verification_idx
-                            .is_none_or(|verification_idx| verification_idx <= mutation_idx)
+                            .is_none_or(|verification_idx| verification_idx < mutation_idx)
                     })
                 {
                     verification_gate_fired = true;
@@ -2893,6 +2931,71 @@ mod tests {
         coding_workspace_snapshot, should_auto_add_activate_skill, verification_command,
         InteractionMode,
     };
+
+    #[test]
+    fn efficiency_regression_shell_checks_prevent_redundant_verification() {
+        let check = |command: &str, exit_code| {
+            verification_command(
+                "shell_run",
+                &serde_json::json!({"command": command}),
+                &serde_json::json!({"exit_code": exit_code, "running": false}).to_string(),
+            )
+        };
+        for command in [
+            "bash -n backup.sh",
+            "sh -n backup.sh",
+            "bash verify_backup.sh",
+            "sh check_output.sh",
+            "node --check index.js",
+            "shellcheck backup.sh",
+        ] {
+            assert_eq!(check(command, 0), Some(command.to_string()), "{command}");
+            assert_eq!(check(command, 1), None);
+        }
+        assert_eq!(check("bash backup.sh", 0), None);
+        assert_eq!(check("echo test", 0), None);
+    }
+
+    #[test]
+    fn bench_regression_inline_output_checks_and_shell_writes() {
+        let check = |command: &str, result: &str| {
+            verification_command(
+                "shell_run",
+                &serde_json::json!({"command": command}),
+                result,
+            )
+        };
+        let command =
+            "python3 -c 'import json; g=json.load(open(\"report.json\")); assert len(g)==4'";
+        assert_eq!(
+            check(command, r#"{"exit_code":0}"#),
+            Some(command.to_string())
+        );
+        assert_eq!(
+            check(command, r#"{"exit_code":1,"output":"exit_code:0"}"#),
+            None
+        );
+        assert_eq!(check("python3 -c 'print(42)'", r#"{"exit_code":0}"#), None);
+        assert_eq!(
+            check(
+                "python3 -c 'import json; assert True'",
+                r#"{"running":true,"exit_code":0}"#
+            ),
+            None
+        );
+        assert!(super::is_mutating_tool_call(
+            "shell_run",
+            &serde_json::json!({"command": "python3 -c 'import json; json.dump({},open(\"report.json\",\"w\"))'"})
+        ));
+        assert!(super::is_mutating_tool_call(
+            "shell_run",
+            &serde_json::json!({"command": "printf hello > out.txt"})
+        ));
+        assert!(!super::is_mutating_tool_call(
+            "shell_run",
+            &serde_json::json!({"command": "python3 -c 'import json; print(json.load(open(\"report.json\")))'"})
+        ));
+    }
 
     #[tokio::test]
     async fn coding_snapshot_filters_blockcell_runtime_files_and_suggests_tests() {
