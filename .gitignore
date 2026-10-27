@@ -111,6 +111,8 @@ __pycache__/
 /docs/reviews/2026-07-24*
 /docs/design/hermes-memory-system-comparison.md
 /docs/design/per-message-runtime-rebuild-design.md
+# 过程性报告（验证记录、取舍说明、复核清单）：只在本地留存，不进仓库
+/docs/reports/
 # Added by code-review-graph
 .code-review-graph/
 .mcp.json
