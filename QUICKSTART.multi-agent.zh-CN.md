@@ -48,7 +48,7 @@ blockcell setup
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-chat"
+      "model": "deepseek-flash"
     },
     "list": [
       {

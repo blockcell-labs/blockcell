@@ -585,11 +585,13 @@ fn default_api_base_for_provider(provider: &str) -> Option<&'static str> {
         "kimi" => Some("https://api.moonshot.cn/v1"),
         "gemini" => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
         "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
-        "minimax" => Some("https://api.minimaxi.com/v1"),
+        // MiniMax 的 Anthropic 兼容端点（本 provider 的 api_type 默认是 anthropic）
+        "minimax" => Some("https://api.minimaxi.com/anthropic"),
         "groq" => Some("https://api.groq.com/openai/v1"),
         "siliconflow" => Some("https://api.siliconflow.cn/v1"),
         "openrouter" => Some("https://openrouter.ai/api/v1"),
-        "qwen" => Some("https://api.qwen.ai/v1"),
+        // 百炼 DashScope 的 OpenAI 兼容端点；api.qwen.ai 不是可用的 OpenAI 兼容入口
+        "qwen" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         "xai" => Some("https://api.x.ai/v1"),
         "mistral" => Some("https://api.mistral.ai/v1"),
         "ollama" => Some("http://localhost:11434"),
@@ -693,28 +695,48 @@ mod tests {
 
     #[test]
     fn test_default_model() {
-        assert_eq!(default_model_for_provider("deepseek"), "deepseek-v4-pro");
-        assert_eq!(default_model_for_provider("openai"), "gpt-5.5");
-        assert_eq!(default_model_for_provider("anthropic"), "claude-opus-4-8");
-        assert_eq!(default_model_for_provider("kimi"), "kimi-k2.6");
-        assert_eq!(default_model_for_provider("moonshot"), "kimi-k2.6");
-        assert_eq!(
-            default_model_for_provider("gemini"),
-            "gemini-3.1-pro-preview"
-        );
-        assert_eq!(default_model_for_provider("zhipu"), "glm-5.2");
-        assert_eq!(default_model_for_provider("glm"), "glm-5.2");
-        assert_eq!(default_model_for_provider("qwen"), "qwen3.7-max");
-        assert_eq!(default_model_for_provider("xai"), "grok-4.3");
+        assert_eq!(default_model_for_provider("deepseek"), "deepseek-flash");
+        assert_eq!(default_model_for_provider("openai"), "gpt-6.1-sol");
+        assert_eq!(default_model_for_provider("anthropic"), "claude-opus-5-5");
+        assert_eq!(default_model_for_provider("kimi"), "kimi-k3.1-pro");
+        assert_eq!(default_model_for_provider("moonshot"), "kimi-k3.1-pro");
+        assert_eq!(default_model_for_provider("gemini"), "gemini-4-argon");
+        assert_eq!(default_model_for_provider("zhipu"), "glm-5.3");
+        assert_eq!(default_model_for_provider("glm"), "glm-5.3");
+        assert_eq!(default_model_for_provider("qwen"), "qwen3.8-max");
+        assert_eq!(default_model_for_provider("xai"), "grok-4.7");
         assert_eq!(default_model_for_provider("mistral"), "mistral-medium-2604");
-        assert_eq!(default_model_for_provider("minimax"), "MiniMax-M3");
+        assert_eq!(default_model_for_provider("minimax"), "MiniMax-M3.1-Flash");
         assert_eq!(default_model_for_provider("groq"), "openai/gpt-oss-120b");
         assert_eq!(
             default_model_for_provider("siliconflow"),
-            "deepseek-ai/DeepSeek-V4-Pro"
+            "deepseek-ai/DeepSeek-V4.1-Flash"
         );
-        assert_eq!(default_model_for_provider("openrouter"), "openai/gpt-5.5");
-        assert_eq!(default_model_for_provider("ollama"), "qwen3.6");
+        assert_eq!(default_model_for_provider("openrouter"), "openai/gpt-6.1-sol");
+        assert_eq!(default_model_for_provider("ollama"), "qwen3.8");
+        // 未知 provider 回落到 OpenAI 当前默认
+        assert_eq!(default_model_for_provider("unknown"), "gpt-6.1-sol");
+    }
+
+    #[test]
+    fn test_default_api_base_for_provider() {
+        assert_eq!(
+            default_api_base_for_provider("qwen"),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        );
+        assert_eq!(
+            default_api_base_for_provider("deepseek"),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert_eq!(
+            default_api_base_for_provider("kimi"),
+            Some("https://api.moonshot.cn/v1")
+        );
+        assert_eq!(
+            default_api_base_for_provider("zhipu"),
+            Some("https://open.bigmodel.cn/api/paas/v4")
+        );
+        assert_eq!(default_api_base_for_provider("unknown"), None);
     }
 
     #[test]

@@ -48,7 +48,7 @@ Then edit `~/.blockcell/config.json5` into a multi-agent layout like this:
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-chat"
+      "model": "deepseek-flash"
     },
     "list": [
       {

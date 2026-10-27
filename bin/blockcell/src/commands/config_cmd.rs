@@ -48,7 +48,7 @@ pub async fn schema() -> anyhow::Result<()> {
                     "defaults": {
                         "type": "object",
                         "properties": {
-                            "model": { "type": "string", "description": "Default model name, e.g. deepseek-chat" },
+                            "model": { "type": "string", "description": "Default model name, e.g. deepseek-v4-pro" },
                             "provider": { "type": "string", "description": "Explicit provider name override" },
                             "evolutionModel": { "type": "string", "description": "Model for self-evolution pipeline" },
                             "evolutionProvider": { "type": "string", "description": "Provider for self-evolution pipeline" },

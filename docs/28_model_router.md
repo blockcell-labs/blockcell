@@ -53,7 +53,7 @@ ModelRouter 使用 Provider Pool 的条目，但选择方式不再只有“最�
           "weight": 3
         },
         {
-          "model": "gpt-5.4-mini",
+          "model": "gpt-6-luna",
           "provider": "openai",
           "priority": 5,
           "weight": 1
@@ -70,7 +70,7 @@ ModelRouter 使用 Provider Pool 的条目，但选择方式不再只有“最�
 
 在 `cost_optimized` 下：
 
-- 当前消息数 `<= 4` 时，选择最低优先级组，也就是 `priority` 数字最大的条目。上例会优先选 `gpt-5.4-mini`。
+- 当前消息数 `<= 4` 时，选择最低优先级组，也就是 `priority` 数字最大的条目。上例会优先选 `gpt-6-luna`。
 - 当前消息数 `> 4` 时，回到正常 Provider Pool 选择，也就是优先选 `priority` 数字最小的主力模型。上例会优先选 `deepseek-v4-pro`。
 
 > 注意：Provider Pool 中 `priority` 的含义是“小数字 = 高优先级”。`cost_optimized` 利用低优先级条目表达“便宜/简单任务模型”。
@@ -192,7 +192,7 @@ ModelRouter 不替代原有 retry 和熔断，而是补充它们：
 "routingStrategy": "cost_optimized",
 "modelPool": [
   { "model": "deepseek-v4-pro", "provider": "deepseek", "priority": 1, "weight": 3 },
-  { "model": "gpt-5.4-mini", "provider": "openai", "priority": 5, "weight": 1 }
+  { "model": "gpt-6-luna", "provider": "openai", "priority": 5, "weight": 1 }
 ]
 ```
 
@@ -203,8 +203,8 @@ ModelRouter 不替代原有 retry 和熔断，而是补充它们：
 ```json
 "routingStrategy": "quality_first",
 "modelPool": [
-  { "model": "claude-opus-4-8", "provider": "anthropic", "priority": 1, "weight": 1 },
-  { "model": "gpt-5.5", "provider": "openai", "priority": 1, "weight": 1 },
+  { "model": "claude-opus-5-5", "provider": "anthropic", "priority": 1, "weight": 1 },
+  { "model": "gpt-6.1-sol", "provider": "openai", "priority": 1, "weight": 1 },
   { "model": "deepseek-v4-pro", "provider": "deepseek", "priority": 2, "weight": 1 }
 ]
 ```
@@ -216,7 +216,7 @@ ModelRouter 不替代原有 retry 和熔断，而是补充它们：
 ```json
 "routingStrategy": "manual",
 "modelPool": [
-  { "model": "ollama/qwen3.6", "provider": "ollama", "priority": 1, "weight": 1 },
+  { "model": "ollama/qwen3.8", "provider": "ollama", "priority": 1, "weight": 1 },
   { "model": "deepseek-v4-pro", "provider": "deepseek", "priority": 2, "weight": 1 }
 ]
 ```
@@ -230,7 +230,7 @@ ModelRouter 不替代原有 retry 和熔断，而是补充它们：
 如果你在 CLI 使用 `--model` 或 `--provider`：
 
 ```bash
-blockcell agent --model gpt-5.5 --provider openai -m "分析这个项目"
+blockcell agent --model gpt-6.1-sol --provider openai -m "分析这个项目"
 ```
 
 本次运行会使用指定模型/Provider，并清空继承的 `modelPool`。这适合临时指定模型，不会修改配置文件。

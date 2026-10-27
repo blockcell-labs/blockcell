@@ -109,7 +109,7 @@ blockcell agent
 blockcell agent --agent ops
 blockcell agent -a ops -m "Check BTC price"
 blockcell agent -a ops -s work:finance
-blockcell agent --agent ops --model gpt-5.5 --provider openai
+blockcell agent --agent ops --model gpt-6.1-sol --provider openai
 ```
 
 Unified slash commands:

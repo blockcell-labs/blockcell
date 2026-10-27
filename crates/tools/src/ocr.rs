@@ -330,7 +330,7 @@ async fn ocr_api(ctx: &ToolContext, path: &str) -> Result<String> {
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&json!({
-            "model": "gpt-4o-mini",
+            "model": "gpt-6-luna",
             "messages": [{
                 "role": "user",
                 "content": [

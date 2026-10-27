@@ -197,7 +197,7 @@ impl Default for Config {
             "minimax".to_string(),
             ProviderConfig {
                 api_key: String::new(),
-                api_base: Some("https://api.minimaxi.com/v1".to_string()),
+                api_base: Some("https://api.minimaxi.com/anthropic".to_string()),
                 proxy: None,
                 api_type: "anthropic".to_string(),
             },
@@ -206,7 +206,7 @@ impl Default for Config {
             "qwen".to_string(),
             ProviderConfig {
                 api_key: String::new(),
-                api_base: Some("https://api.qwen.ai/v1".to_string()),
+                api_base: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
                 proxy: None,
                 api_type: "openai".to_string(),
             },
@@ -215,7 +215,7 @@ impl Default for Config {
             "glm".to_string(),
             ProviderConfig {
                 api_key: String::new(),
-                api_base: Some("https://api.z.ai/v1".to_string()),
+                api_base: Some("https://api.z.ai/api/paas/v4".to_string()),
                 proxy: None,
                 api_type: "openai".to_string(),
             },

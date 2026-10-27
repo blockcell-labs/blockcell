@@ -92,7 +92,7 @@ const EXAMPLE_CONFIG: &str = r#"{
     },
     "gemini": {
       "apiKey": "",
-      "apiBase": "https://generativelanguage.googleapis.com",
+      "apiBase": "https://generativelanguage.googleapis.com/v1beta/openai",
       "apiType": "openai"
     },
     "kimi": {
@@ -126,7 +126,7 @@ const EXAMPLE_CONFIG: &str = r#"{
       "modelPool": [
         {
           "provider": "deepseek",
-          "model": "deepseek-v4-pro",
+          "model": "deepseek-flash",
           "weight": 1,
           "priority": 1
         }
@@ -369,9 +369,9 @@ pub async fn run(
     println!();
     println!("Quick setup examples:");
     println!(
-        "  blockcell onboard --provider deepseek --api-key YOUR_API_KEY --model deepseek-v4-pro"
+        "  blockcell onboard --provider deepseek --api-key YOUR_API_KEY --model deepseek-flash"
     );
-    println!("  blockcell onboard --provider kimi --api-key YOUR_API_KEY --model kimi-k2.6");
+    println!("  blockcell onboard --provider kimi --api-key YOUR_API_KEY --model kimi-k3.1-pro");
     println!("  blockcell onboard --provider openai --api-key YOUR_API_KEY");
 
     Ok(())

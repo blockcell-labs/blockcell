@@ -257,7 +257,7 @@ fn get_api_key(ctx: &ToolContext, provider: &str) -> Result<String> {
         })
 }
 
-/// OpenAI GPT-4o Vision
+/// OpenAI 视觉模型（默认 gpt-6-luna，可用 params.model 覆盖）
 async fn call_openai(
     ctx: &ToolContext,
     prompt: &str,
@@ -269,7 +269,7 @@ async fn call_openai(
     let model = params
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("gpt-4o-mini");
+        .unwrap_or("gpt-6-luna");
     let detail = params
         .get("detail")
         .and_then(|v| v.as_str())
@@ -325,7 +325,7 @@ async fn call_anthropic(
     max_tokens: u32,
 ) -> Result<(String, String, String)> {
     let api_key = get_api_key(ctx, "anthropic")?;
-    let model = "claude-sonnet-4-20250514";
+    let model = "claude-sonnet-5-5";
 
     let mut content = Vec::new();
     for (data_url, mime) in images {
@@ -385,7 +385,7 @@ async fn call_gemini(
     max_tokens: u32,
 ) -> Result<(String, String, String)> {
     let api_key = get_api_key(ctx, "gemini")?;
-    let model = "gemini-2.0-flash";
+    let model = "gemini-3.8-flash";
 
     let mut parts = Vec::new();
     parts.push(json!({"text": prompt}));

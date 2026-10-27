@@ -172,7 +172,7 @@ pub(super) async fn handle_config_test_provider(
     let model = req
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("gpt-3.5-turbo");
+        .unwrap_or("gpt-6-luna");
     let api_key = req.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
     let api_base = req.get("api_base").and_then(|v| v.as_str());
     let proxy = req.get("proxy").and_then(|v| v.as_str());

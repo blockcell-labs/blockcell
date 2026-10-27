@@ -301,7 +301,7 @@ Minimal configuration example (`~/.blockcell/config.json5`):
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -319,7 +319,7 @@ To enable multi-agent routing plus external channels, extend it using the struct
 {
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -420,7 +420,7 @@ Notes:
 - **Google Gemini** (Gemini 3.1 Pro, Gemini 3.5 Flash)
 - **DeepSeek** (DeepSeek V4 Pro, V3, R1)
 - **Kimi/Moonshot**
-- **MiniMax** ([MiniMax M3](https://www.minimaxi.com/))
+- **MiniMax** ([MiniMax M3.1 Flash](https://www.minimaxi.com/))
 - **Zhipu AI** ([GLM-5](https://bigmodel.cn/))
 - **Qwen**
 - **xAI** (Grok)

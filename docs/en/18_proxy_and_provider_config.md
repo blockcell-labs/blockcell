@@ -126,13 +126,13 @@ Current inference rules include:
 
 ```json5
 // Let blockcell infer Anthropic from the model name
-{ model: "claude-3-5-sonnet-20241022" }
+{ model: "claude-sonnet-5-5" }
 
 // Use an anthropic-prefixed model string, but force routing through OpenRouter
-{ model: "anthropic/claude-3-5-sonnet", provider: "openrouter" }
+{ model: "anthropic/claude-sonnet-5-5", provider: "openrouter" }
 
 // Local Ollama model
-{ model: "ollama/qwen3.6" }
+{ model: "ollama/qwen3.8" }
 ```
 
 ---
@@ -147,7 +147,7 @@ Example:
 {
   agents: {
     defaults: {
-      model: "deepseek-v4-pro",
+      model: "deepseek-flash",
       provider: null,
       maxTokens: 8192,
       temperature: 0.7,
@@ -165,7 +165,7 @@ Example:
 
 | Field | Default | Description |
 |------|--------|------|
-| `model` | `deepseek-v4-pro` | Primary model; `setup` writes a provider-specific recommended default |
+| `model` | `deepseek-flash` | Primary model; `setup` writes a provider-specific recommended default |
 | `provider` | `null` | Explicit provider override |
 | `maxTokens` | `8192` | Max output tokens per LLM call |
 | `temperature` | `0.7` | Sampling temperature |
@@ -295,7 +295,7 @@ You do not have to hand-edit `config.json5` for every change. Use `blockcell con
 blockcell config set network.proxy "http://127.0.0.1:7890"
 
 # Set the default model
-blockcell config set agents.defaults.model "deepseek-v4-pro"
+blockcell config set agents.defaults.model "deepseek-flash"
 
 # Set the DeepSeek API key
 blockcell config set providers.deepseek.apiKey "sk-xxxxxxxx"
@@ -352,11 +352,11 @@ A practical production-style example:
   },
   agents: {
     defaults: {
-      model: "claude-3-5-sonnet-20241022",
+      model: "claude-sonnet-5-5",
       maxTokens: 8192,
       temperature: 0.7,
       maxToolIterations: 20,
-      evolutionModel: "deepseek-v4-pro",
+      evolutionModel: "deepseek-flash",
       evolutionProvider: "deepseek",
     },
   },

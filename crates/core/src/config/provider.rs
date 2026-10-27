@@ -89,7 +89,7 @@ pub enum ToolCallMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEntry {
-    /// 模型名称，例如 "deepseek-chat-pro"、"claude-3-5-sonnet"
+    /// 模型名称，例如 "deepseek-v4-pro"、"claude-sonnet-5-5"
     pub model: String,
     /// 对应 providers 表中的 key，例如 "deepseek"、"anthropic"
     pub provider: String,

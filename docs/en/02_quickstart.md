@@ -120,7 +120,7 @@ Find the `providers` section and fill in your API key.
 
 ### Option A: DeepSeek (recommended for beginners)
 
-`blockcell setup --provider deepseek` currently defaults to `deepseek-v4-pro` and configures a 1M-token `maxContextTokens` value. You can still pass `--model deepseek-chat` explicitly if you want the older chat model.
+`blockcell setup --provider deepseek` currently defaults to `deepseek-flash` (DeepSeek-V4.1-Flash-1017) and configures a 1M-token `maxContextTokens` value. Pass `--model deepseek-v4-pro` if you need stronger reasoning (roughly 4x the price).
 
 ```json
 {
@@ -132,7 +132,7 @@ Find the `providers` section and fill in your API key.
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -153,7 +153,7 @@ Find the `providers` section and fill in your API key.
   },
   "agents": {
     "defaults": {
-      "model": "kimi-k2.6"
+      "model": "kimi-k3.1-pro"
     }
   }
 }
@@ -171,7 +171,7 @@ Find the `providers` section and fill in your API key.
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-opus-4-8"
+      "model": "anthropic/claude-opus-5-5"
     }
   }
 }
@@ -190,7 +190,7 @@ If you already have Ollama installed and pulled a model:
   },
   "agents": {
     "defaults": {
-      "model": "ollama/qwen3.6"
+      "model": "ollama/qwen3.8"
     }
   }
 }
@@ -208,7 +208,7 @@ Example output:
 
 ```
 ✓ Config loaded
-✓ Provider: deepseek (deepseek-v4-pro)
+✓ Provider: deepseek (deepseek-flash)
 ✓ Workspace: ~/.blockcell/workspace
 ✓ Memory: SQLite (0 items)
 ✓ Skills: 0 user skills, 44 builtin skills
@@ -337,7 +337,7 @@ Key fields in `~/.blockcell/config.json5`:
   },
   "agents": {
     "defaults": {
-      "model": "gpt-5.5",
+      "model": "gpt-6.1-sol",
       "maxTokens": 4096,
       "temperature": 0.7
     }

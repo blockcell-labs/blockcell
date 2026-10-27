@@ -116,7 +116,8 @@ fn default_workspace() -> String {
 }
 
 fn default_model() -> String {
-    "deepseek-v4-pro".to_string()
+    // 默认走 DeepSeek 的便宜档（V4.1-Flash-1017）；更强推理可显式改成 deepseek-v4-pro
+    "deepseek-flash".to_string()
 }
 
 fn default_max_tokens() -> u32 {

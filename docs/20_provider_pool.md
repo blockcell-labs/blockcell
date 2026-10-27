@@ -47,13 +47,13 @@ Provider Pool 允许你在配置文件中声明一个**模型+供应商列表**�
           "priority": 1
         },
         {
-          "model": "claude-3-5-sonnet-20241022",
+          "model": "claude-sonnet-5-5",
           "provider": "anthropic",
           "weight": 2,
           "priority": 1
         },
         {
-          "model": "gemini-3.5-flash",
+          "model": "gemini-3.8-flash",
           "provider": "gemini",
           "weight": 1,
           "priority": 2
@@ -73,7 +73,7 @@ Provider Pool 允许你在配置文件中声明一个**模型+供应商列表**�
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `model` | string | — | 模型名称，如 `deepseek-v4-pro`、`claude-3-5-sonnet-20241022` |
+| `model` | string | — | 模型名称，如 `deepseek-v4-pro`、`claude-sonnet-5-5` |
 | `provider` | string | — | 对应 `providers` 表中的 key，如 `deepseek`、`anthropic` |
 | `weight` | u32 | `1` | 同优先级内的加权随机权重，越大被选中概率越高 |
 | `priority` | u32 | `1` | 优先级，**小数字 = 高优先级**，仅在高优先级全部不可用时才选低优先级 |
@@ -120,7 +120,7 @@ Healthy ──[3次连续失败]──► Cooling(60s) ──[冷却到期]─�
 ```json
 "modelPool": [
   { "model": "deepseek-v4-pro",           "provider": "deepseek",   "weight": 1, "priority": 1 },
-  { "model": "gpt-5.4-mini",               "provider": "openai",     "weight": 1, "priority": 2 }
+  { "model": "gpt-6-luna",               "provider": "openai",     "weight": 1, "priority": 2 }
 ]
 ```
 
@@ -131,8 +131,8 @@ Healthy ──[3次连续失败]──► Cooling(60s) ──[冷却到期]─�
 ```json
 "modelPool": [
   { "model": "deepseek-v4-pro",           "provider": "deepseek",   "weight": 2, "priority": 1 },
-  { "model": "claude-3-5-sonnet-20241022","provider": "anthropic",  "weight": 1, "priority": 1 },
-  { "model": "gemini-3.5-flash",          "provider": "gemini",     "weight": 1, "priority": 1 }
+  { "model": "claude-sonnet-5-5","provider": "anthropic",  "weight": 1, "priority": 1 },
+  { "model": "gemini-3.8-flash",          "provider": "gemini",     "weight": 1, "priority": 1 }
 ]
 ```
 
@@ -142,7 +142,7 @@ Healthy ──[3次连续失败]──► Cooling(60s) ──[冷却到期]─�
 
 ```json
 "modelPool": [
-  { "model": "ollama/qwen3.6",  "provider": "ollama",    "weight": 1, "priority": 1 },
+  { "model": "ollama/qwen3.8",  "provider": "ollama",    "weight": 1, "priority": 1 },
   { "model": "deepseek-v4-pro",    "provider": "deepseek",  "weight": 1, "priority": 2 }
 ]
 ```
@@ -157,7 +157,7 @@ Healthy ──[3次连续失败]──► Cooling(60s) ──[冷却到期]─�
 
 ```bash
 # 覆盖单次运行的模型，不影响配置文件
-blockcell agent --model gpt-5.5 --provider openai -m "分析这个文件"
+blockcell agent --model gpt-6.1-sol --provider openai -m "分析这个文件"
 ```
 
 也就是说，CLI 覆盖只影响当前进程，不会回写 `config.json5`。

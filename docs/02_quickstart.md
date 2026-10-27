@@ -91,7 +91,7 @@ blockcell setup
 **非交互式用法:**
 ```bash
 # 直接指定 provider 和 API key
-blockcell setup --provider deepseek --api-key sk-xxx --model deepseek-v4-pro
+blockcell setup --provider deepseek --api-key sk-xxx --model deepseek-flash
 
 # 同时配置渠道
 blockcell setup --provider kimi --api-key sk-xxx --channel telegram
@@ -146,7 +146,7 @@ nano ~/.blockcell/config.json5
 
 ### 选项 A：使用 DeepSeek（推荐新手）
 
-`blockcell setup --provider deepseek` 当前默认会选择 `deepseek-v4-pro`，并按 1M 上下文配置 `maxContextTokens`。如果你想继续使用旧的 `deepseek-chat`，也可以显式传入 `--model deepseek-chat`。
+`blockcell setup --provider deepseek` 当前默认会选择 `deepseek-flash`（对应 DeepSeek-V4.1-Flash-1017），并按 1M 上下文配置 `maxContextTokens`。如果需要更强的推理能力，可显式传入 `--model deepseek-v4-pro`（价格约为 Flash 的 4 倍）。
 
 ```json
 {
@@ -158,13 +158,13 @@ nano ~/.blockcell/config.json5
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high",
       "modelPool": [
         {
-          "model": "deepseek-v4-pro",
+          "model": "deepseek-flash",
           "provider": "deepseek",
           "weight": 1,
           "priority": 1
@@ -187,11 +187,11 @@ nano ~/.blockcell/config.json5
   },
   "agents": {
     "defaults": {
-      "model": "kimi-k2.6",
+      "model": "kimi-k3.1-pro",
       "provider": "kimi",
       "modelPool": [
         {
-          "model": "kimi-k2.6",
+          "model": "kimi-k3.1-pro",
           "provider": "kimi",
           "weight": 1,
           "priority": 1
@@ -214,11 +214,11 @@ nano ~/.blockcell/config.json5
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5-5",
       "provider": "openrouter",
       "modelPool": [
         {
-          "model": "anthropic/claude-opus-4-8",
+          "model": "anthropic/claude-opus-5-5",
           "provider": "openrouter",
           "weight": 1,
           "priority": 1
@@ -244,11 +244,11 @@ nano ~/.blockcell/config.json5
   },
   "agents": {
     "defaults": {
-      "model": "qwen3.6",
+      "model": "qwen3.8",
       "provider": "ollama",
       "modelPool": [
         {
-          "model": "qwen3.6",
+          "model": "qwen3.8",
           "provider": "ollama",
           "weight": 1,
           "priority": 1
@@ -271,7 +271,7 @@ blockcell status
 
 ```
 ✓ Config loaded
-✓ Provider: deepseek (deepseek-v4-pro)
+✓ Provider: deepseek (deepseek-flash)
 ✓ Workspace: ~/.blockcell/workspace
 ✓ Memory: SQLite (0 items)
 ✓ Skills: 0 user skills, 44 builtin skills
@@ -405,19 +405,19 @@ blockcell doctor
   },
   "agents": {
     "defaults": {
-      "model": "gpt-5.5",
+      "model": "gpt-6.1-sol",
       "provider": "openai",
       "maxTokens": 8192,
       "temperature": 0.7,
       "modelPool": [
         {
-          "model": "gpt-5.5",
+          "model": "gpt-6.1-sol",
           "provider": "openai",
           "weight": 2,
           "priority": 1
         },
         {
-          "model": "deepseek-v4-pro",
+          "model": "deepseek-flash",
           "provider": "deepseek",
           "weight": 1,
           "priority": 2
@@ -457,7 +457,7 @@ blockcell doctor
 `modelPool` 是一个可选的高级功能，用于配置多模型负载均衡和自动降级：
 
 **字段说明：**
-- `model`: 模型名称（如 "gpt-5.5"、"deepseek-v4-pro"）
+- `model`: 模型名称（如 "gpt-6.1-sol"、"deepseek-flash"）
 - `provider`: 对应 providers 表中的 key
 - `weight`: 负载均衡权重（正整数，越大越优先被选中），默认 1
 - `priority`: 优先级（小数字 = 高优先级），同优先级内按 weight 加权随机，默认 1

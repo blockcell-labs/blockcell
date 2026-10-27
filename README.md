@@ -301,7 +301,7 @@ blockcell gateway
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -318,8 +318,8 @@ blockcell gateway
     "defaults": {
       "routingStrategy": "cost_optimized",
       "modelPool": [
-        { "model": "deepseek-v4-pro", "provider": "deepseek", "priority": 1, "weight": 3 },
-        { "model": "gpt-5.4-mini", "provider": "openai", "priority": 5, "weight": 1 }
+        { "model": "deepseek-flash", "provider": "deepseek", "priority": 1, "weight": 3 },
+        { "model": "gpt-6-luna", "provider": "openai", "priority": 5, "weight": 1 }
       ]
     }
   },
@@ -341,7 +341,7 @@ blockcell gateway
 {
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -442,7 +442,7 @@ blockcell gateway
 - **Google Gemini**（Gemini 3.1 Pro、Gemini 3.5 Flash）
 - **DeepSeek**（DeepSeek V4 Pro、V3、R1）
 - **Kimi/Moonshot**（月之暗面）
-- **MiniMax**（[MiniMax M3](https://www.minimaxi.com/)）
+- **MiniMax**（[MiniMax M3.1 Flash](https://www.minimaxi.com/)）
 - **智谱 AI**（[GLM-5](https://bigmodel.cn/)）
 - **通义千问**（Qwen）
 - **xAI**（Grok）

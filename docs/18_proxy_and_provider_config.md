@@ -56,7 +56,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
 | `xai` | `https://api.x.ai/v1` | xAI / Grok 系列 |
 | `mistral` | `https://api.mistral.ai/v1` | Mistral 系列 |
 | `minimax` | `https://api.minimaxi.com/v1` | MiniMax 系列 |
-| `qwen` | `https://api.qwen.ai/v1` | Qwen 系列 |
+| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen 系列 |
 | `glm` | `https://api.z.ai/v1` | GLM 系列 |
 | `siliconflow` | `https://api.siliconflow.cn/v1` | SiliconFlow 聚合 |
 | `ollama` | `http://localhost:11434` | 本地 Ollama 服务（不需要 apiKey） |
@@ -73,7 +73,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": "deepseek",
       "maxContextTokens": 1048576,
       "reasoningEffort": "high"
@@ -92,7 +92,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
   },
   "agents": {
     "defaults": {
-      "model": "claude-3-5-sonnet-20241022"
+      "model": "claude-sonnet-5-5"
     }
   }
 }
@@ -108,7 +108,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
   },
   "agents": {
     "defaults": {
-      "model": "kimi-k2.6"
+      "model": "kimi-k3.1-pro"
     }
   }
 }
@@ -124,7 +124,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-3-5-sonnet"
+      "model": "anthropic/claude-sonnet-5-5"
     }
   }
 }
@@ -140,7 +140,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
   },
   "agents": {
     "defaults": {
-      "model": "ollama/qwen3.6"
+      "model": "ollama/qwen3.8"
     }
   }
 }
@@ -174,7 +174,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
 {
   "agents": {
     "defaults": {
-      "model": "deepseek-v4-pro",
+      "model": "deepseek-flash",
       "provider": null,
       "maxTokens": 8192,
       "temperature": 0.7,
@@ -192,7 +192,7 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `model` | `deepseek-v4-pro` | 主模型名称；`setup` 会按所选 provider 写入推荐默认模型 |
+| `model` | `deepseek-flash` | 主模型名称；`setup` 会按所选 provider 写入推荐默认模型 |
 | `provider` | null | 显式指定 provider（不指定则从 model 前缀推断） |
 | `maxTokens` | 8192 | 每次 LLM 调用的最大输出 token 数 |
 | `temperature` | 0.7 | 采样温度（0.0 ~ 1.0） |
@@ -227,14 +227,14 @@ WebUI 的完整配置编辑器也会直接读取/保存原始 `config.json5` 文
 
 ```json
 // 情形1：model 前缀自动推断（推荐，无需设置 provider）
-{ "model": "claude-3-5-sonnet-20241022" }
+{ "model": "claude-sonnet-5-5" }
 // → 自动推断使用 anthropic provider
 
 // 情形2：使用 openrouter 调用 Claude（model 前缀是 anthropic/，但想走 openrouter）
-{ "model": "anthropic/claude-3-5-sonnet", "provider": "openrouter" }
+{ "model": "anthropic/claude-sonnet-5-5", "provider": "openrouter" }
 
 // 情形3：本地 Ollama 模型
-{ "model": "ollama/qwen3.6" }
+{ "model": "ollama/qwen3.8" }
 // → 自动推断使用 ollama provider
 ```
 
@@ -352,7 +352,7 @@ Telegram 渠道有独立的代理配置，与 LLM provider 代理分开设置：
 blockcell config set network.proxy "http://127.0.0.1:7890"
 
 # 设置模型
-blockcell config set agents.defaults.model "deepseek-v4-pro"
+blockcell config set agents.defaults.model "deepseek-flash"
 
 # 设置 DeepSeek API Key
 blockcell config set providers.deepseek.apiKey "sk-xxxxxxxx"
@@ -400,11 +400,11 @@ blockcell config providers
   },
   "agents": {
     "defaults": {
-      "model": "claude-3-5-sonnet-20241022",
+      "model": "claude-sonnet-5-5",
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 20,
-      "evolutionModel": "deepseek-v4-pro",
+      "evolutionModel": "deepseek-flash",
       "evolutionProvider": "deepseek"
     }
   },

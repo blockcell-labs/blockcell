@@ -29,7 +29,7 @@ blockcell setup [OPTIONS]
 | `--force` | 重置现有配置为默认值后再开始设置 |
 | `--provider <NAME>` | 指定 LLM provider（deepseek/openai/kimi/anthropic/gemini/zhipu/qwen/xai/mistral/minimax/groq/siliconflow/openrouter/ollama） |
 | `--api-key <KEY>` | 指定 provider 的 API key |
-| `--model <MODEL>` | 指定模型名（如 deepseek-v4-pro、kimi-k2.6、claude-opus-4-8） |
+| `--model <MODEL>` | 指定模型名（如 deepseek-v4-pro、kimi-k3.1-pro、claude-opus-5-5） |
 | `--channel <NAME>` | 可选渠道配置（telegram/feishu/wecom/dingtalk/lark/qq/napcat/none；`skip` 也兼容） |
 | `--skip-provider-test` | 跳过保存后的 provider 配置验证 |
 
@@ -102,7 +102,7 @@ blockcell onboard [OPTIONS]
 | `--interactive` | 交互式向导模式 |
 | `--provider <NAME>` | 指定 LLM provider（如 deepseek、openai、kimi、anthropic） |
 | `--api-key <KEY>` | 指定 provider 的 API key |
-| `--model <MODEL>` | 指定模型名（如 deepseek-v4-pro、kimi-k2.6） |
+| `--model <MODEL>` | 指定模型名（如 deepseek-v4-pro、kimi-k3.1-pro） |
 | `--channels-only` | 仅更新渠道配置，跳过 provider 设置 |
 
 **示例：**
@@ -152,7 +152,7 @@ blockcell agent -a ops -m "帮我查询 BTC 价格"
 blockcell agent -a ops -s work:finance
 
 # 临时使用不同模型
-blockcell agent --agent ops --model gpt-5.5 --provider openai
+blockcell agent --agent ops --model gpt-6.1-sol --provider openai
 ```
 
 **统一斜杠命令：**

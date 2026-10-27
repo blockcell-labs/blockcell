@@ -42,13 +42,13 @@ blockcell's **Provider Pool** solves this by letting you declare a list of **mod
           "priority": 1
         },
         {
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5-5",
           "provider": "anthropic",
           "weight": 1,
           "priority": 1
         },
         {
-          "model": "gpt-5.5",
+          "model": "gpt-6.1-sol",
           "provider": "openai",
           "weight": 1,
           "priority": 2
@@ -103,7 +103,7 @@ Each completed call reports one of these outcomes back to the pool:
 ```json
 "modelPool": [
   { "model": "deepseek-v4-pro", "provider": "deepseek", "weight": 1, "priority": 1 },
-  { "model": "gpt-5.4-mini", "provider": "openai", "weight": 1, "priority": 2 }
+  { "model": "gpt-6-luna", "provider": "openai", "weight": 1, "priority": 2 }
 ]
 ```
 
@@ -114,8 +114,8 @@ Use DeepSeek normally, then fall back to GPT-5.4-mini when needed.
 ```json
 "modelPool": [
   { "model": "deepseek-v4-pro", "provider": "deepseek", "weight": 2, "priority": 1 },
-  { "model": "claude-3-5-sonnet-20241022", "provider": "anthropic", "weight": 1, "priority": 1 },
-  { "model": "gemini-3.5-flash", "provider": "gemini", "weight": 1, "priority": 1 }
+  { "model": "claude-sonnet-5-5", "provider": "anthropic", "weight": 1, "priority": 1 },
+  { "model": "gemini-3.8-flash", "provider": "gemini", "weight": 1, "priority": 1 }
 ]
 ```
 
@@ -125,7 +125,7 @@ Three primary models share traffic in a 2:1:1 ratio.
 
 ```json
 "modelPool": [
-  { "model": "ollama/qwen3.6", "provider": "ollama", "weight": 1, "priority": 1 },
+  { "model": "ollama/qwen3.8", "provider": "ollama", "weight": 1, "priority": 1 },
   { "model": "deepseek-v4-pro", "provider": "deepseek", "weight": 1, "priority": 2 }
 ]
 ```
@@ -138,7 +138,7 @@ Prefer local Ollama, then fall back to DeepSeek if local inference is unavailabl
 
 ```bash
 # Override model/provider for a single run without changing config
-blockcell agent --model gpt-5.5 --provider openai -m "Analyze this file"
+blockcell agent --model gpt-6.1-sol --provider openai -m "Analyze this file"
 ```
 
 ## Evolution provider

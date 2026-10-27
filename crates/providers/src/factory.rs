@@ -16,7 +16,8 @@ pub(crate) fn default_api_base(provider_name: &str) -> &'static str {
         "zhipu" | "glm" => "https://open.bigmodel.cn/api/paas/v4",
         "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
         "kimi" | "moonshot" => "https://api.moonshot.cn/v1",
-        "qwen" => "https://api.qwen.ai/v1",
+        // 百炼 DashScope 的 OpenAI 兼容端点；api.qwen.ai 并非可用的兼容入口
+        "qwen" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "xai" => "https://api.x.ai/v1",
         "mistral" => "https://api.mistral.ai/v1",
         "minimax" => "https://api.minimaxi.com/v1",
@@ -37,7 +38,9 @@ pub fn infer_provider_from_model(model: &str) -> Option<&'static str> {
         Some("gemini")
     } else if lower.starts_with("ollama/") {
         Some("ollama")
-    } else if lower.starts_with("kimi") || lower.starts_with("moonshot") {
+    } else if lower.starts_with("kimi")
+        || (lower.starts_with("moonshot") && !lower.starts_with("moonshotai/"))
+    {
         Some("kimi")
     } else if lower.starts_with("openai/")
         || lower.starts_with("gpt-")
@@ -48,6 +51,7 @@ pub fn infer_provider_from_model(model: &str) -> Option<&'static str> {
         Some("openai")
     } else if lower.starts_with("deepseek-ai/")
         || lower.starts_with("zai-org/")
+        || lower.starts_with("moonshotai/")
         || lower.starts_with("qwen/")
     {
         Some("siliconflow")
@@ -145,7 +149,7 @@ pub fn create_provider_with_tool_mode(
     } else {
         return Err(anyhow::anyhow!(
             "No LLM provider configured. Set 'provider' in config, use a recognized model prefix \
-             (e.g. 'anthropic/claude-...', 'gpt-5.5', 'gemini-...'), or add an API key to providers section."
+             (e.g. 'anthropic/claude-...', 'gpt-6.1-sol', 'gemini-...'), or add an API key to providers section."
         ));
     };
 
@@ -335,42 +339,68 @@ mod tests {
     #[test]
     fn test_infer_provider_from_model() {
         assert_eq!(
-            infer_provider_from_model("anthropic/claude-sonnet-4"),
+            infer_provider_from_model("anthropic/claude-opus-5-5"),
             Some("anthropic")
         );
         assert_eq!(
-            infer_provider_from_model("claude-3-5-sonnet"),
+            infer_provider_from_model("claude-fable-5-1"),
             Some("anthropic")
         );
         assert_eq!(
-            infer_provider_from_model("gemini-3.5-flash"),
+            infer_provider_from_model("gemini-3.8-flash"),
             Some("gemini")
         );
         assert_eq!(
-            infer_provider_from_model("gemini/gemini-pro"),
+            infer_provider_from_model("gemini/gemini-4-argon"),
             Some("gemini")
         );
-        assert_eq!(infer_provider_from_model("ollama/qwen3.6"), Some("ollama"));
-        assert_eq!(infer_provider_from_model("kimi-k2.6"), Some("kimi"));
-        assert_eq!(infer_provider_from_model("gpt-5.5"), Some("openai"));
-        assert_eq!(infer_provider_from_model("o4-mini"), Some("openai"));
-        assert_eq!(infer_provider_from_model("grok-4.3"), Some("xai"));
+        assert_eq!(infer_provider_from_model("ollama/qwen3.8"), Some("ollama"));
+        assert_eq!(infer_provider_from_model("kimi-k3.1-pro"), Some("kimi"));
+        assert_eq!(infer_provider_from_model("gpt-6.1-sol"), Some("openai"));
+        assert_eq!(infer_provider_from_model("gpt-6-astra"), Some("openai"));
+        assert_eq!(infer_provider_from_model("grok-4.7"), Some("xai"));
         assert_eq!(
             infer_provider_from_model("mistral-medium-2604"),
             Some("mistral")
         );
-        assert_eq!(infer_provider_from_model("glm-5.2"), Some("zhipu"));
-        assert_eq!(infer_provider_from_model("qwen3.7-max"), Some("qwen"));
-        assert_eq!(infer_provider_from_model("MiniMax-M3"), Some("minimax"));
+        assert_eq!(infer_provider_from_model("glm-5.3"), Some("zhipu"));
+        assert_eq!(infer_provider_from_model("qwen3.8-max"), Some("qwen"));
         assert_eq!(
-            infer_provider_from_model("deepseek-ai/DeepSeek-V4-Pro"),
+            infer_provider_from_model("MiniMax-M3.1-Flash"),
+            Some("minimax")
+        );
+        assert_eq!(
+            infer_provider_from_model("deepseek-ai/DeepSeek-V4.1-Flash"),
             Some("siliconflow")
         );
         assert_eq!(
-            infer_provider_from_model("deepseek-coder"),
+            infer_provider_from_model("moonshotai/Kimi-K2.7-Code"),
+            Some("siliconflow")
+        );
+        assert_eq!(
+            infer_provider_from_model("deepseek-flash"),
             Some("deepseek")
         );
         assert_eq!(infer_provider_from_model("some-unknown-model"), None);
+    }
+
+    #[test]
+    fn test_default_api_base_endpoints() {
+        assert_eq!(
+            default_api_base("qwen"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(default_api_base("openai"), "https://api.openai.com/v1");
+        assert_eq!(
+            default_api_base("deepseek"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(default_api_base("kimi"), "https://api.moonshot.cn/v1");
+        assert_eq!(
+            default_api_base("zhipu"),
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+        assert_eq!(default_api_base("xai"), "https://api.x.ai/v1");
     }
 
     #[test]
@@ -379,7 +409,7 @@ mod tests {
         // 配置 openai provider
         config.providers.get_mut("openai").unwrap().api_key = "sk-test".to_string();
         // model 是 anthropic 前缀，但显式指定 openai
-        let result = create_provider(&config, "anthropic/claude-sonnet-4", Some("openai"));
+        let result = create_provider(&config, "anthropic/claude-sonnet-5-5", Some("openai"));
         assert!(result.is_ok(), "显式 provider 应该覆盖 model 前缀");
     }
 
@@ -387,7 +417,7 @@ mod tests {
     fn test_create_provider_model_prefix() {
         let mut config = Config::default();
         config.providers.get_mut("anthropic").unwrap().api_key = "sk-ant-test".to_string();
-        let result = create_provider(&config, "claude-3-5-sonnet", None);
+        let result = create_provider(&config, "claude-opus-5-5", None);
         assert!(result.is_ok(), "model 前缀应该推断 anthropic");
     }
 
@@ -395,7 +425,7 @@ mod tests {
     fn test_create_provider_ollama_no_key_needed() {
         let config = Config::default();
         // ollama 不需要 api_key
-        let result = create_provider(&config, "qwen3.6", Some("ollama"));
+        let result = create_provider(&config, "qwen3.8", Some("ollama"));
         assert!(result.is_ok(), "ollama 不需要 api_key");
     }
 
@@ -414,7 +444,7 @@ mod tests {
     #[test]
     fn test_create_provider_explicit_missing_fails() {
         let config = Config::default(); // anthropic key 为空
-        let result = create_provider(&config, "gpt-5.5", Some("anthropic"));
+        let result = create_provider(&config, "gpt-6.1-sol", Some("anthropic"));
         assert!(result.is_err(), "显式指定但无 api_key 时应报错");
     }
 }
