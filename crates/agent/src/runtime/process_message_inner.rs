@@ -855,7 +855,8 @@ impl AgentRuntime {
         };
 
         let routed_agent_id = self.agent_id.as_deref();
-        let mut tool_names = resolve_effective_tool_names(
+        let runtime_granted = self.runtime_granted_tools();
+        let mut tool_names = resolve_effective_tool_names_with_grants(
             &self.config,
             decision.mode,
             routed_agent_id,
@@ -863,6 +864,7 @@ impl AgentRuntime {
             &decision.chat_intents,
             &available_tools,
             &msg.content,
+            &runtime_granted,
         );
 
         if tool_names.is_empty()

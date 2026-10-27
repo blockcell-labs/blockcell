@@ -334,6 +334,14 @@ impl ToolRegistry {
         self.scoped.remove(id).is_some()
     }
 
+    /// 当前视图下可见的**作用域工具**名称（经 `register_scoped` / `insert_scoped` 注册）。
+    ///
+    /// 这些工具由宿主代码注册（进化候选、会话级工具、嵌入方扩展），名字不来自用户消息，
+    /// 因此可以作为能力来源；与之相对，skill 声明与 `tool_search` 结果只能改变曝光。
+    pub fn scoped_tool_names(&self) -> Vec<String> {
+        self.visible_scoped().into_keys().collect()
+    }
+
     /// 设置查询视图（agent / session / 进化候选）。
     pub fn set_scope_view(&mut self, view: ToolScopeView) {
         self.view = view;

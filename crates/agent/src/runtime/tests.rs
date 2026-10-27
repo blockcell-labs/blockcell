@@ -84,9 +84,11 @@ fn static_scope_includes_other_intent_groups_without_matching_them() {
         }}}
     }))
     .unwrap();
-    let available = ["read_file", "video_process"]
+    // 用真实注册表。若只给一个缩小过的 available，断言会退化成"available 里有两个
+    // 工具，结果就有两个"，既验证不到意图组并入，也会掩盖基础集的注入。
+    let available: HashSet<String> = ToolRegistry::with_defaults()
+        .tool_names()
         .into_iter()
-        .map(str::to_string)
         .collect();
     let tools = resolve_effective_tool_names(
         &config,
@@ -97,7 +99,191 @@ fn static_scope_includes_other_intent_groups_without_matching_them() {
         &available,
         "好的",
     );
-    assert_eq!(tools, vec!["read_file", "video_process"]);
+
+    // 未命中的意图组（Media）也并入能力集
+    assert!(tools.contains(&"video_process".to_string()));
+    // 未注册的工具不并入
+    assert!(!tools.contains(&"missing_tool".to_string()));
+    // profile 声明的工具在
+    assert!(tools.contains(&"read_file".to_string()));
+    // 运行时基础集是无条件注入的：这条断言把"窄 profile 并不窄"固定成契约，
+    // 想真正变窄必须显式 denyTools（见下一个用例）。
+    for name in ["write_file", "edit_file", "shell_run", "grep"] {
+        assert!(tools.contains(&name.to_string()), "基础集注入缺失: {name}");
+    }
+}
+
+#[test]
+fn static_scope_narrow_profile_requires_explicit_denies() {
+    // 只写 coreTools 不会让 profile 变窄：运行时基础集与全局内核仍会注入。
+    // 这个用例固定"窄"的真实成本，避免文档一句"请用 denyTools 排除"被当成零成本。
+    let mut config = Config::default();
+    let profile = config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap();
+    profile.core_tools = vec!["read_file".to_string()];
+    profile.intent_tools.clear();
+    profile.intent_tools.insert(
+        "Unknown".into(),
+        blockcell_core::config::IntentToolEntryConfig::Tools(vec![]),
+    );
+    profile.deny_tools = [
+        "write_file",
+        "edit_file",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
+        "grep",
+        "glob",
+        "exec",
+        "exec_local",
+        "exec_skill_script",
+        "tool_search",
+        "web_search",
+        "web_fetch",
+        "activate_skill",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let available: HashSet<String> = ToolRegistry::with_defaults()
+        .tool_names()
+        .into_iter()
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::General,
+        None,
+        None,
+        &[IntentCategory::Unknown],
+        &available,
+        "继续",
+    );
+
+    assert!(tools.contains(&"read_file".to_string()));
+    for denied in [
+        "write_file",
+        "edit_file",
+        "shell_run",
+        "grep",
+        "glob",
+        "exec",
+        "tool_search",
+    ] {
+        assert!(
+            !tools.contains(&denied.to_string()),
+            "denyTools 未生效: {denied}"
+        );
+    }
+    // 全局内核（memory/spawn/cron 等）不在 deny 列表里，仍保留——这是设计而非疏漏。
+    assert!(tools.contains(&"memory_query".to_string()));
+}
+
+#[test]
+fn static_scope_unattended_exec_is_not_exposed() {
+    // `exec` 无沙箱运行：只有在"shell 侧存在沙箱后端"时它才构成绕过，此时必须
+    // 移出能力集。全权限后端没有可绕过的边界，且 workspace-auto 正是为 exec 设计
+    // 的审批档位（见 workspace_auto_* 用例），因此要保留。
+    for backend in [
+        SandboxBackend::MacOsSeatbelt,
+        SandboxBackend::LinuxBubblewrap,
+        SandboxBackend::LinuxLandlockSeccomp,
+    ] {
+        assert!(
+            super::exec_bypasses_sandbox_for_backend(backend),
+            "{backend:?} 下 exec 会绕过沙箱，应移除"
+        );
+    }
+    assert!(!super::exec_bypasses_sandbox_for_backend(
+        SandboxBackend::FullAccess
+    ));
+    assert!(!super::exec_bypasses_sandbox_for_backend(
+        SandboxBackend::ApprovalRequired
+    ));
+
+    // 端到端：全权限 + workspace-auto 必须保留 exec，否则 workspace-auto 这套
+    // 审批语义就失去了被治理的对象。
+    let mut config = Config::default();
+    config.tools.exec.sandbox_policy = Some("full-access".to_string());
+    config.tools.exec.approval_policy = Some("workspace-auto".to_string());
+    let available: HashSet<String> = ["exec", "shell_run", "read_file", "memory_query"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::Coding,
+        None,
+        None,
+        &[IntentCategory::Coding],
+        &available,
+        "跑一下测试",
+    );
+    assert!(
+        tools.contains(&"exec".to_string()),
+        "全权限后端下 exec 应保留（workspace-auto 依赖它）"
+    );
+    assert!(tools.contains(&"shell_run".to_string()));
+}
+
+#[tokio::test]
+async fn static_scope_scoped_tools_are_granted_within_their_view() {
+    // 作用域工具由宿主代码注册（进化候选、会话级工具），名字不来自用户消息，
+    // 因此应直接进入能力集；离开作用域视图后既不可见也不可执行。
+    let mut runtime = test_runtime();
+    let _session_tool = runtime.register_scoped_tool(
+        crate::runtime_kernel::ScopeTarget::Session("cli:grant-a".into()),
+        Arc::new(ScopedEchoTool("session")),
+    );
+
+    let inside = test_main_session_inbound("cli", "grant-a");
+    runtime.sync_tool_scope_view(&inside.session_key());
+    assert!(
+        runtime.tool_within_capability("scoped_echo", &serde_json::json!({})),
+        "作用域内的宿主注册工具应被授权"
+    );
+
+    let outside = test_main_session_inbound("cli", "grant-b");
+    runtime.sync_tool_scope_view(&outside.session_key());
+    assert!(
+        !runtime.tool_within_capability("scoped_echo", &serde_json::json!({})),
+        "离开作用域后不应再授权"
+    );
+}
+
+#[tokio::test]
+async fn static_scope_deny_overrides_host_granted_tool() {
+    // 宿主授权不等于绕过拒绝：denyTools 仍然最后生效。
+    let provider_tool = Arc::new(RuntimeProviderTool {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(Arc::new(TestProvider));
+    runtime.ghost_memory_lifecycle = Some(Arc::new(
+        crate::ghost_memory_provider::GhostMemoryProviderManager::new()
+            .with_provider(provider_tool),
+    ));
+    assert!(runtime.tool_within_capability("external_memory_lookup", &serde_json::json!({})));
+
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("external_memory_lookup".into());
+    assert!(
+        !runtime.tool_within_capability("external_memory_lookup", &serde_json::json!({})),
+        "denyTools 必须覆盖宿主授权"
+    );
 }
 
 #[test]
@@ -659,7 +845,7 @@ async fn static_scope_search_promotes_light_schema_in_same_round_and_rechecks_la
 }
 
 #[tokio::test]
-async fn static_scope_provider_and_ghost_additions_cannot_grant_unconfigured_tools() {
+async fn static_scope_host_registered_provider_tools_are_authorized() {
     let llm = Arc::new(ProviderToolCaptureProvider {
         seen_tools: Mutex::new(Vec::new()),
     });
@@ -674,16 +860,25 @@ async fn static_scope_provider_and_ghost_additions_cannot_grant_unconfigured_too
     let mut msg = test_main_session_inbound("cli", "scope-provider-ghost");
     msg.metadata = serde_json::json!({"ghost":true});
     runtime.process_message(msg).await.unwrap();
-    assert!(provider_tool.calls.lock().unwrap().is_empty());
-    assert!(llm
-        .seen_tools
-        .lock()
-        .unwrap()
+
+    // ghost memory provider 的工具由宿主注册、名字运行时才产生，用户无法预写进
+    // profile，因此必须进入能力集并下发 schema；否则该功能在默认配置下等于关闭。
+    assert!(
+        runtime.tool_within_capability("external_memory_lookup", &serde_json::json!({})),
+        "宿主注册的 provider 工具应被授权"
+    );
+    let seen = llm.seen_tools.lock().unwrap();
+    assert!(!seen.is_empty());
+    assert!(
+        seen.iter().any(|schemas| schemas
+            .iter()
+            .any(|schema| schema["function"]["name"] == "external_memory_lookup")),
+        "provider 工具的 schema 应下发给模型"
+    );
+    // 未注册、未配置的工具仍然不可用（授权只覆盖宿主实际注册的工具）。
+    assert!(seen.iter().all(|schemas| schemas
         .iter()
-        .all(|schemas| schemas.iter().all(|schema| {
-            !["external_memory_lookup", "notification", "community_hub"]
-                .contains(&schema["function"]["name"].as_str().unwrap())
-        })));
+        .all(|schema| schema["function"]["name"] != "notification")));
 }
 
 #[tokio::test]
@@ -4582,7 +4777,6 @@ async fn runtime_exposes_and_dispatches_ghost_memory_provider_tools() {
         calls: Mutex::new(Vec::new()),
     });
     let mut runtime = test_runtime_with_provider(llm_provider.clone());
-    allow_test_tool(&mut runtime, "external_memory_lookup");
     runtime.ghost_memory_lifecycle = Some(Arc::new(
         crate::ghost_memory_provider::GhostMemoryProviderManager::new()
             .with_provider(provider_tool.clone()),

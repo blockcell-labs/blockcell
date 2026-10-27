@@ -12,6 +12,8 @@
 - 意图路由默认使用静态 agent 工具能力集，避免“继续 / OK”等后续消息导致工具丢失；可通过 `intentRouter.toolSelection: "gate"` 保留旧的意图裁剪。
 - 静态模式下移除 Coding 的额外 schema 隐藏，授权工具统一进入发现目录，搜索后同轮补全 light schema，工具顺序保持稳定。
 - profile 拒绝与能力上限统一约束 skill、MCP 发现、ghost/provider 追加、只读预取和执行管线；shell 别名与规范名称同时受 policy 限制。
+- 宿主在运行时注册的工具（ghost memory provider、`register_scoped` 作用域工具）重新计入能力集：这类名字由宿主代码产生、且运行时才确定，无法预先写进 profile；`denyTools` 仍最后生效。
+- `exec` 改为仅在存在沙箱后端（seatbelt / bubblewrap / landlock）时移出能力集——此时它会绕过沙箱。全权限后端保留 `exec`，因为 `approvalPolicy: workspace-auto` 正是为它设计的审批档位。
 
 ## [0.1.8] - 2026-10-22
 

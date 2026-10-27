@@ -1553,12 +1553,14 @@ fn profile_denies_tool(config: &Config, agent_id: Option<&str>, name: &str) -> b
         })
 }
 
-/// Static ceiling: profile union + existing runtime foundation + MCP tools
-/// authorized when building the agent registry. No message, skill or mode input.
+/// Static ceiling: profile union + existing runtime foundation + host-registered
+/// runtime tools + MCP tools authorized when building the agent registry.
+/// No message, skill or mode input.
 fn resolve_static_tool_names(
     config: &Config,
     agent_id: Option<&str>,
     available: &HashSet<String>,
+    runtime_granted: &HashSet<String>,
 ) -> Vec<String> {
     let Some(mut tools) = IntentToolResolver::new(config).resolve_tool_scope(agent_id) else {
         return Vec::new();
@@ -1595,15 +1597,27 @@ fn resolve_static_tool_names(
             available
                 .iter()
                 .filter(|name| {
-                    name.contains("__")
-                        && blockcell_tools::mcp::manager::mcp_access_allows(
-                            &config.agents.defaults.allowed_mcp_servers,
-                            &config.agents.defaults.allowed_mcp_tools,
-                            name,
-                        )
+                    // 宿主在运行时注册的工具（作用域工具、ghost provider）与构建期
+                    // 通过 MCP 白名单授权的工具可以进入能力集；skill 声明与搜索
+                    // 结果不在此列，它们只能改变曝光。
+                    runtime_granted.contains(*name)
+                        || (name.contains("__")
+                            && blockcell_tools::mcp::manager::mcp_access_allows(
+                                &config.agents.defaults.allowed_mcp_servers,
+                                &config.agents.defaults.allowed_mcp_tools,
+                                name,
+                            ))
                 })
                 .cloned(),
         );
+    }
+    // `exec` 无沙箱运行。当 shell 侧存在"沙箱内自动执行"的后端时，保留 `exec`
+    // 等于给模型一条绕过沙箱的通道，因此从能力集移除。全权限后端没有可绕过的
+    // 沙箱，其危险命令由 workspace-auto 与路径策略治理，故保留。
+    // 该规则原在 `apply_coding_tool_defaults` 内且只对 Coding 生效；静态能力集
+    // 与 mode 无关，所以在这里无条件生效，否则 rank 模式会静默失去这层保护。
+    if exec_bypasses_sandbox(config) {
+        tools.retain(|name| name != "exec");
     }
     replace_legacy_shell_tool(&mut tools, available);
     tools.retain(|name| {
@@ -1650,6 +1664,27 @@ fn shell_runs_unattended(config: &Config) -> bool {
         return false;
     };
     shell_runs_unattended_for_backend(native_backend(policy), approval_policy)
+}
+
+/// `exec` 是否绕过了当前配置下真实生效的沙箱。
+///
+/// 只有沙箱后端（seatbelt / bubblewrap / landlock）才会被 `exec` 绕过；全权限后端
+/// 没有可绕过的边界，且 `workspace-auto` 正是为 `exec` 设计的审批档位
+/// （见 `workspace_auto_*` 用例），因此不能把 `exec` 一起裁掉。
+fn exec_bypasses_sandbox_for_backend(backend: SandboxBackend) -> bool {
+    matches!(
+        backend,
+        SandboxBackend::MacOsSeatbelt
+            | SandboxBackend::LinuxBubblewrap
+            | SandboxBackend::LinuxLandlockSeccomp
+    )
+}
+
+fn exec_bypasses_sandbox(config: &Config) -> bool {
+    let Ok(policy) = SandboxPolicy::parse(config.tools.exec.sandbox_policy.as_deref()) else {
+        return false;
+    };
+    exec_bypasses_sandbox_for_backend(native_backend(policy))
 }
 
 fn apply_coding_tool_defaults(
@@ -1771,7 +1806,8 @@ fn ghost_memory_provider_tool_schemas(
         .unwrap_or_default()
 }
 
-fn resolve_effective_tool_names(
+/// 生产入口：静态模式下把宿主运行时授权的工具并入能力集。
+fn resolve_effective_tool_names_with_grants(
     config: &Config,
     mode: InteractionMode,
     agent_id: Option<&str>,
@@ -1779,9 +1815,10 @@ fn resolve_effective_tool_names(
     intents: &[IntentCategory],
     available_tools: &HashSet<String>,
     user_message: &str,
+    runtime_granted: &HashSet<String>,
 ) -> Vec<String> {
     if uses_static_tool_scope(config) {
-        return resolve_static_tool_names(config, agent_id, available_tools);
+        return resolve_static_tool_names(config, agent_id, available_tools, runtime_granted);
     }
     // 1. 先检查 intent_router.enabled
     let router_enabled = config
@@ -1881,6 +1918,33 @@ fn resolve_effective_tool_names(
     tool_names.sort();
     tool_names.dedup();
     tool_names
+}
+
+/// 配置层测试入口：只按配置解析，不注入运行时授权。
+///
+/// 生产路径必须用 [`resolve_effective_tool_names_with_grants`]，否则宿主在运行时
+/// 注册的工具（ghost provider、作用域工具）会被漏掉。保留这个只读包装是为了让
+/// 配置层用例不必关心注册表状态。
+#[cfg(test)]
+fn resolve_effective_tool_names(
+    config: &Config,
+    mode: InteractionMode,
+    agent_id: Option<&str>,
+    active_skill: Option<&ActiveSkillContext>,
+    intents: &[IntentCategory],
+    available_tools: &HashSet<String>,
+    user_message: &str,
+) -> Vec<String> {
+    resolve_effective_tool_names_with_grants(
+        config,
+        mode,
+        agent_id,
+        active_skill,
+        intents,
+        available_tools,
+        user_message,
+        &HashSet::new(),
+    )
 }
 
 fn resolve_profile_tool_names(
@@ -2624,6 +2688,25 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// 宿主在运行时注册的工具名：作用域工具（`register_scoped`，含进化候选与会话级
+    /// 工具）以及 ghost memory provider 暴露的工具。
+    ///
+    /// 这些名字由宿主代码产生，不是模型可控输入，因此可以作为能力来源；skill 声明、
+    /// `tool_search` 结果与 MCP 搜索仍然只能改变曝光。`denyTools` 依旧最后生效。
+    fn runtime_granted_tools(&self) -> HashSet<String> {
+        let mut granted: HashSet<String> =
+            self.tool_registry.scoped_tool_names().into_iter().collect();
+        granted.extend(
+            ghost_memory_provider_tool_schemas(
+                self.ghost_memory_lifecycle.as_deref(),
+                &HashSet::new(),
+            )
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string)),
+        );
+        granted
+    }
+
     fn available_capability_tools(&self) -> HashSet<String> {
         let mut available: HashSet<_> = self.tool_registry.tool_names().into_iter().collect();
         available.extend(
@@ -2667,9 +2750,14 @@ impl AgentRuntime {
         }
         let mut available = self.available_capability_tools();
         available.insert(effective.to_string());
-        resolve_static_tool_names(&self.config, self.agent_id.as_deref(), &available)
-            .iter()
-            .any(|allowed| allowed == effective)
+        resolve_static_tool_names(
+            &self.config,
+            self.agent_id.as_deref(),
+            &available,
+            &self.runtime_granted_tools(),
+        )
+        .iter()
+        .any(|allowed| allowed == effective)
     }
 
     fn filter_capability_tools(&self, names: &mut Vec<String>) {
@@ -2677,6 +2765,7 @@ impl AgentRuntime {
             &self.config,
             self.agent_id.as_deref(),
             &self.available_capability_tools(),
+            &self.runtime_granted_tools(),
         )
         .into_iter()
         .collect();
