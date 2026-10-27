@@ -1,18 +1,32 @@
 # intentRouter 多智能体配置指南
 
-`intentRouter` 现在是 blockcell 中 **意图到工具映射的唯一配置入口**。如果你想让不同的 agent 拥有不同的能力范围，推荐把“agent 归属”和“工具编排”拆开配置：
+`intentRouter` 是 blockcell 中 **agent 工具能力范围的配置入口**。如果你想让不同的 agent 拥有不同的能力范围，推荐把“agent 归属”和“工具编排”拆开配置：
 
 - 在 `agents.list[].intentProfile` 上绑定每个 agent 使用的 profile
 - 在 `intentRouter.profiles` 中定义可复用工具集
 - 用 `coreTools` 放共享基础工具
-- 用 `intentTools` 按意图追加工具
+- 默认 `toolSelection: "rank"`：`coreTools` 与全部 `intentTools` 条目共同组成静态能力集，消息意图不再裁剪工具
 - 用 `denyTools` 从最终结果里移除不允许暴露的工具
-- 为 `Chat` 显式写 `{ "inheritBase": false, "tools": [] }`
+- `Chat: { "inheritBase": false, "tools": [] }` 在默认静态模式下不清空工具；依赖旧行为时显式设置 `toolSelection: "gate"`
 - 始终配置 `Unknown`
 - 如果只是想临时关闭意图分类但保留全量工具，可用 `enabled: false` + `loadAllTools: true`
 - 如果内置意图规则不能覆盖你的业务词汇，可用 `intentRules` 追加关键词或正则
 
 > `allowedMcpServers` / `allowedMcpTools` 是 agent 级别的 MCP 可见性白名单，字段名是 camelCase。
+
+## 静态能力与兼容迁移（2026-10-27）
+
+默认 `intentRouter.toolSelection` 为 `"rank"`。名称为兼容未来排序提示保留；当前工具 schema 按既有展示优先级和名称稳定排序，不随本轮意图重排。意图继续决定交互提示，不决定工具准入。
+
+能力范围由 profile 工具并集、运行时基础工具、agent 的 MCP 白名单与注册表共同决定，最后统一扣除 `denyTools` 和未注册工具。运行时基础工具包括既有全局内核（memory、agent/spawn、skill、session、cron、web_fetch、tool_search、mcp_search_tools 等），以及此前 Coding 隐式补充的 `read_file`、`write_file`、`edit_file`、`grep`、`shell_run`；同时保留 `glob`、shell 的 poll/input/close 和仅在 skill 目录中执行的 `exec_skill_script` / `exec_local`。这些工具仍受执行策略和确认机制约束。自定义窄 profile 也应通过 `denyTools` 排除不需要的基础工具；`denyTools: ["shell"]` 会同时排除 shell 的四个单用途工具。
+
+升级会扩大此前依赖意图裁剪的工具范围。要保留旧的逐轮裁剪和 Coding 曝光行为，配置 `"intentRouter": { "toolSelection": "gate" }`。两种模式都强制执行 `denyTools`；兼容开关不能恢复绕过拒绝规则的行为。
+
+静态模式下，Coding 不再额外隐藏工具 schema。展示为 `discoverable` 的工具先进入授权发现目录，经 `tool_search` 或 MCP 搜索后补全完整 schema；发现只能改变曝光，不能扩权。普通工具继续复用既有 full/light schema 机制，light 工具搜索后在同轮替换为完整 schema。
+
+skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围。自定义 skill 或 memory provider 使用的工具名也需要出现在 profile 中（内置基础工具和已授权 MCP 工具除外）。ghost 的工具追加、持久化发现记录和旧 `shell` 调用同样不能绕过 `denyTools`。profile 不存在时静态模式关闭工具能力，不回退到全局内核。
+
+`ToolPolicy` 仍从 `~/.blockcell/tool_policy.yaml` 加载，按参数、路径和通道求值，优先级为 deny > ask > allow。hook 改写后的参数必须经过 policy；shell 别名与规范名称同时受最严格的匹配结果约束。它与 profile 的静态能力限制同时生效。
 
 ## 先理解这几个规则
 
@@ -21,9 +35,9 @@
 3. 如果还是找不到，就回退到 `intentRouter.defaultProfile`。
 4. `agents.list` 为空时，runtime 会回退到一个隐式的 `default` agent。
 5. `intentRouter` 缺失时，blockcell 会自动注入内置默认 router。
-6. 如果 `intentRouter.enabled = false` 且 `loadAllTools = false`，runtime 仍然会解析 profile，但最终只使用该 profile 的 `Unknown` 工具集。
+6. 如果 `intentRouter.enabled = false` 且 `loadAllTools = false`，profile 部分使用 `Unknown` 工具集；静态模式仍保留运行时基础工具和 agent 已授权的 MCP 工具。
 7. 如果 `intentRouter.enabled = false` 且 `loadAllTools = true`，runtime 会暴露当前可用的全部工具，再应用当前 profile 的 `denyTools`。
-8. 如果 `intentRouter.enabled = true`，`loadAllTools` 会被忽略，仍按意图分类解析工具。
+8. 如果 `intentRouter.enabled = true`，`loadAllTools` 会被忽略，默认取 profile 全部意图组的并集；仅 `toolSelection: "gate"` 按本轮意图解析工具。
 9. 每个 profile 都必须提供 `Unknown`，否则配置校验会失败。
 
 ## 关闭分类但保留全量工具
@@ -54,7 +68,7 @@
 - `enabled: false` 表示不走意图分类
 - `loadAllTools: true` 表示返回所有当前注册且可用的工具
 - `denyTools` 仍然会生效，适合保留全量能力但排除高风险工具
-- 如果不设置 `loadAllTools`，默认是 `false`，会回到只暴露 `Unknown` 工具集的保守行为
+- 如果不设置 `loadAllTools`，默认是 `false`，profile 部分会回到 `Unknown`，运行时基础工具和已授权 MCP 工具仍保留
 
 ## 追加自定义意图规则
 
@@ -165,7 +179,7 @@
 
 ### 这个例子怎么理解
 
-- `default` 的 `Chat` 不继承基础工具，所以闲聊不会意外带出工具能力。
+- 默认静态模式下，`default` 在闲聊和后续任务中保留相同工具能力；`Chat.inheritBase` 仅在 `gate` 模式下生效。
 - `default` 的 `FileOps` 和 `WebSearch` 分别对应文件操作和网页搜索场景。
 - `ops` 的 `DevOps` 允许排障、加密、文件编辑和 HTTP 调试工具。
 - `ops` 额外配置了 `denyTools: ["email"]`，即使别处把 `email` 放进来了，这个 profile 也会把它移除。
@@ -264,11 +278,11 @@
 
 ### 这个例子怎么理解
 
-- `support` 代理的是高频聊天和工单回复，所以 `Chat` 仍然是零工具。
+- `support` 的工具范围由 profile 静态决定；高频聊天不会清空工具，需要限制的基础工具应加入 `denyTools`。
 - `finance` 专门把行情、告警、图表和日报工具聚在一起，适合做“金融分析 Agent”。
 - `admin` 允许系统控制和运维类工具，但没有金融类能力。
 - 如果你把 `finance` 设成某个渠道的 owner，那么这类消息就会优先落到金融 profile 上。
-- 如果 `intentRouter.enabled = false`，这三个 profile 仍会存在，但每个 agent 最终只会拿到自己 profile 的 `Unknown` 工具集。
+- 如果 `intentRouter.enabled = false`，这三个 profile 仍会存在，在 `loadAllTools: false` 时 profile 部分只使用 `Unknown`；运行时基础工具和 agent 已授权的 MCP 工具仍保留。
 
 > 以上 MCP server / tool 名称只是示例，请替换成你自己 `mcp.json` + `mcp.d` 里真实存在的名称。
 

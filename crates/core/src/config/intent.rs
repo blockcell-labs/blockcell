@@ -86,6 +86,9 @@ fn default_intent_rule_priority() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentRouterConfig {
+    /// Static capability union by default; `gate` retains legacy intent gating.
+    #[serde(default)]
+    pub tool_selection: ToolSelection,
     #[serde(default = "super::default_true")]
     pub enabled: bool,
     /// 当 enabled=false 时，是否全量加载所有可用工具。
@@ -104,9 +107,18 @@ pub struct IntentRouterConfig {
     pub intent_rules: Vec<IntentRuleConfig>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSelection {
+    #[default]
+    Rank,
+    Gate,
+}
+
 impl Default for IntentRouterConfig {
     fn default() -> Self {
         Self {
+            tool_selection: ToolSelection::Rank,
             enabled: true,
             load_all_tools: false,
             default_profile: default_intent_router_profile(),

@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
 并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [Unreleased]
+
+### 修复与变更
+
+- 意图路由默认使用静态 agent 工具能力集，避免“继续 / OK”等后续消息导致工具丢失；可通过 `intentRouter.toolSelection: "gate"` 保留旧的意图裁剪。
+- 静态模式下移除 Coding 的额外 schema 隐藏，授权工具统一进入发现目录，搜索后同轮补全 light schema，工具顺序保持稳定。
+- profile 拒绝与能力上限统一约束 skill、MCP 发现、ghost/provider 追加、只读预取和执行管线；shell 别名与规范名称同时受 policy 限制。
+
 ## [0.1.8] - 2026-10-22
 
 本版本由两条主线组成：**Agent Runtime 架构演进**（吸收新一代 Agent Runtime 的可组合、可观察、可拦截、可回放设计，同时保留 Self-Evolution / Ghost Learning 能力），以及**全仓安全与正确性收口**（覆盖全部 crate 的多轮审查，把工具准入、沙箱边界、路径与凭据处理收敛到统一原语）。目标是把“能跑”提升到“可解释、可回放、可审计”。

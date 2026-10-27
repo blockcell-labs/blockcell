@@ -845,11 +845,14 @@ impl AgentRuntime {
             return result;
         }
 
-        let available_tools: HashSet<String> = self
-            .tool_registry
-            .model_visible_tool_names()
-            .into_iter()
-            .collect();
+        let available_tools: HashSet<String> = if uses_static_tool_scope(&self.config) {
+            self.available_capability_tools()
+        } else {
+            self.tool_registry
+                .model_visible_tool_names()
+                .into_iter()
+                .collect()
+        };
 
         let routed_agent_id = self.agent_id.as_deref();
         let mut tool_names = resolve_effective_tool_names(
@@ -862,7 +865,10 @@ impl AgentRuntime {
             &msg.content,
         );
 
-        if tool_names.is_empty() && !matches!(decision.mode, InteractionMode::Chat) {
+        if tool_names.is_empty()
+            && !uses_static_tool_scope(&self.config)
+            && !matches!(decision.mode, InteractionMode::Chat)
+        {
             tool_names = global_core_tool_names();
             tool_names.retain(|name| available_tools.contains(name));
         }
@@ -888,7 +894,8 @@ impl AgentRuntime {
             }
         }
 
-        if should_auto_add_activate_skill(decision.mode, decision.active_skill.is_some())
+        if (uses_static_tool_scope(&self.config)
+            || should_auto_add_activate_skill(decision.mode, decision.active_skill.is_some()))
             && !skill_cards.is_empty()
             && !tool_names
                 .iter()
@@ -898,7 +905,7 @@ impl AgentRuntime {
         }
         hide_runtime_handle_tools(&mut tool_names, self.runtime_handle.is_some());
 
-        let provider_tool_schemas = ghost_memory_provider_tool_schemas(
+        let mut provider_tool_schemas = ghost_memory_provider_tool_schemas(
             self.ghost_memory_lifecycle.as_deref(),
             &disabled_tools,
         );
@@ -913,6 +920,14 @@ impl AgentRuntime {
             })
             .collect::<Vec<_>>();
         tool_names.extend(provider_tool_names);
+
+        // Late runtime additions cannot widen the static agent ceiling.
+        self.filter_capability_tools(&mut tool_names);
+        provider_tool_schemas.retain(|schema| {
+            schema["function"]["name"]
+                .as_str()
+                .is_some_and(|name| tool_names.iter().any(|allowed| allowed == name))
+        });
 
         tool_names.sort();
         tool_names.dedup();
@@ -1067,7 +1082,9 @@ impl AgentRuntime {
             // Chat mode: no tools
             vec![]
         } else {
-            let schema_names: Vec<&String> = if decision.mode == InteractionMode::Coding {
+            let schema_names: Vec<&String> = if !uses_static_tool_scope(&self.config)
+                && decision.mode == InteractionMode::Coding
+            {
                 tool_names
                     .iter()
                     .filter(|name| {
@@ -1080,10 +1097,15 @@ impl AgentRuntime {
                     })
                     .collect()
             } else {
-                tool_names.iter().collect()
+                tool_names
+                    .iter()
+                    .filter(|name| !self.tool_registry.is_model_hidden(name))
+                    .collect()
             };
             let tool_name_refs: Vec<&str> = schema_names.iter().map(|name| name.as_str()).collect();
-            let mut schemas = if decision.mode == InteractionMode::Coding {
+            let mut schemas = if !uses_static_tool_scope(&self.config)
+                && decision.mode == InteractionMode::Coding
+            {
                 self.tool_registry
                     .get_tiered_schemas_core_only(&tool_name_refs, CODING_CORE_TOOL_NAMES)
             } else {
@@ -1451,7 +1473,11 @@ impl AgentRuntime {
                 let activate_skill_call = response
                     .tool_calls
                     .iter()
-                    .find(|call| call.name == ACTIVATE_SKILL_TOOL_NAME)
+                    .find(|call| {
+                        call.name == ACTIVATE_SKILL_TOOL_NAME
+                            && tool_names.contains(&call.name)
+                            && !disabled_tools.contains(&call.name)
+                    })
                     .cloned();
 
                 // Add assistant message with tool calls — use direct struct literal
@@ -1652,8 +1678,9 @@ impl AgentRuntime {
                         }
                     }
                     let tool_timer = ScopedTimer::new();
-                    let legacy_shell_call =
-                        tool_call.name == "shell" && available_tools.contains("shell");
+                    let legacy_shell_call = tool_call.name == "shell"
+                        && available_tools.contains("shell")
+                        && self.tool_within_capability(&tool_call.name, &tool_call.arguments);
                     let tool_output = if legacy_shell_call
                         || tool_names.iter().any(|allowed| allowed == &tool_call.name)
                     {
@@ -1710,6 +1737,8 @@ impl AgentRuntime {
                         for revealed_tool in revealed_tools {
                             if disabled_tools.contains(&revealed_tool)
                                 || !self.tool_registry.is_model_hidden(&revealed_tool)
+                                || !self
+                                    .tool_within_capability(&revealed_tool, &serde_json::json!({}))
                             {
                                 continue;
                             }
@@ -1751,13 +1780,9 @@ impl AgentRuntime {
                                 &session_key,
                                 &revealed_tool,
                             );
-                            if !tools
-                                .iter()
-                                .any(|current| current["function"]["name"] == revealed_tool)
-                            {
-                                tools.push(schema);
-                                _schema_cache_dirty = true;
-                            }
+                            tools.retain(|current| current["function"]["name"] != revealed_tool);
+                            tools.push(schema);
+                            _schema_cache_dirty = true;
                         }
                         self.tool_registry.sort_model_schemas(&mut tools);
                     }

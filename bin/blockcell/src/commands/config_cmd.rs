@@ -86,8 +86,9 @@ pub async fn schema() -> anyhow::Result<()> {
             },
             "intentRouter": {
                 "type": "object",
-                "description": "Config-driven intent to tool routing",
+                "description": "Static agent tool capabilities with optional legacy intent gating",
                 "properties": {
+                    "toolSelection": { "type": "string", "enum": ["rank", "gate"], "default": "rank" },
                     "enabled": { "type": "boolean", "default": true },
                     "defaultProfile": { "type": "string", "default": "default" },
                     "agentProfiles": {

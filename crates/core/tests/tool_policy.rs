@@ -263,6 +263,31 @@ fn deny_and_ask_outrank_allow_regardless_of_order() {
 }
 
 #[test]
+fn broad_deny_cannot_be_overridden_by_specific_allow_or_ask() {
+    for reverse in [false, true] {
+        let mut rules = vec![
+            rule("deny-all", "*", ToolPolicyDecision::Deny),
+            rule("allow-read", "read_file", ToolPolicyDecision::Allow),
+            rule("ask-read", "read_file", ToolPolicyDecision::Ask),
+        ];
+        if reverse {
+            rules.reverse();
+        }
+        let policy = ToolPolicy::from_config(ToolPolicyConfig {
+            rules,
+            ..Default::default()
+        });
+        let eval = policy.evaluate(&ctx(
+            "read_file",
+            &serde_json::json!({"path":"safe.txt"}),
+            "cli",
+        ));
+        assert_eq!(eval.decision, ToolPolicyDecision::Deny);
+        assert_eq!(eval.matched_rule.as_deref(), Some("deny-all"));
+    }
+}
+
+#[test]
 fn unknown_inherited_group_fails_closed() {
     let mut inherited = rule("strict", "*", ToolPolicyDecision::Ask);
     inherited.inherit_from = Some("missing-group".to_string());

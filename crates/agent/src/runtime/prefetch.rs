@@ -66,6 +66,7 @@ impl AgentRuntime {
             // main loop would skip/reject such calls, so prefetching them
             // would perform real I/O whose result is thrown away.
             let admitted = tool_names.iter().any(|name| name == &call.name)
+                && self.tool_within_capability(&call.name, &call.arguments)
                 && loop_guard.would_admit_batch(&call.name, &pending_by_tool, pending_total)
                 && self.prefetch_candidate(call, disabled_tools, disabled_skills);
             if admitted {

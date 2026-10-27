@@ -70,6 +70,7 @@ mod shell_wrapper_tests {
 /// 单次工具调用在管线中流动的状态。
 pub(crate) struct ToolInvocation<'a> {
     pub(crate) call: &'a ToolCallRequest,
+    pub(crate) original_name: &'a str,
     pub(crate) msg: &'a InboundMessage,
     /// 经 listener 改写后、被所有 guard 检查并最终交给工具的参数。
     pub(crate) args: serde_json::Value,
@@ -263,6 +264,12 @@ impl AgentRuntime {
         prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolCallOutput {
         let original_name = tool_call.name.clone();
+        if !self.tool_within_capability(&original_name, &tool_call.arguments) {
+            let denied = scoped_tool_denied_result(&original_name);
+            self.record_unexecuted_tool_call(tool_call, msg, ToolOutcome::Rejected, &denied)
+                .await;
+            return ToolCallOutput::rejected(denied);
+        }
         // 预取阶段已触发过 tool/pre-execute：以（可能被 listener 改写后的）
         // 预取参数为准并跳过重复触发，保证 hook 每次调用只执行一次且
         // 后续准入检查作用于同一组参数。
@@ -302,6 +309,7 @@ impl AgentRuntime {
         }
         let mut inv = ToolInvocation {
             call: tool_call,
+            original_name: &original_name,
             msg,
             args,
             policy_confirmed: false,
@@ -520,7 +528,7 @@ impl AgentRuntime {
         let name = &inv.call.name;
         let (disabled_tools, disabled_skills) =
             load_disabled_toggles_pair(&self.paths, "tools", "skills");
-        if disabled_tools.contains(name) {
+        if disabled_tools.contains(name) || disabled_tools.contains(inv.original_name) {
             return Err(disabled_tool_result(name));
         }
         // Also block disabled skills invoked as tools (skill scripts registered as tools)
@@ -531,8 +539,12 @@ impl AgentRuntime {
     }
 
     async fn guard_tool_policy(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
+        // Recheck after the hook: legacy shell actions can be rewritten.
+        if !self.tool_within_capability(&inv.call.name, &inv.args) {
+            return Err(scoped_tool_denied_result(&inv.call.name));
+        }
         match self
-            .check_tool_policy(&inv.call.name, &inv.args, inv.msg)
+            .check_tool_policy(inv.original_name, &inv.args, inv.msg)
             .await
         {
             PolicyOutcome::Proceed => Ok(()),

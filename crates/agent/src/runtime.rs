@@ -1529,6 +1529,93 @@ const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "tool_search",
 ];
 
+fn uses_static_tool_scope(config: &Config) -> bool {
+    config
+        .intent_router
+        .as_ref()
+        .is_none_or(|router| router.tool_selection == blockcell_core::config::ToolSelection::Rank)
+}
+
+fn profile_denies_tool(config: &Config, agent_id: Option<&str>, name: &str) -> bool {
+    config
+        .intent_router
+        .as_ref()
+        .and_then(|router| {
+            config
+                .resolve_intent_profile_id(agent_id)
+                .and_then(|id| router.profiles.get(&id))
+        })
+        .is_some_and(|profile| {
+            profile
+                .deny_tools
+                .iter()
+                .any(|denied| denied == name || (denied == "shell" && name.starts_with("shell_")))
+        })
+}
+
+/// Static ceiling: profile union + existing runtime foundation + MCP tools
+/// authorized when building the agent registry. No message, skill or mode input.
+fn resolve_static_tool_names(
+    config: &Config,
+    agent_id: Option<&str>,
+    available: &HashSet<String>,
+) -> Vec<String> {
+    let Some(mut tools) = IntentToolResolver::new(config).resolve_tool_scope(agent_id) else {
+        return Vec::new();
+    };
+    if config
+        .intent_router
+        .as_ref()
+        .is_some_and(|router| !router.enabled && router.load_all_tools)
+    {
+        tools = available.iter().cloned().collect();
+    } else {
+        tools.extend(global_core_tool_names());
+        // These used to be added implicitly only in Coding mode. Keep them as
+        // an explicit static runtime foundation so follow-ups cannot lose them.
+        tools.extend(
+            CODING_DEFAULT_TOOL_NAMES
+                .iter()
+                .map(|name| (*name).to_string()),
+        );
+        tools.extend(
+            [
+                "shell_poll",
+                "shell_input",
+                "shell_close",
+                "glob",
+                "exec_skill_script",
+                "exec_local",
+                "activate_skill",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        tools.extend(
+            available
+                .iter()
+                .filter(|name| {
+                    name.contains("__")
+                        && blockcell_tools::mcp::manager::mcp_access_allows(
+                            &config.agents.defaults.allowed_mcp_servers,
+                            &config.agents.defaults.allowed_mcp_tools,
+                            name,
+                        )
+                })
+                .cloned(),
+        );
+    }
+    replace_legacy_shell_tool(&mut tools, available);
+    tools.retain(|name| {
+        available.contains(name)
+            && (config.channels.napcat.enabled || !name.starts_with("napcat_"))
+            && !profile_denies_tool(config, agent_id, name)
+    });
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
 fn replace_legacy_shell_tool(tool_names: &mut Vec<String>, available_tools: &HashSet<String>) {
     if !tool_names.iter().any(|name| name == "shell") {
         return;
@@ -1693,6 +1780,9 @@ fn resolve_effective_tool_names(
     available_tools: &HashSet<String>,
     user_message: &str,
 ) -> Vec<String> {
+    if uses_static_tool_scope(config) {
+        return resolve_static_tool_names(config, agent_id, available_tools);
+    }
     // 1. 先检查 intent_router.enabled
     let router_enabled = config
         .intent_router
@@ -2534,6 +2624,68 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    fn available_capability_tools(&self) -> HashSet<String> {
+        let mut available: HashSet<_> = self.tool_registry.tool_names().into_iter().collect();
+        available.extend(
+            ghost_memory_provider_tool_schemas(
+                self.ghost_memory_lifecycle.as_deref(),
+                &HashSet::new(),
+            )
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string)),
+        );
+        available.insert(ACTIVATE_SKILL_TOOL_NAME.to_string());
+        available
+    }
+
+    /// A late declaration, discovery result or direct call cannot grant a tool.
+    /// Unknown but configured tools still reach normal validation/Unknown-tool
+    /// errors; the registry remains the authority on whether they can execute.
+    fn tool_within_capability(&self, name: &str, args: &serde_json::Value) -> bool {
+        let effective = if name == "shell" {
+            match args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+            {
+                "run" => "shell_run",
+                "poll" => "shell_poll",
+                "write_stdin" => "shell_input",
+                "close" => "shell_close",
+                _ => return false,
+            }
+        } else {
+            name
+        };
+        if profile_denies_tool(&self.config, self.agent_id.as_deref(), name)
+            || profile_denies_tool(&self.config, self.agent_id.as_deref(), effective)
+        {
+            return false;
+        }
+        if !uses_static_tool_scope(&self.config) {
+            return true;
+        }
+        let mut available = self.available_capability_tools();
+        available.insert(effective.to_string());
+        resolve_static_tool_names(&self.config, self.agent_id.as_deref(), &available)
+            .iter()
+            .any(|allowed| allowed == effective)
+    }
+
+    fn filter_capability_tools(&self, names: &mut Vec<String>) {
+        let scope: HashSet<_> = resolve_static_tool_names(
+            &self.config,
+            self.agent_id.as_deref(),
+            &self.available_capability_tools(),
+        )
+        .into_iter()
+        .collect();
+        names.retain(|name| {
+            !profile_denies_tool(&self.config, self.agent_id.as_deref(), name)
+                && (!uses_static_tool_scope(&self.config) || scope.contains(name))
+        });
+    }
+
     pub fn set_forced_interaction_mode(&mut self, mode: Option<InteractionMode>) {
         self.forced_interaction_mode = mode;
     }

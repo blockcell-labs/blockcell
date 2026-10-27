@@ -8,6 +8,11 @@ impl AgentRuntime {
         ctx: blockcell_tools::ToolContext,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        if !self.tool_within_capability(tool_name, &arguments) {
+            return Err(blockcell_core::Error::Tool(scoped_tool_denied_result(
+                tool_name,
+            )));
+        }
         let fut = async {
             if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
                 if manager.has_tool(tool_name) {
@@ -164,11 +169,45 @@ impl AgentRuntime {
         tool_args: &serde_json::Value,
         msg: &InboundMessage,
     ) -> PolicyOutcome {
-        let eval = self.tool_policy.evaluate(&ToolCallContext {
+        let mut eval = self.tool_policy.evaluate(&ToolCallContext {
             tool_name,
             tool_args,
             channel: &msg.channel,
         });
+        // Shell wrappers execute as `shell`; evaluate both the caller's alias
+        // and the canonical/effective action after hooks. Keep the strictest
+        // result and ask at most once, so neither naming surface bypasses policy.
+        let is_shell = matches!(
+            tool_name,
+            "shell" | "shell_run" | "shell_poll" | "shell_input" | "shell_close"
+        );
+        if is_shell {
+            let action_name = match tool_args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+            {
+                "poll" => "shell_poll",
+                "write_stdin" => "shell_input",
+                "close" => "shell_close",
+                _ => "shell_run",
+            };
+            let severity = |decision| match decision {
+                ToolPolicyDecision::Allow => 0,
+                ToolPolicyDecision::Ask => 1,
+                ToolPolicyDecision::Deny => 2,
+            };
+            for name in ["shell", action_name] {
+                let other = self.tool_policy.evaluate(&ToolCallContext {
+                    tool_name: name,
+                    tool_args,
+                    channel: &msg.channel,
+                });
+                if severity(other.decision) > severity(eval.decision) {
+                    eval = other;
+                }
+            }
+        }
         self.audit_policy_decision(tool_name, &eval, msg).await;
 
         match eval.decision {

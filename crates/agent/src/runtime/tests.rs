@@ -8,7 +8,709 @@ use std::sync::{
     Arc, Mutex,
 };
 
+fn allow_test_tool(runtime: &mut AgentRuntime, name: &str) {
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .core_tools
+        .push(name.to_string());
+}
+
+#[test]
+fn static_scope_survives_coding_unknown_and_chat_followups() {
+    let config = Config::default();
+    let available: HashSet<String> = [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "exec",
+        "shell_run",
+        "shell_poll",
+        "shell_input",
+        "shell_close",
+        "grep",
+        "tool_search",
+        "web_search",
+        "office_write",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let classifier = crate::intent::IntentClassifier::global();
+    let turns = [
+        (InteractionMode::Coding, "修复代码"),
+        (InteractionMode::General, "再跑一遍测试"),
+        (InteractionMode::General, "继续"),
+        (InteractionMode::Chat, "OK"),
+        (InteractionMode::Chat, "好的"),
+    ];
+    let scopes: Vec<_> = turns
+        .into_iter()
+        .map(|(mode, message)| {
+            resolve_effective_tool_names(
+                &config,
+                mode,
+                None,
+                None,
+                &classifier.classify(message),
+                &available,
+                message,
+            )
+        })
+        .collect();
+    for scope in &scopes {
+        assert_eq!(scope, &scopes[0], "message changed the capability ceiling");
+        for name in &available {
+            assert!(
+                scope.contains(name),
+                "missing foundational/profile tool {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn static_scope_includes_other_intent_groups_without_matching_them() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "intentRouter": {"profiles": {"default": {
+            "coreTools": ["read_file"],
+            "intentTools": {"Chat": {"inheritBase": false, "tools": []},
+                "Unknown": [], "Media": ["video_process", "missing_tool"]}
+        }}}
+    }))
+    .unwrap();
+    let available = ["read_file", "video_process"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::Chat,
+        None,
+        None,
+        &[IntentCategory::Chat],
+        &available,
+        "好的",
+    );
+    assert_eq!(tools, vec!["read_file", "video_process"]);
+}
+
+#[test]
+fn static_scope_deny_wins_over_global_skill_and_shell_alias_additions() {
+    let mut config = Config::default();
+    let profile = config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap();
+    profile.core_tools.push("shell".into());
+    profile.deny_tools = vec!["memory_query".into(), "email".into(), "shell_run".into()];
+    let available = ["memory_query", "email", "shell", "shell_run", "shell_poll"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let skill = ActiveSkillContext {
+        name: "test".into(),
+        prompt_md: String::new(),
+        inject_prompt_md: true,
+        tools: vec!["email".into()],
+        fallback_message: None,
+        source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
+    };
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::Skill,
+        None,
+        Some(&skill),
+        &[IntentCategory::Unknown],
+        &available,
+        "",
+    );
+    for denied in ["memory_query", "email", "shell_run", "shell"] {
+        assert!(
+            !tools.iter().any(|name| name == denied),
+            "deny bypass: {denied}"
+        );
+    }
+}
+
+#[test]
+fn static_scope_skill_declaration_cannot_add_an_unconfigured_tool() {
+    let config = Config::default();
+    let available = ["read_file", "custom_admin"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let skill = ActiveSkillContext {
+        name: "test".into(),
+        prompt_md: String::new(),
+        inject_prompt_md: true,
+        tools: vec!["custom_admin".into()],
+        fallback_message: None,
+        source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
+    };
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::Skill,
+        None,
+        Some(&skill),
+        &[IntentCategory::Unknown],
+        &available,
+        "",
+    );
+    assert!(!tools.contains(&"custom_admin".to_string()));
+}
+
+#[test]
+fn static_scope_missing_profile_does_not_fall_back_to_kernel_tools() {
+    let mut config = Config::default();
+    config.intent_router.as_mut().unwrap().default_profile = "missing".into();
+    let available = ["read_file", "memory_query", "tool_search"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::General,
+        None,
+        None,
+        &[IntentCategory::Unknown],
+        &available,
+        "继续",
+    );
+    assert!(tools.is_empty());
+}
+
+#[test]
+fn legacy_gate_keeps_chat_tool_gating() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "intentRouter": {"toolSelection": "gate"}
+    }))
+    .unwrap();
+    let available = ["read_file", "write_file", "exec", "tool_search"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::Chat,
+        None,
+        None,
+        &[IntentCategory::Chat],
+        &available,
+        "好的",
+    );
+    assert_eq!(tools, vec!["tool_search"]);
+}
+
 struct TestProvider;
+
+#[derive(Default)]
+struct ScopeSchemaProvider {
+    schemas: Mutex<Vec<Vec<serde_json::Value>>>,
+    search_query: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl Provider for ScopeSchemaProvider {
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<LLMResponse> {
+        let first = {
+            let mut schemas = self.schemas.lock().unwrap();
+            schemas.push(tools.to_vec());
+            schemas.len() == 1
+        };
+        if let Some(query) = self.search_query.filter(|_| first) {
+            return Ok(LLMResponse {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![tool_call("tool_search", serde_json::json!({"query":query}))],
+                finish_reason: "tool_calls".into(),
+                usage: serde_json::Value::Null,
+            });
+        }
+        Ok(LLMResponse {
+            content: Some("done".into()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            usage: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime.config.agents.ghost.learning.enabled = false;
+    for content in ["修复代码", "再跑一遍测试", "继续", "OK", "好的"] {
+        let mut msg = test_main_session_inbound("cli", "scope-followup");
+        msg.content = content.into();
+        runtime
+            .process_message(msg)
+            .await
+            .expect("process followup");
+    }
+    let calls = provider.schemas.lock().unwrap();
+    assert_eq!(calls.len(), 5);
+    for schemas in calls.iter() {
+        let names: Vec<_> = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .collect();
+        for required in [
+            "exec",
+            "read_file",
+            "write_file",
+            "shell_run",
+            "shell_poll",
+            "grep",
+            "web_search",
+            "file_ops",
+            "tool_search",
+            "office_write",
+        ] {
+            assert!(names.contains(&required), "missing {required}: {names:?}");
+        }
+    }
+    assert!(
+        calls.windows(2).all(|pair| pair[0] == pair[1]),
+        "schemas changed with intent/mode"
+    );
+}
+
+#[tokio::test]
+async fn static_scope_pipeline_rejects_denied_tools_before_hooks_or_execution() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("list_dir".into());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .event_bus()
+        .register(Arc::new(RecordingToolListener {
+            events: events.clone(),
+            reject: false,
+            rewrite: serde_json::Value::Null,
+        }));
+    let msg = test_main_session_inbound("cli", "scope-denied");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("list_dir", serde_json::json!({"path":"."})),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(result.outcome, ToolOutcome::Rejected);
+    assert!(result.text.contains("scope"), "{}", result.text);
+    assert!(!events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolPreExecute { .. } | AgentEvent::ToolCall { .. }
+    )));
+}
+
+#[tokio::test]
+async fn static_scope_pipeline_rejects_registered_tools_outside_profile() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime.tool_registry.register(Arc::new(FixedResultTool(
+        "custom_admin",
+        serde_json::json!({"ok":true}),
+    )));
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("custom_admin", serde_json::json!({})),
+            &test_main_session_inbound("cli", "scope-unlisted"),
+            None,
+        )
+        .await;
+    assert_eq!(result.outcome, ToolOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn static_scope_skill_tools_are_intersected_with_agent_ceiling() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime.tool_registry.register(Arc::new(FixedResultTool(
+        "custom_admin",
+        serde_json::json!({}),
+    )));
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("exec_skill_script".into());
+    let skill = ActiveSkillContext {
+        name: "test".into(),
+        prompt_md: String::new(),
+        inject_prompt_md: true,
+        tools: vec![
+            "custom_admin".into(),
+            "read_file".into(),
+            "exec_skill_script".into(),
+        ],
+        fallback_message: None,
+        source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
+    };
+    assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["read_file"]);
+}
+
+#[tokio::test]
+async fn static_scope_prefetch_cannot_bypass_profile_deny() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("read_file".into());
+    std::fs::create_dir_all(runtime.paths.workspace()).unwrap();
+    std::fs::write(runtime.paths.workspace().join("a.txt"), "private").unwrap();
+    let calls = ["a", "b"]
+        .map(|id| tool_call_with_id(id, "read_file", serde_json::json!({"path":"a.txt"})));
+    let results = runtime
+        .prefetch_read_only_tools(
+            &calls,
+            &test_main_session_inbound("cli", "scope-prefetch"),
+            &prefetch_test_scope(),
+            &prefetch_test_guard(),
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .await;
+    assert!(results.is_empty(), "denied data was read by prefetch");
+}
+
+#[tokio::test]
+async fn static_scope_discovery_catalog_contains_hidden_authorized_tools_only() {
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime.config.agents.defaults.allowed_mcp_servers = vec!["demo".into()];
+    runtime
+        .tool_registry
+        .register_model_hidden(Arc::new(FixedResultTool(
+            "demo__lookup",
+            serde_json::json!({"ok":true}),
+        )));
+    runtime
+        .tool_registry
+        .register_model_hidden(Arc::new(FixedResultTool(
+            "demo__denied_lookup",
+            serde_json::json!({}),
+        )));
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("demo__denied_lookup".into());
+    let msg = test_main_session_inbound("cli", "scope-discovery");
+    runtime.process_message(msg.clone()).await.unwrap();
+    assert!(!provider.schemas.lock().unwrap()[0]
+        .iter()
+        .any(|s| s["function"]["name"] == "demo__lookup"));
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("tool_search", serde_json::json!({"query":"lookup"})),
+            &msg,
+            None,
+        )
+        .await;
+    assert!(result.text.contains("demo__lookup"), "{}", result.text);
+    assert!(!result.text.contains("demo__denied_lookup"));
+    let denied = runtime
+        .execute_tool_call(
+            &tool_call("demo__denied_lookup", serde_json::json!({})),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(denied.outcome, ToolOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn static_scope_hook_continue_cannot_override_policy_deny_or_ask() {
+    use blockcell_core::tool_policy::{ToolPolicyConfig, ToolPolicyDecision};
+    for decision in [ToolPolicyDecision::Deny, ToolPolicyDecision::Ask] {
+        let mut runtime = test_runtime_with_default_tools();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .event_bus()
+            .register(Arc::new(RecordingToolListener {
+                events: events.clone(),
+                reject: false,
+                rewrite: serde_json::json!({"path":"."}),
+            }));
+        runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
+            rules: vec![tool_policy_rule("restrict-list", "list_dir", decision)],
+            ..Default::default()
+        });
+        let result = runtime
+            .execute_tool_call(
+                &tool_call("list_dir", serde_json::json!({"path":"."})),
+                &test_main_session_inbound("cli", "scope-hook-policy"),
+                None,
+            )
+            .await;
+        assert_eq!(result.outcome, ToolOutcome::Rejected);
+        let events = events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolPreExecute { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCall { .. })));
+    }
+}
+
+#[tokio::test]
+async fn static_scope_shell_alias_policy_is_not_lost_on_canonicalization() {
+    use blockcell_core::tool_policy::{ToolPolicyConfig, ToolPolicyDecision};
+    let mut runtime = test_runtime_with_default_tools();
+    let mut deny = tool_policy_rule("deny-shell-alias", "shell_run", ToolPolicyDecision::Deny);
+    deny.description = Some("alias policy applied".into());
+    runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
+        rules: vec![deny],
+        ..Default::default()
+    });
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("shell_run", serde_json::json!({"command":"echo harmless"})),
+            &test_main_session_inbound("cli", "scope-alias-policy"),
+            None,
+        )
+        .await;
+    assert_eq!(result.outcome, ToolOutcome::Rejected);
+    assert!(
+        result.text.contains("alias policy applied"),
+        "{}",
+        result.text
+    );
+}
+
+#[tokio::test]
+async fn static_scope_mcp_search_does_not_return_denied_schema() {
+    let mut runtime = test_runtime_with_default_tools();
+    let tools = ["lookup", "denied_lookup"]
+        .into_iter()
+        .map(|name| {
+            (
+                "demo".to_string(),
+                blockcell_tools::mcp::client::McpTool {
+                    name: name.into(),
+                    description: Some("Lookup data".into()),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                },
+            )
+        })
+        .collect();
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::mcp::search::McpSearchTool::new(
+            tools,
+        )));
+    runtime.config.agents.defaults.allowed_mcp_servers = vec!["demo".into()];
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("demo__denied_lookup".into());
+    let result = runtime
+        .execute_tool_call(
+            &tool_call(
+                "mcp_search_tools",
+                serde_json::json!({"query":"lookup","limit":1}),
+            ),
+            &test_main_session_inbound("cli", "scope-mcp-filter"),
+            None,
+        )
+        .await;
+    assert!(result.text.contains("demo__lookup"), "{}", result.text);
+    assert!(
+        !result.text.contains("demo__denied_lookup"),
+        "{}",
+        result.text
+    );
+}
+
+struct OptionalDiscoveryTool;
+
+#[async_trait::async_trait]
+impl blockcell_tools::Tool for OptionalDiscoveryTool {
+    fn schema(&self) -> blockcell_tools::ToolSchema {
+        blockcell_tools::ToolSchema {
+            name: "optional_lookup".into(),
+            description: "Lookup with an optional output format".into(),
+            parameters: serde_json::json!({"type":"object","properties":{"format":{"type":"string"}}}),
+        }
+    }
+    fn validate(&self, _params: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+    async fn execute(
+        &self,
+        _ctx: blockcell_tools::ToolContext,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({"ok":true}))
+    }
+}
+
+#[tokio::test]
+async fn static_scope_search_promotes_light_schema_in_same_round_and_rechecks_later_denies() {
+    let provider = Arc::new(ScopeSchemaProvider {
+        search_query: Some("optional_lookup"),
+        ..Default::default()
+    });
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime
+        .tool_registry
+        .register(Arc::new(OptionalDiscoveryTool));
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .intent_tools
+        .insert(
+            "Unknown".into(),
+            blockcell_core::config::IntentToolEntryConfig::Tools(vec!["optional_lookup".into()]),
+        );
+    let msg = test_main_session_inbound("cli", "scope-promote");
+    runtime.process_message(msg.clone()).await.unwrap();
+    runtime.process_message(msg.clone()).await.unwrap();
+    {
+        let calls = provider.schemas.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        let schema = |i: usize| {
+            calls[i]
+                .iter()
+                .find(|s| s["function"]["name"] == "optional_lookup")
+                .unwrap()
+        };
+        assert!(schema(0)["function"]["parameters"]["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        for i in [1, 2] {
+            assert_eq!(
+                schema(i)["function"]["parameters"]["properties"]["format"]["type"],
+                "string"
+            );
+        }
+    }
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("optional_lookup".into());
+    runtime.process_message(msg).await.unwrap();
+    assert!(!provider.schemas.lock().unwrap()[3]
+        .iter()
+        .any(|s| s["function"]["name"] == "optional_lookup"));
+}
+
+#[tokio::test]
+async fn static_scope_provider_and_ghost_additions_cannot_grant_unconfigured_tools() {
+    let llm = Arc::new(ProviderToolCaptureProvider {
+        seen_tools: Mutex::new(Vec::new()),
+    });
+    let provider_tool = Arc::new(RuntimeProviderTool {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(llm.clone());
+    runtime.ghost_memory_lifecycle = Some(Arc::new(
+        crate::ghost_memory_provider::GhostMemoryProviderManager::new()
+            .with_provider(provider_tool.clone()),
+    ));
+    let mut msg = test_main_session_inbound("cli", "scope-provider-ghost");
+    msg.metadata = serde_json::json!({"ghost":true});
+    runtime.process_message(msg).await.unwrap();
+    assert!(provider_tool.calls.lock().unwrap().is_empty());
+    assert!(llm
+        .seen_tools
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|schemas| schemas.iter().all(|schema| {
+            !["external_memory_lookup", "notification", "community_hub"]
+                .contains(&schema["function"]["name"].as_str().unwrap())
+        })));
+}
+
+#[tokio::test]
+async fn static_scope_legacy_shell_cannot_bypass_denied_action() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("shell_run".into());
+    for name in ["shell", "shell_run"] {
+        let result = runtime
+            .execute_tool_call(
+                &tool_call(name, serde_json::json!({"command":"echo harmless"})),
+                &test_main_session_inbound("cli", "scope-shell-deny"),
+                None,
+            )
+            .await;
+        assert_eq!(result.outcome, ToolOutcome::Rejected);
+        assert!(result.text.contains("scope"));
+    }
+}
 struct StreamingRetryProvider {
     attempts: AtomicUsize,
 }
@@ -1199,9 +1901,10 @@ fn sandbox_writable_roots_include_allowed_and_authorized_dirs_but_not_denied_pat
     use blockcell_core::path_policy::PathOp;
 
     let temp = tempfile::tempdir().expect("create sandbox roots temp dir");
-    let allowed = temp.path().join("allowed");
-    let authorized = temp.path().join("authorized");
-    let denied = temp.path().join("denied");
+    let root = temp.path().canonicalize().expect("canonical sandbox roots");
+    let allowed = root.join("allowed");
+    let authorized = root.join("authorized");
+    let denied = root.join("denied");
     for path in [&allowed, &authorized, &denied] {
         std::fs::create_dir_all(path).expect("create sandbox root");
     }
@@ -1403,9 +2106,10 @@ async fn test_workspace_internal_deny_rule_is_enforced() {
 async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
     // 危险命令批准（dangerous_confirmed → confirmed=true, cache=false）跳过 Confirm
     // 弹窗，但不得把路径写入会话授权缓存——与策略级确认（cache=true）区分开。
-    // The target is outside the workspace and outside the system temporary directory.
-    let outside = std::path::PathBuf::from(format!(
-        "/var/tmp/blockcell-dangerous-scope-{}",
+    // Outside workspace/temp without hitting macOS's protected /private/var.
+    // Only policy evaluation is performed; this path is never written.
+    let outside = dirs::home_dir().expect("home directory").join(format!(
+        "blockcell-dangerous-scope-{}",
         uuid::Uuid::new_v4()
     ));
     let args = serde_json::json!({"command": format!("cat {}", outside.display())});
@@ -1726,8 +2430,18 @@ fn test_active_tool_names_for_skill_include_kernel_and_declared_tools() {
         learned: false,
     };
 
+    let mut config = Config::default();
+    config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .core_tools
+        .push("finance_api".into());
     let tool_names = resolve_effective_tool_names(
-        &Config::default(),
+        &config,
         InteractionMode::Skill,
         None,
         Some(&skill),
@@ -2665,7 +3379,7 @@ fn one_shot_general_intent_uses_code_workspace_fallback() {
 }
 
 #[test]
-fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
+fn test_static_coding_scope_keeps_exec_and_shell_tools() {
     let available: HashSet<String> = [
         "read_file",
         "write_file",
@@ -2719,10 +3433,7 @@ fn test_coding_mode_uses_shell_and_code_tools_without_legacy_exec() {
         ]
     );
     assert!(!tools.contains(&"shell".to_string()));
-    assert_eq!(
-        tools.contains(&"exec".to_string()),
-        !super::shell_runs_unattended(&Config::default())
-    );
+    assert!(tools.contains(&"exec".to_string()));
 }
 
 #[test]
@@ -3871,6 +4582,7 @@ async fn runtime_exposes_and_dispatches_ghost_memory_provider_tools() {
         calls: Mutex::new(Vec::new()),
     });
     let mut runtime = test_runtime_with_provider(llm_provider.clone());
+    allow_test_tool(&mut runtime, "external_memory_lookup");
     runtime.ghost_memory_lifecycle = Some(Arc::new(
         crate::ghost_memory_provider::GhostMemoryProviderManager::new()
             .with_provider(provider_tool.clone()),
@@ -4979,8 +5691,8 @@ fn test_resolve_effective_tool_names_load_all_applies_napcat_filter() {
 }
 
 #[test]
-fn test_resolve_effective_tool_names_load_all_extends_skill_tools() {
-    // 当有 active_skill 时，应扩展 skill.tools
+fn test_resolve_effective_tool_names_load_all_rejects_unregistered_skill_tools() {
+    // A skill declaration cannot manufacture tools absent from the registry.
     let raw = r#"{
             "intentRouter": {
                 "enabled": false,
@@ -5025,12 +5737,11 @@ fn test_resolve_effective_tool_names_load_all_extends_skill_tools() {
         "",
     );
 
-    // 应包含 available tools + skill.tools
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 2);
     assert!(tools.contains(&"read_file".to_string()));
     assert!(tools.contains(&"write_file".to_string()));
-    assert!(tools.contains(&"skill_tool_1".to_string()));
-    assert!(tools.contains(&"skill_tool_2".to_string()));
+    assert!(!tools.contains(&"skill_tool_1".to_string()));
+    assert!(!tools.contains(&"skill_tool_2".to_string()));
 }
 
 #[test]
@@ -6032,6 +6743,7 @@ async fn tool_call_audit_records_declared_execution_environment() {
 #[tokio::test]
 async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
     let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "custom_full_access");
     runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
         "custom_full_access",
         blockcell_tools::ExecutionEnvironment::FullAccess,
@@ -6074,6 +6786,7 @@ async fn explicit_confirmation_gate_is_driven_by_declaration_not_tool_name() {
 async fn confirmation_gate_follows_the_flag_not_the_environment() {
     // 同一个执行环境声明（Shell）下，只有 requires_confirmation=true 才触发确认。
     let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "custom_shell_confirm");
     runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
         "custom_shell_confirm",
         blockcell_tools::ExecutionEnvironment::Shell,
@@ -6113,6 +6826,7 @@ async fn confirmation_gate_follows_the_flag_not_the_environment() {
 async fn declaration_without_confirmation_skips_gate() {
     // 同一个工具名与参数，仅声明不同：无需确认时直接执行，不触发任何审批。
     let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "custom_shell");
     runtime.tool_registry.register(Arc::new(DeclaredEnvTool(
         "custom_shell",
         blockcell_tools::ExecutionEnvironment::Shell,
@@ -8547,6 +9261,7 @@ async fn side_effecting_tool_timeout_is_recorded_as_unknown_outcome() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
 
     let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "place_order");
     runtime
         .tool_registry
         .register(Arc::new(TimingOutSideEffectTool));
@@ -8817,6 +9532,7 @@ async fn scoped_tools_follow_runtime_session_and_candidate_views() {
     use crate::runtime_kernel::ScopeTarget;
 
     let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "scoped_echo");
     let _session_tool = runtime.register_scoped_tool(
         ScopeTarget::Session("cli:scoped-a".into()),
         Arc::new(ScopedEchoTool("session")),

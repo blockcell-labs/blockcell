@@ -290,6 +290,35 @@ impl<'a> IntentToolResolver<'a> {
         Self { config }
     }
 
+    /// Profile capability ceiling, independent of the current message or mode.
+    /// Runtime foundation and agent-authorized MCP tools are merged separately;
+    /// denyTools must also be applied after those additions and alias expansion.
+    pub fn resolve_tool_scope(&self, agent_id: Option<&str>) -> Option<Vec<String>> {
+        let default_router = blockcell_core::config::IntentRouterConfig::default();
+        let router = self
+            .config
+            .intent_router
+            .as_ref()
+            .unwrap_or(&default_router);
+        let profile_id = self.config.resolve_intent_profile_id(agent_id)?;
+        let profile = router.profiles.get(&profile_id)?;
+        let mut tools: HashSet<String> = profile.core_tools.iter().cloned().collect();
+        if router.enabled {
+            for entry in profile.intent_tools.values() {
+                tools.extend(entry.tools().iter().cloned());
+            }
+        } else if let Some(entry) = profile.intent_tools.get("Unknown") {
+            if !entry.inherit_base() {
+                tools.clear();
+            }
+            tools.extend(entry.tools().iter().cloned());
+        }
+        tools.retain(|name| !profile.deny_tools.contains(name));
+        let mut tools: Vec<_> = tools.into_iter().collect();
+        tools.sort();
+        Some(tools)
+    }
+
     pub fn resolve_tool_names(
         &self,
         agent_id: Option<&str>,

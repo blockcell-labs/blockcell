@@ -57,6 +57,15 @@ impl McpSearchTool {
     }
 
     pub fn search_value(&self, query: &str, limit: usize) -> Value {
+        self.search_value_filtered(query, limit, |_| true)
+    }
+
+    fn search_value_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed: impl Fn(&str) -> bool,
+    ) -> Value {
         let limit = limit.clamp(1, 20);
         let query_lower = query.trim().to_lowercase();
         let query_words = extract_keywords(&query_lower);
@@ -64,6 +73,7 @@ impl McpSearchTool {
         let mut scored = self
             .tool_index
             .iter()
+            .filter(|entry| allowed(&entry.name))
             .filter_map(|entry| {
                 let haystack = format!(
                     "{} {} {}",
@@ -178,7 +188,7 @@ impl Tool for McpSearchTool {
         Some(self.prompt_index())
     }
 
-    async fn execute(&self, _ctx: ToolContext, params: Value) -> Result<Value> {
+    async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
         let query = params
             .get("query")
             .and_then(Value::as_str)
@@ -189,7 +199,21 @@ impl Tool for McpSearchTool {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(5);
 
-        Ok(self.search_value(query, limit))
+        let profile_id = ctx.config.resolve_intent_profile_id(
+            ctx.agent_identity
+                .as_ref()
+                .map(|identity| identity.agent_id.as_str()),
+        );
+        let profile = ctx
+            .config
+            .intent_router
+            .as_ref()
+            .and_then(|router| profile_id.as_ref().and_then(|id| router.profiles.get(id)));
+        // Filter before ranking/limit: denied tools must neither expose their
+        // schemas nor occupy all result slots ahead of authorized tools.
+        Ok(self.search_value_filtered(query, limit, |name| {
+            !profile.is_some_and(|profile| profile.deny_tools.iter().any(|denied| denied == name))
+        }))
     }
 }
 

@@ -2,21 +2,35 @@
 
 > Series: *In-Depth Analysis of the Open Source Project “blockcell”* — Article 21
 
-`intentRouter` is now the **single configuration entry point** for intent-to-tool mapping in blockcell. If you want different agents to expose different capabilities, keep “which agent gets which profile” separate from “which tools each profile can expose”.
+`intentRouter` is now the **configuration entry point** for agent tool capabilities in blockcell. If you want different agents to expose different capabilities, keep “which agent gets which profile” separate from “which tools each profile can expose”.
 
 ## What to remember first
 
 - Bind each agent with `agents.list[].intentProfile`
 - Define reusable tool sets under `intentRouter.profiles`
 - Put shared baseline tools in `coreTools`
-- Add intent-specific tools in `intentTools`
+- Default `toolSelection: "rank"` uses the union of `coreTools` and every `intentTools` group, independently of message intent
 - Remove disallowed tools with `denyTools`
-- Explicitly configure `Chat` as `{ "inheritBase": false, "tools": [] }`
+- An empty `Chat` entry does not clear tools in static mode; set `toolSelection: "gate"` to retain legacy gating
 - Always configure `Unknown`
 - Use `enabled: false` + `loadAllTools: true` if you want to disable classification while exposing the full available tool set
 - Use `intentRules` when built-in intent rules do not cover your domain vocabulary
 
 > `allowedMcpServers` and `allowedMcpTools` are agent-level MCP visibility allowlists. The JSON field names are camelCase.
+
+## Static capabilities and migration (2026-10-27)
+
+`intentRouter.toolSelection` defaults to `"rank"`. The name leaves room for future ranking hints; schemas currently retain stable presentation order rather than being reordered by intent. Intent still affects interaction prompts, but cannot remove tools.
+
+The static ceiling combines the profile union, the runtime foundation, and MCP tools authorized by the agent allowlists and registry, then removes `denyTools` and unavailable tools. The foundation retains the existing global memory/agent/skill/session/cron/discovery tools, the formerly implicit Coding tools (`read_file`, `write_file`, `edit_file`, `grep`, `shell_run`), `glob`, shell poll/input/close, and the skill-directory execution tools `exec_skill_script` / `exec_local`. Execution policy and confirmation still apply. Narrow custom profiles must deny unwanted foundation tools explicitly. Denying `shell` also denies its four action tools.
+
+This changes behavior for configurations that relied on intent gating. Set `"intentRouter": { "toolSelection": "gate" }` to retain legacy gating and Coding exposure. Both modes enforce profile denies; the compatibility switch does not restore deny bypasses.
+
+Static mode removes the extra Coding schema whitelist. Discoverable tools stay in the authorized catalog until searched. Discovery upgrades exposure, never permissions; searching a light tool replaces its schema immediately in the same round. Other tools reuse the existing full/light mechanism.
+
+Skill declarations are intersected with the agent ceiling. Custom skill and memory-provider tools must be included in the profile unless they are foundation or authorized MCP tools. Ghost additions, persisted activations and legacy shell calls cannot bypass denies. A missing profile fails closed without falling back to global tools.
+
+Tool policies continue to load from `~/.blockcell/tool_policy.yaml`, with deny > ask > allow precedence. Policy checks use hook-modified arguments and apply to both shell aliases and canonical names. Static capability checks and per-invocation policy both apply.
 
 ## Key rules
 
@@ -25,9 +39,9 @@
 3. If that still does not resolve, blockcell falls back to `intentRouter.defaultProfile`.
 4. If `agents.list` is empty, runtime falls back to an implicit `default` agent.
 5. If `intentRouter` is missing, blockcell injects the built-in default router automatically.
-6. If `intentRouter.enabled = false` and `loadAllTools = false`, runtime still resolves profiles, but it ultimately keeps only that profile's `Unknown` tool set.
+6. If `intentRouter.enabled = false` and `loadAllTools = false`, the profile portion uses `Unknown`; static mode also retains the runtime foundation and agent-authorized MCP tools.
 7. If `intentRouter.enabled = false` and `loadAllTools = true`, runtime exposes all currently available tools, then applies the active profile's `denyTools`.
-8. If `intentRouter.enabled = true`, `loadAllTools` is ignored and tool resolution still follows intent classification.
+8. If `intentRouter.enabled = true`, `loadAllTools` is ignored and static mode unions all profile intent groups; only `toolSelection: "gate"` resolves tools from the current intent.
 9. Every profile must configure `Unknown`, otherwise validation fails.
 
 ## Disable classification but keep all tools
@@ -58,7 +72,7 @@ In this mode:
 - `enabled: false` disables intent classification
 - `loadAllTools: true` returns all registered and currently available tools
 - `denyTools` still applies, which is useful when you want broad capability but still exclude high-risk tools
-- if `loadAllTools` is omitted, it defaults to `false`, preserving the conservative `Unknown`-only behavior
+- if `loadAllTools` is omitted, it defaults to `false`, using `Unknown` for the profile portion while retaining the runtime foundation and authorized MCP tools
 
 ## Add custom intent rules
 
@@ -169,7 +183,7 @@ This is the most common two-role split:
 
 ### How to read this example
 
-- `default` keeps `Chat` tool-free, so plain conversation does not accidentally expose tools.
+- In static mode, `default` keeps the same capabilities in chat and task follow-ups; `Chat.inheritBase` applies only to `gate` mode.
 - `default`'s `FileOps` and `WebSearch` cover file work and web search.
 - `ops`'s `DevOps` profile allows debugging, encryption, file editing, and HTTP inspection.
 - `ops` also sets `denyTools: ["email"]`, so `email` is removed even if it is added elsewhere.
@@ -268,11 +282,11 @@ This example is closer to a “front desk / finance / platform ops” split:
 
 ### How to read this example
 
-- `support` is used for high-frequency chat and ticket replies, so `Chat` still exposes no tools.
+- `support` keeps its static profile scope during chat; exclude unwanted runtime foundation tools with `denyTools`.
 - `finance` groups market data, alerts, charts, and reports together, which makes it a good finance agent.
 - `admin` can use system-control and ops tools, but it does not get finance-specific capabilities.
 - If you bind `finance` as the owner for a channel, messages from that channel will land on the finance profile first.
-- If `intentRouter.enabled = false`, these profiles still exist, but each agent will end up with only its profile's `Unknown` tool set.
+- If `intentRouter.enabled = false`, these profiles still exist, but with `loadAllTools: false` the profile portion uses `Unknown`, while the runtime foundation and authorized MCP tools remain available.
 
 > The MCP server / tool names above are examples only. Replace them with real names from your merged `mcp.json` + `mcp.d` view.
 

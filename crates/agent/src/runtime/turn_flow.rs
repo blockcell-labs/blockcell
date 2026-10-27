@@ -568,10 +568,13 @@ impl AgentRuntime {
             declared_tools.push("exec_skill_script".to_string());
             declared_tools.push("exec_local".to_string());
         }
-        crate::prompt_skill_executor::PromptSkillExecutor::resolve_allowed_tool_names(
-            &declared_tools,
-            &available_tools,
-        )
+        let mut tools =
+            crate::prompt_skill_executor::PromptSkillExecutor::resolve_allowed_tool_names(
+                &declared_tools,
+                &available_tools,
+            );
+        self.filter_capability_tools(&mut tools);
+        tools
     }
 
     pub(crate) async fn run_skill_for_turn(
