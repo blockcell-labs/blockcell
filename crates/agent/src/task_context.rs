@@ -27,6 +27,9 @@ fn bounded_text(text: &str, limit: usize) -> String {
 }
 
 fn normalized_outcome(outcome: &str) -> &'static str {
+    if outcome == "Unknown" {
+        return "unknown_outcome";
+    }
     match bounded_text(outcome, 32).to_ascii_lowercase().as_str() {
         "succeeded" => "succeeded",
         "failed" => "failed",
@@ -34,7 +37,7 @@ fn normalized_outcome(outcome: &str) -> &'static str {
         "timedout" | "timed_out" => "timed_out",
         "unknownoutcome" | "unknown_outcome" => "unknown_outcome",
         "cancelled" | "canceled" => "cancelled",
-        "skipped" => "skipped",
+        "skipped" | "notstarted" | "not_started" => "skipped",
         _ => "unknown",
     }
 }
@@ -315,6 +318,22 @@ mod tests {
         assert_eq!(tools[0]["name"], "tool_7");
         assert_eq!(tools[0]["outcome"], "succeeded");
         assert_eq!(tools[5]["outcome"], "unknown");
+    }
+
+    #[test]
+    fn runtime_unknown_and_not_started_outcomes_keep_their_execution_meaning() {
+        let mut context = TaskContext::default();
+        context.observe_user("Submit the request");
+        context.record_tool("place_order", "Unknown");
+        context.record_tool("email", "NotStarted");
+        let metadata = stored(&context);
+        let tools = &metadata[TASK_CONTEXT_METADATA_KEY]["recent_tools"];
+        assert_eq!(tools[0]["outcome"], "unknown_outcome");
+        assert_eq!(tools[1]["outcome"], "skipped");
+        assert_eq!(
+            TaskContext::from_metadata(&metadata).render(),
+            context.render()
+        );
     }
 
     #[test]

@@ -73,3 +73,25 @@ Verify: Python unittest and Rust routing regressions. Commit: test(agent): add b
 ## Final verification
 
 Run formatting, affected Rust library/integration suites, Python evaluation tests, inspect git diff/status and commit history. Use pinned rustc 1.96 explicitly because the shell cargo otherwise selects Homebrew rustc 1.92. Report actual checks and any unrun live evaluation.
+
+
+## Implementation status
+
+All nine items have separate implementation commits on `main`:
+
+| Item | Commit |
+| --- | --- |
+| 1. Layered observations | `901a5a5` |
+| 2. Typed host grants | `8531fa3` |
+| 3. Explicit base packs | `854555d` |
+| 4. Host-approved skill grants | `786294f` |
+| 5. Isolated lexical hints | `e02addb` |
+| 6. Bounded task state | `5bee8af` |
+| 7. Stable schema byte budget | `7651537` |
+| 8. Bounded Chinese/English discovery | `93b0563` |
+| 9. Paired evaluation harness (landed before behavior changes) | `b25c2db` |
+
+Evaluation trace validation and forbidden-selection attribution were tightened in `a69e302`. Final review also adds media-preserving ephemeral context and preserves runtime unknown/not-started outcome semantics. Live model comparison remains unrun; the offline suite establishes reproducibility, not model accuracy.
+
+
+Final validation completed with Rust 1.96: agent 913/913, tools 560/560, core 122/122 library tests; Python evaluation 23/23; 120 cases/60 bilingual pairs validated; `cargo check -p blockcell --bin blockcell --offline` passed. Changed Rust files pass rustfmt and `git diff --check`. Agent tests use `TMPDIR=/tmp` on macOS because the default `/var/folders` temp root is intentionally denied by the path policy. Regenerable incremental build cache was cleared after a disk-space failure; subsequent verification completed successfully.

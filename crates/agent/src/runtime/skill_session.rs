@@ -55,7 +55,8 @@ impl AgentRuntime {
             );
 
         if let Some(context) = task_context.render() {
-            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context)).into_owned();
+            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context))
+                .into_owned();
         }
 
         let mut tools = if tool_names.is_empty() {

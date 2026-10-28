@@ -18,17 +18,17 @@
 
 > `allowedMcpServers` and `allowedMcpTools` are agent-level MCP visibility allowlists. The JSON field names are camelCase.
 
-## Static capabilities and migration (2026-10-27)
+## Static capabilities and migration (2026-10-28)
 
-`intentRouter.toolSelection` defaults to `"rank"`. The name leaves room for future ranking hints; schemas currently retain stable presentation order rather than being reordered by intent. Intent still affects interaction prompts, but cannot remove tools.
+`intentRouter.toolSelection` defaults to `"rank"`. The name leaves room for future ranking hints; schemas currently retain stable presentation order rather than being reordered by intent. Default mode selection no longer depends on keywords; classification is used only for legacy `gate` or explicitly enabled ephemeral hints.
 
-The static ceiling combines the profile union, the runtime foundation, and MCP tools authorized by the agent allowlists and registry, then removes `denyTools` and unavailable tools. The foundation retains the existing global memory/agent/skill/session/cron/discovery tools, the formerly implicit Coding tools (`read_file`, `write_file`, `edit_file`, `grep`, `shell_run`), `glob`, shell poll/input/close, and the skill-directory execution tools `exec_skill_script` / `exec_local`. Execution policy and confirmation still apply. Narrow custom profiles must deny unwanted foundation tools explicitly. Denying `shell` also denies its four action tools.
+The static ceiling combines the profile union, the runtime foundation, and MCP tools authorized by the agent allowlists and registry, then removes `denyTools` and unavailable tools. The foundation retains the existing global memory/agent/skill/session/cron/discovery tools, the formerly implicit Coding tools (`read_file`, `write_file`, `edit_file`, `grep`, `shell_run`), `glob`, shell poll/input/close, and the skill-directory execution tools `exec_skill_script` / `exec_local`. Execution policy and confirmation still apply. Omitting `basePacks` preserves this foundation. Narrow profiles can set `basePacks: []` and explicitly declare the tools they need. Denying `shell` also denies its four action tools.
 
 This changes behavior for configurations that relied on intent gating. Set `"intentRouter": { "toolSelection": "gate" }` to retain legacy gating and Coding exposure. Both modes enforce profile denies; the compatibility switch does not restore deny bypasses.
 
 Static mode removes the extra Coding schema whitelist. Discoverable tools stay in the authorized catalog until searched. Discovery upgrades exposure, never permissions; searching a light tool replaces its schema immediately in the same round. Other tools reuse the existing full/light mechanism.
 
-Skill declarations are intersected with the agent ceiling. Custom skill and memory-provider tools must be included in the profile unless they are foundation or authorized MCP tools. Ghost additions, persisted activations and legacy shell calls cannot bypass denies. A missing profile fails closed without falling back to global tools.
+Skill declarations are intersected with the agent ceiling. Profiles may explicitly approve skill tools with `skillGrants`; host extensions can use `register_host_granted`, while scoped registration and ghost providers supply constrained host grants. Ordinary registration, skill declarations and discovery results do not authorize tools. Ghost additions, persisted activations and legacy shell calls cannot bypass denies. A missing profile fails closed without falling back to global tools.
 
 Tool policies continue to load from `~/.blockcell/tool_policy.yaml`, with deny > ask > allow precedence. Policy checks use hook-modified arguments and apply to both shell aliases and canonical names. Static capability checks and per-invocation policy both apply.
 
@@ -282,7 +282,7 @@ This example is closer to a “front desk / finance / platform ops” split:
 
 ### How to read this example
 
-- `support` keeps its static profile scope during chat; exclude unwanted runtime foundation tools with `denyTools`.
+- `support` keeps its static profile scope during chat; use `basePacks: []` to remove implicit foundation tools and declare the needed tools. Denies still apply.
 - `finance` groups market data, alerts, charts, and reports together, which makes it a good finance agent.
 - `admin` can use system-control and ops tools, but it does not get finance-specific capabilities.
 - If you bind `finance` as the owner for a channel, messages from that channel will land on the finance profile first.
@@ -295,8 +295,8 @@ This example is closer to a “front desk / finance / platform ops” split:
 The final tool set is computed in this order:
 
 1. Choose the profile for the current agent: first `agents.list[].intentProfile`, then `intentRouter.agentProfiles`, then `defaultProfile`
-2. Merge `coreTools` and `intentTools` for the classified intents
-3. Add runtime-required tools such as ghost-required tools
+2. In static mode, merge all profile groups and selected packs; only legacy `gate` selects groups by classified intent
+3. Merge explicit skill grants and constrained host/MCP grants; runtime additions such as ghost tools cannot exceed the capability ceiling
 4. Apply `denyTools`
 5. Apply runtime tool switches or visibility filters
 

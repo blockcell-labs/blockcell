@@ -876,7 +876,8 @@ mod tests {
         assert!(!chat.contains("## Tools"));
 
         let coding = render(&registry, "default", InteractionMode::Coding).rules;
-        assert!(!coding.contains("## Tools"));
+        assert!(coding.contains("## Tools"));
+        assert!(coding.contains("Read existing content before modifying it"));
         assert!(coding.contains("## Coding"));
         assert!(coding.contains("`edit_file`: `old_text` must match exactly (read first)."));
         assert!(!coding.contains("## Skill System Guidance"));

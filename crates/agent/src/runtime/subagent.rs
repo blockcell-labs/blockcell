@@ -370,8 +370,18 @@ pub(crate) fn append_ephemeral_context_to_latest_user_message<'a>(
         .rev()
         .find(|message| message.role == "user")
     {
-        let base = chat_message_text(message);
-        *message = ChatMessage::user(&format!("{}\n\n{}", base, context_block));
+        match &mut message.content {
+            serde_json::Value::String(text) => {
+                text.push_str("\n\n");
+                text.push_str(context_block);
+            }
+            serde_json::Value::Array(parts) => {
+                parts.push(serde_json::json!({"type": "text", "text": context_block}));
+            }
+            content => {
+                *content = serde_json::Value::String(context_block.to_string());
+            }
+        }
     }
     std::borrow::Cow::Owned(api_messages)
 }
@@ -440,5 +450,28 @@ pub(crate) fn extract_reply_metadata(msg: &InboundMessage) -> serde_json::Value 
             serde_json::Value::Null
         }
         _ => serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_context_tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_context_preserves_multimodal_parts_and_message_identity() {
+        let mut user = ChatMessage::user("inspect screenshot");
+        user.id = Some("original-user-message".into());
+        user.content = serde_json::json!([
+            {"type":"text","text":"inspect screenshot"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,fixture"}}
+        ]);
+        let messages = vec![ChatMessage::system("stable"), user];
+        let request =
+            append_ephemeral_context_to_latest_user_message(&messages, Some("task state"));
+        assert_eq!(request[1].content[1], messages[1].content[1]);
+        assert_eq!(request[1].id, messages[1].id);
+        assert_eq!(request[0].content, messages[0].content);
+        assert_eq!(messages[1].content.as_array().unwrap().len(), 2);
+        assert_eq!(request[1].content[2]["text"], "task state");
     }
 }

@@ -14,17 +14,17 @@
 
 > `allowedMcpServers` / `allowedMcpTools` 是 agent 级别的 MCP 可见性白名单，字段名是 camelCase。
 
-## 静态能力与兼容迁移（2026-10-27）
+## 静态能力与兼容迁移（2026-10-28）
 
-默认 `intentRouter.toolSelection` 为 `"rank"`。名称为兼容未来排序提示保留；当前工具 schema 按既有展示优先级和名称稳定排序，不随本轮意图重排。意图继续决定交互提示，不决定工具准入。
+默认 `intentRouter.toolSelection` 为 `"rank"`。名称为兼容未来排序提示保留；当前工具 schema 按既有展示优先级和名称稳定排序，不随本轮意图重排。默认不再根据关键词切换交互模式；分类只用于旧 `gate` 或显式启用的临时提示，不决定静态工具准入。
 
-能力范围由 profile 工具并集、运行时基础工具、agent 的 MCP 白名单与注册表共同决定，最后统一扣除 `denyTools` 和未注册工具。运行时基础工具包括既有全局内核（memory、agent/spawn、skill、session、cron、web_fetch、tool_search、mcp_search_tools 等），以及此前 Coding 隐式补充的 `read_file`、`write_file`、`edit_file`、`grep`、`shell_run`；同时保留 `glob`、shell 的 poll/input/close 和仅在 skill 目录中执行的 `exec_skill_script` / `exec_local`。这些工具仍受执行策略和确认机制约束。自定义窄 profile 也应通过 `denyTools` 排除不需要的基础工具；`denyTools: ["shell"]` 会同时排除 shell 的四个单用途工具。
+能力范围由 profile 工具并集、运行时基础工具、agent 的 MCP 白名单与注册表共同决定，最后统一扣除 `denyTools` 和未注册工具。运行时基础工具包括既有全局内核（memory、agent/spawn、skill、session、cron、web_fetch、tool_search、mcp_search_tools 等），以及此前 Coding 隐式补充的 `read_file`、`write_file`、`edit_file`、`grep`、`shell_run`；同时保留 `glob`、shell 的 poll/input/close 和仅在 skill 目录中执行的 `exec_skill_script` / `exec_local`。这些工具仍受执行策略和确认机制约束。省略 `basePacks` 保持这些基础工具；窄 profile 可显式设置 `basePacks: []` 并声明所需工具，无需维护基础工具 deny 长串；`denyTools: ["shell"]` 会同时排除 shell 的四个单用途工具。
 
 升级会扩大此前依赖意图裁剪的工具范围。要保留旧的逐轮裁剪和 Coding 曝光行为，配置 `"intentRouter": { "toolSelection": "gate" }`。两种模式都强制执行 `denyTools`；兼容开关不能恢复绕过拒绝规则的行为。
 
 静态模式下，Coding 不再额外隐藏工具 schema。展示为 `discoverable` 的工具先进入授权发现目录，经 `tool_search` 或 MCP 搜索后补全完整 schema；发现只能改变曝光，不能扩权。普通工具继续复用既有 full/light schema 机制，light 工具搜索后在同轮替换为完整 schema。
 
-skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围。自定义 skill 或 memory provider 使用的工具名也需要出现在 profile 中（内置基础工具和已授权 MCP 工具除外）。ghost 的工具追加、持久化发现记录和旧 `shell` 调用同样不能绕过 `denyTools`。profile 不存在时静态模式关闭工具能力，不回退到全局内核。
+skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围。技能工具可由 profile 的 `skillGrants` 显式批准；宿主扩展可使用 `register_host_granted`，作用域注册与 ghost provider 也可提供受约束的宿主授权。普通注册、技能声明和发现结果本身不授权。ghost 的工具追加、持久化发现记录和旧 `shell` 调用同样不能绕过 `denyTools`。profile 不存在时静态模式关闭工具能力，不回退到全局内核。
 
 `ToolPolicy` 仍从 `~/.blockcell/tool_policy.yaml` 加载，按参数、路径和通道求值，优先级为 deny > ask > allow。hook 改写后的参数必须经过 policy；shell 别名与规范名称同时受最严格的匹配结果约束。它与 profile 的静态能力限制同时生效。
 
@@ -278,7 +278,7 @@ skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围�
 
 ### 这个例子怎么理解
 
-- `support` 的工具范围由 profile 静态决定；高频聊天不会清空工具，需要限制的基础工具应加入 `denyTools`。
+- `support` 的工具范围由 profile 静态决定；高频聊天不会清空工具，可用 `basePacks: []` 移除隐式基础工具，再声明所需工具；`denyTools` 始终有效。
 - `finance` 专门把行情、告警、图表和日报工具聚在一起，适合做“金融分析 Agent”。
 - `admin` 允许系统控制和运维类工具，但没有金融类能力。
 - 如果你把 `finance` 设成某个渠道的 owner，那么这类消息就会优先落到金融 profile 上。
@@ -292,7 +292,7 @@ skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围�
 
 1. 选择 agent 对应的 profile：先看 `agents.list[].intentProfile`，再看 `intentRouter.agentProfiles`，最后回退 `defaultProfile`
 2. 默认静态模式合并 profile 中所有工具组及所选基础包；仅 `gate` 按当前意图选择工具组
-3. 叠加运行时强制工具（如 ghost 所需工具）
+3. 合并所选基础包、显式技能授权和受约束的宿主/MCP 授权；ghost 等运行时追加仍不得突破能力上限
 4. 应用 `denyTools`
 5. 应用运行时其它工具开关或可见性过滤
 

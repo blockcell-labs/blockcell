@@ -1536,8 +1536,10 @@ fn budget_initial_tool_schemas(
     budget: Option<usize>,
     catalog: &HashSet<String>,
 ) -> crate::tool_exposure::ExposureReport {
-    let names: HashSet<String> = schemas.iter()
-        .filter_map(|s| s["function"]["name"].as_str().map(str::to_string)).collect();
+    let names: HashSet<String> = schemas
+        .iter()
+        .filter_map(|s| s["function"]["name"].as_str().map(str::to_string))
+        .collect();
     let mut protected: HashSet<String> = global_core_tool_names().into_iter().collect();
     protected.insert("tool_search".into());
     protected.insert(ACTIVATE_SKILL_TOOL_NAME.into());

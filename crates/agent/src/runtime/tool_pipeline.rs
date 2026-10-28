@@ -277,7 +277,8 @@ impl AgentRuntime {
                     "code": "DISCOVERY_BUDGET_EXHAUSTED", "tool": "tool_search",
                     "hint": "At most two searches (initial query plus one reformulation) are allowed across all loops. Use existing results, explain the limitation or ask for clarification. Do not retry discovery or bypass a denial."
                 }).to_string();
-                self.record_unexecuted_tool_call(tool_call, msg, ToolOutcome::Rejected, &denied).await;
+                self.record_unexecuted_tool_call(tool_call, msg, ToolOutcome::Rejected, &denied)
+                    .await;
                 return ToolCallOutput::rejected(denied);
             }
             self.tool_search_calls_this_turn += 1;

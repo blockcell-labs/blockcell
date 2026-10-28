@@ -1027,7 +1027,8 @@ impl AgentRuntime {
         }
 
         if let Some(context) = task_context.render() {
-            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context)).into_owned();
+            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context))
+                .into_owned();
         }
 
         // 注入当前后台任务状态到 system prompt
@@ -1201,11 +1202,13 @@ impl AgentRuntime {
         }
         tools.extend(provider_tool_schemas);
         let schema_budget = self.config.intent_router.as_ref().and_then(|router| {
-            self.config.resolve_intent_profile_id(self.agent_id.as_deref())
+            self.config
+                .resolve_intent_profile_id(self.agent_id.as_deref())
                 .and_then(|id| router.profiles.get(&id))
                 .and_then(|profile| profile.initial_schema_budget_bytes)
         });
-        let exposure = budget_initial_tool_schemas(&mut tools, schema_budget, &routing_catalog_names);
+        let exposure =
+            budget_initial_tool_schemas(&mut tools, schema_budget, &routing_catalog_names);
         tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
             stage = "initial_exposure", initial_schema_bytes = exposure.initial_bytes,
             exposed_schema_bytes = exposure.exposed_bytes, deferred_count = exposure.deferred_count,
@@ -1694,7 +1697,8 @@ impl AgentRuntime {
                         }
                     };
                     session_metadata = updated_metadata;
-                    task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
+                    task_context =
+                        crate::task_context::TaskContext::from_metadata(&session_metadata);
                     task_context.record_tool(ACTIVATE_SKILL_TOOL_NAME, "Succeeded");
                     record_active_skill_name(&mut session_metadata, &skill_ctx.name);
                     append_activated_skill_history(
@@ -1781,7 +1785,8 @@ impl AgentRuntime {
                         .await;
                         ToolCallOutput::rejected(denied)
                     };
-                    task_context.record_tool(&tool_call.name, &format!("{:?}", tool_output.outcome));
+                    task_context
+                        .record_tool(&tool_call.name, &format!("{:?}", tool_output.outcome));
                     let is_error = tool_call_failed(&tool_output);
                     metrics.routing.record_outcome(
                         matches!(tool_output.outcome, ToolOutcome::Rejected),

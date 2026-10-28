@@ -344,9 +344,9 @@ fn static_scope_includes_other_intent_groups_without_matching_them() {
 }
 
 #[test]
-fn static_scope_narrow_profile_requires_explicit_denies() {
-    // 只写 coreTools 不会让 profile 变窄：运行时基础集与全局内核仍会注入。
-    // 这个用例固定"窄"的真实成本，避免文档一句"请用 denyTools 排除"被当成零成本。
+fn static_scope_omitted_base_packs_preserve_legacy_foundation_and_denies() {
+    // 兼容旧配置：省略 basePacks 仍注入基础工具，denyTools 继续生效。
+    // 新的窄 profile 应使用 basePacks: []，由独立测试覆盖。
     let mut config = Config::default();
     let profile = config
         .intent_router
@@ -411,7 +411,7 @@ fn static_scope_narrow_profile_requires_explicit_denies() {
             "denyTools 未生效: {denied}"
         );
     }
-    // 全局内核（memory/spawn/cron 等）不在 deny 列表里，仍保留——这是设计而非疏漏。
+    // 省略 basePacks 时，未被 deny 的旧版内核仍保留。
     assert!(tools.contains(&"memory_query".to_string()));
 }
 
@@ -10544,9 +10544,15 @@ async fn routing_task_context_survives_bilingual_followups_without_persisting_pr
         msg.content = content.into();
         runtime.process_message(msg.clone()).await.unwrap();
         let metadata = runtime.session_store.load_metadata(&key).unwrap();
-        assert_eq!(metadata["routing_task_context"]["objective"], "分析销售报告 / analyze sales report");
+        assert_eq!(
+            metadata["routing_task_context"]["objective"],
+            "分析销售报告 / analyze sales report"
+        );
         let history = runtime.session_store.load(&key).unwrap();
-        assert!(history.iter().filter(|m| m.role == "user").all(|m| !chat_message_text(m).contains("task-context")));
+        assert!(history
+            .iter()
+            .filter(|m| m.role == "user")
+            .all(|m| !chat_message_text(m).contains("task-context")));
     }
 }
 
@@ -10562,8 +10568,12 @@ fn routing_exposure_budget_keeps_discovery_and_uncatalogued_schemas_reachable() 
     let report = budget_initial_tool_schemas(&mut schemas, Some(0), &catalog);
     assert_eq!(report.deferred_count, 1);
     assert_eq!(schemas.len(), 2);
-    assert!(schemas.iter().any(|s| s["function"]["name"] == "tool_search"));
-    assert!(schemas.iter().any(|s| s["function"]["name"] == "provider_special"));
+    assert!(schemas
+        .iter()
+        .any(|s| s["function"]["name"] == "tool_search"));
+    assert!(schemas
+        .iter()
+        .any(|s| s["function"]["name"] == "provider_special"));
     let mut no_discovery = original[1..].to_vec();
     let before = no_discovery.clone();
     let report = budget_initial_tool_schemas(&mut no_discovery, Some(0), &catalog);
@@ -10575,9 +10585,15 @@ fn routing_exposure_budget_keeps_discovery_and_uncatalogued_schemas_reachable() 
 async fn routing_discovery_budget_is_shared_across_loops_and_resets_next_user_turn() {
     let mut runtime = test_runtime_with_default_tools();
     let msg = test_main_session_inbound("cli", "discovery-budget");
-    let call = tool_call("tool_search", serde_json::json!({"query":"missing capability"}));
+    let call = tool_call(
+        "tool_search",
+        serde_json::json!({"query":"missing capability"}),
+    );
     for _ in 0..2 {
-        assert_eq!(runtime.execute_tool_call(&call, &msg, None).await.outcome, ToolOutcome::Succeeded);
+        assert_eq!(
+            runtime.execute_tool_call(&call, &msg, None).await.outcome,
+            ToolOutcome::Succeeded
+        );
     }
     // Creating another skill/tool loop cannot replenish the per-turn budget.
     let _another_loop = ToolLoopGuard::new(100, HashMap::new());
@@ -10585,5 +10601,8 @@ async fn routing_discovery_budget_is_shared_across_loops_and_resets_next_user_tu
     assert_eq!(denied.outcome, ToolOutcome::Rejected);
     assert!(denied.text.contains("DISCOVERY_BUDGET_EXHAUSTED"));
     runtime.process_message(msg.clone()).await.unwrap();
-    assert_eq!(runtime.execute_tool_call(&call, &msg, None).await.outcome, ToolOutcome::Succeeded);
+    assert_eq!(
+        runtime.execute_tool_call(&call, &msg, None).await.outcome,
+        ToolOutcome::Succeeded
+    );
 }

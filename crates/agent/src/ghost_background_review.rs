@@ -938,7 +938,13 @@ mod tests {
             messages: &[ChatMessage],
             tools: &[serde_json::Value],
         ) -> blockcell_core::Result<LLMResponse> {
-            if tools.is_empty() {
+            // Normal turns may expose skill activation even with an empty
+            // registry. Identify reviewer calls by their actual prompt contract.
+            let is_review = messages
+                .first()
+                .and_then(|m| m.content.as_str())
+                .is_some_and(|system| system.contains("quiet Ghost learning reviewer"));
+            if !is_review {
                 return Ok(LLMResponse {
                     content: Some("mock answer: learn my preferred deploy style".to_string()),
                     reasoning_content: None,
