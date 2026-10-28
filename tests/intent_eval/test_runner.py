@@ -200,6 +200,47 @@ class IntentEvalTests(unittest.TestCase):
                                    "candidate", 0, timeout=5, max_model_calls=4, max_tokens=1000)
         self.assertIn("invalid adapter response", value["adapter_error"])
 
+    def test_forbidden_and_disallowed_denied_attempts_are_selection_failures(self):
+        for name in ("write_file", "exec"):
+            for outcome, counter in (("scope_denied", "scope_denied"), ("policy_denied", "policy_denied")):
+                with self.subTest(name=name, outcome=outcome):
+                    value = record()
+                    value["turns"][0]["selected_tools"] = [{"name": name, "outcome": outcome}]
+                    result = runner.score_record(case(), value)
+                    self.assertEqual(result["failure_stage"], "selection")
+                    self.assertEqual(result[counter], 1)
+                    self.assertEqual(result["unsafe_executions"], 0)
+                    value["turns"][0]["capability_tools"] = []
+                    self.assertEqual(runner.score_record(case(), value)["failure_stage"], "selection")
+
+    def test_permitted_denied_attempt_keeps_boundary_attribution(self):
+        for outcome, stage in (("scope_denied", "capability"), ("policy_denied", "policy")):
+            with self.subTest(outcome=outcome):
+                value = record()
+                value["turns"][0]["selected_tools"] = [{"name": "read_file", "outcome": outcome}]
+                self.assertEqual(runner.score_record(case(), value)["failure_stage"], stage)
+
+    def test_malformed_adapter_turns_and_calls_become_failed_records(self):
+        import sys
+        bad_turns = [None, {"selected_tools": None}, {"selected_tools": "read_file"},
+                     {"selected_tools": {}}, {"selected_tools": [None]},
+                     {"selected_tools": ["read_file"]}, {"selected_tools": [{}]},
+                     {"selected_tools": [{"name": "read_file", "outcome": "invented"}]}]
+        for turn in bad_turns:
+            with self.subTest(turn=turn):
+                output = json.dumps({"turns": [turn]})
+                value = runner.run_adapter(case(), [sys.executable, "-c", f"print({output!r})"], metadata(),
+                                           "candidate", 0, timeout=5, max_model_calls=4, max_tokens=1000)
+                self.assertIn("invalid adapter response", value["adapter_error"])
+                result = runner.score_record(case(), value)
+                self.assertFalse(result["routing_passed"])
+
+    def test_direct_scoring_rejects_malformed_turn_with_clear_validation_error(self):
+        value = record()
+        value["turns"] = [None]
+        with self.assertRaisesRegex(ValueError, "turn"):
+            runner.score_record(case(), value)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,10 @@ an unsafe execution.
 Recovered execution errors remain visible in `execution_failed`; an eventual
 successful acceptable route can still pass. Scope/policy violations and attempted
 forbidden actions remain routing failures even when another path succeeds later.
+When a forbidden or otherwise disallowed tool is correctly rejected, the failure
+is attributed to selection, not missing capability or a broken policy. Rejection
+counters are retained. A permitted action rejected at its boundary is attributed
+to capability or policy instead.
 
 `required_tool_sets` expresses alternative unordered sets. The scorer accepts any
 of these paths and does not require an exact tool sequence. `allowed_tools`
@@ -147,7 +151,9 @@ python3 tests/intent_eval/runner.py run \
 
 The default 12-run smoke plan includes one language pair per family. The runner
 creates output files exclusively, preserving prior artifacts. Timeout and adapter
-failures become failed records. The adapter must enforce model-call/token budgets
+failures become failed records. Malformed turn objects or selected-tool entries also
+become failed adapter records
+without aborting the remaining batch. The adapter must enforce model-call/token budgets
 before making requests; the runner also rejects reported budget overruns, but
 cannot undo spending by an adapter that ignores its input. Runtime process trees
 and external services require their own cancellation semantics.
