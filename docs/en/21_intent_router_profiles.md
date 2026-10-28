@@ -341,3 +341,9 @@ An explicitly file-read-only profile starts with:
 ```
 
 Empty packs remove implicit capabilities. Explicit profile tools, host grants, scoped tools and allowlisted MCP tools can still add capabilities; a read-only deployment must restrict those grants and execution policies too. Denies always win. Legacy `gate` retains its compatibility behavior.
+
+## Host-approved skill tools
+
+A profile may set `"skillGrants": {"audit": ["read_file", "email"]}`. These are explicit host-approved agent capabilities grouped by skill, included in the static ceiling before activation. This is not an activation-only permission boundary. Skill execution still intersects its own tool declaration with the agent ceiling.
+
+A skill's `tools`, `learned: false`, or discovery result never authorizes itself. Ordinary `register` provides an implementation; embedders can explicitly use `register_host_granted`. Scoped registration follows the current view and guard lifetime; genuine MCP registrations still require the current agent allowlist. Denies and execution policy apply to every source.

@@ -313,6 +313,9 @@ impl<'a> IntentToolResolver<'a> {
             }
             tools.extend(entry.tools().iter().cloned());
         }
+        // Host configuration grants capabilities; skill metadata is only a
+        // declaration of requirements, regardless of its learned flag.
+        tools.extend(profile.skill_grants.values().flatten().cloned());
         tools.retain(|name| !profile.deny_tools.contains(name));
         let mut tools: Vec<_> = tools.into_iter().collect();
         tools.sort();
@@ -475,6 +478,14 @@ impl<'a> IntentToolResolver<'a> {
 
             for tool in &profile.core_tools {
                 ensure_known_tool(self.config, mcp, profile_name, tool, &registered)?;
+            }
+            for (skill, granted_tools) in &profile.skill_grants {
+                if skill.trim().is_empty() {
+                    return Err(Error::Config(format!("intentRouter.profiles.{profile_name}.skillGrants requires nonempty skill names")));
+                }
+                for tool in granted_tools {
+                    ensure_known_tool(self.config, mcp, profile_name, tool, &registered)?;
+                }
             }
             for tool in &profile.deny_tools {
                 ensure_known_tool(self.config, mcp, profile_name, tool, &registered)?;

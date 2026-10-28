@@ -155,6 +155,36 @@ fn static_scope_named_packs_do_not_enable_other_packs() {
     }
 }
 
+#[tokio::test]
+async fn routing_refactor_skill_grants_require_host_configuration() {
+    let mut runtime = test_runtime_with_default_tools();
+    let mut config = serde_json::json!({"intentRouter":{"profiles":{"default":{
+        "basePacks":[], "coreTools":["read_file"], "intentTools":{"Unknown":[]}
+    }}}});
+    runtime.config = serde_json::from_value(config.clone()).unwrap();
+    let mut skill = ActiveSkillContext {
+        name: "audit".into(), prompt_md: String::new(), inject_prompt_md: true,
+        tools: vec!["email".into()], fallback_message: None,
+        source: blockcell_skills::manager::SkillSource::BlockCell, learned: false,
+    };
+    assert!(runtime.resolved_skill_tool_names(&skill).is_empty());
+    config["intentRouter"]["profiles"]["default"]["skillGrants"] = serde_json::json!({"audit":["email"]});
+    runtime.config = serde_json::from_value(config).unwrap();
+    assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["email"]);
+    skill.learned = true;
+    assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["email"]);
+    runtime.config.intent_router.as_mut().unwrap().profiles.get_mut("default").unwrap().deny_tools.push("email".into());
+    assert!(runtime.resolved_skill_tool_names(&skill).is_empty());
+}
+
+#[test]
+fn routing_refactor_skill_grant_validation_rejects_unknown_implementations() {
+    let config: Config = serde_json::from_value(serde_json::json!({"intentRouter":{"profiles":{"default":{
+        "basePacks":[], "intentTools":{"Unknown":[]}, "skillGrants":{"audit":["missing_admin"]}
+    }}}})).unwrap();
+    assert!(IntentToolResolver::new(&config).validate(&ToolRegistry::with_defaults()).is_err());
+}
+
 #[test]
 fn static_scope_survives_coding_unknown_and_chat_followups() {
     let config = Config::default();

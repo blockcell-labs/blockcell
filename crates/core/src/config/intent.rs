@@ -52,6 +52,10 @@ pub struct IntentToolProfileConfig {
     /// Omitted: legacy foundation. Explicit []: no implicit capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_packs: Option<Vec<ToolBasePack>>,
+    /// Explicit host approval grouped by skill. Included in the agent ceiling;
+    /// the skill manifest/learned flag itself cannot grant capabilities.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub skill_grants: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub core_tools: Vec<String>,
     #[serde(default)]
@@ -155,6 +159,7 @@ fn default_intent_router_profiles() -> HashMap<String, IntentToolProfileConfig> 
         "default".to_string(),
         IntentToolProfileConfig {
             base_packs: None,
+            skill_grants: HashMap::new(),
             core_tools: vec![
                 "read_file".to_string(),
                 "write_file".to_string(),

@@ -331,3 +331,9 @@ blockcell doctor
 ```
 
 空基础包表示不继承隐式能力；`coreTools`、`intentTools`、显式宿主授权、作用域工具以及获白名单授权的 MCP 工具仍可能增加能力。真正只读还需要这些授权和执行策略一致。`denyTools` 始终优先；`gate` 为兼容旧行为保留原路径。
+
+## 宿主批准的技能工具
+
+profile 可设置 `"skillGrants": {"audit": ["read_file", "email"]}`。这是宿主显式批准的 agent 能力，按技能名分组以避免混入领域工具组；工具会在激活前进入静态能力上限。它不是“仅在技能内部可调用”的权限。技能执行仍仅使用自己的工具声明与 agent 能力上限的交集。
+
+技能的 `tools`、`learned: false` 和搜索结果都不能自行授权；普通 `register` 只提供实现，嵌入方可用 `register_host_granted` 显式批准扩展。作用域注册受视图及 guard 生命周期约束，真实 MCP 注册仍需通过当前 agent 的白名单。所有来源都受最终 deny 和执行策略约束。
