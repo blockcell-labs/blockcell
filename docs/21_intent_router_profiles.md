@@ -339,3 +339,5 @@ profile 可设置 `"skillGrants": {"audit": ["read_file", "email"]}`。这是宿
 技能的 `tools`、`learned: false` 和搜索结果都不能自行授权；普通 `register` 只提供实现，嵌入方可用 `register_host_granted` 显式批准扩展。作用域注册受视图及 guard 生命周期约束，真实 MCP 注册仍需通过当前 agent 的白名单。所有来源都受最终 deny 和执行策略约束。
 
 默认 `rank` 由主模型按任务选择工具，不再根据关键词切换 Coding/Chat 模式；显式模式和旧 `gate` 保持有效。`intentRouter.lexicalHints` 默认 `false`，启用后仅把不可靠的分类提示附加到当前用户轮次，不修改 system、持久化输入或能力上限。技能目录也可在显式 Coding 模式发现。
+
+会话元数据保存有界 `routing_task_context`：目标最多 400 字符、最近请求 200 字符、最近工具 6 项。中英文简短续接保留目标，新请求替换目标。只注入当前用户消息，不写入历史正文；状态不构成批准，技能执行路径同样保存工具结果。

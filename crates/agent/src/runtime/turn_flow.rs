@@ -230,6 +230,7 @@ impl AgentRuntime {
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
         let mut trace_messages = Vec::new();
+        let mut tool_outcomes = Vec::new();
 
         let final_response = loop {
             let step = self.begin_step();
@@ -318,6 +319,7 @@ impl AgentRuntime {
                         .await;
                         ToolCallOutput::rejected(denied)
                     };
+                tool_outcomes.push((tool_call.name.clone(), format!("{:?}", tool_output.outcome)));
                 if loop_guard.record(&tool_call, tool_call_failed(&tool_output)) {
                     over_iteration = true;
                     warn!(
@@ -356,6 +358,7 @@ impl AgentRuntime {
 
         let final_response = strip_fake_tool_calls(final_response.trim());
         Ok(PromptSkillLoopOutput {
+            tool_outcomes,
             final_response: final_response.trim().to_string(),
             trace_messages,
         })

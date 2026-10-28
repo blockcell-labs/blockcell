@@ -10534,3 +10534,18 @@ async fn bench_regression_dynamic_path_refusal_explains_static_validation() {
         .unwrap()
         .contains("not a real filesystem path"));
 }
+
+#[tokio::test]
+async fn routing_task_context_survives_bilingual_followups_without_persisting_prompt_annotations() {
+    let mut runtime = test_runtime_with_provider(Arc::new(TestProvider));
+    let mut msg = test_main_session_inbound("cli", "task-context");
+    let key = msg.session_key();
+    for content in ["分析销售报告 / analyze sales report", "继续", "continue"] {
+        msg.content = content.into();
+        runtime.process_message(msg.clone()).await.unwrap();
+        let metadata = runtime.session_store.load_metadata(&key).unwrap();
+        assert_eq!(metadata["routing_task_context"]["objective"], "分析销售报告 / analyze sales report");
+        let history = runtime.session_store.load(&key).unwrap();
+        assert!(history.iter().filter(|m| m.role == "user").all(|m| !chat_message_text(m).contains("task-context")));
+    }
+}

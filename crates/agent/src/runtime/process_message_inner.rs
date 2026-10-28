@@ -709,6 +709,8 @@ impl AgentRuntime {
         // session_key 是来源会话。历史应从目标会话加载，避免源会话历史覆盖目标会话。
         let mut history = self.session_store.load(&persist_session_key)?;
         let mut session_metadata = self.session_store.load_metadata(&persist_session_key)?;
+        let mut task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
+        task_context.observe_user(&msg.content);
         let is_new_session = history.is_empty();
 
         self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
@@ -1021,6 +1023,10 @@ impl AgentRuntime {
         if let Some(hint) = lexical_routing_hint(&self.config, &decision.chat_intents) {
             messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&hint))
                 .into_owned();
+        }
+
+        if let Some(context) = task_context.render() {
+            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context)).into_owned();
         }
 
         // 注入当前后台任务状态到 system prompt
@@ -1677,6 +1683,8 @@ impl AgentRuntime {
                         }
                     };
                     session_metadata = updated_metadata;
+                    task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
+                    task_context.record_tool(ACTIVATE_SKILL_TOOL_NAME, "Succeeded");
                     record_active_skill_name(&mut session_metadata, &skill_ctx.name);
                     append_activated_skill_history(
                         &mut history,
@@ -1762,6 +1770,7 @@ impl AgentRuntime {
                         .await;
                         ToolCallOutput::rejected(denied)
                     };
+                    task_context.record_tool(&tool_call.name, &format!("{:?}", tool_output.outcome));
                     let is_error = tool_call_failed(&tool_output);
                     metrics.routing.record_outcome(
                         matches!(tool_output.outcome, ToolOutcome::Rejected),
@@ -2974,6 +2983,7 @@ impl AgentRuntime {
             }
         }
 
+        task_context.write_metadata(&mut session_metadata);
         let delivered_response = self
             .persist_and_deliver_final_response(FinalResponseContext {
                 msg: &msg,

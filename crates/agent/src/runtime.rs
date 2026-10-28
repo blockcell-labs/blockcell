@@ -1161,6 +1161,7 @@ fn apply_skill_fallback_response(final_response: String, fallback_message: Optio
 }
 
 pub(crate) struct PromptSkillLoopOutput {
+    tool_outcomes: Vec<(String, String)>,
     final_response: String,
     trace_messages: Vec<ChatMessage>,
 }

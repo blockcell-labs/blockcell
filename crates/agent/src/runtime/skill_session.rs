@@ -30,12 +30,14 @@ impl AgentRuntime {
             .get("media_pending_intent")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let session_metadata = self.session_store.load_metadata(session_key)?;
+        let mut session_metadata = self.session_store.load_metadata(session_key)?;
+        let mut task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
+        task_context.observe_user(&msg.content);
         // 先异步预取项目环境探测（git 子进程），避免同步构建阻塞 executor
         self.context_builder
             .prefetch_project_environment(session_key)
             .await;
-        let messages = self
+        let mut messages = self
             .context_builder
             .build_messages_for_session_mode_with_channel(
                 session_key,
@@ -51,6 +53,10 @@ impl AgentRuntime {
                 tool_names,
                 &tool_prompt_rules,
             );
+
+        if let Some(context) = task_context.render() {
+            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&context)).into_owned();
+        }
 
         let mut tools = if tool_names.is_empty() {
             Vec::new()
@@ -84,6 +90,10 @@ impl AgentRuntime {
             )
             .await?;
 
+        for (name, outcome) in &prompt_result.tool_outcomes {
+            task_context.record_tool(name, outcome);
+        }
+        task_context.write_metadata(&mut session_metadata);
         let mut final_response = prompt_result.final_response;
         if let Some(last_local_exec_tool_name) =
             Self::last_local_exec_tool_name(&prompt_result.trace_messages)
