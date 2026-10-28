@@ -394,7 +394,17 @@ impl AgentRuntime {
             .get("forced_skill_name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let chat_intents = classifier.classify(&msg.content);
+        let static_scope = super::uses_static_tool_scope(&self.config);
+        let hints_enabled = self
+            .config
+            .intent_router
+            .as_ref()
+            .is_some_and(|r| r.lexical_hints);
+        let chat_intents = if !static_scope || hints_enabled {
+            classifier.classify(&msg.content)
+        } else {
+            vec![IntentCategory::Unknown]
+        };
         let session_skill_name = continued_skill_name(session_metadata, history);
 
         if !forced_skill_name.is_empty() {
@@ -429,12 +439,14 @@ impl AgentRuntime {
 
         let code_workspace_fallback = self.one_shot_cli_auto_coding
             && self.forced_interaction_mode.is_none()
-            && !chat_intents.contains(&IntentCategory::Coding)
-            && !(chat_intents.len() == 1 && matches!(chat_intents[0], IntentCategory::Chat))
+            && (static_scope
+                || (!chat_intents.contains(&IntentCategory::Coding)
+                    && !(chat_intents.len() == 1
+                        && matches!(chat_intents[0], IntentCategory::Chat))))
             && super::workspace_looks_like_code(&self.paths.workspace());
         let mode = super::resolve_interaction_mode(
             false,
-            &chat_intents,
+            if static_scope { &[] } else { &chat_intents },
             self.forced_interaction_mode,
             code_workspace_fallback,
         );

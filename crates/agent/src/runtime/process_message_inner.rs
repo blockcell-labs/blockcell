@@ -808,7 +808,14 @@ impl AgentRuntime {
             .map(|r| r.intent_rules.as_slice())
             .unwrap_or(&[]);
         let _classifier_owned;
-        let classifier: &crate::intent::IntentClassifier = if config_intent_rules.is_empty() {
+        let classifier: &crate::intent::IntentClassifier = if config_intent_rules.is_empty()
+            || (uses_static_tool_scope(&self.config)
+                && !self
+                    .config
+                    .intent_router
+                    .as_ref()
+                    .is_some_and(|r| r.lexical_hints))
+        {
             crate::intent::IntentClassifier::global()
         } else {
             _classifier_owned =
@@ -1001,12 +1008,19 @@ impl AgentRuntime {
                 &tool_names,
                 &tool_prompt_rules,
             );
-        if decision.mode != InteractionMode::Coding && decision.active_skill.is_none() {
+        if decision.active_skill.is_none()
+            && tool_names.iter().any(|n| n == ACTIVATE_SKILL_TOOL_NAME)
+        {
             inject_skill_cards_into_system_prompt(
                 &mut messages,
                 &skill_cards,
                 recent_skill_name.as_deref(),
             );
+        }
+
+        if let Some(hint) = lexical_routing_hint(&self.config, &decision.chat_intents) {
+            messages = append_ephemeral_context_to_latest_user_message(&messages, Some(&hint))
+                .into_owned();
         }
 
         // 注入当前后台任务状态到 system prompt

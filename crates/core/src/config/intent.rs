@@ -106,6 +106,9 @@ fn default_intent_rule_priority() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentRouterConfig {
+    /// Optional unreliable lexical guidance, appended only to the current user turn.
+    #[serde(default)]
+    pub lexical_hints: bool,
     /// Static capability union by default; `gate` retains legacy intent gating.
     #[serde(default)]
     pub tool_selection: ToolSelection,
@@ -139,6 +142,7 @@ impl Default for IntentRouterConfig {
     fn default() -> Self {
         Self {
             tool_selection: ToolSelection::Rank,
+            lexical_hints: false,
             enabled: true,
             load_all_tools: false,
             default_profile: default_intent_router_profile(),

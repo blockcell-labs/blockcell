@@ -163,26 +163,92 @@ async fn routing_refactor_skill_grants_require_host_configuration() {
     }}}});
     runtime.config = serde_json::from_value(config.clone()).unwrap();
     let mut skill = ActiveSkillContext {
-        name: "audit".into(), prompt_md: String::new(), inject_prompt_md: true,
-        tools: vec!["email".into()], fallback_message: None,
-        source: blockcell_skills::manager::SkillSource::BlockCell, learned: false,
+        name: "audit".into(),
+        prompt_md: String::new(),
+        inject_prompt_md: true,
+        tools: vec!["email".into()],
+        fallback_message: None,
+        source: blockcell_skills::manager::SkillSource::BlockCell,
+        learned: false,
     };
     assert!(runtime.resolved_skill_tool_names(&skill).is_empty());
-    config["intentRouter"]["profiles"]["default"]["skillGrants"] = serde_json::json!({"audit":["email"]});
+    config["intentRouter"]["profiles"]["default"]["skillGrants"] =
+        serde_json::json!({"audit":["email"]});
     runtime.config = serde_json::from_value(config).unwrap();
     assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["email"]);
     skill.learned = true;
     assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["email"]);
-    runtime.config.intent_router.as_mut().unwrap().profiles.get_mut("default").unwrap().deny_tools.push("email".into());
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("email".into());
     assert!(runtime.resolved_skill_tool_names(&skill).is_empty());
 }
 
 #[test]
 fn routing_refactor_skill_grant_validation_rejects_unknown_implementations() {
-    let config: Config = serde_json::from_value(serde_json::json!({"intentRouter":{"profiles":{"default":{
-        "basePacks":[], "intentTools":{"Unknown":[]}, "skillGrants":{"audit":["missing_admin"]}
-    }}}})).unwrap();
-    assert!(IntentToolResolver::new(&config).validate(&ToolRegistry::with_defaults()).is_err());
+    let config: Config =
+        serde_json::from_value(serde_json::json!({"intentRouter":{"profiles":{"default":{
+            "basePacks":[], "intentTools":{"Unknown":[]}, "skillGrants":{"audit":["missing_admin"]}
+        }}}}))
+        .unwrap();
+    assert!(IntentToolResolver::new(&config)
+        .validate(&ToolRegistry::with_defaults())
+        .is_err());
+}
+
+#[tokio::test]
+async fn routing_refactor_rank_mode_does_not_depend_on_message_language_or_keywords() {
+    let mut runtime = test_runtime_with_default_tools();
+    for prompt in [
+        "修复代码",
+        "fix bug",
+        "hello",
+        "好的",
+        "Merci",
+        "先解释，再修复代码",
+    ] {
+        let mut msg = test_main_session_inbound("cli", "stable-mode");
+        msg.content = prompt.into();
+        let decision = runtime
+            .decide_interaction(
+                &msg,
+                &HashSet::new(),
+                crate::intent::IntentClassifier::global(),
+                &[],
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision.mode, InteractionMode::General, "{prompt}");
+    }
+}
+
+#[test]
+fn routing_refactor_optional_lexical_hints_preserve_system_and_persisted_user_input() {
+    let default_config = Config::default();
+    assert!(lexical_routing_hint(&default_config, &[IntentCategory::Coding]).is_none());
+    let config: Config =
+        serde_json::from_value(serde_json::json!({"intentRouter":{"lexicalHints":true}})).unwrap();
+    let hint = lexical_routing_hint(&config, &[IntentCategory::Coding]).unwrap();
+    let history = vec![
+        ChatMessage::system("stable system"),
+        ChatMessage::user("修复代码 / fix bug"),
+    ];
+    let request = append_ephemeral_context_to_latest_user_message(&history, Some(&hint));
+    assert_eq!(request[0].content, history[0].content);
+    assert_eq!(history[1].content, serde_json::json!("修复代码 / fix bug"));
+    assert!(request[1]
+        .content
+        .as_str()
+        .unwrap()
+        .contains("routing-hint"));
 }
 
 #[test]

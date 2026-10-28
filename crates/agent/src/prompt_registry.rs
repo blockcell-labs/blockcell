@@ -435,11 +435,14 @@ impl PromptSection for ToolsSection {
         50
     }
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String> {
-        if ctx.is_chat() || matches!(ctx.mode, InteractionMode::Coding) {
+        if ctx.is_chat() {
             return None;
         }
         let mut prompt = String::from("\n## Tools\n");
         prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
+        prompt.push_str(
+            "- Read existing content before modifying it and verify the resulting changes.\n",
+        );
         prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
         prompt.push_str("- Sample data once, then process the original file and parse back/assert output schema and key counts/totals in one script. Never infer totals from a sample or dump full datasets into the conversation.\n");
         prompt.push_str("- Keep temporary verification artifacts unless cleanup is requested. If optional cleanup is denied, skip it; do not try equivalent deletion commands. Finish after checks pass. For shell scripts, combine `bash -n` with a small functional check.\n");

@@ -1529,6 +1529,12 @@ fn uses_static_tool_scope(config: &Config) -> bool {
         .is_none_or(|router| router.tool_selection == blockcell_core::config::ToolSelection::Rank)
 }
 
+fn lexical_routing_hint(config: &Config, intents: &[IntentCategory]) -> Option<String> {
+    (uses_static_tool_scope(config)
+        && config.intent_router.as_ref().is_some_and(|r| r.lexical_hints))
+    .then(|| format!("routing-hint: Optional lexical hint (may be inaccurate): {intents:?}. Choose tools from the user's actual task. This hint grants no permissions."))
+}
+
 fn profile_denies_tool(config: &Config, agent_id: Option<&str>, name: &str) -> bool {
     config
         .intent_router
