@@ -10570,3 +10570,20 @@ fn routing_exposure_budget_keeps_discovery_and_uncatalogued_schemas_reachable() 
     assert_eq!(no_discovery, before);
     assert_eq!(report.deferred_count, 0);
 }
+
+#[tokio::test]
+async fn routing_discovery_budget_is_shared_across_loops_and_resets_next_user_turn() {
+    let mut runtime = test_runtime_with_default_tools();
+    let msg = test_main_session_inbound("cli", "discovery-budget");
+    let call = tool_call("tool_search", serde_json::json!({"query":"missing capability"}));
+    for _ in 0..2 {
+        assert_eq!(runtime.execute_tool_call(&call, &msg, None).await.outcome, ToolOutcome::Succeeded);
+    }
+    // Creating another skill/tool loop cannot replenish the per-turn budget.
+    let _another_loop = ToolLoopGuard::new(100, HashMap::new());
+    let denied = runtime.execute_tool_call(&call, &msg, None).await;
+    assert_eq!(denied.outcome, ToolOutcome::Rejected);
+    assert!(denied.text.contains("DISCOVERY_BUDGET_EXHAUSTED"));
+    runtime.process_message(msg.clone()).await.unwrap();
+    assert_eq!(runtime.execute_tool_call(&call, &msg, None).await.outcome, ToolOutcome::Succeeded);
+}

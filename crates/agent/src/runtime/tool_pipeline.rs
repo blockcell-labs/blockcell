@@ -270,6 +270,18 @@ impl AgentRuntime {
                 .await;
             return ToolCallOutput::rejected(denied);
         }
+        if original_name == "tool_search" {
+            if self.tool_search_calls_this_turn >= 2 {
+                let denied = serde_json::json!({
+                    "error": "Tool discovery budget exhausted for this user turn.",
+                    "code": "DISCOVERY_BUDGET_EXHAUSTED", "tool": "tool_search",
+                    "hint": "At most two searches (initial query plus one reformulation) are allowed across all loops. Use existing results, explain the limitation or ask for clarification. Do not retry discovery or bypass a denial."
+                }).to_string();
+                self.record_unexecuted_tool_call(tool_call, msg, ToolOutcome::Rejected, &denied).await;
+                return ToolCallOutput::rejected(denied);
+            }
+            self.tool_search_calls_this_turn += 1;
+        }
         // 预取阶段已触发过 tool/pre-execute：以（可能被 listener 改写后的）
         // 预取参数为准并跳过重复触发，保证 hook 每次调用只执行一次且
         // 后续准入检查作用于同一组参数。

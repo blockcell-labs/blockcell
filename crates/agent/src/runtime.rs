@@ -2645,6 +2645,8 @@ pub struct AgentRuntime {
     event_tx_slot: event_listeners::EventTxSlot,
     /// Current turn / step identity attached to every dispatched runtime event.
     current_turn_id: Option<String>,
+    /// Shared by the main and nested skill loops; reset only for a new inbound turn.
+    tool_search_calls_this_turn: u32,
     current_step: Option<u32>,
     /// Steps already started in the current turn; nested skill loops share it so step ids stay unique.
     turn_step_counter: u32,
@@ -2992,6 +2994,7 @@ impl AgentRuntime {
             event_bus,
             event_tx_slot,
             current_turn_id: None,
+            tool_search_calls_this_turn: 0,
             current_step: None,
             turn_step_counter: 0,
             candidate_scope: None,
@@ -3093,6 +3096,7 @@ impl AgentRuntime {
             event_bus: self.event_bus.clone(),
             event_tx_slot: self.event_tx_slot.clone(),
             current_turn_id: None,
+            tool_search_calls_this_turn: 0,
             current_step: None,
             turn_step_counter: 0,
             candidate_scope: None,

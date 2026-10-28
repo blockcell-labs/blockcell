@@ -19,7 +19,7 @@ pub(crate) fn scoped_tool_denied_result(tool_name: &str) -> String {
             "Tool '{}' is not available in the current built-in/skill scope.",
             tool_name
         ),
-        "Check the agent tool profile, denyTools, and active skill scope. Tool discovery cannot grant permissions.",
+        "Do not retry this unavailable capability or search for a bypass. Check the agent tool profile, denyTools, and active skill scope; explain the limitation. Tool discovery cannot grant permissions.",
     )
 }
 

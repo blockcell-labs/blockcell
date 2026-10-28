@@ -714,6 +714,7 @@ impl AgentRuntime {
         let is_new_session = history.is_empty();
 
         self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
+        self.tool_search_calls_this_turn = 0;
         self.current_step = None;
         self.turn_step_counter = 0;
         self.sync_tool_scope_view(&persist_session_key);
