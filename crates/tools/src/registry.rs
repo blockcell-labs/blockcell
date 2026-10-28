@@ -112,6 +112,14 @@ pub struct ScopedTool {
     presentation: ToolPresentation,
 }
 
+/// Provenance established by host code, never by a tool name or skill manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCapabilityOrigin {
+    HostGrant,
+    ScopedRegistration,
+    McpAllowlist,
+}
+
 #[derive(Clone)]
 pub struct ToolRegistry {
     /// 全局工具（构建 registry 时注册，对所有视图可见）。
@@ -124,6 +132,7 @@ pub struct ToolRegistry {
     scoped: ScopedRegistry<ScopedTool>,
     /// 当前查询视图，决定哪些作用域工具可见、可执行。
     view: ToolScopeView,
+    capability_origins: HashMap<String, ToolCapabilityOrigin>,
 }
 
 impl ToolRegistry {
@@ -134,6 +143,7 @@ impl ToolRegistry {
             presentation_overrides: HashMap::new(),
             scoped: ScopedRegistry::new(),
             view: ToolScopeView::default(),
+            capability_origins: HashMap::new(),
         }
     }
 
@@ -289,6 +299,35 @@ impl ToolRegistry {
         self.insert_tool(tool, presentation);
     }
 
+    /// Register an extension and explicitly grant it to this agent registry.
+    /// Runtime deny, scope, toggle and execution policies still apply.
+    pub fn register_host_granted(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.schema().name;
+        self.register(tool);
+        self.capability_origins
+            .insert(name, ToolCapabilityOrigin::HostGrant);
+    }
+
+    /// Register a genuine MCP implementation; runtime rechecks the agent allowlist.
+    pub fn register_mcp(&mut self, tool: Arc<dyn Tool>, model_hidden: bool) {
+        let name = tool.schema().name;
+        if model_hidden {
+            self.register_model_hidden(tool);
+        } else {
+            self.register(tool);
+        }
+        self.capability_origins
+            .insert(name, ToolCapabilityOrigin::McpAllowlist);
+    }
+
+    pub fn capability_grants(&self) -> HashMap<String, ToolCapabilityOrigin> {
+        let mut grants = self.capability_origins.clone();
+        for name in self.visible_scoped().into_keys() {
+            grants.insert(name, ToolCapabilityOrigin::ScopedRegistration);
+        }
+        grants
+    }
+
     /// Register a tool that remains executable but is hidden from the initial
     /// model-visible tool list. Progressive MCP discovery uses this so tools
     /// can be revealed after `mcp_search_tools` returns their schema.
@@ -302,6 +341,8 @@ impl ToolRegistry {
 
     fn insert_tool(&mut self, tool: Arc<dyn Tool>, presentation: ToolPresentation) {
         let name = tool.schema().name;
+        // A replacement implementation cannot inherit a previous host grant.
+        self.capability_origins.remove(&name);
         debug!(name = %name, visibility = ?presentation.visibility, "Registering tool");
         self.registered_presentation
             .insert(name.clone(), presentation);
@@ -484,7 +525,7 @@ impl ToolRegistry {
         let tools = provider.tools().await;
         for tool in tools {
             debug!(name = %tool.schema().name, server = %provider.server_name, "Registering MCP tool");
-            self.register(tool);
+            self.register_mcp(tool, false);
         }
     }
 
@@ -968,6 +1009,89 @@ mod tests {
     fn description(reg: &ToolRegistry, name: &str) -> Option<String> {
         reg.full_model_schema(name)
             .map(|schema| schema["function"]["description"].as_str().unwrap().into())
+    }
+
+    #[test]
+    fn capability_grants_require_explicit_host_authority() {
+        let mut reg = ToolRegistry::with_defaults();
+        assert!(reg.capability_grants().is_empty());
+        reg.register(Arc::new(NamedTool("custom", "implementation only")));
+        reg.register(Arc::new(NamedTool("fake__tool", "not an MCP registration")));
+        assert!(reg.capability_grants().is_empty());
+        reg.register_host_granted(Arc::new(NamedTool("custom", "host granted")));
+        assert_eq!(
+            reg.capability_grants().get("custom"),
+            Some(&ToolCapabilityOrigin::HostGrant)
+        );
+        assert!(!reg.capability_grants().contains_key("fake__tool"));
+    }
+
+    #[test]
+    fn capability_grants_are_revoked_when_implementation_is_replaced() {
+        let mut reg = ToolRegistry::new();
+        reg.register_host_granted(Arc::new(NamedTool("custom", "first")));
+        reg.register(Arc::new(NamedTool("custom", "ordinary replacement")));
+        assert!(!reg.capability_grants().contains_key("custom"));
+        reg.register_host_granted(Arc::new(NamedTool("custom", "second")));
+        reg.register_model_hidden(Arc::new(NamedTool("custom", "hidden replacement")));
+        assert!(!reg.capability_grants().contains_key("custom"));
+        assert!(reg.is_model_hidden("custom"));
+    }
+
+    #[test]
+    fn capability_grants_record_mcp_provenance_independently_of_visibility() {
+        let mut reg = ToolRegistry::new();
+        reg.register_mcp(Arc::new(NamedTool("server__direct", "direct")), false);
+        reg.register_mcp(Arc::new(NamedTool("server__hidden", "hidden")), true);
+        for name in ["server__direct", "server__hidden"] {
+            assert_eq!(
+                reg.capability_grants().get(name),
+                Some(&ToolCapabilityOrigin::McpAllowlist)
+            );
+        }
+        assert!(!reg.is_model_hidden("server__direct"));
+        assert!(reg.is_model_hidden("server__hidden"));
+        reg.register(Arc::new(NamedTool("server__direct", "replacement")));
+        assert!(!reg.capability_grants().contains_key("server__direct"));
+    }
+
+    #[test]
+    fn capability_grants_follow_scoped_view_and_guard_lifetime() {
+        let mut reg = ToolRegistry::new();
+        reg.set_scope_view(scope_view("ops", "cli:1", None));
+        let guard = reg.register_scoped(
+            ScopeTarget::Session("cli:1".into()),
+            Arc::new(NamedTool("session_tool", "scoped")),
+        );
+        assert_eq!(
+            reg.capability_grants().get("session_tool"),
+            Some(&ToolCapabilityOrigin::ScopedRegistration)
+        );
+        reg.set_scope_view(scope_view("ops", "cli:2", None));
+        assert!(!reg.capability_grants().contains_key("session_tool"));
+        reg.set_scope_view(scope_view("ops", "cli:1", None));
+        drop(guard);
+        assert!(!reg.capability_grants().contains_key("session_tool"));
+    }
+
+    #[test]
+    fn capability_grants_restore_global_origin_after_scoped_override() {
+        let mut reg = ToolRegistry::new();
+        reg.register_host_granted(Arc::new(NamedTool("custom", "global")));
+        reg.set_scope_view(scope_view("ops", "cli:1", None));
+        let guard = reg.register_scoped(
+            ScopeTarget::Session("cli:1".into()),
+            Arc::new(NamedTool("custom", "scoped")),
+        );
+        assert_eq!(
+            reg.capability_grants().get("custom"),
+            Some(&ToolCapabilityOrigin::ScopedRegistration)
+        );
+        drop(guard);
+        assert_eq!(
+            reg.capability_grants().get("custom"),
+            Some(&ToolCapabilityOrigin::HostGrant)
+        );
     }
 
     #[test]

@@ -21,6 +21,66 @@ fn allow_test_tool(runtime: &mut AgentRuntime, name: &str) {
         .push(name.to_string());
 }
 
+#[tokio::test]
+async fn static_scope_explicit_host_grants_do_not_trust_name_shapes() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime.config.agents.defaults.allowed_mcp_servers = vec!["fake".into()];
+    runtime.tool_registry.register(Arc::new(FixedResultTool(
+        "fake__admin",
+        serde_json::json!({}),
+    )));
+    assert!(!runtime.tool_within_capability("fake__admin", &serde_json::json!({})));
+    runtime
+        .tool_registry
+        .register_host_granted(Arc::new(FixedResultTool(
+            "host_extension",
+            serde_json::json!({}),
+        )));
+    assert!(runtime.tool_within_capability("host_extension", &serde_json::json!({})));
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .deny_tools
+        .push("host_extension".into());
+    assert!(!runtime.tool_within_capability("host_extension", &serde_json::json!({})));
+}
+
+#[tokio::test]
+async fn static_scope_mcp_revocation_overrides_profile_and_load_all() {
+    let mut runtime = test_runtime_with_default_tools();
+    runtime.tool_registry.register_mcp(
+        Arc::new(FixedResultTool("demo__secret", serde_json::json!({}))),
+        false,
+    );
+    runtime.config.agents.defaults.allowed_mcp_servers = vec!["demo".into()];
+    runtime
+        .config
+        .intent_router
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("default")
+        .unwrap()
+        .core_tools
+        .push("demo__secret".into());
+    assert!(runtime.tool_within_capability("demo__secret", &serde_json::json!({})));
+    runtime.config.agents.defaults.allowed_mcp_servers.clear();
+    for load_all in [false, true] {
+        let router = runtime.config.intent_router.as_mut().unwrap();
+        router.enabled = !load_all;
+        router.load_all_tools = load_all;
+        assert!(!runtime.tool_within_capability("demo__secret", &serde_json::json!({})));
+        let mut names = vec!["demo__secret".into()];
+        runtime.filter_capability_tools(&mut names);
+        assert!(names.is_empty());
+    }
+}
+
 #[test]
 fn static_scope_survives_coding_unknown_and_chat_followups() {
     let config = Config::default();
@@ -602,18 +662,20 @@ async fn static_scope_discovery_catalog_contains_hidden_authorized_tools_only() 
     let mut runtime = test_runtime_with_provider(provider.clone());
     runtime.tool_registry = ToolRegistry::with_defaults();
     runtime.config.agents.defaults.allowed_mcp_servers = vec!["demo".into()];
-    runtime
-        .tool_registry
-        .register_model_hidden(Arc::new(FixedResultTool(
+    runtime.tool_registry.register_mcp(
+        Arc::new(FixedResultTool(
             "demo__lookup",
             serde_json::json!({"ok":true}),
-        )));
-    runtime
-        .tool_registry
-        .register_model_hidden(Arc::new(FixedResultTool(
+        )),
+        true,
+    );
+    runtime.tool_registry.register_mcp(
+        Arc::new(FixedResultTool(
             "demo__denied_lookup",
             serde_json::json!({}),
-        )));
+        )),
+        true,
+    );
     runtime
         .config
         .intent_router
@@ -711,6 +773,11 @@ async fn static_scope_shell_alias_policy_is_not_lost_on_canonicalization() {
 #[tokio::test]
 async fn static_scope_mcp_search_does_not_return_denied_schema() {
     let mut runtime = test_runtime_with_default_tools();
+    for name in ["demo__lookup", "demo__denied_lookup"] {
+        runtime
+            .tool_registry
+            .register_mcp(Arc::new(FixedResultTool(name, serde_json::json!({}))), true);
+    }
     let tools = ["lookup", "denied_lookup"]
         .into_iter()
         .map(|name| {

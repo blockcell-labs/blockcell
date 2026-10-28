@@ -1601,12 +1601,6 @@ fn resolve_static_tool_names(
                     // 通过 MCP 白名单授权的工具可以进入能力集；skill 声明与搜索
                     // 结果不在此列，它们只能改变曝光。
                     runtime_granted.contains(*name)
-                        || (name.contains("__")
-                            && blockcell_tools::mcp::manager::mcp_access_allows(
-                                &config.agents.defaults.allowed_mcp_servers,
-                                &config.agents.defaults.allowed_mcp_tools,
-                                name,
-                            ))
                 })
                 .cloned(),
         );
@@ -2694,8 +2688,20 @@ impl AgentRuntime {
     /// 这些名字由宿主代码产生，不是模型可控输入，因此可以作为能力来源；skill 声明、
     /// `tool_search` 结果与 MCP 搜索仍然只能改变曝光。`denyTools` 依旧最后生效。
     fn runtime_granted_tools(&self) -> HashSet<String> {
-        let mut granted: HashSet<String> =
-            self.tool_registry.scoped_tool_names().into_iter().collect();
+        let mut granted: HashSet<String> = self
+            .tool_registry
+            .capability_grants()
+            .into_iter()
+            .filter(|(name, origin)| {
+                *origin != blockcell_tools::ToolCapabilityOrigin::McpAllowlist
+                    || blockcell_tools::mcp::manager::mcp_access_allows(
+                        &self.config.agents.defaults.allowed_mcp_servers,
+                        &self.config.agents.defaults.allowed_mcp_tools,
+                        name,
+                    )
+            })
+            .map(|(name, _)| name)
+            .collect();
         granted.extend(
             ghost_memory_provider_tool_schemas(
                 self.ghost_memory_lifecycle.as_deref(),
@@ -2740,6 +2746,9 @@ impl AgentRuntime {
         } else {
             name
         };
+        if !self.mcp_registration_allows(effective) {
+            return false;
+        }
         if profile_denies_tool(&self.config, self.agent_id.as_deref(), name)
             || profile_denies_tool(&self.config, self.agent_id.as_deref(), effective)
         {
@@ -2770,9 +2779,21 @@ impl AgentRuntime {
         .into_iter()
         .collect();
         names.retain(|name| {
-            !profile_denies_tool(&self.config, self.agent_id.as_deref(), name)
+            self.mcp_registration_allows(name)
+                && !profile_denies_tool(&self.config, self.agent_id.as_deref(), name)
                 && (!uses_static_tool_scope(&self.config) || scope.contains(name))
         });
+    }
+
+    /// A profile grant or load-all request never overrides a revoked MCP allowlist.
+    fn mcp_registration_allows(&self, name: &str) -> bool {
+        self.tool_registry.capability_grants().get(name)
+            != Some(&blockcell_tools::ToolCapabilityOrigin::McpAllowlist)
+            || blockcell_tools::mcp::manager::mcp_access_allows(
+                &self.config.agents.defaults.allowed_mcp_servers,
+                &self.config.agents.defaults.allowed_mcp_tools,
+                name,
+            )
     }
 
     pub fn set_forced_interaction_mode(&mut self, mode: Option<InteractionMode>) {

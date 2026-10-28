@@ -185,15 +185,17 @@ impl McpManager {
             registry.register(Arc::new(McpSearchTool::new(search_index)));
 
             for (server_name, tool, client) in allowed_mcp_tools {
-                registry.register_model_hidden(Arc::new(McpToolWrapper::new(
-                    &server_name,
-                    tool,
-                    client,
-                )));
+                registry.register_mcp(
+                    Arc::new(McpToolWrapper::new(&server_name, tool, client)),
+                    true,
+                );
             }
         } else {
             for (server_name, tool, client) in allowed_mcp_tools {
-                registry.register(Arc::new(McpToolWrapper::new(&server_name, tool, client)));
+                registry.register_mcp(
+                    Arc::new(McpToolWrapper::new(&server_name, tool, client)),
+                    false,
+                );
             }
         }
 

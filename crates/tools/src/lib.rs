@@ -79,7 +79,7 @@ use tokio::sync::{mpsc, Mutex};
 
 pub use execution_env::ExecutionEnvironment;
 pub use presentation::{ToolPresentation, ToolPresentationConfig, ToolVisibility};
-pub use registry::{ScopedTool, ToolRegistry, ToolScopeView};
+pub use registry::{ScopedTool, ToolCapabilityOrigin, ToolRegistry, ToolScopeView};
 pub use registry_builder::{
     build_tool_registry_for_agent_config, build_tool_registry_with_all_mcp,
 };
