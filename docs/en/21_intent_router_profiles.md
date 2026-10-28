@@ -329,3 +329,15 @@ Check:
 *Previous: [Provider Pool](./20_provider_pool.md)*
 
 *Index: [Series directory](./00_index.md)*
+
+## Explicit base capability packs
+
+`profiles.<name>.basePacks` controls implicit capabilities in the default static mode. Omitting it preserves the legacy foundation; `[]` injects no packs. Supported names are `core` (global kernel, including memory writes/task/skill management), `coding` (file editing and shell lifecycle), `skills` (activation/local scripts), and `discovery` (tool discovery). Unknown pack names are configuration errors.
+
+An explicitly file-read-only profile starts with:
+
+```json
+{"basePacks": [], "coreTools": ["read_file", "grep", "glob"], "intentTools": {"Unknown": []}}
+```
+
+Empty packs remove implicit capabilities. Explicit profile tools, host grants, scoped tools and allowlisted MCP tools can still add capabilities; a read-only deployment must restrict those grants and execution policies too. Denies always win. Legacy `gate` retains its compatibility behavior.

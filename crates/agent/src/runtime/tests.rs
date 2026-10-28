@@ -82,6 +82,80 @@ async fn static_scope_mcp_revocation_overrides_profile_and_load_all() {
 }
 
 #[test]
+fn static_scope_explicit_empty_packs_remove_all_implicit_side_effects() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "intentRouter": {"profiles": {"default": {
+            "basePacks": [], "coreTools": ["read_file"], "intentTools": {"Unknown": []}
+        }}}
+    }))
+    .unwrap();
+    let available = ToolRegistry::with_defaults()
+        .tool_names()
+        .into_iter()
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::General,
+        None,
+        None,
+        &[IntentCategory::Unknown],
+        &available,
+        "Read only / 只读",
+    );
+    assert_eq!(tools, vec!["read_file"]);
+    let serialized = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        serialized["intentRouter"]["profiles"]["default"]["basePacks"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn static_scope_named_packs_do_not_enable_other_packs() {
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "intentRouter": {"profiles": {"default": {
+            "basePacks": ["coding"], "coreTools": [], "intentTools": {"Unknown": []}
+        }}}
+    }))
+    .unwrap();
+    let available = ToolRegistry::with_defaults()
+        .tool_names()
+        .into_iter()
+        .collect();
+    let tools = resolve_effective_tool_names(
+        &config,
+        InteractionMode::General,
+        None,
+        None,
+        &[IntentCategory::Unknown],
+        &available,
+        "",
+    );
+    for name in [
+        "read_file",
+        "write_file",
+        "shell_run",
+        "shell_poll",
+        "grep",
+        "glob",
+    ] {
+        assert!(tools.contains(&name.into()), "{name}");
+    }
+    for name in [
+        "cron",
+        "memory_upsert",
+        "skill_manage",
+        "exec_local",
+        "activate_skill",
+    ] {
+        assert!(
+            !tools.contains(&name.into()),
+            "implicit capability leaked: {name}"
+        );
+    }
+}
+
+#[test]
 fn static_scope_survives_coding_unknown_and_chat_followups() {
     let config = Config::default();
     let available: HashSet<String> = [

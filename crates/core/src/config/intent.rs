@@ -49,12 +49,28 @@ impl IntentToolEntryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentToolProfileConfig {
+    /// Omitted: legacy foundation. Explicit []: no implicit capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_packs: Option<Vec<ToolBasePack>>,
     #[serde(default)]
     pub core_tools: Vec<String>,
     #[serde(default)]
     pub intent_tools: HashMap<String, IntentToolEntryConfig>,
     #[serde(default)]
     pub deny_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolBasePack {
+    Core,
+    Coding,
+    Skills,
+    Discovery,
+}
+
+impl ToolBasePack {
+    pub const LEGACY: &'static [Self] = &[Self::Core, Self::Coding, Self::Skills, Self::Discovery];
 }
 
 /// 配置文件中自定义的意图匹配规则，与代码内置规则互补。
@@ -138,6 +154,7 @@ fn default_intent_router_profiles() -> HashMap<String, IntentToolProfileConfig> 
     profiles.insert(
         "default".to_string(),
         IntentToolProfileConfig {
+            base_packs: None,
             core_tools: vec![
                 "read_file".to_string(),
                 "write_file".to_string(),

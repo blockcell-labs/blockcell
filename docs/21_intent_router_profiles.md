@@ -291,7 +291,7 @@ skill 只能从 agent 能力范围中选择工具，不能靠声明扩大范围�
 最终工具集合按下面顺序得到：
 
 1. 选择 agent 对应的 profile：先看 `agents.list[].intentProfile`，再看 `intentRouter.agentProfiles`，最后回退 `defaultProfile`
-2. 根据 intent 合并 `coreTools` 与 `intentTools`
+2. 默认静态模式合并 profile 中所有工具组及所选基础包；仅 `gate` 按当前意图选择工具组
 3. 叠加运行时强制工具（如 ghost 所需工具）
 4. 应用 `denyTools`
 5. 应用运行时其它工具开关或可见性过滤
@@ -319,3 +319,15 @@ blockcell doctor
 - 是否引用了未注册的工具名
 - `Unknown` 是否有配置
 - 如果 profile 里引用了 MCP 工具，MCP server / tool 名称是否与当前 `mcp.json` + `mcp.d` 合并结果一致
+
+## 显式基础能力包
+
+`profiles.<name>.basePacks` 控制默认静态模式的隐式能力。省略字段保持旧版兼容；显式 `[]` 不注入任何基础包。可选值为 `core`（全局内核，含记忆写入、任务及技能管理）、`coding`（文件编辑与 shell 生命周期）、`skills`（技能激活和本地脚本）、`discovery`（工具发现）。包名拼错会拒绝配置。
+
+下面的 profile 仅显式声明文件读取能力：
+
+```json
+{"basePacks": [], "coreTools": ["read_file", "grep", "glob"], "intentTools": {"Unknown": []}}
+```
+
+空基础包表示不继承隐式能力；`coreTools`、`intentTools`、显式宿主授权、作用域工具以及获白名单授权的 MCP 工具仍可能增加能力。真正只读还需要这些授权和执行策略一致。`denyTools` 始终优先；`gate` 为兼容旧行为保留原路径。

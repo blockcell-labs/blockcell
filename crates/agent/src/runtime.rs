@@ -1520,14 +1520,7 @@ fn global_core_tool_names() -> Vec<String> {
         .collect()
 }
 
-const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
-    "read_file",
-    "write_file",
-    "edit_file",
-    "shell_run",
-    "grep",
-    "tool_search",
-];
+const CODING_DEFAULT_TOOL_NAMES: &[&str] = blockcell_tools::base_packs::CODING_DEFAULT_TOOL_NAMES;
 
 fn uses_static_tool_scope(config: &Config) -> bool {
     config
@@ -1572,27 +1565,24 @@ fn resolve_static_tool_names(
     {
         tools = available.iter().cloned().collect();
     } else {
-        tools.extend(global_core_tool_names());
-        // These used to be added implicitly only in Coding mode. Keep them as
-        // an explicit static runtime foundation so follow-ups cannot lose them.
-        tools.extend(
-            CODING_DEFAULT_TOOL_NAMES
-                .iter()
-                .map(|name| (*name).to_string()),
-        );
-        tools.extend(
-            [
-                "shell_poll",
-                "shell_input",
-                "shell_close",
-                "glob",
-                "exec_skill_script",
-                "exec_local",
-                "activate_skill",
-            ]
-            .into_iter()
-            .map(str::to_string),
-        );
+        let default_router = blockcell_core::config::IntentRouterConfig::default();
+        let router = config.intent_router.as_ref().unwrap_or(&default_router);
+        if let Some(profile) = config
+            .resolve_intent_profile_id(agent_id)
+            .and_then(|id| router.profiles.get(&id))
+        {
+            let packs = profile
+                .base_packs
+                .as_deref()
+                .unwrap_or(blockcell_core::config::ToolBasePack::LEGACY);
+            for pack in packs {
+                tools.extend(
+                    blockcell_tools::base_packs::tool_names(*pack)
+                        .into_iter()
+                        .map(str::to_string),
+                );
+            }
+        }
         tools.extend(
             available
                 .iter()

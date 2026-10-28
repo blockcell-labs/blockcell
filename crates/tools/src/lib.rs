@@ -3,6 +3,7 @@ pub mod agent_status;
 pub mod alert_rule;
 pub mod app_control;
 pub mod audio_transcribe;
+pub mod base_packs;
 mod bounded_io;
 pub mod browser;
 pub mod camera;
