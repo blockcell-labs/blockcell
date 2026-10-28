@@ -935,7 +935,9 @@ impl Provider for OpenAIProvider {
                                                 let idx = tc.index;
 
                                                 let acc = tool_calls.entry(idx).or_default();
-                                                if let Some(id) = &tc.id {
+                                                if let Some(id) = tc.id.as_ref().filter(|id| {
+                                                    !id.is_empty() && acc.id.is_empty()
+                                                }) {
                                                     acc.id = id.clone();
                                                     let _ = tx
                                                         .send(StreamChunk::ToolCallStart {
@@ -949,7 +951,11 @@ impl Provider for OpenAIProvider {
                                                         })
                                                         .await;
                                                 }
-                                                if let Some(name) = &tc.function.name {
+                                                if let Some(name) =
+                                                    tc.function.name.as_ref().filter(|name| {
+                                                        !name.is_empty() && acc.name.is_empty()
+                                                    })
+                                                {
                                                     acc.name = name.clone();
                                                 }
                                                 if let Some(args_delta) = &tc.function.arguments {
@@ -1065,6 +1071,67 @@ fn supports_thinking_mode(provider_name: &str) -> bool {
 mod tests {
     use super::*;
     use blockcell_core::types::ChatMessage;
+
+    #[tokio::test]
+    async fn stream_preserves_parallel_calls_with_empty_identity_deltas() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let _ = socket.read(&mut request).unwrap();
+            let events = [
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"read_file"}},{"index":1,"id":"b","function":{"name":"write_file"}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"{\"path\":"}},{"index":1,"id":"","function":{"name":"","arguments":"{\"path\":"}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"\"a\"}"}},{"index":1,"id":"","function":{"name":"","arguments":"\"b\"}"}}]}}]}),
+            ];
+            let mut body = events
+                .iter()
+                .map(|e| format!("data: {e}\n\n"))
+                .collect::<String>();
+            body.push_str("data: [DONE]\n\n");
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let provider =
+            OpenAIProvider::new("test", Some(&format!("http://{addr}")), "test", 100, 0.0).unwrap();
+        let mut rx = provider
+            .chat_stream(
+                &[],
+                &[json!({"type":"function","function":{"name":"read_file"}})],
+            )
+            .await
+            .unwrap();
+        let mut starts = Vec::new();
+        let mut calls = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                StreamChunk::ToolCallStart { id, name, .. } => starts.push((id, name)),
+                StreamChunk::Done { response } => calls = response.tool_calls,
+                StreamChunk::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        server.join().unwrap();
+        starts.sort();
+        calls.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            starts,
+            vec![
+                ("a".into(), "read_file".into()),
+                ("b".into(), "write_file".into())
+            ]
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (&calls[0].name, &calls[0].arguments),
+            (&"read_file".to_string(), &json!({"path":"a"}))
+        );
+        assert_eq!(
+            (&calls[1].name, &calls[1].arguments),
+            (&"write_file".to_string(), &json!({"path":"b"}))
+        );
+    }
 
     #[test]
     fn test_apply_reasoning_effort_deepseek_max() {

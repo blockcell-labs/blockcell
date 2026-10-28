@@ -146,7 +146,7 @@ impl AgentRuntime {
                         }
                         let mut accumulated_content = String::new();
                         let mut accumulated_reasoning = String::new();
-                        let mut tool_call_accumulators: HashMap<String, ToolCallAccumulator> =
+                        let mut tool_call_accumulators: HashMap<usize, ToolCallAccumulator> =
                             HashMap::new();
                         let mut emitted_text_delta = false;
                         let mut stream_error: Option<blockcell_core::Error> = None;
@@ -189,20 +189,21 @@ impl AgentRuntime {
                                             let _ = event_tx.send(event.to_string());
                                         }
                                     }
-                                    StreamChunk::ToolCallStart { index: _, id, name } => {
-                                        let acc =
-                                            tool_call_accumulators.entry(id.clone()).or_default();
-                                        acc.id = id.clone();
-                                        acc.name = name.clone();
-                                    }
-                                    StreamChunk::ToolCallDelta {
-                                        index: _,
-                                        id,
-                                        delta,
-                                    } => {
-                                        if let Some(acc) = tool_call_accumulators.get_mut(&id) {
-                                            acc.arguments.push_str(&delta);
+                                    StreamChunk::ToolCallStart { index, id, name } => {
+                                        let acc = tool_call_accumulators.entry(index).or_default();
+                                        if acc.id.is_empty() && !id.is_empty() {
+                                            acc.id = id;
                                         }
+                                        if acc.name.is_empty() && !name.is_empty() {
+                                            acc.name = name;
+                                        }
+                                    }
+                                    StreamChunk::ToolCallDelta { index, id, delta } => {
+                                        let acc = tool_call_accumulators.entry(index).or_default();
+                                        if acc.id.is_empty() && !id.is_empty() {
+                                            acc.id = id;
+                                        }
+                                        acc.arguments.push_str(&delta);
                                     }
                                     StreamChunk::Done { response } => {
                                         let final_tool_calls = if !tool_call_accumulators.is_empty()

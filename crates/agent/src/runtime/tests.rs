@@ -4512,6 +4512,95 @@ async fn connection_phase_failure_falls_back_to_next_provider_without_retry_budg
     assert_eq!(served_by.provider, "test");
 }
 
+struct EmptyIdentityStreamProvider;
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for EmptyIdentityStreamProvider {
+    async fn chat(
+        &self,
+        _: &[ChatMessage],
+        _: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        unreachable!()
+    }
+    async fn chat_stream(
+        &self,
+        _: &[ChatMessage],
+        _: &[serde_json::Value],
+    ) -> blockcell_core::Result<mpsc::Receiver<StreamChunk>> {
+        let (tx, rx) = mpsc::channel(16);
+        for chunk in [
+            StreamChunk::ToolCallStart {
+                index: 0,
+                id: "a".into(),
+                name: "read_file".into(),
+            },
+            StreamChunk::ToolCallStart {
+                index: 1,
+                id: "b".into(),
+                name: "write_file".into(),
+            },
+            StreamChunk::ToolCallStart {
+                index: 0,
+                id: "".into(),
+                name: "".into(),
+            },
+            StreamChunk::ToolCallDelta {
+                index: 0,
+                id: "".into(),
+                delta: "{\"path\":\"a\"}".into(),
+            },
+            StreamChunk::ToolCallStart {
+                index: 1,
+                id: "".into(),
+                name: "".into(),
+            },
+            StreamChunk::ToolCallDelta {
+                index: 1,
+                id: "".into(),
+                delta: "{\"path\":\"b\"}".into(),
+            },
+            StreamChunk::Done {
+                response: LLMResponse {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: vec![],
+                    finish_reason: "tool_calls".into(),
+                    usage: serde_json::Value::Null,
+                },
+            },
+        ] {
+            tx.send(chunk).await.unwrap();
+        }
+        Ok(rx)
+    }
+}
+
+#[tokio::test]
+async fn stream_dispatch_accumulates_parallel_calls_by_index() {
+    let mut runtime = test_runtime_with_provider(Arc::new(EmptyIdentityStreamProvider));
+    let msg = test_main_session_inbound("cli", "stream-parallel");
+    let (response, _) = runtime
+        .call_llm_with_retry(
+            &[ChatMessage::user("hello")],
+            &[],
+            &msg,
+            None,
+            &HashMap::new(),
+            &mut false,
+            &mut 0,
+        )
+        .await
+        .unwrap();
+    let mut calls = response.tool_calls;
+    calls.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "read_file");
+    assert_eq!(calls[0].arguments, serde_json::json!({"path":"a"}));
+    assert_eq!(calls[1].name, "write_file");
+    assert_eq!(calls[1].arguments, serde_json::json!({"path":"b"}));
+}
+
 #[tokio::test]
 async fn explicit_stream_done_reports_provider_success() {
     let mut config = Config::default();
