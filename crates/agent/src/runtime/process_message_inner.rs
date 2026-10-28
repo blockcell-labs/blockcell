@@ -1078,6 +1078,10 @@ impl AgentRuntime {
             .cloned()
             .collect();
         let search_entries = self.tool_registry.tool_search_entries(&searchable_names);
+        let routing_catalog_names: HashSet<String> = search_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
         blockcell_tools::tool_search::set_tool_search_catalog(&session_key, search_entries);
 
         let mut tools = if tool_names.is_empty() {
@@ -1344,6 +1348,16 @@ impl AgentRuntime {
                 break;
             }
 
+            metrics.routing.record_inventory(
+                tool_names.len(),
+                routing_catalog_names.len(),
+                tools.len(),
+                serde_json::to_vec(&tools).map_or(0, |bytes| bytes.len()),
+            );
+            tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
+                turn_id = ?self.current_turn_id, stage = "inventory", resolved_scope_count = tool_names.len(),
+                catalog_count = routing_catalog_names.len(), exposed_count = tools.len(),
+                schema_bytes = metrics.routing.schema_bytes, "Tool routing inventory");
             debug!(
                 iteration = ?loop_guard.call_counts(),
                 current_messages_len = current_messages.len(),
@@ -1460,6 +1474,16 @@ impl AgentRuntime {
                 final_response = format!("⚠️ {}", e.message);
                 history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
                 break;
+            }
+
+            for call in &response.tool_calls {
+                let in_scope = self.tool_within_capability(&call.name, &call.arguments);
+                metrics.routing.record_selection(in_scope);
+                tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
+                    turn_id = ?self.current_turn_id, stage = "selection", tool = %call.name,
+                    in_scope, catalogued = routing_catalog_names.contains(&call.name),
+                    advertised = tools.iter().any(|schema| schema["function"]["name"] == call.name),
+                    "Model selected tool");
             }
 
             // Handle tool calls
@@ -1616,6 +1640,15 @@ impl AgentRuntime {
                             &persist_session_key,
                         )
                         .await;
+                    metrics.routing.record_outcome(
+                        false,
+                        skill_outcome.is_ok(),
+                        skill_outcome.is_err(),
+                    );
+                    tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
+                        turn_id = ?self.current_turn_id, stage = "skill_outcome",
+                        tool = ACTIVATE_SKILL_TOOL_NAME, succeeded = skill_outcome.is_ok(),
+                        "Skill execution outcome");
                     let (skill_result, updated_metadata, allowed_tools) = match skill_outcome {
                         Ok(outcome) => outcome,
                         Err(error) => {
@@ -1716,6 +1749,14 @@ impl AgentRuntime {
                         ToolCallOutput::rejected(denied)
                     };
                     let is_error = tool_call_failed(&tool_output);
+                    metrics.routing.record_outcome(
+                        matches!(tool_output.outcome, ToolOutcome::Rejected),
+                        matches!(tool_output.outcome, ToolOutcome::Succeeded),
+                        is_error,
+                    );
+                    tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
+                        turn_id = ?self.current_turn_id, stage = "outcome", tool = %tool_call.name,
+                        outcome = ?tool_output.outcome, "Tool routing outcome");
                     let result = tool_output.text;
                     let current_tool_call_index = tool_call_index;
                     tool_call_index = tool_call_index.saturating_add(1);

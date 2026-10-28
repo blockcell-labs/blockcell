@@ -11,6 +11,7 @@
 
 mod circuit_breaker;
 mod memory;
+mod routing;
 mod summary;
 
 pub use circuit_breaker::{
@@ -36,6 +37,7 @@ pub(crate) struct ProcessingMetrics {
     tool_executions: Vec<(String, u64)>,
     compression_count: u32,
     finalized: bool,
+    pub routing: routing::RoutingMetrics,
 }
 
 impl ProcessingMetrics {
@@ -47,6 +49,7 @@ impl ProcessingMetrics {
             tool_executions: Vec::new(),
             compression_count: 0,
             finalized: false,
+            routing: routing::RoutingMetrics::default(),
         }
     }
 
@@ -96,6 +99,7 @@ impl ProcessingMetrics {
             tool_calls = self.tool_executions.len(),
             tool_total_ms,
             compressions = self.compression_count,
+            routing = ?self.routing,
             "📊 Message processing metrics"
         );
 
