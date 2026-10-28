@@ -177,3 +177,5 @@ mod steering_tests {
 }
 
 mod task_context;
+
+mod tool_exposure;

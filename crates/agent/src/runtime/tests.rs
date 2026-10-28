@@ -10549,3 +10549,24 @@ async fn routing_task_context_survives_bilingual_followups_without_persisting_pr
         assert!(history.iter().filter(|m| m.role == "user").all(|m| !chat_message_text(m).contains("task-context")));
     }
 }
+
+#[test]
+fn routing_exposure_budget_keeps_discovery_and_uncatalogued_schemas_reachable() {
+    let original = vec![
+        serde_json::json!({"function":{"name":"tool_search","parameters":{"type":"object"}}}),
+        serde_json::json!({"function":{"name":"email"}}),
+        serde_json::json!({"function":{"name":"provider_special"}}),
+    ];
+    let mut schemas = original.clone();
+    let catalog = HashSet::from(["tool_search".into(), "email".into()]);
+    let report = budget_initial_tool_schemas(&mut schemas, Some(0), &catalog);
+    assert_eq!(report.deferred_count, 1);
+    assert_eq!(schemas.len(), 2);
+    assert!(schemas.iter().any(|s| s["function"]["name"] == "tool_search"));
+    assert!(schemas.iter().any(|s| s["function"]["name"] == "provider_special"));
+    let mut no_discovery = original[1..].to_vec();
+    let before = no_discovery.clone();
+    let report = budget_initial_tool_schemas(&mut no_discovery, Some(0), &catalog);
+    assert_eq!(no_discovery, before);
+    assert_eq!(report.deferred_count, 0);
+}

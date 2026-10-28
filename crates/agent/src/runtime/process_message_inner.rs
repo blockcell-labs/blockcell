@@ -1199,6 +1199,16 @@ impl AgentRuntime {
             }
         }
         tools.extend(provider_tool_schemas);
+        let schema_budget = self.config.intent_router.as_ref().and_then(|router| {
+            self.config.resolve_intent_profile_id(self.agent_id.as_deref())
+                .and_then(|id| router.profiles.get(&id))
+                .and_then(|profile| profile.initial_schema_budget_bytes)
+        });
+        let exposure = budget_initial_tool_schemas(&mut tools, schema_budget, &routing_catalog_names);
+        tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
+            stage = "initial_exposure", initial_schema_bytes = exposure.initial_bytes,
+            exposed_schema_bytes = exposure.exposed_bytes, deferred_count = exposure.deferred_count,
+            over_budget = exposure.over_budget, "Initial tool schema budget");
         info!(
             mode = ?decision.mode,
             active_skill = decision.active_skill.as_ref().map(|s| s.name.as_str()),

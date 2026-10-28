@@ -49,6 +49,9 @@ impl IntentToolEntryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentToolProfileConfig {
+    /// Initial schema JSON UTF-8 byte budget; discovery does not change capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_schema_budget_bytes: Option<usize>,
     /// Omitted: legacy foundation. Explicit []: no implicit capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_packs: Option<Vec<ToolBasePack>>,
@@ -162,6 +165,7 @@ fn default_intent_router_profiles() -> HashMap<String, IntentToolProfileConfig> 
     profiles.insert(
         "default".to_string(),
         IntentToolProfileConfig {
+            initial_schema_budget_bytes: None,
             base_packs: None,
             skill_grants: HashMap::new(),
             core_tools: vec![

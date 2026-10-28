@@ -548,6 +548,7 @@ fn build_activate_skill_tool_schema(skill_cards: &[SkillCard]) -> Option<serde_j
         "type": "function",
         "function": {
             "name": ACTIVATE_SKILL_TOOL_NAME,
+            "description": "Activate an installed skill for a concrete task using the listed skill_name. This executes the skill within the agent capability ceiling; it does not grant permissions. For ordinary operations, use the relevant tool directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1528,6 +1529,24 @@ fn uses_static_tool_scope(config: &Config) -> bool {
         .intent_router
         .as_ref()
         .is_none_or(|router| router.tool_selection == blockcell_core::config::ToolSelection::Rank)
+}
+
+fn budget_initial_tool_schemas(
+    schemas: &mut Vec<serde_json::Value>,
+    budget: Option<usize>,
+    catalog: &HashSet<String>,
+) -> crate::tool_exposure::ExposureReport {
+    let names: HashSet<String> = schemas.iter()
+        .filter_map(|s| s["function"]["name"].as_str().map(str::to_string)).collect();
+    let mut protected: HashSet<String> = global_core_tool_names().into_iter().collect();
+    protected.insert("tool_search".into());
+    protected.insert(ACTIVATE_SKILL_TOOL_NAME.into());
+    // Uncatalogued/provider schemas cannot be recovered through tool_search.
+    protected.extend(names.iter().filter(|n| !catalog.contains(*n)).cloned());
+    if !names.contains("tool_search") {
+        protected.extend(names);
+    }
+    crate::tool_exposure::apply_schema_budget(schemas, budget, &protected)
 }
 
 fn lexical_routing_hint(config: &Config, intents: &[IntentCategory]) -> Option<String> {
