@@ -4564,7 +4564,12 @@ impl blockcell_providers::Provider for EmptyIdentityStreamProvider {
                 response: LLMResponse {
                     content: None,
                     reasoning_content: None,
-                    tool_calls: vec![],
+                    tool_calls: vec![ToolCallRequest {
+                        id: "a".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({"path":"a"}),
+                        thought_signature: Some("signed-thought".into()),
+                    }],
                     finish_reason: "tool_calls".into(),
                     usage: serde_json::Value::Null,
                 },
@@ -4592,9 +4597,12 @@ async fn stream_dispatch_accumulates_parallel_calls_by_index() {
         )
         .await
         .unwrap();
-    let mut calls = response.tool_calls;
-    calls.sort_by(|a, b| a.id.cmp(&b.id));
+    let calls = response.tool_calls;
     assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].thought_signature.as_deref(),
+        Some("signed-thought")
+    );
     assert_eq!(calls[0].name, "read_file");
     assert_eq!(calls[0].arguments, serde_json::json!({"path":"a"}));
     assert_eq!(calls[1].name, "write_file");

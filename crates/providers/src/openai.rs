@@ -935,21 +935,12 @@ impl Provider for OpenAIProvider {
                                                 let idx = tc.index;
 
                                                 let acc = tool_calls.entry(idx).or_default();
+                                                let mut identity_updated = false;
                                                 if let Some(id) = tc.id.as_ref().filter(|id| {
                                                     !id.is_empty() && acc.id.is_empty()
                                                 }) {
                                                     acc.id = id.clone();
-                                                    let _ = tx
-                                                        .send(StreamChunk::ToolCallStart {
-                                                            index: idx,
-                                                            id: id.clone(),
-                                                            name: tc
-                                                                .function
-                                                                .name
-                                                                .clone()
-                                                                .unwrap_or_default(),
-                                                        })
-                                                        .await;
+                                                    identity_updated = true;
                                                 }
                                                 if let Some(name) =
                                                     tc.function.name.as_ref().filter(|name| {
@@ -957,6 +948,19 @@ impl Provider for OpenAIProvider {
                                                     })
                                                 {
                                                     acc.name = name.clone();
+                                                    identity_updated = true;
+                                                }
+                                                if identity_updated
+                                                    && !acc.id.is_empty()
+                                                    && !acc.name.is_empty()
+                                                {
+                                                    let _ = tx
+                                                        .send(StreamChunk::ToolCallStart {
+                                                            index: idx,
+                                                            id: acc.id.clone(),
+                                                            name: acc.name.clone(),
+                                                        })
+                                                        .await;
                                                 }
                                                 if let Some(args_delta) = &tc.function.arguments {
                                                     acc.arguments.push_str(args_delta);
@@ -1130,6 +1134,58 @@ mod tests {
         assert_eq!(
             (&calls[1].name, &calls[1].arguments),
             (&"write_file".to_string(), &json!({"path":"b"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_start_waits_for_separately_delivered_id_and_name() {
+        let events = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":""}},{"index":1,"id":"","function":{"name":"write_file"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"","arguments":"{\"path\":\"b\"}"}},{"index":0,"id":"","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]}}]}),
+        ];
+        let body = events
+            .iter()
+            .map(|e| format!("data: {e}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n";
+        let (url, server) = crate::test_http::serve(body).await;
+        let provider = OpenAIProvider::new_with_proxy(
+            "test",
+            Some(&url),
+            "test",
+            100,
+            0.0,
+            Some(""),
+            None,
+            &[],
+            ToolCallMode::Native,
+            "test",
+            None,
+        )
+        .unwrap();
+        let starts = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut rx = provider.chat_stream(&[], &[]).await.unwrap();
+            let mut starts = Vec::new();
+            while let Some(chunk) = rx.recv().await {
+                match chunk {
+                    StreamChunk::ToolCallStart { index, id, name } => {
+                        starts.push((index, id, name))
+                    }
+                    StreamChunk::Error { message } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+            starts
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            starts,
+            vec![
+                (1, "b".into(), "write_file".into()),
+                (0, "a".into(), "read_file".into())
+            ]
         );
     }
 

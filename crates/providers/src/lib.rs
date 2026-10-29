@@ -71,3 +71,6 @@ pub use openai_responses::OpenAIResponsesProvider;
 pub use pool::{
     CallResult, PoolEntryStatus, ProviderPool, ProviderPoolEntry, RoutingContext, ServedBy,
 };
+
+#[cfg(test)]
+mod test_http;

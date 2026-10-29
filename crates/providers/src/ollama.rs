@@ -484,6 +484,7 @@ impl Provider for OllamaProvider {
             let mut buffer = String::new();
             let mut accumulated_content = String::new();
             let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
+            let mut tool_call_index = 0usize;
             let mut finish_reason = "stop".to_string();
             let mut stream_guard = StreamGuard::new(MAX_PROVIDER_RESPONSE_BYTES);
 
@@ -520,8 +521,10 @@ impl Provider for OllamaProvider {
 
                                 // 处理工具调用
                                 if let Some(native_calls) = &chunk.message.tool_calls {
-                                    for (i, tc) in native_calls.iter().enumerate() {
+                                    for tc in native_calls {
                                         if let Some(func) = &tc.function {
+                                            let i = tool_call_index;
+                                            tool_call_index += 1;
                                             let id = format!("ollama_call_{}", i);
                                             let _ = tx
                                                 .send(StreamChunk::ToolCallStart {
@@ -689,6 +692,42 @@ mod tests {
     fn test_normalize_model() {
         assert_eq!(OllamaProvider::normalize_model("ollama/qwen3.6"), "qwen3.6");
         assert_eq!(OllamaProvider::normalize_model("qwen3.6"), "qwen3.6");
+    }
+
+    #[tokio::test]
+    async fn tool_call_indices_continue_across_events() {
+        let body = [
+            serde_json::json!({"message":{"tool_calls":[{"function":{"name":"read_file","arguments":{"path":"a"}}}]},"done":false}),
+            serde_json::json!({"message":{"tool_calls":[{"function":{"name":"write_file","arguments":{"path":"b"}}}]},"done":false}),
+            serde_json::json!({"message":{"content":""},"done":true}),
+        ].iter().map(|v| format!("{v}\n")).collect::<String>();
+        let (base, server) = crate::test_http::serve(body).await;
+        let provider = OllamaProvider::new(Some(&base), "test", 100, 0.0).unwrap();
+        let mut rx = provider
+            .chat_stream(&[ChatMessage::user("hello")], &[])
+            .await
+            .unwrap();
+        let mut starts = Vec::new();
+        let mut calls = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                StreamChunk::ToolCallStart { index, id, name } => starts.push((index, id, name)),
+                StreamChunk::Done { response } => calls = response.tool_calls,
+                StreamChunk::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        server.await.unwrap();
+        assert_eq!(
+            starts,
+            vec![
+                (0, "ollama_call_0".into(), "read_file".into()),
+                (1, "ollama_call_1".into(), "write_file".into())
+            ]
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, serde_json::json!({"path":"a"}));
+        assert_eq!(calls[1].arguments, serde_json::json!({"path":"b"}));
     }
 
     #[test]

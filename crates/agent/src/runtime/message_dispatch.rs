@@ -42,6 +42,30 @@ fn retry_after_delay_ms(error: &blockcell_core::Error) -> Option<u64> {
     )
 }
 
+// Stream indices define execution order. Prefer complete provider records when
+// available: they may contain metadata (for example Gemini thought signatures)
+// that cannot be represented by ToolCallStart/ToolCallDelta.
+fn merge_stream_tool_calls(
+    accumulators: HashMap<usize, ToolCallAccumulator>,
+    mut completed: Vec<ToolCallRequest>,
+) -> Vec<ToolCallRequest> {
+    let mut indexed: Vec<_> = accumulators.into_iter().collect();
+    indexed.sort_by_key(|(index, _)| *index);
+    let mut calls = Vec::new();
+    for (_, acc) in indexed {
+        if let Some(position) = completed
+            .iter()
+            .position(|call| !acc.id.is_empty() && call.id == acc.id)
+        {
+            calls.push(completed.remove(position));
+        } else if !acc.id.is_empty() && !acc.name.is_empty() {
+            calls.push(acc.to_tool_call_request());
+        }
+    }
+    calls.extend(completed);
+    calls
+}
+
 impl AgentRuntime {
     /// Extracted sub-function (#15): Call LLM with streaming and retry on transient errors.
     /// Returns the LLM response on success, or the last error on exhaustion.
@@ -206,15 +230,10 @@ impl AgentRuntime {
                                         acc.arguments.push_str(&delta);
                                     }
                                     StreamChunk::Done { response } => {
-                                        let final_tool_calls = if !tool_call_accumulators.is_empty()
-                                        {
-                                            tool_call_accumulators
-                                                .drain()
-                                                .map(|(_, acc)| acc.to_tool_call_request())
-                                                .collect()
-                                        } else {
-                                            response.tool_calls.clone()
-                                        };
+                                        let final_tool_calls = merge_stream_tool_calls(
+                                            std::mem::take(&mut tool_call_accumulators),
+                                            response.tool_calls.clone(),
+                                        );
 
                                         let final_content = if !accumulated_content.is_empty() {
                                             Some(accumulated_content.clone())
@@ -272,10 +291,8 @@ impl AgentRuntime {
                                 || !accumulated_content.is_empty())
                         {
                             self.provider_pool.report(pool_idx, CallResult::Success);
-                            let final_tool_calls: Vec<ToolCallRequest> = tool_call_accumulators
-                                .into_values()
-                                .map(|acc| acc.to_tool_call_request())
-                                .collect();
+                            let final_tool_calls =
+                                merge_stream_tool_calls(tool_call_accumulators, Vec::new());
 
                             let served_by = self.served_by(pool_idx);
                             return Ok((
