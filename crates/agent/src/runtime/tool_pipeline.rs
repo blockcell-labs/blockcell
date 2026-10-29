@@ -1177,6 +1177,27 @@ impl AgentRuntime {
             return;
         }
 
+        if tool_call.name == "shell" {
+            let command = inv
+                .args
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| inv.args.get("input").and_then(serde_json::Value::as_str));
+            if let Some(command) = command {
+                let session_cwd = inv
+                    .args
+                    .get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(blockcell_tools::shell_session::session_cwd)
+                    .flatten();
+                let paths = crate::runtime::path_security::extract_literal_shell_read_paths(
+                    command,
+                    &session_cwd,
+                );
+                self.record_file_observations(&inv.msg.session_key(), &paths);
+            }
+        }
+
         if matches!(
             tool_call.name.as_str(),
             "read_file" | "write_file" | "edit_file"

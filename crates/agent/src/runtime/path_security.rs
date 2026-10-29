@@ -577,7 +577,12 @@ impl super::AgentRuntime {
             return Ok(());
         }
         let mut effective_args = args.clone();
-        if tool_name == "shell_run"
+        if matches!(tool_name, "shell" | "shell_run")
+            && effective_args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+                == "run"
             && effective_args
                 .get("session_id")
                 .and_then(serde_json::Value::as_str)
@@ -1164,6 +1169,50 @@ fn resolve_shell_access_path(path: &str, session_cwd: &Option<Option<PathBuf>>) 
     }
 }
 
+pub(super) fn extract_literal_shell_read_paths(
+    command: &str,
+    initial_cwd: &Option<PathBuf>,
+) -> Vec<String> {
+    let cwd = infer_command_cwd(command, &Some(initial_cwd.clone()));
+    let mut paths = Vec::new();
+    for segment in command.split(['&', ';', '|']) {
+        let mut tokens = segment.split_whitespace();
+        let Some(program) = tokens
+            .next()
+            .map(|value| value.rsplit('/').next().unwrap_or(value))
+        else {
+            continue;
+        };
+        if !matches!(program, "cat" | "head" | "tail" | "nl" | "sed") {
+            continue;
+        }
+        let mut skip_sed_expression = program == "sed";
+        for token in tokens {
+            let token = token.trim_matches(['\'', '"']);
+            if token.starts_with('-')
+                || token.starts_with('$')
+                || token.contains('`')
+                || token.contains("$(")
+                || token == "-"
+                || token.is_empty()
+            {
+                continue;
+            }
+            if skip_sed_expression {
+                skip_sed_expression = false;
+                continue;
+            }
+            if token == ";" || token == "&&" || token == "|" {
+                break;
+            }
+            if !paths.contains(&token.to_string()) {
+                paths.push(resolve_shell_access_path(token, &cwd));
+            }
+        }
+    }
+    paths
+}
+
 fn infer_command_cwd(
     command: &str,
     initial_cwd: &Option<Option<PathBuf>>,
@@ -1288,8 +1337,8 @@ fn is_safe_relative_skill_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_mutates_cwd, extract_command_paths, extract_path_accesses,
-        is_safe_relative_skill_path, resolve_shell_access_path, PathAccess,
+        command_mutates_cwd, extract_command_paths, extract_literal_shell_read_paths,
+        extract_path_accesses, is_safe_relative_skill_path, resolve_shell_access_path, PathAccess,
     };
     use blockcell_core::path_policy::PathOp;
     use serde_json::json;
@@ -1671,6 +1720,19 @@ mod tests {
         assert!(extract_command_paths("echo $(pwd)/x")
             .iter()
             .any(|p| p.starts_with("/__unresolved_shell_var__/")));
+    }
+
+    #[test]
+    fn shell_read_observation_accepts_only_literal_paths() {
+        assert_eq!(
+            extract_literal_shell_read_paths("cat a.py", &None),
+            vec!["a.py"]
+        );
+        assert!(extract_literal_shell_read_paths("cat $HOME/.ssh/id_rsa", &None).is_empty());
+        assert_eq!(
+            extract_literal_shell_read_paths("sed -n '1,20p' src/main.rs", &None),
+            vec!["src/main.rs"]
+        );
     }
 
     /// 持久 shell 的 cwd 与 workspace 分叉时，相对路径必须按会话 cwd 解析；
