@@ -277,6 +277,15 @@ fn build_bubblewrap_args(
         let path = match sensitive_path {
             SensitiveReadPath::Directory(path) | SensitiveReadPath::File(path) => path,
         };
+        // Sensitive paths under /dev are device nodes, not host secrets. Masking
+        // them with tmpfs/ro-bind can shadow the sandbox's writable null device.
+        if path.starts_with("/dev")
+            || path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical.starts_with("/dev"))
+        {
+            continue;
+        }
         if path.is_dir() {
             args.push(OsString::from("--tmpfs"));
             args.push(path.as_os_str().to_os_string());
@@ -287,7 +296,34 @@ fn build_bubblewrap_args(
         }
     }
 
+    // Rebind standard devices after all user and sensitive path mounts so a
+    // broad writable root or sensitive-path rule cannot mask their semantics.
+    for device in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/tty"] {
+        // Minimal containers may omit /dev/tty. Do not bind absent paths or
+        // accidentally expose a regular file masquerading as a standard device.
+        if !is_character_device(Path::new(device)) {
+            continue;
+        }
+        args.push(OsString::from("--dev-bind"));
+        args.push(OsString::from(device));
+        args.push(OsString::from(device));
+    }
+
     args
+}
+
+fn is_character_device(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_char_device())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn append_seatbelt_writable_root(profile: &mut String, root: &Path) -> Result<()> {
@@ -414,15 +450,10 @@ impl SandboxProvider for NativeSandboxProvider {
             }
             SandboxBackend::LinuxBubblewrap => {
                 let mut command = Command::new("bwrap");
-                command
-                    .args(build_bubblewrap_args(
-                        policy,
-                        &writable_roots,
-                        &sensitive_read_paths(),
-                    ))
-                    .arg("--")
-                    .arg(&program)
-                    .args(&args);
+                let bwrap_args =
+                    build_bubblewrap_args(policy, &writable_roots, &sensitive_read_paths());
+                tracing::debug!(?bwrap_args, "Prepared Bubblewrap sandbox arguments");
+                command.args(bwrap_args).arg("--").arg(&program).args(&args);
                 command
             }
             SandboxBackend::LinuxLandlockSeccomp => {
@@ -498,6 +529,7 @@ fn apply_landlock(writable_roots: &[PathBuf]) -> std::io::Result<()> {
     const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
     const ACCESS_FS_REFER: u64 = 1 << 13;
     const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+    const DEVICE_WRITE_ACCESS: u64 = ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE;
     let abi = unsafe {
         libc::syscall(
             libc::SYS_landlock_create_ruleset,
@@ -561,13 +593,42 @@ fn apply_landlock(writable_roots: &[PathBuf]) -> std::io::Result<()> {
             if path_fd < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            let allowed = if canonical.is_file() {
-                handled & (ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE)
-            } else {
+            let allowed = if canonical.is_dir() {
                 handled
+            } else {
+                handled & (ACCESS_FS_WRITE_FILE | ACCESS_FS_TRUNCATE)
             };
             let rule = PathBeneathAttr {
                 allowed_access: allowed,
+                parent_fd: path_fd,
+                reserved: 0,
+            };
+            let add_result = unsafe {
+                libc::syscall(
+                    libc::SYS_landlock_add_rule,
+                    ruleset_fd,
+                    RULE_PATH_BENEATH,
+                    &rule,
+                    0u32,
+                )
+            };
+            unsafe { libc::close(path_fd) };
+            if add_result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        for device in ["/dev/null", "/dev/zero", "/dev/tty"] {
+            if !is_character_device(Path::new(device)) {
+                continue;
+            }
+            let path = CString::new(device)
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+            let path_fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+            if path_fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let rule = PathBeneathAttr {
+                allowed_access: handled & DEVICE_WRITE_ACCESS,
                 parent_fd: path_fd,
                 reserved: 0,
             };
@@ -1005,6 +1066,179 @@ mod tests {
         ));
         assert!(args.iter().any(|arg| arg == "--unshare-net"));
         assert!(args.iter().any(|arg| arg == "--die-with-parent"));
+    }
+
+    #[test]
+    fn bubblewrap_keeps_standard_devices_available_after_sensitive_masks() {
+        let args = build_bubblewrap_args(
+            SandboxPolicy::WorkspaceWrite,
+            &[],
+            &[SensitiveReadPath::File(PathBuf::from("/dev/null"))],
+        );
+        for device in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/tty"] {
+            assert_eq!(
+                contains_args(&args, &["--dev-bind", device, device]),
+                is_character_device(Path::new(device)),
+                "only existing character devices may be restored: {device}"
+            );
+        }
+        assert!(!contains_args(
+            &args,
+            &["--ro-bind", "/dev/null", "/dev/null"]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bubblewrap_never_masks_a_device_directory_through_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let alias = root.path().join("device-alias");
+        std::os::unix::fs::symlink("/dev", &alias).unwrap();
+        let args = build_bubblewrap_args(
+            SandboxPolicy::WorkspaceWrite,
+            &[],
+            &[SensitiveReadPath::Directory(alias.clone())],
+        );
+        assert!(
+            !contains_args(&args, &["--tmpfs", alias.to_str().unwrap()]),
+            "masking the symlink would mask /dev: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bubblewrap_still_masks_sensitive_symlinks_outside_devices() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("credentials");
+        std::fs::write(&target, "secret").unwrap();
+        let alias = root.path().join("credential-alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let args = build_bubblewrap_args(
+            SandboxPolicy::WorkspaceWrite,
+            &[],
+            &[SensitiveReadPath::File(alias.clone())],
+        );
+        assert!(contains_args(
+            &args,
+            &["--ro-bind", "/dev/null", alias.to_str().unwrap()]
+        ));
+        let mask_at = args
+            .iter()
+            .position(|arg| arg == alias.as_os_str())
+            .unwrap();
+        let device_at = args.iter().position(|arg| arg == "--dev-bind").unwrap();
+        assert!(
+            device_at > mask_at,
+            "devices must be restored after sensitive masks"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_standard_devices_work_in_exec_and_shell(
+        provider: std::sync::Arc<dyn SandboxProvider>,
+    ) {
+        use crate::shell_session::{SessionOwner, ShellSessionManager};
+        if which::which("python3").is_err() {
+            eprintln!("skipping device integration test: python3 is unavailable");
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let command = "echo x > /dev/null && python3 -c \"open('/dev/null', 'w').close(); open('/dev/zero', 'w').close()\" && printf device-ok";
+        let result = LocalShellExecutor::new(provider.clone())
+            .execute(workspace_write_request(command, workspace.path()))
+            .await
+            .expect("execute device smoke test");
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("device-ok"));
+
+        let manager = ShellSessionManager::with_sandbox(provider);
+        let session_id = manager
+            .create(
+                workspace.path(),
+                SandboxPolicy::WorkspaceWrite,
+                SessionOwner::default(),
+            )
+            .await
+            .expect("create sandboxed shell session");
+        let result = manager
+            .run_command(&session_id, command, std::time::Duration::from_secs(5))
+            .await
+            .expect("run device smoke test in persistent shell");
+        manager
+            .close(&session_id)
+            .await
+            .expect("close shell session");
+        assert!(!result.running, "{result:?}");
+        assert_eq!(result.exit_code, Some(0), "{result:?}");
+        assert!(result.output.contains("device-ok"), "{result:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_bubblewrap_standard_devices_work_in_exec_and_shell() {
+        if !bubblewrap_available_for_test() {
+            return;
+        }
+        assert_standard_devices_work_in_exec_and_shell(std::sync::Arc::new(NativeSandboxProvider))
+            .await;
+    }
+
+    // Landlock is intentionally not selected as a production fallback because
+    // it cannot enforce the sensitive-read masks. Exercise its device grants
+    // directly, without changing native_backend's fail-closed selection.
+    #[cfg(target_os = "linux")]
+    struct LandlockForDeviceTest;
+
+    #[cfg(target_os = "linux")]
+    #[async_trait::async_trait]
+    impl SandboxProvider for LandlockForDeviceTest {
+        fn name(&self) -> &'static str {
+            "landlock-device-test"
+        }
+        async fn prepare(&self, request: SandboxRequest) -> Result<SandboxHandle> {
+            assert_eq!(request.policy, SandboxPolicy::WorkspaceWrite);
+            let mut command = Command::new(request.program);
+            command.args(request.args);
+            let roots = request.writable_roots;
+            // Same child confinement path as the dormant native Landlock backend.
+            unsafe {
+                command.pre_exec(move || apply_linux_sandbox(&roots));
+            }
+            command.kill_on_drop(true);
+            Ok(SandboxHandle {
+                command,
+                backend: SandboxBackend::LinuxLandlockSeccomp,
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_landlock_standard_devices_work_in_exec_and_shell() {
+        if landlock_abi().is_none() {
+            eprintln!("skipping Landlock device test: kernel ABI is unavailable");
+            return;
+        }
+        let provider = std::sync::Arc::new(LandlockForDeviceTest);
+        assert_standard_devices_work_in_exec_and_shell(provider.clone()).await;
+        // Device grants must not turn into a directory-wide filesystem grant.
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("denied");
+        let result = LocalShellExecutor::new(provider)
+            .execute(workspace_write_request(
+                &format!("printf denied > '{}'", target.display()),
+                workspace.path(),
+            ))
+            .await
+            .expect("run out-of-scope write check");
+        assert_ne!(result.exit_code, Some(0));
+        assert!(!target.exists());
     }
 
     #[tokio::test]
