@@ -38,6 +38,141 @@ fn push_paths(accesses: &mut Vec<PathAccess>, args: &serde_json::Value, field: &
     }
 }
 
+fn sandboxed_shell_expansion(
+    command: &str,
+    cwd: &Path,
+    workspace: &Path,
+    backend: blockcell_tools::sandbox::SandboxBackend,
+    policy: blockcell_tools::sandbox::SandboxPolicy,
+) -> Option<(String, Vec<PathAccess>)> {
+    use blockcell_tools::sandbox::{SandboxBackend, SandboxPolicy};
+    if policy == SandboxPolicy::FullAccess
+        || !matches!(
+            backend,
+            SandboxBackend::MacOsSeatbelt
+                | SandboxBackend::LinuxBubblewrap
+                | SandboxBackend::LinuxLandlockSeccomp
+        )
+        || !backend.enforces(policy)
+        || !is_path_within_base(workspace, cwd)
+        || command_mutates_cwd(command)
+    {
+        return None;
+    }
+    let safe_relative = |text: &str| {
+        !text.is_empty()
+            && !text.starts_with('/')
+            && !text.starts_with('~')
+            && !text.contains("..")
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+    };
+    let command = command.trim();
+    // Lookup results are allowed only as an executable, never as a read operand.
+    let lookup =
+        regex::Regex::new(r"^\$\((?:command -v|which) ([A-Za-z0-9_-]+)\)([ A-Za-z0-9_./-]*)$")
+            .ok()?;
+    if let Some(caps) = lookup.captures(command) {
+        return Some((format!("{}{}", &caps[1], &caps[2]), Vec::new()));
+    }
+    let loop_re = regex::Regex::new(
+        r#"^for ([A-Za-z_][A-Za-z0-9_]*) in \$\(find ([A-Za-z0-9_./-]+) -type f\); do (.+); done$"#,
+    )
+    .ok()?;
+    if let Some(caps) = loop_re.captures(command) {
+        let variable = &caps[1];
+        let root = &caps[2];
+        if !safe_relative(root) {
+            return None;
+        }
+        let root = cwd.join(root);
+        if !is_path_within_base(workspace, &root)
+            || root.symlink_metadata().ok()?.file_type().is_symlink()
+        {
+            return None;
+        }
+        let body = &caps[3];
+        let operand = format!("\"${variable}\"");
+        let prefix = body.strip_suffix(&operand)?.trim_end();
+        let tokens: Vec<_> = prefix.split_whitespace().collect();
+        let valid = tokens == ["cat"]
+            || (tokens.len() == 3
+                && tokens[0] == "grep"
+                && matches!(tokens[1], "-n" | "-l" | "-H")
+                && tokens[2]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)));
+        if !valid {
+            return None;
+        }
+        // Enumerate bounded read operands so explicit per-file denials still win.
+        // Reject symlinks and filenames altered by shell word splitting/globbing.
+        let mut pending = vec![root.clone()];
+        let mut accesses = vec![PathAccess {
+            path: root.to_string_lossy().into_owned(),
+            op: PathOp::Read,
+        }];
+        let mut seen = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).ok()? {
+                seen += 1;
+                if seen > 2048 {
+                    return None;
+                }
+                let entry = entry.ok()?;
+                let path = entry.path();
+                let relative = path.strip_prefix(cwd).ok()?.to_str()?;
+                if !safe_relative(relative) || !is_path_within_base(workspace, &path) {
+                    return None;
+                }
+                let kind = entry.file_type().ok()?;
+                if kind.is_symlink() {
+                    return None;
+                }
+                if kind.is_dir() {
+                    pending.push(path.clone());
+                }
+                accesses.push(PathAccess {
+                    path: path.to_string_lossy().into_owned(),
+                    op: PathOp::Read,
+                });
+            }
+        }
+        return Some((String::new(), accesses));
+    }
+    let substitution = regex::Regex::new(r"\$\((pwd|dirname ([A-Za-z0-9_./-]+))\)").ok()?;
+    let mut normalized = String::new();
+    let mut cursor = 0;
+    let mut changed = false;
+    for caps in substitution.captures_iter(command) {
+        let whole = caps.get(0)?;
+        let path = if &caps[1] == "pwd" {
+            cwd.to_path_buf()
+        } else {
+            let relative = caps.get(2)?.as_str();
+            if !safe_relative(relative) {
+                return None;
+            }
+            let path = cwd.join(relative);
+            if !is_path_within_base(workspace, &path) {
+                return None;
+            }
+            path.parent()?.to_path_buf()
+        };
+        normalized.push_str(&command[cursor..whole.start()]);
+        normalized.push_str(path.to_str()?);
+        cursor = whole.end();
+        changed = true;
+    }
+    normalized.push_str(&command[cursor..]);
+    if changed && !normalized.contains('$') && !normalized.contains('`') {
+        Some((normalized, Vec::new()))
+    } else {
+        None
+    }
+}
+
 impl super::AgentRuntime {
     /// Extract filesystem paths from tool call parameters.
     pub(super) fn extract_path_accesses(
@@ -45,7 +180,66 @@ impl super::AgentRuntime {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> Vec<PathAccess> {
-        extract_path_accesses(tool_name, args)
+        let fallback = || extract_path_accesses(tool_name, args);
+        if !matches!(tool_name, "shell" | "exec") {
+            return fallback();
+        }
+        if tool_name == "shell"
+            && args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+                != "run"
+        {
+            return fallback();
+        }
+        let Some(command) = args.get("command").and_then(serde_json::Value::as_str) else {
+            return fallback();
+        };
+        let workspace = self.paths.workspace();
+        let session = args.get("session_id").and_then(serde_json::Value::as_str);
+        let cwd = if tool_name == "shell" {
+            match session.and_then(blockcell_tools::shell_session::session_cwd) {
+                Some(Some(cwd)) => cwd,
+                Some(None) => return fallback(),
+                None => workspace.clone(),
+            }
+        } else {
+            args.get("working_dir")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| self.resolve_path(path))
+                .unwrap_or_else(|| workspace.clone())
+        };
+        let policy = if tool_name == "shell" {
+            session
+                .and_then(blockcell_tools::shell_session::session_sandbox_policy)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    blockcell_tools::sandbox::SandboxPolicy::parse(
+                        args.get("sandbox_policy")
+                            .and_then(serde_json::Value::as_str)
+                            .or(self.config.tools.exec.sandbox_policy.as_deref()),
+                    )
+                })
+        } else {
+            blockcell_tools::exec::ExecTool::resolve_config_policy(&self.config.tools.exec)
+        };
+        let Ok(policy) = policy else {
+            return fallback();
+        };
+        let Some((command, mut extra)) = sandboxed_shell_expansion(
+            command,
+            &cwd,
+            &workspace,
+            blockcell_tools::sandbox::native_backend(policy),
+            policy,
+        ) else {
+            return fallback();
+        };
+        let mut normalized = args.clone();
+        normalized["command"] = serde_json::Value::String(command);
+        extra.extend(extract_path_accesses(tool_name, &normalized));
+        extra
     }
 }
 
@@ -1547,5 +1741,129 @@ mod tests {
                 "expected `{cmd}` not to mutate cwd"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sandbox_expansion_tests {
+    use super::*;
+    use blockcell_tools::sandbox::{SandboxBackend, SandboxPolicy};
+
+    fn expand(command: &str, workspace: &Path) -> Option<(String, Vec<PathAccess>)> {
+        sandboxed_shell_expansion(
+            command,
+            workspace,
+            workspace,
+            SandboxBackend::LinuxBubblewrap,
+            SandboxPolicy::WorkspaceWrite,
+        )
+    }
+
+    #[test]
+    fn bounded_find_loop_exposes_concrete_workspace_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("proj")).unwrap();
+        std::fs::write(temp.path().join("proj/a.py"), "TODO").unwrap();
+        let (_, accesses) = expand(
+            "for f in $(find proj -type f); do grep -n TODO \"$f\"; done",
+            temp.path(),
+        )
+        .expect("literal workspace find loop should be statically provable");
+        assert!(accesses
+            .iter()
+            .any(|a| a.op == PathOp::Read && a.path.ends_with("/proj/a.py")));
+        assert!(accesses
+            .iter()
+            .all(|a| is_path_within_base(temp.path(), Path::new(&a.path))));
+    }
+
+    #[test]
+    fn safe_lookup_pwd_and_dirname_substitutions_have_literal_analysis() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("proj")).unwrap();
+        for cmd in [
+            "$(command -v python3) --version",
+            "$(which python3) --version",
+            "cat \"$(pwd)/a.py\"",
+            "cat \"$(dirname proj/a.py)/b.py\"",
+        ] {
+            let (normalized, _) = expand(cmd, temp.path()).expect(cmd);
+            assert!(!normalized.contains('$'), "{normalized}");
+            assert!(extract_command_paths(&normalized)
+                .iter()
+                .all(|p| !p.contains("__unresolved")));
+        }
+    }
+
+    #[test]
+    fn unknown_or_mutating_expansions_remain_conservative() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("proj")).unwrap();
+        for cmd in [
+            "cat $HOME/.ssh/id_rsa",
+            "cat \"$FOO/id_rsa\"",
+            "cat $f",
+            "cat $(which python3)",
+            "$(command -v python3; cat /etc/passwd)",
+            "cat $(dirname ../secret)/x",
+            "cat $(dirname /etc/passwd)/shadow",
+            "for f in $(find /etc -type f); do grep -n TODO \"$f\"; done",
+            "for f in $(find ../proj -type f); do grep -n TODO \"$f\"; done",
+            "for f in $(find proj -type f -delete); do grep -n TODO \"$f\"; done",
+            "for f in $(find proj -type f -exec cat /etc/passwd +); do cat \"$f\"; done",
+            "for f in $(find proj -type f); do f=/etc/passwd; cat \"$f\"; done",
+            "for f in $(find proj -type f); do grep -f /etc/passwd \"$f\"; done",
+        ] {
+            assert!(expand(cmd, temp.path()).is_none(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn expansion_requires_known_workspace_cwd_and_os_enforcement() {
+        let temp = tempfile::tempdir().unwrap();
+        for (backend, policy) in [
+            (
+                SandboxBackend::ApprovalRequired,
+                SandboxPolicy::WorkspaceWrite,
+            ),
+            (SandboxBackend::FullAccess, SandboxPolicy::FullAccess),
+        ] {
+            assert!(sandboxed_shell_expansion(
+                "$(which python3) --version",
+                temp.path(),
+                temp.path(),
+                backend,
+                policy
+            )
+            .is_none());
+        }
+        assert!(sandboxed_shell_expansion(
+            "$(which python3) --version",
+            Path::new("/"),
+            temp.path(),
+            SandboxBackend::LinuxBubblewrap,
+            SandboxPolicy::WorkspaceWrite
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_loop_rejects_symlink_roots_and_shell_split_filenames() {
+        let temp = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(other.path(), temp.path().join("escape")).unwrap();
+        assert!(expand(
+            "for f in $(find escape -type f); do cat \"$f\"; done",
+            temp.path()
+        )
+        .is_none());
+        std::fs::create_dir(temp.path().join("proj")).unwrap();
+        std::fs::write(temp.path().join("proj/a b"), "x").unwrap();
+        assert!(expand(
+            "for f in $(find proj -type f); do cat \"$f\"; done",
+            temp.path()
+        )
+        .is_none());
     }
 }
