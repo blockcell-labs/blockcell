@@ -319,6 +319,23 @@ pub(crate) fn mentions_tool_name(content: &str, name: &str) -> bool {
 
 const ACTIVATE_SKILL_TOOL_NAME: &str = "activate_skill";
 
+/// 请求体各部分的字节数，用于定位 token 花在哪：system / user / history。
+/// 只统计 content，不含 role/name 等元数据——量级足够做前后对比。
+pub(crate) fn request_part_bytes(messages: &[ChatMessage]) -> (usize, usize, usize) {
+    let mut system = 0;
+    let mut user = 0;
+    let mut history = 0;
+    for message in messages {
+        let bytes = serde_json::to_vec(&message.content).map_or(0, |bytes| bytes.len());
+        match message.role.as_str() {
+            "system" => system += bytes,
+            "user" => user += bytes,
+            _ => history += bytes,
+        }
+    }
+    (system, user, history)
+}
+
 /// Review 模式枚举
 ///
 /// 用于 NudgeEngine 触发后台 Review 时决定审查范围：

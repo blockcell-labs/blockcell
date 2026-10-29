@@ -147,6 +147,8 @@ impl AgentRuntime {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<LLMResponse> {
+        let (system_bytes, user_bytes, history_bytes) =
+            crate::runtime::request_part_bytes(messages);
         self.dispatch_event(
             msg,
             session_id,
@@ -154,6 +156,9 @@ impl AgentRuntime {
                 message_count: messages.len(),
                 tool_count: tools.len(),
                 tool_schema_bytes: serde_json::to_vec(tools).map_or(0, |bytes| bytes.len()),
+                system_bytes,
+                user_bytes,
+                history_bytes,
             },
         )
         .await;

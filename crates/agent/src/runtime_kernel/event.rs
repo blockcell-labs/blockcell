@@ -63,6 +63,12 @@ pub enum AgentEvent {
         message_count: usize,
         tool_count: usize,
         tool_schema_bytes: usize,
+        /// 请求体里 system 段字节数（系统提示 + 技能卡）。
+        system_bytes: usize,
+        /// 请求体里 user 段字节数（任务提示 + runtime-context）。
+        user_bytes: usize,
+        /// 请求体里 assistant/tool 段字节数（本轮之前的历史）。
+        history_bytes: usize,
     },
     /// 模型请求在 provider 回退与重试后仍然失败；`recovery` 是 Runtime 据 `kind` 决定的后续策略。
     AgentRequestError {

@@ -1428,6 +1428,8 @@ impl AgentRuntime {
                 "LLM loop state"
             );
 
+            let (system_bytes, user_bytes, history_bytes) =
+                crate::runtime::request_part_bytes(&current_messages);
             self.dispatch_event(
                 &msg,
                 &persist_session_key,
@@ -1435,6 +1437,9 @@ impl AgentRuntime {
                     message_count: current_messages.len(),
                     tool_count: tools.len(),
                     tool_schema_bytes: serde_json::to_vec(&tools).map_or(0, |bytes| bytes.len()),
+                    system_bytes,
+                    user_bytes,
+                    history_bytes,
                 },
             )
             .await;

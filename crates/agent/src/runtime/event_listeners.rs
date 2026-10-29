@@ -149,9 +149,19 @@ fn session_events_for(event: &AgentEvent) -> Vec<(SessionEventKind, serde_json::
             message_count,
             tool_count,
             tool_schema_bytes,
+            system_bytes,
+            user_bytes,
+            history_bytes,
         } => vec![(
             SessionEventKind::ModelRequest,
-            json!({ "message_count": message_count, "tool_count": tool_count, "tool_schema_bytes": tool_schema_bytes }),
+            json!({
+                "message_count": message_count,
+                "tool_count": tool_count,
+                "tool_schema_bytes": tool_schema_bytes,
+                "system_bytes": system_bytes,
+                "user_bytes": user_bytes,
+                "history_bytes": history_bytes,
+            }),
         )],
         AgentEvent::AgentRequestError {
             error,
