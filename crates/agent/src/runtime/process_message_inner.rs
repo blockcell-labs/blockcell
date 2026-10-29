@@ -1348,6 +1348,9 @@ impl AgentRuntime {
         let mut message_tool_sent_media = false;
         let mut tool_fail_counts: HashMap<String, u32> = HashMap::new();
         let mut resource_missing_hints_sent: HashSet<String> = HashSet::new();
+        // finish_reason=stop 却给出空内容且没有工具调用：模型"说完就停"（实测发生在
+        // 长上下文任务里）。追问一次让它给结论；第二次仍为空则按原样结束。
+        let mut empty_response_nudges: u32 = 0;
         // 同一 turn 内被策略/技能上下文拒绝的次数。达到阈值后只提醒一次"收尾"，
         // 避免模型把拒绝当成工具缺失、连续换工具硬试（工具漂移）。
         let mut policy_rejection_streak = 0_u32;
@@ -2347,6 +2350,25 @@ impl AgentRuntime {
                 .await;
                 // No tool calls, we have the final response
                 let response_content = response.content.unwrap_or_default();
+
+                // 空回复兜底：追问一次而不是把空串当最终答案交付。
+                if response_content.trim().is_empty() && empty_response_nudges < 1 {
+                    empty_response_nudges += 1;
+                    warn!(
+                        nudges = empty_response_nudges,
+                        finish_reason = %response.finish_reason,
+                        "Empty final response; asking the model to conclude"
+                    );
+                    current_messages.push(ChatMessage::assistant_with_reasoning(
+                        "",
+                        response.reasoning_content.clone(),
+                    ));
+                    current_messages.push(ChatMessage::user(
+                        "你上一条回复是空的。请基于以上信息直接给出结论；如果任务无法完成，请明确说明原因与卡点。",
+                    ));
+                    continue;
+                }
+
                 if !verification_gate_fired
                     && last_mutation_idx.is_some_and(|mutation_idx| {
                         last_verification_idx
