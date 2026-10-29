@@ -9195,11 +9195,8 @@ async fn every_proposed_tool_call_ends_with_a_tool_result_outcome() {
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
     config.agents.defaults.max_tool_iterations = 1;
-    let base =
-        std::env::temp_dir().join(format!("blockcell-tool-outcome-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&base).expect("create temp runtime dir");
     let mut runtime = test_runtime_with_provider_and_paths(
-        Paths::with_base(base),
+        test_runtime_paths("blockcell-tool-outcome"),
         Arc::new(EndlessToolProvider),
         config,
     );
