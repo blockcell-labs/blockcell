@@ -45,7 +45,7 @@ impl Tool for WebSearchTool {
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **Web search**: Use `web_search` for discovery. Supports Brave Search API and Baidu AI Search API. Chinese queries prefer Baidu; non-Chinese prefer Brave. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. **If `web_search` returns a config/API-key error, you MUST tell the user to configure the API key** (tools.web.search.apiKey for Brave, tools.web.search.baiduApiKey or env BAIDU_API_KEY for Baidu) — do NOT answer from memory as if search succeeded. **If results are irrelevant**: retry with rephrased query (shorter, different keywords) before concluding no results exist — never give up after just one failed search.".to_string())
+        Some("- **Web search**: Use `web_search` for discovery. Supports Brave Search API and Baidu AI Search API. Chinese queries prefer Baidu; non-Chinese prefer Brave. For 'latest/最近/24小时/今天' news queries, set `freshness=day`. If a primary source is rate-limited, blocked, or returns a thin page, try 1–2 independent alternatives before stopping: rephrase `web_search`, use another official API endpoint/source, or use `web_fetch` with `extractMode=raw`. Report source failures and avoid stating unverified facts. **If `web_search` returns a config/API-key error, tell the user to configure the API key** (tools.web.search.apiKey for Brave, tools.web.search.baiduApiKey or env BAIDU_API_KEY for Baidu). If results are irrelevant, retry with rephrased query before concluding no results exist.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {
@@ -108,7 +108,9 @@ impl Tool for WebSearchTool {
             if !brave_key.is_empty() {
                 match brave_search(brave_key, query, count, freshness.as_deref()).await {
                     Ok(results) => {
-                        return Ok(json!({ "query": query, "results": results, "source": "brave" }))
+                        return Ok(
+                            json!({ "query": query, "results": results, "source": "brave" }),
+                        );
                     }
                     Err(e) => tracing::warn!(error = %e, "Brave search also failed"),
                 }
@@ -353,7 +355,7 @@ impl Tool for WebFetchTool {
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
         Some(concat!(
-            "- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). Use `browse` for JS-heavy sites or interactive automation.\n",
+            "- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). Use `extractMode=raw` if conversion omits requested page metadata or counts; try 1–2 independent sources after rate limits, access blocks, or thin pages. Use `browse` for JS-heavy sites or interactive automation.\n",
             "- **信息充足性原则（避免过度抓取）**: 每次 `web_fetch` 后先评估已有信息是否满足任务需求，**够用就停止**，不要贪婪地抓取所有搜索结果。判断标准：(1) 用户要求[找N篇/N个] -> 已收集到N个独立来源即可停止；(2) 用户要求[总结/汇总] -> 有2-3个高质量来源即可，无需穷举；(3) 用户要求[最新/最全] -> 才需要多源验证。**错误做法**：搜到10条结果就逐一fetch全部。**正确做法**：fetch前几条最相关的，判断内容是否满足需求，满足则直接执行后续任务（写文件/输出等）。"
         ).to_string())
     }
