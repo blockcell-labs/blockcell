@@ -10949,3 +10949,59 @@ async fn repeated_policy_rejections_ask_the_model_to_wrap_up() {
         "the wrap-up hint must be injected exactly once: {hint_counts:?}"
     );
 }
+
+/// `exec` 里的纯读取同样算"已观察"：否则 `exec cat a.py` 之后写同一个文件
+/// 仍会被 FS_NOT_OBSERVED 拦一次（真实测评 t01 就发生过）。
+#[tokio::test]
+async fn exec_literal_read_marks_the_file_observed_for_write_file() {
+    // exec 需要明确的沙箱策略；这里用全权限 + workspace-auto，避免用例结果依赖宿主
+    // 上 seatbelt/bwrap 是否可用。策略必须在构造 runtime 前写进 config。
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.tools.exec.sandbox_policy = Some("full-access".to_string());
+    config.tools.exec.approval_policy = Some("workspace-auto".to_string());
+    let mut runtime = test_runtime_with_provider_and_paths(
+        test_runtime_paths("blockcell-exec-observe"),
+        Arc::new(TestProvider),
+        config,
+    );
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    // 默认注册表里的 ExecTool 用 WorkspaceWrite；macOS 上 seatbelt 不可用时会被拒，
+    // 这里按同一份 config 重新注册，让用例只验证"观察记录"这一件事。
+    let exec_config = runtime.config.tools.exec.clone();
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::exec::ExecTool::from_config(
+            &exec_config,
+        )));
+    let workspace = runtime.paths.workspace().to_path_buf();
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::write(workspace.join("observed.py"), "print(1)\n").expect("write fixture");
+    let msg = test_main_session_inbound("cli", "exec-observe");
+
+    let read = runtime
+        .execute_tool_call(
+            &tool_call("exec", serde_json::json!({"command": "cat observed.py"})),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+
+    let written = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({"path": "observed.py", "content": "print(2)\n"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(written.outcome, ToolOutcome::Succeeded, "{}", written.text);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("observed.py")).unwrap(),
+        "print(2)\n"
+    );
+}

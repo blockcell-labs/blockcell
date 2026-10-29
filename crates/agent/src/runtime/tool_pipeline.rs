@@ -1177,19 +1177,30 @@ impl AgentRuntime {
             return;
         }
 
-        if tool_call.name == "shell" {
+        if matches!(tool_call.name.as_str(), "shell" | "exec") {
             let command = inv
                 .args
                 .get("command")
                 .and_then(serde_json::Value::as_str)
                 .or_else(|| inv.args.get("input").and_then(serde_json::Value::as_str));
             if let Some(command) = command {
+                // `shell` 的 cwd 来自持久会话；`exec` 用 working_dir（缺省为工作区）。
                 let session_cwd = inv
                     .args
                     .get("session_id")
                     .and_then(serde_json::Value::as_str)
                     .and_then(blockcell_tools::shell_session::session_cwd)
-                    .flatten();
+                    .flatten()
+                    .or_else(|| {
+                        (tool_call.name == "exec")
+                            .then(|| {
+                                inv.args
+                                    .get("working_dir")
+                                    .and_then(serde_json::Value::as_str)
+                            })
+                            .flatten()
+                            .map(|dir| self.resolve_path(dir))
+                    });
                 let paths = crate::runtime::path_security::extract_literal_shell_read_paths(
                     command,
                     &session_cwd,
