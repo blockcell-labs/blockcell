@@ -2,6 +2,9 @@ use super::*;
 use rand::Rng;
 
 const MAX_TOTAL_RETRY_BACKOFF_MS: u64 = 60_000;
+/// 限流单独给更大的退避预算：免费网关的 429 往往几秒内自行恢复，60s 封顶会让
+/// 重试在窗口结束前就放弃（实测 26 次 429 全靠重试扛过）。
+const MAX_RATE_LIMIT_RETRY_BACKOFF_MS: u64 = 240_000;
 
 fn retry_delay_ms(
     attempt: u32,
@@ -9,8 +12,9 @@ fn retry_delay_ms(
     backoff_so_far_ms: u64,
     retry_after_ms: Option<u64>,
     jitter: f64,
+    total_cap_ms: u64,
 ) -> u64 {
-    let remaining_ms = MAX_TOTAL_RETRY_BACKOFF_MS.saturating_sub(backoff_so_far_ms);
+    let remaining_ms = total_cap_ms.saturating_sub(backoff_so_far_ms);
     let multiplier = 1_u64
         .checked_shl(attempt.saturating_sub(1).min(63))
         .unwrap_or(u64::MAX);
@@ -107,12 +111,20 @@ impl AgentRuntime {
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 let retry_after_ms = last_error.as_ref().and_then(retry_after_delay_ms);
+                // 限流与普通瞬时错误分开给退避预算：429 通常几秒内恢复，但密集时需要
+                // 更长的总等待窗口。
+                let total_cap_ms = if matches!(last_failure, Some(FailureKind::RateLimited)) {
+                    MAX_RATE_LIMIT_RETRY_BACKOFF_MS
+                } else {
+                    MAX_TOTAL_RETRY_BACKOFF_MS
+                };
                 let delay_ms = retry_delay_ms(
                     attempt,
                     base_delay_ms,
                     backoff_so_far_ms,
                     retry_after_ms,
                     rand::thread_rng().gen(),
+                    total_cap_ms,
                 );
                 backoff_so_far_ms = backoff_so_far_ms.saturating_add(delay_ms);
                 warn!(
@@ -283,6 +295,23 @@ impl AgentRuntime {
                                             acc.arguments.push_str(&delta);
                                         }
                                         StreamChunk::Done { response } => {
+                                            // 网关内容护栏存在误伤：实测同一 payload 稍后重试即可
+                                            // 通过。把 content_filter 当作瞬时错误交给既有重试逻辑，
+                                            // 而不是把拒答话术当作最终答案交付。
+                                            if response.finish_reason == "content_filter" {
+                                                warn!(
+                                                    attempt,
+                                                    ?iteration,
+                                                    pool_idx,
+                                                    "LLM stream ended with content_filter; retrying"
+                                                );
+                                                stream_error =
+                                                    Some(blockcell_core::Error::Provider(
+                                                        "LLM content filter rejected the request"
+                                                            .to_string(),
+                                                    ));
+                                                break;
+                                            }
                                             let final_tool_calls = merge_stream_tool_calls(
                                                 std::mem::take(&mut tool_call_accumulators),
                                                 response.tool_calls.clone(),
@@ -562,16 +591,32 @@ mod retry_delay_tests {
 
     #[test]
     fn retry_delay_uses_full_jitter_within_exponential_bounds() {
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.0), 0);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.25), 1000);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.0), 4000);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.5), 4000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.0, 60_000), 0);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.25, 60_000), 1000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.0, 60_000), 4000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.5, 60_000), 4000);
     }
 
     #[test]
     fn retry_after_takes_precedence_and_total_backoff_is_capped() {
-        assert_eq!(retry_delay_ms(4, 1000, 0, Some(3500), 0.0), 3500);
-        assert_eq!(retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0), 1000);
+        assert_eq!(retry_delay_ms(4, 1000, 0, Some(3500), 0.0, 60_000), 3500);
+        assert_eq!(
+            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 60_000),
+            1000
+        );
+    }
+
+    #[test]
+    fn rate_limit_gets_a_larger_total_backoff_budget() {
+        // 限流窗口往往几秒内自行恢复：同样的指数退避，总预算放大后允许更晚放弃。
+        assert_eq!(
+            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 240_000),
+            3500
+        );
+        // attempt=6 → 指数 32 倍，剩余预算 180s，不会被总预算截断
+        assert_eq!(retry_delay_ms(6, 1000, 60_000, None, 1.0, 240_000), 32_000);
+        // 普通 60s 封顶时同样的请求会被截到 0（已无剩余预算）
+        assert_eq!(retry_delay_ms(6, 1000, 60_000, None, 1.0, 60_000), 0);
     }
 
     #[test]
