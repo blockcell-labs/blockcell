@@ -1083,7 +1083,7 @@ impl ContextBuilder {
         let mut runtime_rules = format!(
             "Current time: {} ({} UTC)\nWorkspace: {}\n",
             local_time.format("%Y-%m-%d %H:%M"),
-            now.format("%Y-%m-%d %H:%M"),
+            now.format("%H:%M"),
             self.paths.workspace().display()
         );
 
@@ -1099,6 +1099,8 @@ impl ContextBuilder {
                 let git_lines = environment
                     .lines()
                     .filter(|line| line.starts_with("Git branch:"))
+                    // "不是 git 仓库"没有信息量，不占每轮的上下文预算。
+                    .filter(|line| !line.contains("(not a git repository)"))
                     .collect::<Vec<_>>();
                 if !git_lines.is_empty() {
                     runtime_rules.push_str(&git_lines.join("\n"));

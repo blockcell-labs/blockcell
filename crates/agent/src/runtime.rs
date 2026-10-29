@@ -687,14 +687,25 @@ fn inject_skill_cards_into_system_prompt(
             String::new()
         };
 
+        // 这张卡每轮都会随 runtime-context 重发，所以只保留"决定要不要激活"必需的
+        // 信息：名称、简介、布局、本地入口，以及一句"适合什么时候用"。
+        // `outputs` 与 `when_to_use` 常常是同一段话，重复下发没有意义。
+        let when_to_use = compact_skill_text(&card.when_to_use, 110);
+        let outputs = compact_skill_text(&card.outputs, 110);
+        let outputs_note = if outputs.is_empty() || is_same_skill_text(&when_to_use, &outputs) {
+            String::new()
+        } else {
+            format!(" | 输出: {outputs}")
+        };
+
         let card_text = format!(
-            "- `{}`: {} | 布局: {}{} | 适合: {} | 输出: {}\n",
+            "- `{}`: {} | 布局: {}{}{} | 适合: {}\n",
             card.name,
-            card.description,
+            compact_skill_text(&card.description, 160),
             card.execution_layout,
             local_exec_note,
-            card.when_to_use,
-            card.outputs
+            outputs_note,
+            when_to_use,
         );
         section.push_str(&crate::retrieval::truncate_to_token_budget(&card_text, 300));
         if !section.ends_with('\n') {
@@ -703,6 +714,27 @@ fn inject_skill_cards_into_system_prompt(
     }
 
     append_ephemeral_user_context(messages, &section);
+}
+
+/// 技能卡里的长段落截断到指定字符数（按字符，不破坏 UTF-8）。
+fn compact_skill_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(max_chars).collect();
+    format!("{head}…")
+}
+
+/// 两段技能文案是否实质重复（互相包含或去空白后相同）。
+fn is_same_skill_text(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let normalize = |text: &str| text.split_whitespace().collect::<String>();
+    let left = normalize(left);
+    let right = normalize(right);
+    left == right || left.contains(&right) || right.contains(&left)
 }
 
 fn append_ephemeral_user_context(messages: &mut Vec<ChatMessage>, section: &str) {
