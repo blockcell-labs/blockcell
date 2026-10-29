@@ -1173,41 +1173,95 @@ pub(super) fn extract_literal_shell_read_paths(
     command: &str,
     initial_cwd: &Option<PathBuf>,
 ) -> Vec<String> {
-    let cwd = infer_command_cwd(command, &Some(initial_cwd.clone()));
-    let mut paths = Vec::new();
-    for segment in command.split(['&', ';', '|']) {
-        let mut tokens = segment.split_whitespace();
-        let Some(program) = tokens
-            .next()
-            .map(|value| value.rsplit('/').next().unwrap_or(value))
-        else {
-            continue;
-        };
-        if !matches!(program, "cat" | "head" | "tail" | "nl" | "sed") {
-            continue;
+    // This is evidence for the read-before-write guard, not general shell
+    // analysis. Decline syntax whose execution or operands we cannot prove.
+    if command
+        .chars()
+        .any(|c| "\n\r;&|><$`\\(){}*?[]~".contains(c))
+    {
+        return Vec::new();
+    }
+    let tokens: Vec<_> = command.split_whitespace().collect();
+    let Some(program) = tokens.first() else {
+        return Vec::new();
+    };
+    let program = program
+        .strip_prefix("/usr/bin/")
+        .or_else(|| program.strip_prefix("/bin/"))
+        .unwrap_or(program);
+    if !matches!(program, "cat" | "head" | "tail" | "nl" | "sed") {
+        return Vec::new();
+    }
+    let mut index = 1;
+    if program == "sed" {
+        // Only the common printing form is recognized. Other sed scripts can
+        // execute commands, read extra files, or suppress the actual input.
+        if tokens.get(index) != Some(&"-n") {
+            return Vec::new();
         }
-        let mut skip_sed_expression = program == "sed";
-        for token in tokens {
-            let token = token.trim_matches(['\'', '"']);
-            if token.starts_with('-')
-                || token.starts_with('$')
-                || token.contains('`')
-                || token.contains("$(")
-                || token == "-"
-                || token.is_empty()
-            {
-                continue;
-            }
-            if skip_sed_expression {
-                skip_sed_expression = false;
-                continue;
-            }
-            if token == ";" || token == "&&" || token == "|" {
+        index += 1;
+        let Some(expression) = tokens.get(index) else {
+            return Vec::new();
+        };
+        let expression = expression.trim_matches(['\'', '"']);
+        let Some(range) = expression.strip_suffix('p') else {
+            return Vec::new();
+        };
+        if range.is_empty() || !range.chars().all(|c| c.is_ascii_digit() || c == ',') {
+            return Vec::new();
+        }
+        index += 1;
+    } else {
+        while let Some(option) = tokens.get(index).filter(|token| token.starts_with('-')) {
+            if *option == "--" {
+                index += 1;
                 break;
             }
-            if !paths.contains(&token.to_string()) {
-                paths.push(resolve_shell_access_path(token, &cwd));
+            let known = match program {
+                "cat" => matches!(*option, "-n" | "-b" | "-s" | "-v" | "-E" | "-T" | "-A"),
+                "nl" => false,
+                "head" | "tail" => matches!(*option, "-n" | "-c"),
+                _ => false,
+            };
+            if !known {
+                return Vec::new();
             }
+            index += 1;
+            if matches!(program, "head" | "tail") {
+                let Some(count) = tokens.get(index) else {
+                    return Vec::new();
+                };
+                if count.is_empty() || !count.chars().all(|c| c.is_ascii_digit()) {
+                    return Vec::new();
+                }
+                index += 1;
+            }
+        }
+    }
+    let cwd = initial_cwd.clone().map(Some);
+    let mut paths = Vec::new();
+    for token in &tokens[index..] {
+        if token.len() < 2 && matches!(*token, "\'" | "\"") {
+            return Vec::new();
+        }
+        let token = if (token.starts_with('\'') && token.ends_with('\''))
+            || (token.starts_with('"') && token.ends_with('"'))
+        {
+            &token[1..token.len() - 1]
+        } else {
+            token
+        };
+        if token.is_empty()
+            || token.starts_with('-')
+            || !token
+                .chars()
+                .all(|c| c.is_alphanumeric() || "_./-".contains(c))
+        {
+            return Vec::new();
+        }
+        let path = resolve_shell_access_path(token, &cwd);
+        if !paths.contains(&path) {
+            paths.push(path);
         }
     }
     paths
@@ -1733,6 +1787,36 @@ mod tests {
             extract_literal_shell_read_paths("sed -n '1,20p' src/main.rs", &None),
             vec!["src/main.rs"]
         );
+    }
+
+    #[test]
+    fn shell_read_observation_preserves_initial_cwd() {
+        let cwd = Some(PathBuf::from("/workspace/sub"));
+        assert_eq!(
+            extract_literal_shell_read_paths("cat a.py", &cwd),
+            vec!["/workspace/sub/a.py"]
+        );
+    }
+
+    #[test]
+    fn shell_read_observation_rejects_ambiguous_execution() {
+        for command in [
+            "false && cat victim.py; true",
+            "cat /dev/null > victim.py",
+            "cat a.py | head",
+            "cat a.py\ncat b.py",
+            "cat prefix$FILE",
+            "cat *.py",
+            "cat 'a b.py'",
+            "sed -n 'e cat victim.py' a.py",
+            "head -c victim.py",
+            "cat --help victim.py",
+        ] {
+            assert!(
+                extract_literal_shell_read_paths(command, &None).is_empty(),
+                "{command}"
+            );
+        }
     }
 
     /// 持久 shell 的 cwd 与 workspace 分叉时，相对路径必须按会话 cwd 解析；

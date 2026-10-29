@@ -1177,7 +1177,12 @@ impl AgentRuntime {
             return;
         }
 
-        if matches!(tool_call.name.as_str(), "shell" | "exec") {
+        if matches!(tool_call.name.as_str(), "shell" | "exec")
+            && outcome.result_json["exit_code"].as_i64() == Some(0)
+            && outcome.result_json["running"].as_bool() != Some(true)
+            && outcome.result_json["truncated"].as_bool() != Some(true)
+            && (tool_call.name == "exec" || inv.args["action"].as_str().unwrap_or("run") == "run")
+        {
             let command = inv
                 .args
                 .get("command")
@@ -1185,22 +1190,28 @@ impl AgentRuntime {
                 .or_else(|| inv.args.get("input").and_then(serde_json::Value::as_str));
             if let Some(command) = command {
                 // `shell` 的 cwd 来自持久会话；`exec` 用 working_dir（缺省为工作区）。
-                let session_cwd = inv
-                    .args
-                    .get("session_id")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(blockcell_tools::shell_session::session_cwd)
+                let tracked_cwd = (tool_call.name == "shell")
+                    .then(|| {
+                        inv.args
+                            .get("session_id")
+                            .and_then(serde_json::Value::as_str)
+                    })
                     .flatten()
-                    .or_else(|| {
-                        (tool_call.name == "exec")
-                            .then(|| {
-                                inv.args
-                                    .get("working_dir")
-                                    .and_then(serde_json::Value::as_str)
-                            })
-                            .flatten()
-                            .map(|dir| self.resolve_path(dir))
-                    });
+                    .and_then(blockcell_tools::shell_session::session_cwd);
+                // Never resolve an unknown persistent cwd against the workspace.
+                if tracked_cwd == Some(None) {
+                    return;
+                }
+                let session_cwd = tracked_cwd.flatten().or_else(|| {
+                    (tool_call.name == "exec")
+                        .then(|| {
+                            inv.args
+                                .get("working_dir")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .flatten()
+                        .map(|dir| self.resolve_path(dir))
+                });
                 let paths = crate::runtime::path_security::extract_literal_shell_read_paths(
                     command,
                     &session_cwd,

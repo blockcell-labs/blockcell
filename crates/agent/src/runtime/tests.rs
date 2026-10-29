@@ -11076,6 +11076,82 @@ async fn exec_literal_read_marks_the_file_observed_for_write_file() {
     std::fs::write(workspace.join("observed.py"), "print(1)\n").expect("write fixture");
     let msg = test_main_session_inbound("cli", "exec-observe");
 
+    // A non-zero command can have produced no readable output. It must not
+    // establish an observation for another, existing operand.
+    let failed_read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "exec",
+                serde_json::json!({"command": "head -n 0 observed.py missing.py"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    let failed_json: serde_json::Value = serde_json::from_str(&failed_read.text).unwrap();
+    assert_ne!(failed_json["exit_code"], 0);
+    let denied = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({"path": "observed.py", "content": "unread"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert!(denied.text.contains("FS_NOT_OBSERVED"), "{}", denied.text);
+
+    std::fs::create_dir_all(workspace.join("sub")).unwrap();
+    std::fs::write(workspace.join("sub/observed.py"), "sub contents").unwrap();
+    let sub_read = runtime
+        .execute_tool_call(
+            &tool_call(
+                "exec",
+                serde_json::json!({"command": "cat observed.py", "working_dir": "sub"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(
+        sub_read.outcome,
+        ToolOutcome::Succeeded,
+        "{}",
+        sub_read.text
+    );
+    let root_denied = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({"path": "observed.py", "content": "unread root"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert!(
+        root_denied.text.contains("FS_NOT_OBSERVED"),
+        "{}",
+        root_denied.text
+    );
+    let sub_written = runtime
+        .execute_tool_call(
+            &tool_call(
+                "write_file",
+                serde_json::json!({"path": "sub/observed.py", "content": "updated sub"}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert_eq!(
+        sub_written.outcome,
+        ToolOutcome::Succeeded,
+        "{}",
+        sub_written.text
+    );
+
     let read = runtime
         .execute_tool_call(
             &tool_call("exec", serde_json::json!({"command": "cat observed.py"})),
@@ -11100,4 +11176,44 @@ async fn exec_literal_read_marks_the_file_observed_for_write_file() {
         std::fs::read_to_string(workspace.join("observed.py")).unwrap(),
         "print(2)\n"
     );
+}
+
+#[tokio::test]
+async fn content_filter_retries_past_two_rejections_and_recovers() {
+    struct FilteredProvider(AtomicUsize);
+    #[async_trait::async_trait]
+    impl Provider for FilteredProvider {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> blockcell_core::Result<LLMResponse> {
+            let filtered = self.0.fetch_add(1, Ordering::SeqCst) < 2;
+            Ok(LLMResponse {
+                content: Some(if filtered { "filtered" } else { "recovered" }.into()),
+                reasoning_content: None,
+                tool_calls: vec![],
+                finish_reason: if filtered { "content_filter" } else { "stop" }.into(),
+                usage: serde_json::Value::Null,
+            })
+        }
+    }
+    let provider = Arc::new(FilteredProvider(AtomicUsize::new(0)));
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".into();
+    config.agents.defaults.provider = Some("test".into());
+    config.agents.defaults.llm_max_retries = 2;
+    config.agents.defaults.llm_retry_delay_ms = 0;
+    config.agents.ghost.learning.enabled = false;
+    let mut runtime = test_runtime_with_provider_and_paths(
+        test_runtime_paths("blockcell-filter-retry"),
+        provider.clone(),
+        config,
+    );
+    let reply = runtime
+        .process_message(test_main_session_inbound("cli", "filter-retry"))
+        .await
+        .expect("recover after two filtered responses");
+    assert_eq!(reply, "recovered");
+    assert_eq!(provider.0.load(Ordering::SeqCst), 3);
 }

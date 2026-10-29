@@ -224,6 +224,7 @@ impl FailureKind {
         } else if has(&[
             "http_status=5",
             "http 5",
+            "llm content filter rejected the request",
             "server error",
             "overloaded",
             "unavailable",
@@ -313,6 +314,17 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn content_filter_uses_backoff_and_provider_fallback() {
+        let kind = FailureKind::classify_provider_message(
+            "Provider error: LLM content filter rejected the request",
+        );
+        assert_eq!(kind, FailureKind::ProviderUnavailable);
+        let recovery = kind.request_recovery();
+        assert!(recovery.switch_provider);
+        assert_eq!(recovery.retry, RequestRetry::Backoff);
     }
 
     #[test]
