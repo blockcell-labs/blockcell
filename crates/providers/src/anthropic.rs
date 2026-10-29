@@ -442,11 +442,7 @@ impl Provider for AnthropicProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
+            let retry_after = crate::security::retry_after_from_headers(response.headers());
             let body_len = consume_error_body(response).await;
             error!(status = %status, body_len, "Anthropic API error");
             return Err(http_status_error_with_retry_after(
@@ -576,11 +572,7 @@ impl Provider for AnthropicProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
+            let retry_after = crate::security::retry_after_from_headers(response.headers());
             let body_len = consume_error_body(response).await;
             return Err(http_status_error_with_retry_after(
                 "Anthropic stream",

@@ -77,6 +77,133 @@ pub(crate) fn http_status_error_with_retry_after(
     ))
 }
 
+// Keep normalized hints safe for callers converting seconds to milliseconds.
+const MAX_RETRY_AFTER_SECS: u64 = u64::MAX / 1000;
+
+/// Normalize provider reset hints to a minimum delay in whole seconds. A valid
+/// Retry-After takes precedence; otherwise wait for the slowest resource reset.
+/// Round upwards so sub-second resets never result in an early retry.
+pub(crate) fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    retry_after_from_headers_at(headers, now_ms)
+}
+
+fn retry_after_from_headers_at(
+    headers: &reqwest::header::HeaderMap,
+    local_now_ms: u64,
+) -> Option<String> {
+    let now_ms = headers
+        .get("date")
+        .and_then(|value| value.to_str().ok())
+        .and_then(http_date_ms)
+        .unwrap_or(local_now_ms);
+    if let Some(value) = headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+    {
+        let value = value.trim();
+        if value.len() <= 128 {
+            let seconds = value
+                .parse::<u64>()
+                .ok()
+                .map(|v| v.min(MAX_RETRY_AFTER_SECS))
+                .or_else(|| http_date_ms(value).map(|at| at.saturating_sub(now_ms).div_ceil(1000)));
+            if let Some(seconds) = seconds {
+                return Some(seconds.to_string());
+            }
+        }
+    }
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.as_str();
+            if name != "x-ratelimit-reset" && !name.starts_with("x-ratelimit-reset-") {
+                return None;
+            }
+            let value = value.to_str().ok()?.trim();
+            if value.is_empty() || value.len() > 128 {
+                return None;
+            }
+            if let Ok(number) = value.parse::<u64>() {
+                // Generic reset headers conventionally contain epoch seconds. OpenAI
+                // resource reset headers may instead contain a small duration.
+                if name == "x-ratelimit-reset" || number >= 1_000_000_000 {
+                    let reset_ms = if number >= 1_000_000_000_000 {
+                        number
+                    } else {
+                        number.checked_mul(1000)?
+                    };
+                    return Some(reset_ms.saturating_sub(now_ms).div_ceil(1000));
+                }
+                return Some(number.min(MAX_RETRY_AFTER_SECS));
+            }
+            parse_reset_duration_seconds(value)
+        })
+        .max()
+        .map(|seconds| seconds.to_string())
+}
+
+fn http_date_ms(value: &str) -> Option<u64> {
+    u64::try_from(
+        chrono::DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .timestamp_millis(),
+    )
+    .ok()
+}
+
+/// Parse the bounded duration syntax used by OpenAI-compatible gateways, such as
+/// `1m30s` or `250ms`, without floating-point rounding or unchecked arithmetic.
+fn parse_reset_duration_seconds(mut value: &str) -> Option<u64> {
+    let mut total_ns = 0u128;
+    while !value.is_empty() {
+        let digits = value.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        let whole = value[..digits].parse::<u128>().ok()?;
+        value = &value[digits..];
+        let (fraction, scale) = if let Some(rest) = value.strip_prefix('.') {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 || digits > 9 {
+                return None;
+            }
+            let fraction = rest[..digits].parse::<u128>().ok()?;
+            value = &rest[digits..];
+            (fraction, 10u128.pow(digits as u32))
+        } else {
+            (0, 1)
+        };
+        let (unit_ns, rest) = if let Some(rest) = value.strip_prefix("ms") {
+            (1_000_000u128, rest)
+        } else if let Some(rest) = value.strip_prefix('s') {
+            (1_000_000_000, rest)
+        } else if let Some(rest) = value.strip_prefix('m') {
+            (60_000_000_000, rest)
+        } else if let Some(rest) = value.strip_prefix('h') {
+            (3_600_000_000_000, rest)
+        } else if let Some(rest) = value.strip_prefix('d') {
+            (86_400_000_000_000, rest)
+        } else {
+            return None;
+        };
+        let ns = whole
+            .checked_mul(unit_ns)?
+            .checked_add(fraction.checked_mul(unit_ns)?.div_ceil(scale))?;
+        total_ns = total_ns.checked_add(ns)?;
+        value = rest;
+    }
+    Some(
+        total_ns
+            .div_ceil(1_000_000_000)
+            .min(MAX_RETRY_AFTER_SECS as u128) as u64,
+    )
+}
+
 pub(crate) fn append_limited(data: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<()> {
     if data.len().saturating_add(chunk.len()) > max_bytes {
         return Err(Error::Provider(format!(
@@ -201,6 +328,134 @@ impl StreamGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rate_headers(values: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        values
+            .iter()
+            .map(|(name, value)| {
+                (
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    reqwest::header::HeaderValue::from_str(value).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retry_after_has_priority_over_rate_limit_reset_hints() {
+        let headers = rate_headers(&[
+            ("retry-after", " 12 "),
+            ("x-ratelimit-reset-tokens", "1m30s"),
+        ]);
+        assert_eq!(
+            retry_after_from_headers_at(&headers, 1_700_000_000_000),
+            Some("12".into())
+        );
+        let zero = rate_headers(&[("retry-after", "0"), ("x-ratelimit-reset", "1700000090")]);
+        assert_eq!(
+            retry_after_from_headers_at(&zero, 1_700_000_000_000),
+            Some("0".into())
+        );
+    }
+
+    #[test]
+    fn rate_limit_reset_durations_round_up_and_use_longest_resource_wait() {
+        for (value, seconds) in [
+            ("1m30s", "90"),
+            ("250ms", "1"),
+            ("1.2s", "2"),
+            ("1h2m3.5s", "3724"),
+            ("2d", "172800"),
+            ("3", "3"),
+        ] {
+            let headers = rate_headers(&[("x-ratelimit-reset-requests", value)]);
+            assert_eq!(
+                retry_after_from_headers_at(&headers, 1_700_000_000_000),
+                Some(seconds.into()),
+                "{value}"
+            );
+        }
+        let headers = rate_headers(&[
+            ("x-ratelimit-reset-requests", "2s"),
+            ("x-ratelimit-reset-tokens", "1m30s"),
+        ]);
+        assert_eq!(
+            retry_after_from_headers_at(&headers, 1_700_000_000_000),
+            Some("90".into())
+        );
+    }
+
+    #[test]
+    fn rate_limit_reset_accepts_epoch_seconds_and_milliseconds() {
+        for (header, value, expected) in [
+            ("x-ratelimit-reset", "1700000090", "90"),
+            ("x-ratelimit-reset-tokens", "1700000090250", "91"),
+            ("x-ratelimit-reset-requests", "1699999990", "0"),
+        ] {
+            let headers = rate_headers(&[(header, value)]);
+            assert_eq!(
+                retry_after_from_headers_at(&headers, 1_700_000_000_000),
+                Some(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limit_dates_use_server_date_to_avoid_clock_skew() {
+        let headers = rate_headers(&[
+            ("date", "Tue, 14 Nov 2023 22:13:20 GMT"),
+            ("retry-after", "Tue, 14 Nov 2023 22:14:50 GMT"),
+        ]);
+        assert_eq!(
+            retry_after_from_headers_at(&headers, 1_700_001_000_000),
+            Some("90".into())
+        );
+        let headers = rate_headers(&[
+            ("date", "Tue, 14 Nov 2023 22:13:20 GMT"),
+            ("x-ratelimit-reset", "1700000090"),
+        ]);
+        assert_eq!(
+            retry_after_from_headers_at(&headers, 1_700_001_000_000),
+            Some("90".into())
+        );
+    }
+
+    #[test]
+    fn malformed_rate_limit_hints_are_ignored_without_overflow() {
+        for value in [
+            "",
+            "tomorrow",
+            "-1s",
+            "NaN",
+            "1s junk",
+            "1m-2s",
+            "0.0000000001s",
+            "9999999999999999999999999999999999999999999999999999999999s",
+        ] {
+            let headers =
+                rate_headers(&[("retry-after", value), ("x-ratelimit-reset-tokens", value)]);
+            assert_eq!(
+                retry_after_from_headers_at(&headers, 1_700_000_000_000),
+                None,
+                "{value}"
+            );
+        }
+        let headers = rate_headers(&[
+            ("retry-after", "bad date"),
+            ("x-ratelimit-reset-tokens", "2s"),
+        ]);
+        assert_eq!(
+            retry_after_from_headers_at(&headers, 1_700_000_000_000),
+            Some("2".into())
+        );
+        let headers = rate_headers(&[("retry-after", "18446744073709551615")]);
+        let value = retry_after_from_headers_at(&headers, 1_700_000_000_000)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(value.checked_mul(1000).is_some());
+        assert!(value > 60);
+    }
 
     #[test]
     fn redact_url_removes_userinfo_and_sensitive_query_values() {

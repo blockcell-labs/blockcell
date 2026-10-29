@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use blockcell_core::config::{RoutingStrategy, ToolCallMode};
 use blockcell_core::Config;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use rand::Rng;
 
@@ -265,7 +265,13 @@ impl ProviderPool {
             .collect();
 
         if healthy.is_empty() {
-            warn!("ProviderPool: all entries are cooling, dead, or unavailable");
+            if self.entries.len() == 1
+                && matches!(state.health.get(&0), Some(EntryHealth::Cooling(_)))
+            {
+                debug!("ProviderPool: single provider is cooling; caller controls retry timing");
+            } else {
+                warn!("ProviderPool: all entries are cooling, dead, or unavailable");
+            }
             return None;
         }
 
@@ -444,7 +450,12 @@ impl ProviderPool {
             return Some(healthy);
         }
 
-        warn!("ProviderPool: all eligible entries are cooling, dead, or unavailable");
+        if self.entries.len() == 1 && matches!(state.health.get(&0), Some(EntryHealth::Cooling(_)))
+        {
+            debug!("ProviderPool: single provider is cooling; caller controls retry timing");
+        } else {
+            warn!("ProviderPool: all eligible entries are cooling, dead, or unavailable");
+        }
         None
     }
 

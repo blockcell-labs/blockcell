@@ -19,3 +19,4 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+chrono = { workspace = true }
