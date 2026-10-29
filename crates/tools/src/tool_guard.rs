@@ -49,12 +49,19 @@ static ALWAYS_CONFIRM_DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static SUDO_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bsudo\b").expect("sudo regex is valid"));
+static ROOT_CWD_DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)(?:^|[;&|])\s*cd\s+/\s*(?:&&|;|\|)\s*[^;&|]*\brm\b")
+        .expect("root cwd delete regex is valid")
+});
 
 pub fn is_dangerous_exec_command(command: &str) -> bool {
     let c = command.to_lowercase();
     let c = c.trim();
     if c.is_empty() {
         return false;
+    }
+    if ROOT_CWD_DELETE_RE.is_match(c) {
+        return true;
     }
 
     for re in DANGEROUS_EXEC_DIRECT_RES.iter() {
@@ -360,12 +367,12 @@ impl NestedToolGuard {
                         "Policy denied tool call by rule: {}",
                         eval.matched_rule.as_deref().unwrap_or("default")
                     )
-                }))
+                }));
             }
             ToolPolicyDecision::Ask => {
                 return Some(format!(
                     "'{tool_name}' requires user confirmation by tool policy, which is not available inside skill scripts"
-                ))
+                ));
             }
         }
         let items = dangerous_operation_items(tool_name, args);
@@ -557,6 +564,17 @@ mod tests {
                 "expected dangerous: {command}"
             );
         }
+    }
+
+    #[test]
+    fn cd_workspace_chain_allows_plain_relative_rm_but_root_chain_is_dangerous() {
+        let workspace = std::env::temp_dir().join("blockcell-eval/ws/t12");
+        let allowed = format!(
+            "cd {} && rm -f todo.json && python3 todo.py add task",
+            workspace.display()
+        );
+        assert!(!is_dangerous_exec_command(&allowed), "{allowed}");
+        assert!(is_dangerous_exec_command("cd / && rm -f etc/x"));
     }
 
     #[test]
