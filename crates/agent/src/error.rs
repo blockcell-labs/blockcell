@@ -13,14 +13,42 @@ pub(crate) fn tool_denied_json(tool_name: &str, error: &str, hint: &str) -> Stri
 
 /// Build a scoped-tool-denied result when a tool is not in the current scope.
 pub(crate) fn scoped_tool_denied_result(tool_name: &str) -> String {
+    let base = "Do not retry this unavailable capability or search for a bypass. Check the agent tool profile, denyTools, and active skill scope; explain the limitation. Tool discovery cannot grant permissions.";
+    let hint = match replacement_tool_hint(tool_name) {
+        Some(replacement) => format!("{replacement} {base}"),
+        None => base.to_string(),
+    };
     tool_denied_json(
         tool_name,
         &format!(
             "Tool '{}' is not available in the current built-in/skill scope.",
             tool_name
         ),
-        "Do not retry this unavailable capability or search for a bypass. Check the agent tool profile, denyTools, and active skill scope; explain the limitation. Tool discovery cannot grant permissions.",
+        &hint,
     )
+}
+
+/// 旧名/别名对应的真实工具名与调用方式。模型偶尔会凭记忆调用已合并的工具，
+/// 直接给出正确写法比让它继续猜更省一轮。
+fn replacement_tool_hint(tool_name: &str) -> Option<&'static str> {
+    Some(match tool_name {
+        "shell_run" => {
+            "This build exposes the persistent `shell` tool instead: call `shell` with action:\"run\"."
+        }
+        "shell_poll" => {
+            "This build exposes the persistent `shell` tool instead: call `shell` with action:\"poll\"."
+        }
+        "shell_input" => {
+            "This build exposes the persistent `shell` tool instead: call `shell` with action:\"input\"."
+        }
+        "shell_close" => {
+            "This build exposes the persistent `shell` tool instead: call `shell` with action:\"close\"."
+        }
+        "exec_local" | "exec_skill_script" => {
+            "These tools only work inside an active skill scope: call `activate_skill` first."
+        }
+        _ => return None,
+    })
 }
 
 /// Build a disabled-tool error result.
@@ -112,6 +140,22 @@ pub(crate) enum ToolFailureKind {
     SkillContextMissing,
 }
 
+/// 同一 turn 内出现这么多次"被拒绝"后，提示模型收尾而不是继续换工具。
+pub(crate) const POLICY_REJECTION_WRAP_UP_THRESHOLD: u32 = 2;
+
+/// 该结果是"本次调用被拒绝"，而不是"工具坏了"。三者都来自策略、路径规则或
+/// 技能作用域，换等价工具不会解除，因此需要单独计数以便触发收尾提示。
+pub(crate) fn is_policy_rejection(result: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+        let code = value["code"].as_str().unwrap_or_default();
+        if code == "PATH_ACCESS_DENIED" || code == "NEEDS_CONFIRMATION_NONINTERACTIVE" {
+            return true;
+        }
+    }
+    let lower = result.to_ascii_lowercase();
+    lower.contains("requires an active skill context") || lower.contains("skill context")
+}
+
 /// Classify a tool error result string into transient or permanent.
 pub(crate) fn classify_tool_failure(result: &str) -> ToolFailureKind {
     // A policy rejection describes these arguments, not tool availability.
@@ -190,6 +234,40 @@ pub(crate) fn classify_tool_failure(result: &str) -> ToolFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_rejections_are_counted_separately_from_tool_outages() {
+        for denial in [
+            path_access_denied("shell", "/outside/x"),
+            dangerous_exec_denied("exec", false),
+            dangerous_file_ops_denied(),
+        ] {
+            assert!(is_policy_rejection(&denial), "{denial}");
+        }
+        assert!(is_policy_rejection(
+            "exec_local requires an active skill context. Use the `activate_skill` tool first"
+        ));
+        // 真正的工具故障不是"拒绝"，不应计入收尾阈值。
+        for outage in [
+            r#"{"error":"connection reset","code":"TRANSIENT"}"#,
+            r#"{"error":"missing API key"}"#,
+            "Tool 'web_search' is not available in the current built-in/skill scope.",
+        ] {
+            assert!(!is_policy_rejection(outage), "{outage}");
+        }
+    }
+
+    #[test]
+    fn scoped_denial_names_the_replacement_tool() {
+        let shell = scoped_tool_denied_result("shell_run");
+        assert!(shell.contains("persistent `shell` tool"), "{shell}");
+        assert!(shell.contains("run"), "{shell}");
+        let skill = scoped_tool_denied_result("exec_local");
+        assert!(skill.contains("activate_skill"), "{skill}");
+        // 没有已知替代名时保持原提示，不编造工具。
+        let other = scoped_tool_denied_result("quantum_oracle");
+        assert!(!other.contains("action:"), "{other}");
+    }
 
     #[test]
     fn efficiency_regression_approval_refusal_is_not_tool_unavailability() {

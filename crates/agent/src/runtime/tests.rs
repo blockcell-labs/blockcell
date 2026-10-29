@@ -10815,3 +10815,138 @@ async fn idle_stream_after_first_chunk_times_out_and_retries() {
         "the stalled stream must be retried exactly once"
     );
 }
+
+/// 没有 active skill 时，技能执行类工具只从 schema 中消失，能力集不变：
+/// 直接调用仍然"可执行"（返回技能上下文缺失），而不是"不在作用域内"。
+#[tokio::test]
+async fn skill_exec_tools_are_hidden_without_an_active_skill_but_stay_executable() {
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime.config.agents.ghost.learning.enabled = false;
+    runtime
+        .process_message(test_main_session_inbound("cli", "skill-exec-exposure"))
+        .await
+        .expect("process message");
+
+    let calls = provider.schemas.lock().unwrap();
+    let names: Vec<&str> = calls
+        .last()
+        .expect("schema captured")
+        .iter()
+        .filter_map(|schema| schema["function"]["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"exec_local"), "{names:?}");
+    assert!(!names.contains(&"exec_skill_script"), "{names:?}");
+    // 技能执行入口被收敛后，技能激活入口与发现入口必须还在。
+    assert!(names.contains(&"tool_search"), "{names:?}");
+    drop(calls);
+
+    let msg = test_main_session_inbound("cli", "skill-exec-exposure");
+    let result = runtime
+        .execute_tool_call(
+            &tool_call("exec_local", serde_json::json!({"path": "scripts/run.py"})),
+            &msg,
+            None,
+        )
+        .await;
+    assert!(
+        !result
+            .text
+            .contains("is not available in the current built-in/skill scope"),
+        "hiding a schema must not revoke the capability: {}",
+        result.text
+    );
+    assert!(result.text.contains("skill context"), "{}", result.text);
+}
+
+/// 同一 turn 内被策略/技能上下文拒绝两次后，只注入一次"收尾"提示，
+/// 阻止模型继续换工具硬试（工具漂移）。
+#[tokio::test]
+async fn repeated_policy_rejections_ask_the_model_to_wrap_up() {
+    struct RejectionStreakProvider {
+        calls: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl blockcell_providers::Provider for RejectionStreakProvider {
+        async fn chat(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> blockcell_core::Result<LLMResponse> {
+            self.calls.lock().unwrap().push(messages.to_vec());
+            // 自同步：只要还没看到收尾提示就继续调 exec_local，看到就收尾。
+            let saw_wrap_up = messages
+                .iter()
+                .any(|message| chat_message_text(message).contains("不要再尝试替代工具"));
+            if !saw_wrap_up {
+                // 内置敏感目录：稳定返回 PATH_ACCESS_DENIED / NEEDS_CONFIRMATION。
+                return Ok(LLMResponse {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: vec![tool_call(
+                        "read_file",
+                        serde_json::json!({"path": "~/.ssh/id_rsa"}),
+                    )],
+                    finish_reason: "tool_calls".into(),
+                    usage: serde_json::Value::Null,
+                });
+            }
+            Ok(LLMResponse {
+                content: Some("done".into()),
+                reasoning_content: None,
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+                usage: serde_json::Value::Null,
+            })
+        }
+    }
+
+    let provider = Arc::new(RejectionStreakProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    // 工作区放 /tmp：macOS 的 /var/folders 会 canonicalize 到 /private/var，
+    // 命中内置敏感目录，工作区内的正常路径也会被拒。
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "blockcell-rejection-streak-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    let mut runtime =
+        test_runtime_with_provider_and_paths(Paths::with_base(base), provider.clone(), config);
+    // 该构造器用空注册表，需要显式换成默认工具集，否则静态能力集会被裁空。
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime
+        .process_message(test_main_session_inbound("cli", "rejection-streak"))
+        .await
+        .expect("process message");
+
+    let calls = provider.calls.lock().unwrap();
+    let hint_counts: Vec<usize> = calls
+        .iter()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| chat_message_text(message).contains("不要再尝试替代工具"))
+                .count()
+        })
+        .collect();
+    assert!(
+        hint_counts.iter().any(|count| *count > 0),
+        "no wrap-up hint was injected: {hint_counts:?}"
+    );
+    // 第一次被拒不该收尾；第二次被拒后注入，且整轮只注入一次。
+    let first_hint = hint_counts
+        .iter()
+        .position(|count| *count > 0)
+        .expect("hint present");
+    assert!(first_hint >= 2, "hint arrived too early: {hint_counts:?}");
+    assert_eq!(
+        hint_counts[first_hint], 1,
+        "the wrap-up hint must be injected exactly once: {hint_counts:?}"
+    );
+}

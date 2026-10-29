@@ -35,7 +35,8 @@ use crate::capability_adapter::EvolutionWorkflowStoreAdapter;
 use crate::context::{ActiveSkillContext, ContextBuilder, InteractionMode};
 use crate::error::{
     classify_tool_failure, dangerous_exec_denied, dangerous_file_ops_denied, disabled_skill_result,
-    disabled_tool_result, llm_exhausted_error, scoped_tool_denied_result, ToolFailureKind,
+    disabled_tool_result, is_policy_rejection, llm_exhausted_error, scoped_tool_denied_result,
+    ToolFailureKind, POLICY_REJECTION_WRAP_UP_THRESHOLD,
 };
 use crate::ghost_learning::{
     estimate_turn_complexity_score, GhostEpisodeSnapshot, GhostLearningBoundary,

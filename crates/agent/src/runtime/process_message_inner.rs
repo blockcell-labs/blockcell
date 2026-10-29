@@ -1139,10 +1139,18 @@ impl AgentRuntime {
                             .is_some_and(|skill| skill.tools.iter().any(|tool| tool == name))
                     })
                     .collect();
+                // 技能执行类工具只在技能作用域里曝光：没有 active skill 时它们必然
+                // 返回 `requires an active skill context`，暴露只会诱发"工具漂移"。
+                // 激活技能后由技能作用域重新声明（turn_flow 的 declared_tools）。
+                let defer_skill_exec = decision.active_skill.is_none();
                 tool_names
                     .iter()
                     .filter(|name| !self.tool_registry.is_model_hidden(name))
                     .filter(|name| !deferred_niche.contains(name.as_str()))
+                    .filter(|name| {
+                        !(defer_skill_exec
+                            && matches!(name.as_str(), "exec_local" | "exec_skill_script"))
+                    })
                     .collect()
             };
             let tool_name_refs: Vec<&str> = schema_names.iter().map(|name| name.as_str()).collect();
@@ -1338,6 +1346,10 @@ impl AgentRuntime {
         let mut message_tool_sent_media = false;
         let mut tool_fail_counts: HashMap<String, u32> = HashMap::new();
         let mut resource_missing_hints_sent: HashSet<String> = HashSet::new();
+        // 同一 turn 内被策略/技能上下文拒绝的次数。达到阈值后只提醒一次"收尾"，
+        // 避免模型把拒绝当成工具缺失、连续换工具硬试（工具漂移）。
+        let mut policy_rejection_streak = 0_u32;
+        let mut wrap_up_hint_sent = false;
         let mut should_throttle_next_tool_round = false;
         let mut saw_rate_limit_this_turn = false;
         let mut overflow_compaction_attempted = false;
@@ -2042,6 +2054,24 @@ impl AgentRuntime {
                         );
                     }
                     if is_error {
+                        if is_policy_rejection(&result) {
+                            policy_rejection_streak = policy_rejection_streak.saturating_add(1);
+                            if policy_rejection_streak >= POLICY_REJECTION_WRAP_UP_THRESHOLD
+                                && !wrap_up_hint_sent
+                            {
+                                wrap_up_hint_sent = true;
+                                warn!(
+                                    tool = %tool_call.name,
+                                    streak = policy_rejection_streak,
+                                    "Repeated policy rejections — asking the model to wrap up"
+                                );
+                                tool_round_hints.push(ChatMessage::user(
+                                    "⛔ 本轮已被策略/技能上下文拒绝多次。不要再尝试替代工具或改写脚本绕过：\
+                                     这些限制来自用户策略、路径规则或技能作用域，换工具不会解除。\
+                                     现在用已经拿到的证据给出结论，并明确说明哪些步骤没有验证、为什么被拒绝。",
+                                ));
+                            }
+                        }
                         let failure_kind = classify_tool_failure(&result);
                         match failure_kind {
                             ToolFailureKind::ApprovalRequired => {
@@ -2093,6 +2123,7 @@ impl AgentRuntime {
                         // Reset on success
                         tool_fail_counts.remove(&tool_call.name);
                         resource_missing_hints_sent.remove(&tool_call.name);
+                        policy_rejection_streak = 0;
                     }
 
                     let mut tool_msg = ChatMessage::tool_result(&tool_call.id, &result);
