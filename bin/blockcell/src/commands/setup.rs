@@ -712,7 +712,10 @@ mod tests {
             default_model_for_provider("siliconflow"),
             "deepseek-ai/DeepSeek-V4.1-Flash"
         );
-        assert_eq!(default_model_for_provider("openrouter"), "openai/gpt-6.1-sol");
+        assert_eq!(
+            default_model_for_provider("openrouter"),
+            "openai/gpt-6.1-sol"
+        );
         assert_eq!(default_model_for_provider("ollama"), "qwen3.8");
         // 未知 provider 回落到 OpenAI 当前默认
         assert_eq!(default_model_for_provider("unknown"), "gpt-6.1-sol");

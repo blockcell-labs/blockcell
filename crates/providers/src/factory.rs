@@ -391,10 +391,7 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
         assert_eq!(default_api_base("openai"), "https://api.openai.com/v1");
-        assert_eq!(
-            default_api_base("deepseek"),
-            "https://api.deepseek.com/v1"
-        );
+        assert_eq!(default_api_base("deepseek"), "https://api.deepseek.com/v1");
         assert_eq!(default_api_base("kimi"), "https://api.moonshot.cn/v1");
         assert_eq!(
             default_api_base("zhipu"),

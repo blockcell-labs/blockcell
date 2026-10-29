@@ -731,7 +731,7 @@ impl super::AgentRuntime {
                     || access.path.starts_with("/__unknown_shell_cwd__/")
             });
             let mut alternative = String::from(
-                "Only this invocation was rejected; the tool remains available. Do not use tool_search or rewrite a working script because of this refusal. For test fixtures, use literal workspace paths such as ./.tmp/src, ./.tmp/out and ./.tmp/missing (leave missing absent for negative tests). Retry the corrected verification with the same tool. Do not retry denied access or bypass policy/user denials."
+                "Only this invocation was rejected; the tool remains available. Do not use tool_search or rewrite a working script because of this refusal. For test fixtures, use literal workspace paths such as ./.tmp/src, ./.tmp/out and ./.tmp/missing (leave missing absent for negative tests). Retry the corrected verification with the same tool. Do not retry denied access or bypass policy/user denials.",
             );
             if unresolved {
                 alternative.push_str(" An unresolved marker is not a real filesystem path: static validation could not determine a shell variable, substitution or cwd. For your own workspace artifacts, use a Python verification script with literal workspace paths and glob/tarfile instead of shell path interpolation. Keep protected/external paths out of the retry.");
