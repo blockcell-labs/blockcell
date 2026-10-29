@@ -250,6 +250,73 @@ impl ToolLoopGuard {
         self.consecutive_failures >= MAX_IDENTICAL_TOOL_FAILURES
     }
 }
+/// 默认直接可见的工具：文件读写与检索、命令执行、能力发现、技能入口、联网。
+///
+/// 其余工具默认**不曝光**，但能力集不变——模型需要时用 `tool_search` 发现，
+/// 用户点名、工具已被搜索激活、或当前技能声明时也会重新可见。
+/// 曝光的是 schema（参数说明），不是权限，所以收敛不会让工具"消失"。
+///
+/// 这里只列**内置**工具。用户/宿主显式配置的扩展工具（MCP `<server>__<tool>`、
+/// 运行时注册与授权）不走白名单，见 [`should_expose_tool`]。
+pub(crate) const CORE_EXPOSURE_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "grep",
+    "glob",
+    "exec",
+    "shell",
+    "shell_run",
+    "shell_poll",
+    "shell_input",
+    "shell_close",
+    "tool_search",
+    // MCP 渐进发现的入口：藏掉它，用户配好的 MCP 工具就没有可发现路径了。
+    blockcell_tools::mcp::search::MCP_SEARCH_TOOL_NAME,
+    "activate_skill",
+    "list_skills",
+    "skill_view",
+    "web_search",
+    "web_fetch",
+    "file_ops",
+];
+
+/// 本轮是否直接下发该工具的 schema。
+///
+/// 白名单（[`CORE_EXPOSURE_TOOL_NAMES`]）只约束内置工具。以下三类必须保持可见，
+/// 否则"省 token"会变成"功能消失"：
+/// - 扩展工具：MCP 的 `<server>__<tool>` 与宿主授权/运行时注册的工具，名字不可猜、
+///   数量少，藏起来等于让用户的配置失效；
+/// - `tool_search` 已激活的工具（同轮晋升，之后持续可见）；
+/// - 当前技能声明的工具，以及用户在消息里点名的工具。
+pub(crate) fn should_expose_tool(
+    name: &str,
+    activated: &HashSet<String>,
+    skill_tools: &HashSet<String>,
+    granted: &HashSet<String>,
+    user_content: &str,
+) -> bool {
+    CORE_EXPOSURE_TOOL_NAMES.contains(&name)
+        || name.contains("__")
+        || granted.contains(name)
+        || activated.contains(name)
+        || skill_tools.contains(name)
+        || mentions_tool_name(user_content, name)
+}
+
+/// 用户消息里是否点名了某个工具（按词切分；中文与标点都算分隔符）。
+pub(crate) fn mentions_tool_name(content: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    content
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .any(|token| token.eq_ignore_ascii_case(name))
+}
+
 const ACTIVATE_SKILL_TOOL_NAME: &str = "activate_skill";
 
 /// Review 模式枚举

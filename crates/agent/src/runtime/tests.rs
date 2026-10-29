@@ -688,7 +688,7 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
             .iter()
             .filter_map(|s| s["function"]["name"].as_str())
             .collect();
-        // 预算与 niche 收敛只能改变曝光，不能按意图/mode 改变"哪些日常工具可见"。
+        // 曝光收敛只能改变"可见"，不能按意图/mode 改变"哪些核心工具可见"。
         for required in [
             "exec",
             "read_file",
@@ -701,13 +701,21 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
             "web_search",
             "web_fetch",
             "file_ops",
-            "http_request",
             "tool_search",
+            "list_skills",
         ] {
             assert!(names.contains(&required), "missing {required}: {names:?}");
         }
-        // niche 工具默认不曝光（用户未点名时），但必须仍可经 tool_search 发现。
-        for deferred in ["office_write", "termux_api", "video_process", "browse"] {
+        // 核心集之外默认不曝光，但必须仍可经 tool_search 发现（能力集不变）。
+        for deferred in [
+            "office_write",
+            "termux_api",
+            "video_process",
+            "browse",
+            "http_request",
+            "cron",
+            "data_process",
+        ] {
             assert!(
                 !names.contains(&deferred),
                 "{deferred} should be deferred by default: {names:?}"
@@ -720,20 +728,26 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
     );
     drop(calls);
 
-    // 用户点名 niche 工具时当轮恢复曝光，能力集不变、只是重新可见。
+    // 用户点名工具时当轮恢复曝光，能力集不变、只是重新可见。
     let mut msg = test_main_session_inbound("cli", "scope-followup");
-    msg.content = "用 office_write 导出这份表格".into();
+    msg.content = "用 office_write 导出这份表格，并用 cron 安排一次定时任务".into();
     runtime
         .process_message(msg)
         .await
         .expect("process niche followup");
     let calls = provider.schemas.lock().unwrap();
     let last = calls.last().expect("schema captured");
+    let names: Vec<&str> = last
+        .iter()
+        .filter_map(|s| s["function"]["name"].as_str())
+        .collect();
     assert!(
-        last.iter()
-            .filter_map(|s| s["function"]["name"].as_str())
-            .any(|name| name == "office_write"),
-        "named niche tool must be exposed again"
+        names.contains(&"office_write"),
+        "named niche tool must be exposed again: {names:?}"
+    );
+    assert!(
+        names.contains(&"cron"),
+        "named non-core tool must be exposed again: {names:?}"
     );
 }
 
@@ -1023,6 +1037,86 @@ async fn static_scope_mcp_search_does_not_return_denied_schema() {
     );
 }
 
+#[test]
+fn exposure_allowlist_only_constrains_builtin_tools() {
+    let empty: HashSet<String> = HashSet::new();
+    // 内置非核心工具：默认收敛，靠 tool_search 发现。
+    assert!(!should_expose_tool(
+        "cron",
+        &empty,
+        &empty,
+        &empty,
+        "安排一个定时任务"
+    ));
+    // 核心工具常驻。
+    assert!(should_expose_tool("read_file", &empty, &empty, &empty, ""));
+    // MCP 工具与 MCP 发现入口：用户显式配置，藏起来等于让配置失效。
+    assert!(should_expose_tool(
+        "demo__lookup",
+        &empty,
+        &empty,
+        &empty,
+        ""
+    ));
+    assert!(should_expose_tool(
+        blockcell_tools::mcp::search::MCP_SEARCH_TOOL_NAME,
+        &empty,
+        &empty,
+        &empty,
+        ""
+    ));
+    // 宿主授权 / 运行时注册的工具。
+    let granted: HashSet<String> = ["host_extension".to_string()].into_iter().collect();
+    assert!(should_expose_tool(
+        "host_extension",
+        &empty,
+        &empty,
+        &granted,
+        ""
+    ));
+}
+
+#[tokio::test]
+async fn static_scope_mcp_tools_stay_exposed_without_tool_search() {
+    // 用户配好 MCP 服务器后，工具必须直接出现在 schema 里：名字不可猜，
+    // 藏起来模型既不知道它存在，也无从点名。
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime.config.agents.ghost.learning.enabled = false;
+    runtime.config.agents.defaults.allowed_mcp_servers = vec!["demo".into()];
+    runtime.tool_registry.register_mcp(
+        Arc::new(FixedResultTool("demo__lookup", serde_json::json!({}))),
+        false,
+    );
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::mcp::search::McpSearchTool::new(
+            vec![(
+                "demo".to_string(),
+                blockcell_tools::mcp::client::McpTool {
+                    name: "lookup".into(),
+                    description: Some("Lookup data".into()),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                },
+            )],
+        )));
+    runtime
+        .process_message(test_main_session_inbound("cli", "scope-mcp-exposure"))
+        .await
+        .expect("process");
+    let calls = provider.schemas.lock().unwrap();
+    let names: Vec<&str> = calls[0]
+        .iter()
+        .filter_map(|s| s["function"]["name"].as_str())
+        .collect();
+    assert!(names.contains(&"demo__lookup"), "{names:?}");
+    assert!(
+        names.contains(&blockcell_tools::mcp::search::MCP_SEARCH_TOOL_NAME),
+        "{names:?}"
+    );
+}
+
 struct OptionalDiscoveryTool;
 
 #[async_trait::async_trait]
@@ -1074,21 +1168,24 @@ async fn static_scope_search_promotes_light_schema_in_same_round_and_rechecks_la
     runtime.process_message(msg.clone()).await.unwrap();
     runtime.process_message(msg.clone()).await.unwrap();
     {
+        // 渐进式曝光：非核心工具首轮不下发 schema，模型通过 tool_search 发现；
+        // 激活后下一轮（以及后续消息）才拿到完整参数 schema。
         let calls = provider.schemas.lock().unwrap();
         assert_eq!(calls.len(), 3);
         let schema = |i: usize| {
             calls[i]
                 .iter()
                 .find(|s| s["function"]["name"] == "optional_lookup")
-                .unwrap()
         };
-        assert!(schema(0)["function"]["parameters"]["properties"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        assert!(
+            schema(0).is_none(),
+            "request 0 should not carry the non-core schema yet"
+        );
+        // tool_search 命中后同轮晋升完整 schema（请求 1、2）。
         for i in [1, 2] {
             assert_eq!(
-                schema(i)["function"]["parameters"]["properties"]["format"]["type"],
+                schema(i).expect("activated schema in request {i}")["function"]["parameters"]
+                    ["properties"]["format"]["type"],
                 "string"
             );
         }

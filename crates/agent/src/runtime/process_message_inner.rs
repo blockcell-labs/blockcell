@@ -1125,31 +1125,33 @@ impl AgentRuntime {
                     })
                     .collect()
             } else {
-                // 静态能力集里 niche 工具默认不曝光：它们与多数任务无关、schema 又偏大，
-                // 需要时由 `tool_search` 发现，或由用户消息点名、技能声明恢复。能力集本身
-                // 不变，所以这层收敛不会让工具"消失"，只影响本轮是否直接可见。
-                let deferred_niche: HashSet<&str> = NICHE_TOOL_NAMES
-                    .iter()
-                    .copied()
-                    .filter(|name| !msg.content.contains(*name))
-                    .filter(|name| {
-                        !decision
-                            .active_skill
-                            .as_ref()
-                            .is_some_and(|skill| skill.tools.iter().any(|tool| tool == name))
-                    })
-                    .collect();
-                // 技能执行类工具只在技能作用域里曝光：没有 active skill 时它们必然
-                // 返回 `requires an active skill context`，暴露只会诱发"工具漂移"。
-                // 激活技能后由技能作用域重新声明（turn_flow 的 declared_tools）。
-                let defer_skill_exec = decision.active_skill.is_none();
+                // 渐进式曝光：静态能力集里默认只下发核心工具的 schema（其余 schema 体量
+                // 是核心集的三倍多，而每轮都要重发）。能力集不变，模型需要时用
+                // `tool_search` 发现；扩展工具与技能/用户点名的工具仍直接可见，
+                // 判据见 `should_expose_tool`。
+                let activated_tools: HashSet<String> =
+                    blockcell_tools::tool_search::activated_tool_schemas(&session_key)
+                        .into_iter()
+                        .collect();
+                let skill_tools: HashSet<String> = decision
+                    .active_skill
+                    .as_ref()
+                    .map(|skill| skill.tools.iter().cloned().collect())
+                    .unwrap_or_default();
+                // 宿主/MCP 授权来的工具：用户显式配置，不能因为不在白名单里就静默隐藏。
+                let granted_tools: HashSet<String> =
+                    self.tool_registry.capability_grants().into_keys().collect();
                 tool_names
                     .iter()
                     .filter(|name| !self.tool_registry.is_model_hidden(name))
-                    .filter(|name| !deferred_niche.contains(name.as_str()))
                     .filter(|name| {
-                        !(defer_skill_exec
-                            && matches!(name.as_str(), "exec_local" | "exec_skill_script"))
+                        should_expose_tool(
+                            name,
+                            &activated_tools,
+                            &skill_tools,
+                            &granted_tools,
+                            &msg.content,
+                        )
                     })
                     .collect()
             };
