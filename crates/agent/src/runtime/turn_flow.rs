@@ -153,6 +153,7 @@ impl AgentRuntime {
             &mut AgentEvent::AgentRequest {
                 message_count: messages.len(),
                 tool_count: tools.len(),
+                tool_schema_bytes: serde_json::to_vec(tools).map_or(0, |bytes| bytes.len()),
             },
         )
         .await;

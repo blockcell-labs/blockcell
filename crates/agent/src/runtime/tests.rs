@@ -688,24 +688,52 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
             .iter()
             .filter_map(|s| s["function"]["name"].as_str())
             .collect();
+        // 预算与 niche 收敛只能改变曝光，不能按意图/mode 改变"哪些日常工具可见"。
         for required in [
             "exec",
             "read_file",
             "write_file",
+            "edit_file",
             "shell_run",
             "shell_poll",
             "grep",
+            "glob",
             "web_search",
+            "web_fetch",
             "file_ops",
+            "http_request",
             "tool_search",
-            "office_write",
         ] {
             assert!(names.contains(&required), "missing {required}: {names:?}");
+        }
+        // niche 工具默认不曝光（用户未点名时），但必须仍可经 tool_search 发现。
+        for deferred in ["office_write", "termux_api", "video_process", "browse"] {
+            assert!(
+                !names.contains(&deferred),
+                "{deferred} should be deferred by default: {names:?}"
+            );
         }
     }
     assert!(
         calls.windows(2).all(|pair| pair[0] == pair[1]),
         "schemas changed with intent/mode"
+    );
+    drop(calls);
+
+    // 用户点名 niche 工具时当轮恢复曝光，能力集不变、只是重新可见。
+    let mut msg = test_main_session_inbound("cli", "scope-followup");
+    msg.content = "用 office_write 导出这份表格".into();
+    runtime
+        .process_message(msg)
+        .await
+        .expect("process niche followup");
+    let calls = provider.schemas.lock().unwrap();
+    let last = calls.last().expect("schema captured");
+    assert!(
+        last.iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .any(|name| name == "office_write"),
+        "named niche tool must be exposed again"
     );
 }
 

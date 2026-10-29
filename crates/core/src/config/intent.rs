@@ -165,7 +165,7 @@ fn default_intent_router_profiles() -> HashMap<String, IntentToolProfileConfig> 
     profiles.insert(
         "default".to_string(),
         IntentToolProfileConfig {
-            initial_schema_budget_bytes: None,
+            initial_schema_budget_bytes: Some(48 * 1024),
             base_packs: None,
             skill_grants: HashMap::new(),
             core_tools: vec![

@@ -1125,9 +1125,24 @@ impl AgentRuntime {
                     })
                     .collect()
             } else {
+                // 静态能力集里 niche 工具默认不曝光：它们与多数任务无关、schema 又偏大，
+                // 需要时由 `tool_search` 发现，或由用户消息点名、技能声明恢复。能力集本身
+                // 不变，所以这层收敛不会让工具"消失"，只影响本轮是否直接可见。
+                let deferred_niche: HashSet<&str> = NICHE_TOOL_NAMES
+                    .iter()
+                    .copied()
+                    .filter(|name| !msg.content.contains(*name))
+                    .filter(|name| {
+                        !decision
+                            .active_skill
+                            .as_ref()
+                            .is_some_and(|skill| skill.tools.iter().any(|tool| tool == name))
+                    })
+                    .collect();
                 tool_names
                     .iter()
                     .filter(|name| !self.tool_registry.is_model_hidden(name))
+                    .filter(|name| !deferred_niche.contains(name.as_str()))
                     .collect()
             };
             let tool_name_refs: Vec<&str> = schema_names.iter().map(|name| name.as_str()).collect();
@@ -1405,6 +1420,7 @@ impl AgentRuntime {
                 &mut AgentEvent::AgentRequest {
                     message_count: current_messages.len(),
                     tool_count: tools.len(),
+                    tool_schema_bytes: serde_json::to_vec(&tools).map_or(0, |bytes| bytes.len()),
                 },
             )
             .await;

@@ -1524,6 +1524,49 @@ fn global_core_tool_names() -> Vec<String> {
 
 const CODING_DEFAULT_TOOL_NAMES: &[&str] = blockcell_tools::base_packs::CODING_DEFAULT_TOOL_NAMES;
 
+/// 与主流任务无关、schema 又偏大的工具：默认不曝光，由 `tool_search` 按需发现，
+/// 或在用户消息直接点名时恢复。静态能力集与 mode 无关，所以这份收敛不能只挂在
+/// Coding 分支上（原先只作用于 `apply_coding_tool_defaults`）。
+pub(crate) const NICHE_TOOL_NAMES: &[&str] = &[
+    "termux_api",
+    "alert_rule",
+    "video_process",
+    "knowledge_graph",
+    "stream_subscribe",
+    "encrypt",
+    "email",
+    "camera_capture",
+    "app_control",
+    "tts",
+    "ocr",
+    "audio_transcribe",
+    "image_understand",
+    "chart_generate",
+    "network_monitor",
+    "community_hub",
+    "office_write",
+    "browse",
+];
+
+/// schema 预算再紧也必须保持可见的工具。裁掉它们只会让模型多花一轮
+/// `tool_search` 才能完成最基本的读写、检索与执行，净收益为负。
+const SCHEMA_BUDGET_PROTECTED_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "shell",
+    "shell_run",
+    "shell_poll",
+    "shell_input",
+    "shell_close",
+    "grep",
+    "glob",
+    "http_request",
+    "web_fetch",
+    "tool_search",
+    "activate_skill",
+];
+
 fn uses_static_tool_scope(config: &Config) -> bool {
     config
         .intent_router
@@ -1548,7 +1591,17 @@ fn budget_initial_tool_schemas(
     if !names.contains("tool_search") {
         protected.extend(names);
     }
-    crate::tool_exposure::apply_schema_budget(schemas, budget, &protected)
+    protected.extend(
+        SCHEMA_BUDGET_PROTECTED_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_string()),
+    );
+    // 超预算时优先牺牲 niche 工具，而不是按展示顺序把核心工具挤出 schema。
+    let deferrable: HashSet<String> = NICHE_TOOL_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    crate::tool_exposure::apply_schema_budget(schemas, budget, &protected, &deferrable)
 }
 
 fn lexical_routing_hint(config: &Config, intents: &[IntentCategory]) -> Option<String> {
@@ -1731,26 +1784,7 @@ fn apply_coding_tool_defaults(
             tool_names.push((*name).to_string());
         }
     }
-    const NICHE_TOOLS: &[&str] = &[
-        "termux_api",
-        "alert_rule",
-        "video_process",
-        "knowledge_graph",
-        "stream_subscribe",
-        "encrypt",
-        "email",
-        "camera_capture",
-        "app_control",
-        "tts",
-        "ocr",
-        "audio_transcribe",
-        "image_understand",
-        "chart_generate",
-        "network_monitor",
-        "community_hub",
-        "office_write",
-        "browse",
-    ];
+    const NICHE_TOOLS: &[&str] = NICHE_TOOL_NAMES;
     for name in NICHE_TOOLS {
         if !user_message.contains(name) {
             tool_names.retain(|tool_name| tool_name != name);

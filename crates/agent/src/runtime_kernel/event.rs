@@ -62,6 +62,7 @@ pub enum AgentEvent {
     AgentRequest {
         message_count: usize,
         tool_count: usize,
+        tool_schema_bytes: usize,
     },
     /// 模型请求在 provider 回退与重试后仍然失败；`recovery` 是 Runtime 据 `kind` 决定的后续策略。
     AgentRequestError {

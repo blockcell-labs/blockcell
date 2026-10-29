@@ -13,14 +13,17 @@ pub struct ExposureReport {
 }
 
 /// Apply a byte budget to the initial JSON schema array, without changing any
-/// retained schema. Protected tools are reserved before selecting optional tools
-/// in input order. Their presence (and the empty array's two bytes) may exceed
-/// the budget, which is reported rather than removing required entry points.
+/// retained schema. Protected tools are reserved before selecting optional tools;
+/// `deferrable` tools are only considered once every other optional tool has been
+/// given a chance, so a tight budget sacrifices niche capabilities instead of the
+/// everyday ones. Their presence (and the empty array's two bytes) may exceed the
+/// budget, which is reported rather than removing required entry points.
 /// Call once before the initial request; do not rebudget discoveries mid-turn.
 pub fn apply_schema_budget(
     schemas: &mut Vec<Value>,
     budget: Option<usize>,
     protected: &HashSet<String>,
+    deferrable: &HashSet<String>,
 ) -> ExposureReport {
     let sizes: Vec<_> = schemas
         .iter()
@@ -37,7 +40,7 @@ pub fn apply_schema_budget(
         };
     };
 
-    let mandatory: Vec<_> = schemas
+    let names: Vec<Option<String>> = schemas
         .iter()
         .map(|schema| {
             schema
@@ -45,9 +48,25 @@ pub fn apply_schema_budget(
                 .and_then(|function| function.get("name"))
                 .or_else(|| schema.get("name"))
                 .and_then(Value::as_str)
-                .is_some_and(|name| protected.contains(name))
+                .map(str::to_string)
         })
         .collect();
+    let mandatory: Vec<bool> = names
+        .iter()
+        .map(|name| name.as_deref().is_some_and(|name| protected.contains(name)))
+        .collect();
+    let optional_priority: Vec<usize> = {
+        let is_deferrable = |index: usize| {
+            names[index]
+                .as_deref()
+                .is_some_and(|name| deferrable.contains(name))
+        };
+        let mut order: Vec<usize> = (0..schemas.len())
+            .filter(|&index| !mandatory[index] && !is_deferrable(index))
+            .collect();
+        order.extend((0..schemas.len()).filter(|&index| !mandatory[index] && is_deferrable(index)));
+        order
+    };
     let mut selected_count = mandatory.iter().filter(|&&keep| keep).count();
     let mut exposed_bytes = array_bytes(
         sizes
@@ -55,22 +74,23 @@ pub fn apply_schema_budget(
             .zip(&mandatory)
             .filter_map(|(&size, &keep)| keep.then_some(size)),
     );
+    let mut keep = mandatory.clone();
+    for index in optional_priority {
+        let candidate_bytes = exposed_bytes
+            .saturating_add(sizes[index])
+            .saturating_add(usize::from(selected_count > 0));
+        if candidate_bytes > limit {
+            continue;
+        }
+        selected_count += 1;
+        exposed_bytes = candidate_bytes;
+        keep[index] = true;
+    }
     let mut index = 0;
     schemas.retain(|_| {
         let current = index;
         index += 1;
-        if mandatory[current] {
-            return true;
-        }
-        let candidate_bytes = exposed_bytes
-            .saturating_add(sizes[current])
-            .saturating_add(usize::from(selected_count > 0));
-        if candidate_bytes > limit {
-            return false;
-        }
-        selected_count += 1;
-        exposed_bytes = candidate_bytes;
-        true
+        keep[current]
     });
     ExposureReport {
         initial_bytes,
@@ -112,7 +132,7 @@ mod tests {
             schema("write_file", "Write files"),
         ];
         let original = schemas.clone();
-        let report = apply_schema_budget(&mut schemas, None, &HashSet::new());
+        let report = apply_schema_budget(&mut schemas, None, &HashSet::new(), &HashSet::new());
         assert_eq!(schemas, original);
         assert_eq!(report.initial_bytes, bytes(&original));
         assert_eq!(report.exposed_bytes, bytes(&original));
@@ -129,7 +149,7 @@ mod tests {
         ];
         let original = schemas.clone();
         let protected = HashSet::from(["tool_search".into(), "activate_skill".into()]);
-        let report = apply_schema_budget(&mut schemas, Some(1), &protected);
+        let report = apply_schema_budget(&mut schemas, Some(1), &protected, &HashSet::new());
         assert_eq!(schemas, original[1..]);
         assert!(report.over_budget);
         assert_eq!(report.initial_bytes, bytes(&original));
@@ -146,13 +166,13 @@ mod tests {
         let original = vec![optional.clone(), second, core.clone()];
         let mut schemas = original.clone();
         let protected = HashSet::from(["tool_search".into()]);
-        let report = apply_schema_budget(&mut schemas, Some(budget), &protected);
+        let report = apply_schema_budget(&mut schemas, Some(budget), &protected, &HashSet::new());
         assert_eq!(schemas, vec![optional, core]);
         assert_eq!(report.exposed_bytes, budget);
         assert_eq!(report.deferred_count, 1);
         let mut repeated = original;
         assert_eq!(
-            apply_schema_budget(&mut repeated, Some(budget), &protected),
+            apply_schema_budget(&mut repeated, Some(budget), &protected, &HashSet::new()),
             report
         );
         assert_eq!(repeated, schemas);
@@ -163,12 +183,18 @@ mod tests {
         let original = vec![schema("first", "One"), schema("second", "Two")];
         let exact = bytes(&original);
         let mut schemas = original.clone();
-        let report = apply_schema_budget(&mut schemas, Some(exact), &HashSet::new());
+        let report =
+            apply_schema_budget(&mut schemas, Some(exact), &HashSet::new(), &HashSet::new());
         assert_eq!(schemas, original);
         assert_eq!(report.exposed_bytes, exact);
         assert!(!report.over_budget);
         let mut schemas = original;
-        let report = apply_schema_budget(&mut schemas, Some(exact - 1), &HashSet::new());
+        let report = apply_schema_budget(
+            &mut schemas,
+            Some(exact - 1),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
         assert_eq!(schemas.len(), 1);
         assert_eq!(report.deferred_count, 1);
         assert_eq!(report.exposed_bytes, bytes(&schemas));
@@ -185,24 +211,49 @@ mod tests {
             &mut schemas,
             Some(serialized.chars().count()),
             &HashSet::new(),
+            &HashSet::new(),
         );
         assert!(schemas.is_empty());
         assert_eq!(report.initial_bytes, serialized.len());
         assert_eq!(report.exposed_bytes, 2);
         let mut schemas = original.clone();
-        apply_schema_budget(&mut schemas, Some(serialized.len()), &HashSet::new());
+        apply_schema_budget(
+            &mut schemas,
+            Some(serialized.len()),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
         assert_eq!(schemas, original);
+    }
+
+    #[test]
+    fn deferrable_schemas_are_sacrificed_before_ordinary_optional_tools() {
+        // niche 工具排在输入最前，但预算不够时必须先牺牲它，而不是挤掉日常工具。
+        let niche = schema("termux_api", "Android termux bridge");
+        let read = schema("read_file", "Read files");
+        let data = schema("data_process", "Process data");
+        let budget = bytes(&[read.clone(), data.clone()]);
+        let mut schemas = vec![niche.clone(), read.clone(), data.clone()];
+        let deferrable = HashSet::from(["termux_api".to_string()]);
+        let report = apply_schema_budget(&mut schemas, Some(budget), &HashSet::new(), &deferrable);
+        assert_eq!(schemas, vec![read, data]);
+        assert_eq!(report.deferred_count, 1);
+        assert!(!report.over_budget);
+        // 输入顺序仍然保持稳定：保留项按原顺序输出，不受优先级排序影响。
+        let mut all = vec![niche, schema("read_file", "Read files")];
+        apply_schema_budget(&mut all, Some(usize::MAX), &HashSet::new(), &deferrable);
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
     fn zero_budget_has_empty_array_overhead_and_never_panics() {
         let mut schemas = vec![schema("optional", "Optional")];
-        let report = apply_schema_budget(&mut schemas, Some(0), &HashSet::new());
+        let report = apply_schema_budget(&mut schemas, Some(0), &HashSet::new(), &HashSet::new());
         assert!(schemas.is_empty());
         assert_eq!(report.exposed_bytes, 2);
         assert!(report.over_budget);
         assert_eq!(report.deferred_count, 1);
-        let report = apply_schema_budget(&mut schemas, Some(2), &HashSet::new());
+        let report = apply_schema_budget(&mut schemas, Some(2), &HashSet::new(), &HashSet::new());
         assert_eq!(report.initial_bytes, 2);
         assert!(!report.over_budget);
     }
