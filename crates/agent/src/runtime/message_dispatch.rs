@@ -158,8 +158,31 @@ impl AgentRuntime {
                 };
 
                 *requests_sent = (*requests_sent).saturating_add(1);
-                match provider.chat_stream(&api_messages, tools).await {
-                    Ok(mut stream_rx) => {
+                let stream_started = std::time::Instant::now();
+                let first_event_timeout = std::time::Duration::from_secs(
+                    self.config
+                        .agents
+                        .defaults
+                        .stream_first_event_timeout_secs
+                        .max(1),
+                );
+                match tokio::time::timeout(
+                    first_event_timeout,
+                    provider.chat_stream(&api_messages, tools),
+                )
+                .await
+                {
+                    Err(_) => {
+                        let message = format!(
+                            "Stream header timeout after {} seconds",
+                            first_event_timeout.as_secs()
+                        );
+                        last_error = Some(blockcell_core::Error::Provider(message));
+                        self.provider_pool.report(pool_idx, CallResult::Transient);
+                        excluded_provider_indices.push(pool_idx);
+                        continue;
+                    }
+                    Ok(Ok(mut stream_rx)) => {
                         if attempt > 0 {
                             info!(
                                 attempt,
@@ -175,108 +198,150 @@ impl AgentRuntime {
                         let mut emitted_text_delta = false;
                         let mut stream_error: Option<blockcell_core::Error> = None;
 
-                        const STREAM_TIMEOUT_SECS: u64 = 300;
+                        let first_event_timeout = std::time::Duration::from_secs(
+                            self.config
+                                .agents
+                                .defaults
+                                .stream_first_event_timeout_secs
+                                .max(1),
+                        );
+                        let idle_timeout = std::time::Duration::from_secs(
+                            self.config.agents.defaults.stream_idle_timeout_secs.max(1),
+                        );
+                        let mut received_event = false;
+                        // 首包延迟（TTFT）与总耗时是判断 provider 卡顿的主要依据。
+                        let mut first_event_ms: Option<u128> = None;
 
                         loop {
-                            let recv_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(STREAM_TIMEOUT_SECS),
-                                stream_rx.recv(),
-                            )
-                            .await;
+                            let timeout = if received_event {
+                                idle_timeout
+                            } else {
+                                first_event_timeout
+                            };
+                            let recv_result = tokio::time::timeout(timeout, stream_rx.recv()).await;
 
                             match recv_result {
-                                Ok(Some(chunk)) => match chunk {
-                                    StreamChunk::TextDelta { delta } => {
-                                        accumulated_content.push_str(&delta);
-                                        emitted_text_delta = true;
-                                        if let Some(ref event_tx) = self.event_tx {
-                                            let event = serde_json::json!({
-                                                "type": "token",
-                                                "channel": msg.channel,
-                                                "agent_id": agent_id.as_str(),
-                                                "chat_id": msg.chat_id.clone(),
-                                                "delta": delta,
-                                            });
-                                            let _ = event_tx.send(event.to_string());
-                                        }
-                                    }
-                                    StreamChunk::ReasoningDelta { delta } => {
-                                        accumulated_reasoning.push_str(&delta);
-                                        if let Some(ref event_tx) = self.event_tx {
-                                            let event = serde_json::json!({
-                                                "type": "thinking",
-                                                "channel": msg.channel,
-                                                "agent_id": agent_id.as_str(),
-                                                "chat_id": msg.chat_id.clone(),
-                                                "content": delta,
-                                            });
-                                            let _ = event_tx.send(event.to_string());
-                                        }
-                                    }
-                                    StreamChunk::ToolCallStart { index, id, name } => {
-                                        let acc = tool_call_accumulators.entry(index).or_default();
-                                        if acc.id.is_empty() && !id.is_empty() {
-                                            acc.id = id;
-                                        }
-                                        if acc.name.is_empty() && !name.is_empty() {
-                                            acc.name = name;
-                                        }
-                                    }
-                                    StreamChunk::ToolCallDelta { index, id, delta } => {
-                                        let acc = tool_call_accumulators.entry(index).or_default();
-                                        if acc.id.is_empty() && !id.is_empty() {
-                                            acc.id = id;
-                                        }
-                                        acc.arguments.push_str(&delta);
-                                    }
-                                    StreamChunk::Done { response } => {
-                                        let final_tool_calls = merge_stream_tool_calls(
-                                            std::mem::take(&mut tool_call_accumulators),
-                                            response.tool_calls.clone(),
+                                Ok(Some(chunk)) => {
+                                    if first_event_ms.is_none() {
+                                        first_event_ms = Some(stream_started.elapsed().as_millis());
+                                        debug!(
+                                            ttft_ms = first_event_ms.unwrap_or_default() as u64,
+                                            attempt,
+                                            ?iteration,
+                                            pool_idx,
+                                            "LLM stream first event"
                                         );
-
-                                        let final_content = if !accumulated_content.is_empty() {
-                                            Some(accumulated_content.clone())
-                                        } else {
-                                            response.content.clone()
-                                        };
-
-                                        let final_reasoning = if !accumulated_reasoning.is_empty() {
-                                            Some(accumulated_reasoning.clone())
-                                        } else {
-                                            response.reasoning_content.clone()
-                                        };
-
-                                        self.provider_pool.report(pool_idx, CallResult::Success);
-                                        return Ok((
-                                            LLMResponse {
-                                                content: final_content,
-                                                reasoning_content: final_reasoning,
-                                                tool_calls: final_tool_calls,
-                                                finish_reason: response.finish_reason.clone(),
-                                                usage: response.usage.clone(),
-                                            },
-                                            self.served_by(pool_idx),
-                                        ));
                                     }
-                                    StreamChunk::Error { message } => {
-                                        warn!(error = %message, "Stream error");
-                                        stream_error =
-                                            Some(blockcell_core::Error::Provider(message));
-                                        break;
+                                    match chunk {
+                                        StreamChunk::TextDelta { delta } => {
+                                            received_event = true;
+                                            accumulated_content.push_str(&delta);
+                                            emitted_text_delta = true;
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "token",
+                                                    "channel": msg.channel,
+                                                    "agent_id": agent_id.as_str(),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "delta": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ReasoningDelta { delta } => {
+                                            received_event = true;
+                                            accumulated_reasoning.push_str(&delta);
+                                            if let Some(ref event_tx) = self.event_tx {
+                                                let event = serde_json::json!({
+                                                    "type": "thinking",
+                                                    "channel": msg.channel,
+                                                    "agent_id": agent_id.as_str(),
+                                                    "chat_id": msg.chat_id.clone(),
+                                                    "content": delta,
+                                                });
+                                                let _ = event_tx.send(event.to_string());
+                                            }
+                                        }
+                                        StreamChunk::ToolCallStart { index, id, name } => {
+                                            received_event = true;
+                                            let acc =
+                                                tool_call_accumulators.entry(index).or_default();
+                                            if acc.id.is_empty() && !id.is_empty() {
+                                                acc.id = id;
+                                            }
+                                            if acc.name.is_empty() && !name.is_empty() {
+                                                acc.name = name;
+                                            }
+                                        }
+                                        StreamChunk::ToolCallDelta { index, id, delta } => {
+                                            received_event = true;
+                                            let acc =
+                                                tool_call_accumulators.entry(index).or_default();
+                                            if acc.id.is_empty() && !id.is_empty() {
+                                                acc.id = id;
+                                            }
+                                            acc.arguments.push_str(&delta);
+                                        }
+                                        StreamChunk::Done { response } => {
+                                            let final_tool_calls = merge_stream_tool_calls(
+                                                std::mem::take(&mut tool_call_accumulators),
+                                                response.tool_calls.clone(),
+                                            );
+
+                                            let final_content = if !accumulated_content.is_empty() {
+                                                Some(accumulated_content.clone())
+                                            } else {
+                                                response.content.clone()
+                                            };
+
+                                            let final_reasoning =
+                                                if !accumulated_reasoning.is_empty() {
+                                                    Some(accumulated_reasoning.clone())
+                                                } else {
+                                                    response.reasoning_content.clone()
+                                                };
+
+                                            self.provider_pool
+                                                .report(pool_idx, CallResult::Success);
+                                            info!(
+                                                ttft_ms = first_event_ms.unwrap_or_default() as u64,
+                                                total_ms =
+                                                    stream_started.elapsed().as_millis() as u64,
+                                                attempt,
+                                                ?iteration,
+                                                pool_idx,
+                                                "LLM stream completed"
+                                            );
+                                            return Ok((
+                                                LLMResponse {
+                                                    content: final_content,
+                                                    reasoning_content: final_reasoning,
+                                                    tool_calls: final_tool_calls,
+                                                    finish_reason: response.finish_reason.clone(),
+                                                    usage: response.usage.clone(),
+                                                },
+                                                self.served_by(pool_idx),
+                                            ));
+                                        }
+                                        StreamChunk::Error { message } => {
+                                            warn!(error = %message, "Stream error");
+                                            stream_error =
+                                                Some(blockcell_core::Error::Provider(message));
+                                            break;
+                                        }
                                     }
-                                },
+                                }
                                 Ok(None) => {
                                     break;
                                 }
                                 Err(_) => {
                                     warn!(
                                         "Stream receive timeout after {} seconds",
-                                        STREAM_TIMEOUT_SECS
+                                        timeout.as_secs()
                                     );
                                     stream_error = Some(blockcell_core::Error::Provider(format!(
                                         "Stream timeout after {} seconds",
-                                        STREAM_TIMEOUT_SECS
+                                        timeout.as_secs()
                                     )));
                                     break;
                                 }
@@ -291,6 +356,14 @@ impl AgentRuntime {
                                 || !accumulated_content.is_empty())
                         {
                             self.provider_pool.report(pool_idx, CallResult::Success);
+                            info!(
+                                ttft_ms = first_event_ms.unwrap_or_default() as u64,
+                                total_ms = stream_started.elapsed().as_millis() as u64,
+                                attempt,
+                                ?iteration,
+                                pool_idx,
+                                "LLM stream completed without an explicit done event"
+                            );
                             let final_tool_calls =
                                 merge_stream_tool_calls(tool_call_accumulators, Vec::new());
 
@@ -362,7 +435,7 @@ impl AgentRuntime {
                         }
                         break;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         let err_str = format!("{}", e);
                         warn!(error = %err_str, attempt, max_retries, ?iteration, pool_idx, "LLM stream call failed");
                         let call_result = ProviderPool::classify_error(&err_str);

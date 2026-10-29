@@ -31,6 +31,12 @@ pub struct AgentDefaults {
     pub llm_max_retries: u32,
     #[serde(default = "default_llm_retry_delay_ms")]
     pub llm_retry_delay_ms: u64,
+    /// 首个流式事件允许等待的秒数。
+    #[serde(default = "default_stream_first_event_timeout_secs")]
+    pub stream_first_event_timeout_secs: u64,
+    /// 流式事件之间允许空闲的秒数。
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: u32,
     /// 显式指定 LLM provider（可选）
@@ -140,6 +146,14 @@ fn default_llm_retry_delay_ms() -> u64 {
     2000
 }
 
+fn default_stream_first_event_timeout_secs() -> u64 {
+    60
+}
+
+fn default_stream_idle_timeout_secs() -> u64 {
+    45
+}
+
 fn default_max_context_tokens() -> u32 {
     1_048_576 // 1M 上下文
 }
@@ -155,6 +169,8 @@ impl Default for AgentDefaults {
             max_tool_iterations_by_tool: HashMap::new(),
             llm_max_retries: default_llm_max_retries(),
             llm_retry_delay_ms: default_llm_retry_delay_ms(),
+            stream_first_event_timeout_secs: default_stream_first_event_timeout_secs(),
+            stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             max_context_tokens: default_max_context_tokens(),
             provider: None,
             evolution_model: None,
@@ -273,5 +289,18 @@ mod tests {
     #[test]
     fn default_tool_iteration_budget_supports_long_coding_tasks() {
         assert_eq!(AgentDefaults::default().max_tool_iterations, 200);
+    }
+
+    #[test]
+    fn stream_timeout_defaults_are_bounded_and_legacy_config_deserializes() {
+        let defaults = AgentDefaults::default();
+        assert_eq!(defaults.stream_first_event_timeout_secs, 60);
+        assert_eq!(defaults.stream_idle_timeout_secs, 45);
+        let parsed: AgentDefaults = serde_json::from_str(
+            r#"{"workspace":"/tmp/ws","model":"test","maxTokens":10,"temperature":0.0,"maxToolIterations":1,"llmMaxRetries":0,"llmRetryDelayMs":0,"maxContextTokens":100}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.stream_first_event_timeout_secs, 60);
+        assert_eq!(parsed.stream_idle_timeout_secs, 45);
     }
 }

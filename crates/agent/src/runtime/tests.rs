@@ -10703,3 +10703,87 @@ async fn routing_discovery_budget_is_shared_across_loops_and_resets_next_user_tu
         ToolOutcome::Succeeded
     );
 }
+
+/// 流式响应发出首包后挂起：必须在空闲超时后报错并重试，而不是一直等下去。
+#[tokio::test]
+async fn idle_stream_after_first_chunk_times_out_and_retries() {
+    struct StallingIdleStreamProvider {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl blockcell_providers::Provider for StallingIdleStreamProvider {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> blockcell_core::Result<LLMResponse> {
+            std::future::pending().await
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> blockcell_core::Result<mpsc::Receiver<StreamChunk>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(4);
+            tokio::spawn(async move {
+                if attempt == 0 {
+                    let _ = tx
+                        .send(StreamChunk::TextDelta {
+                            delta: "partial".to_string(),
+                        })
+                        .await;
+                    // 挂起：通道保持存活但不再发送，模拟服务端卡住。
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+                let _ = tx
+                    .send(StreamChunk::Done {
+                        response: LLMResponse {
+                            content: Some("recovered".to_string()),
+                            reasoning_content: None,
+                            tool_calls: vec![],
+                            finish_reason: "stop".to_string(),
+                            usage: serde_json::Value::Null,
+                        },
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    let provider = Arc::new(StallingIdleStreamProvider {
+        attempts: AtomicUsize::new(0),
+    });
+    let paths = Paths::with_base(
+        std::env::temp_dir().join(format!("blockcell-idle-stream-{}", uuid::Uuid::new_v4())),
+    );
+    paths.ensure_dirs().expect("create runtime dirs");
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.agents.defaults.stream_idle_timeout_secs = 1;
+    config.agents.defaults.stream_first_event_timeout_secs = 5;
+    config.agents.defaults.llm_max_retries = 2;
+    config.agents.defaults.llm_retry_delay_ms = 0;
+    config.agents.ghost.learning.enabled = false;
+    let mut runtime = test_runtime_with_provider_and_paths(paths, provider.clone(), config);
+
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        runtime.process_message(test_main_session_inbound("cli", "idle-stream")),
+    )
+    .await
+    .expect("idle timeout must not hang the turn")
+    .expect("turn completes after retry");
+
+    let attempts = provider.attempts.load(Ordering::SeqCst);
+    assert_eq!(reply, "recovered", "attempts={attempts}");
+    assert_eq!(
+        attempts, 2,
+        "the stalled stream must be retried exactly once"
+    );
+}
