@@ -4686,17 +4686,21 @@ async fn explicit_stream_done_reports_provider_success() {
     assert_eq!(status[0].fail_count, 0);
 }
 
+/// 测试用运行时目录。放在 `/tmp` 而不是 `std::env::temp_dir()`：macOS 的
+/// `/var/folders/...` canonicalize 后是 `/private/var/...`，命中路径策略的内置敏感
+/// 目录，会让工作区内的正常路径被判为 Deny，用例会误报成策略拒绝。
+fn test_runtime_paths(prefix: &str) -> Paths {
+    let base = std::path::PathBuf::from("/tmp").join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    Paths::with_base(base)
+}
+
 fn test_runtime() -> AgentRuntime {
     let mut config = Config::default();
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
 
-    let base = std::env::temp_dir().join(format!(
-        "blockcell-system-event-runtime-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&base).expect("create temp runtime dir");
-    let paths = Paths::with_base(base);
+    let paths = test_runtime_paths("blockcell-system-event-runtime");
     test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config)
 }
 
@@ -4727,12 +4731,7 @@ fn test_runtime_with_provider(provider: Arc<dyn Provider>) -> AgentRuntime {
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
 
-    let base = std::env::temp_dir().join(format!(
-        "blockcell-system-event-runtime-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&base).expect("create temp runtime dir");
-    let paths = Paths::with_base(base);
+    let paths = test_runtime_paths("blockcell-system-event-runtime");
     test_runtime_with_provider_and_paths(paths, provider, config)
 }
 
