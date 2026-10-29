@@ -5049,12 +5049,14 @@ async fn run_loop_cancels_active_message_when_inbound_closes() {
         .send(test_main_session_inbound("ws", "close-chat"))
         .await
         .expect("send inbound");
-    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+    // 5s 而不是 2s：这个用例要的是"取消能发生"，不是"取消多快"；
+    // 2s 在并行跑整仓用例、或机器正忙时会假失败。
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
         .await
         .expect("message task did not reach provider");
     drop(inbound_tx);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), run_loop)
+    tokio::time::timeout(std::time::Duration::from_secs(5), run_loop)
         .await
         .expect("run loop did not stop")
         .expect("run loop panicked");
