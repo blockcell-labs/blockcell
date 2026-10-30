@@ -59,7 +59,6 @@ impl ToolEvidence {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct TaskProgress {
     pub contract: TaskContract,
     revision: usize,
@@ -69,6 +68,26 @@ pub(crate) struct TaskProgress {
     pending: HashMap<String, (VerificationIntent, String, usize)>,
     pub last_verification: Option<(VerificationIntent, String)>,
     initial_outputs: HashMap<String, Option<super::FileVersion>>,
+    /// 本轮开始时间。`must_update` 的语义是「本轮更新」，所以基线必须是轮次起点，
+    /// 而不是契约注册的时刻——模型常常先写文件、再声明契约，用注册时刻做基线会让
+    /// 已经写好的产物永远判为「未更新」，逼它重写一遍同内容。
+    turn_started_at: std::time::SystemTime,
+}
+
+impl Default for TaskProgress {
+    fn default() -> Self {
+        Self {
+            contract: TaskContract::default(),
+            revision: 0,
+            changed: false,
+            uncertain_effects: false,
+            verified_revision: None,
+            pending: HashMap::new(),
+            last_verification: None,
+            initial_outputs: HashMap::new(),
+            turn_started_at: std::time::SystemTime::now(),
+        }
+    }
 }
 
 impl TaskProgress {
@@ -119,11 +138,19 @@ impl TaskProgress {
         else {
             return false;
         };
-        self.initial_outputs.get(output).is_some_and(|before| {
-            super::tool_pipeline::file_version(&path)
-                .ok()
-                .is_some_and(|after| after.is_some() && after != *before)
-        })
+        let Ok(Some(after)) = super::tool_pipeline::file_version(&path) else {
+            return false;
+        };
+        // 本轮开始后被写过的文件本身就是「本轮更新」。这条判据覆盖了「先写文件、
+        // 后声明契约」的常见顺序：此时 initial_outputs 抓到的已经是写后的版本，
+        // 再拿它比对永远相等，会误报「要求本轮更新但仍是原版本」。
+        if after.modified >= self.turn_started_at {
+            return true;
+        }
+        // 轮次开始前就存在、本轮未被写过的文件：与注册时的快照比较（此时两者必然相同）。
+        self.initial_outputs
+            .get(output)
+            .is_some_and(|before| before.as_ref() != Some(&after))
     }
 
     pub fn contract_for_continuation(&self, workspace: &std::path::Path) -> TaskContract {
@@ -287,6 +314,32 @@ mod tests {
         );
         std::fs::write(workspace.path().join("report.json"), "new content").unwrap();
         assert_eq!(progress.first_incomplete_output(workspace.path()), None);
+        assert!(
+            !progress
+                .contract_for_continuation(workspace.path())
+                .deliverables[0]
+                .must_update
+        );
+    }
+
+    #[test]
+    fn deliverable_written_before_the_contract_is_declared_counts_as_updated() {
+        // t06 的真实顺序：模型先写出 todos.md，过几步才在别的工具调用上声明契约。
+        // 基线若取注册时刻，这里会永远判「未更新」，逼模型重写一遍同内容。
+        let workspace = tempfile::tempdir().unwrap();
+        let mut progress = TaskProgress::default();
+        std::fs::write(workspace.path().join("todos.md"), "- item\n").unwrap();
+
+        let contract: TaskContract = serde_json::from_value(json!({"verification":"allowed",
+            "deliverables":[{"path":"todos.md","must_update":true,"required":true}]}))
+        .unwrap();
+        progress.register_contract(&contract, workspace.path());
+
+        assert_eq!(
+            progress.first_incomplete_output(workspace.path()),
+            None,
+            "本轮写出的产物不应被判为未更新"
+        );
         assert!(
             !progress
                 .contract_for_continuation(workspace.path())
