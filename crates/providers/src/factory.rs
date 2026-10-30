@@ -74,6 +74,34 @@ pub fn infer_provider_from_model(model: &str) -> Option<&'static str> {
     }
 }
 
+/// Only explicitly configured loopback OpenAI-compatible endpoints may omit auth.
+fn allows_anonymous_local_provider(
+    name: &str,
+    config: &blockcell_core::config::ProviderConfig,
+) -> bool {
+    if name == "anthropic" || !matches!(config.api_type.as_str(), "openai" | "openai_responses") {
+        return false;
+    }
+    let Some(url) = config
+        .api_base
+        .as_deref()
+        .and_then(|base| reqwest::Url::parse(base).ok())
+    else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// 从 config 中找到第一个配置了 api_key 的 provider 名字作为 fallback
 /// 这比旧的 get_api_key() 更合理：先按 model 前缀确认优先 provider
 fn fallback_provider_name(config: &Config) -> Option<&str> {
@@ -96,6 +124,9 @@ fn fallback_provider_name(config: &Config) -> Option<&str> {
     ];
     for name in priority {
         if let Some(p) = config.providers.get(name) {
+            // 免 key 只用于"用户显式指定"的本地端点：默认配置里 vllm 等条目本身就带
+            // localhost api_base，若让它参与隐式回退，一个 key 都没配的用户会被静默
+            // 指向本机 8000 端口，失败要等到请求时才暴露。
             if !p.api_key.is_empty() && p.api_key != "dummy" {
                 return Some(name);
             }
@@ -156,7 +187,7 @@ pub fn create_provider_with_tool_mode(
     // 获取 provider 配置
     let provider_cfg = config.providers.get(effective_provider);
 
-    // 对于显式指定的 provider（非 ollama），必须有配置且有 api_key
+    // Cloud providers require credentials; configured loopback OpenAI endpoints may omit them.
     if explicit_provider.is_some() && effective_provider != "ollama" {
         match provider_cfg {
             None => {
@@ -165,7 +196,10 @@ pub fn create_provider_with_tool_mode(
                     effective_provider
                 ));
             }
-            Some(cfg) if cfg.api_key.is_empty() || cfg.api_key == "dummy" => {
+            Some(cfg)
+                if (cfg.api_key.is_empty() || cfg.api_key == "dummy")
+                    && !allows_anonymous_local_provider(effective_provider, cfg) =>
+            {
                 return Err(anyhow::anyhow!(
                     "Provider '{}' is explicitly configured but has no API key",
                     effective_provider

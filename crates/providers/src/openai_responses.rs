@@ -319,13 +319,16 @@ impl OpenAIResponsesProvider {
             "Responses request body prepared"
         );
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .timeout(HTTP_REQUEST_TIMEOUT)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .body(request_body)
+            .body(request_body);
+        if !self.api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| request_error("Responses request failed", e))?;

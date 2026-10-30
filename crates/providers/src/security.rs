@@ -43,7 +43,19 @@ pub(crate) fn redact_url(value: &str) -> String {
 }
 
 pub(crate) fn request_error(context: &str, error: reqwest::Error) -> Error {
-    Error::Provider(format!("{}: {}", context, error.without_url()))
+    let kind = if error.is_timeout() || error.is_connect() || error.is_body() || error.is_request()
+    {
+        blockcell_core::FailureKind::ProviderUnavailable
+    } else {
+        blockcell_core::FailureKind::Unknown
+    };
+    Error::ProviderFailure(blockcell_core::ProviderFailure {
+        kind,
+        status: error.status().map(|status| status.as_u16()),
+        code: Some("transport".into()),
+        retry_after_ms: None,
+        message: format!("{}: {}", context, error.without_url()),
+    })
 }
 
 pub(crate) fn http_status_error(
@@ -51,12 +63,7 @@ pub(crate) fn http_status_error(
     status: reqwest::StatusCode,
     body_len: usize,
 ) -> Error {
-    Error::Provider(format!(
-        "HTTP_STATUS={} {} API request failed (body_len={})",
-        status.as_u16(),
-        provider,
-        body_len
-    ))
+    http_status_error_with_retry_after(provider, status, body_len, None)
 }
 
 pub(crate) fn http_status_error_with_retry_after(
@@ -65,16 +72,51 @@ pub(crate) fn http_status_error_with_retry_after(
     body_len: usize,
     retry_after: Option<&str>,
 ) -> Error {
-    let Some(retry_after) = retry_after else {
-        return http_status_error(provider, status, body_len);
+    use blockcell_core::FailureKind;
+    let kind = match status.as_u16() {
+        429 => FailureKind::RateLimited,
+        401 | 403 => FailureKind::AuthenticationFailed,
+        400 => FailureKind::InvalidRequest,
+        500..=599 => FailureKind::ProviderUnavailable,
+        _ => FailureKind::Unknown,
     };
-    Error::Provider(format!(
-        "HTTP_STATUS={} {} API request failed (body_len={}, retry_after={})",
-        status.as_u16(),
-        provider,
-        body_len,
-        retry_after
-    ))
+    let retry_after_ms = retry_after.and_then(|value| {
+        value
+            .parse::<u64>()
+            .ok()
+            .map(|seconds| seconds.saturating_mul(1000))
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(|date| {
+                        date.signed_duration_since(chrono::Utc::now())
+                            .num_milliseconds()
+                            .max(0) as u64
+                    })
+            })
+    });
+    let message = match retry_after {
+        Some(value) => format!(
+            "HTTP_STATUS={} {} API request failed (body_len={}, retry_after={})",
+            status.as_u16(),
+            provider,
+            body_len,
+            value
+        ),
+        None => format!(
+            "HTTP_STATUS={} {} API request failed (body_len={})",
+            status.as_u16(),
+            provider,
+            body_len
+        ),
+    };
+    Error::ProviderFailure(blockcell_core::ProviderFailure {
+        kind,
+        status: Some(status.as_u16()),
+        code: None,
+        retry_after_ms,
+        message,
+    })
 }
 
 // Keep normalized hints safe for callers converting seconds to milliseconds.

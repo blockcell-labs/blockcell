@@ -1,11 +1,7 @@
 use super::*;
 use rand::Rng;
 
-const MAX_TOTAL_RETRY_BACKOFF_MS: u64 = 60_000;
-/// 限流单独给更大的退避预算：免费网关的 429 往往几秒内自行恢复，60s 封顶会让
-/// 重试在窗口结束前就放弃（实测 26 次 429 全靠重试扛过）。
-const MAX_RATE_LIMIT_RETRY_BACKOFF_MS: u64 = 240_000;
-
+// Runtime policy comes from config; the previous values remain its defaults.
 fn retry_delay_ms(
     attempt: u32,
     base_delay_ms: u64,
@@ -13,23 +9,29 @@ fn retry_delay_ms(
     retry_after_ms: Option<u64>,
     jitter: f64,
     total_cap_ms: u64,
+    per_attempt_cap_ms: u64,
 ) -> u64 {
     let remaining_ms = total_cap_ms.saturating_sub(backoff_so_far_ms);
     let multiplier = 1_u64
         .checked_shl(attempt.saturating_sub(1).min(63))
         .unwrap_or(u64::MAX);
-    let upper_bound_ms = retry_after_ms
-        .unwrap_or_else(|| base_delay_ms.saturating_mul(multiplier))
-        .min(remaining_ms);
-
-    if retry_after_ms.is_some() {
-        upper_bound_ms
-    } else {
-        (upper_bound_ms as f64 * jitter.clamp(0.0, 1.0)) as u64
+    // Retry-After is a minimum server wait, not an exponential-backoff hint.
+    // The caller stops if the remaining budget cannot accommodate it.
+    if let Some(delay_ms) = retry_after_ms {
+        return delay_ms;
     }
+    let upper_bound_ms = base_delay_ms
+        .saturating_mul(multiplier)
+        .min(per_attempt_cap_ms)
+        .min(remaining_ms);
+    (upper_bound_ms as f64 * jitter.clamp(0.0, 1.0)) as u64
 }
 
 fn retry_after_delay_ms(error: &blockcell_core::Error) -> Option<u64> {
+    if let blockcell_core::Error::ProviderFailure(failure) = error {
+        return failure.retry_after_ms;
+    }
+    // Compatibility for external adapters that still report formatted errors.
     let message = error.to_string();
     let value = message.split_once("retry_after=")?.1;
     let value = value.split(')').next().unwrap_or(value).trim();
@@ -84,7 +86,17 @@ impl AgentRuntime {
         saw_rate_limit_this_turn: &mut bool,
         requests_sent: &mut u32,
     ) -> std::result::Result<(LLMResponse, ServedBy), blockcell_core::Error> {
+        let retry_policy = self.config.agents.defaults.llm_retry_policy.clone();
+        let request_started = std::time::Instant::now();
+        let remaining_deadline = || {
+            retry_policy.deadline_ms.map(|limit| {
+                std::time::Duration::from_millis(limit).saturating_sub(request_started.elapsed())
+            })
+        };
         let max_retries = self.config.agents.defaults.llm_max_retries;
+        // 限流放宽尝试次数：免费网关的 429 是"等一会儿就好"，不该按普通瞬时错误的
+        // 次数上限直接判死。非限流失败仍然只走 `llmMaxRetries`。
+        let max_attempts = max_retries.max(retry_policy.rate_limit_max_retries);
         let base_delay_ms = self.config.agents.defaults.llm_retry_delay_ms;
         let mut last_error = None;
         let mut last_failure: Option<FailureKind> = None;
@@ -108,15 +120,25 @@ impl AgentRuntime {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        for attempt in 0..=max_retries {
+        for attempt in 0..=max_attempts {
+            // 只有限流允许超过常规次数上限；其余失败按原策略及时收手。
+            if attempt > max_retries && !matches!(last_failure, Some(FailureKind::RateLimited)) {
+                break;
+            }
             if attempt > 0 {
                 let retry_after_ms = last_error.as_ref().and_then(retry_after_delay_ms);
                 // 限流与普通瞬时错误分开给退避预算：429 通常几秒内恢复，但密集时需要
-                // 更长的总等待窗口。
-                let total_cap_ms = if matches!(last_failure, Some(FailureKind::RateLimited)) {
-                    MAX_RATE_LIMIT_RETRY_BACKOFF_MS
+                // 更长的总等待窗口；无 Retry-After 时单次指数退避最多 30s。
+                let rate_limited = matches!(last_failure, Some(FailureKind::RateLimited));
+                let total_cap_ms = if rate_limited {
+                    retry_policy.rate_limit_backoff_ms
                 } else {
-                    MAX_TOTAL_RETRY_BACKOFF_MS
+                    retry_policy.total_backoff_ms
+                };
+                let per_attempt_cap_ms = if rate_limited {
+                    retry_policy.rate_limit_attempt_cap_ms
+                } else {
+                    retry_policy.total_backoff_ms
                 };
                 let delay_ms = retry_delay_ms(
                     attempt,
@@ -125,11 +147,23 @@ impl AgentRuntime {
                     retry_after_ms,
                     rand::thread_rng().gen(),
                     total_cap_ms,
+                    per_attempt_cap_ms,
                 );
+                let remaining_ms = total_cap_ms.saturating_sub(backoff_so_far_ms);
+                if remaining_ms == 0
+                    || delay_ms > remaining_ms
+                    || remaining_deadline().is_some_and(|remaining| {
+                        std::time::Duration::from_millis(delay_ms) >= remaining
+                    })
+                {
+                    warn!(attempt, remaining_ms, delay_ms,
+                        "Retry budget cannot honor the required wait; stopping without an early retry");
+                    break;
+                }
                 backoff_so_far_ms = backoff_so_far_ms.saturating_add(delay_ms);
                 warn!(
                     attempt,
-                    max_retries,
+                    max_attempts,
                     delay_ms,
                     ?iteration,
                     "Retrying LLM call after transient error"
@@ -139,6 +173,11 @@ impl AgentRuntime {
             let mut excluded_provider_indices = Vec::new();
 
             loop {
+                if remaining_deadline().is_some_and(|remaining| remaining.is_zero()) {
+                    return Err(blockcell_core::Error::Timeout(
+                        "LLM request deadline exhausted".into(),
+                    ));
+                }
                 let provider_candidate = self
                     .provider_pool
                     .acquire_with_strategy_excluding(
@@ -179,7 +218,9 @@ impl AgentRuntime {
                         .max(1),
                 );
                 match tokio::time::timeout(
-                    first_event_timeout,
+                    remaining_deadline().map_or(first_event_timeout, |remaining| {
+                        first_event_timeout.min(remaining)
+                    }),
                     provider.chat_stream(&api_messages, tools),
                 )
                 .await
@@ -230,6 +271,8 @@ impl AgentRuntime {
                             } else {
                                 first_event_timeout
                             };
+                            let timeout = remaining_deadline()
+                                .map_or(timeout, |remaining| timeout.min(remaining));
                             let recv_result = tokio::time::timeout(timeout, stream_rx.recv()).await;
 
                             match recv_result {
@@ -306,10 +349,11 @@ impl AgentRuntime {
                                                     "LLM stream ended with content_filter; retrying"
                                                 );
                                                 stream_error =
-                                                    Some(blockcell_core::Error::Provider(
-                                                        "LLM content filter rejected the request"
-                                                            .to_string(),
-                                                    ));
+                                                    Some(blockcell_core::Error::ProviderFailure(blockcell_core::ProviderFailure {
+                                                        kind: if retry_policy.retry_content_filter { FailureKind::ProviderUnavailable } else { FailureKind::InvalidRequest },
+                                                        status: None, code: Some("content_filter".into()), retry_after_ms: None,
+                                                        message: "LLM content filter rejected the request".into(),
+                                                    }));
                                                 break;
                                             }
                                             let final_tool_calls = merge_stream_tool_calls(
@@ -450,12 +494,12 @@ impl AgentRuntime {
                             )
                             .await;
                         }
-                        let call_result = ProviderPool::classify_error(&err_str);
+                        let call_result = ProviderPool::classify_failure(&err);
                         if matches!(&call_result, CallResult::RateLimit) {
                             *saw_rate_limit_this_turn = true;
                         }
                         self.provider_pool.report(pool_idx, call_result);
-                        let failure = FailureKind::classify_provider_message(&err_str);
+                        let failure = err.provider_failure_kind();
                         last_failure = Some(failure);
                         last_error = Some(err);
                         if failure.request_recovery().switch_provider {
@@ -467,12 +511,12 @@ impl AgentRuntime {
                     Ok(Err(e)) => {
                         let err_str = format!("{}", e);
                         warn!(error = %err_str, attempt, max_retries, ?iteration, pool_idx, "LLM stream call failed");
-                        let call_result = ProviderPool::classify_error(&err_str);
+                        let call_result = ProviderPool::classify_failure(&e);
                         if matches!(&call_result, CallResult::RateLimit) {
                             *saw_rate_limit_this_turn = true;
                         }
                         self.provider_pool.report(pool_idx, call_result);
-                        let failure = FailureKind::classify_provider_message(&err_str);
+                        let failure = e.provider_failure_kind();
                         last_failure = Some(failure);
                         last_error = Some(e);
                         // 限流、服务不可用、凭据失效都只针对当前 provider：本轮先换下一个 provider。
@@ -591,18 +635,21 @@ mod retry_delay_tests {
 
     #[test]
     fn retry_delay_uses_full_jitter_within_exponential_bounds() {
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.0, 60_000), 0);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.25, 60_000), 1000);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.0, 60_000), 4000);
-        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.5, 60_000), 4000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.0, 60_000, 60_000), 0);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 0.25, 60_000, 60_000), 1000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.0, 60_000, 60_000), 4000);
+        assert_eq!(retry_delay_ms(3, 1000, 0, None, 1.5, 60_000, 60_000), 4000);
     }
 
     #[test]
-    fn retry_after_takes_precedence_and_total_backoff_is_capped() {
-        assert_eq!(retry_delay_ms(4, 1000, 0, Some(3500), 0.0, 60_000), 3500);
+    fn retry_after_is_not_shortened_by_the_remaining_budget() {
         assert_eq!(
-            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 60_000),
-            1000
+            retry_delay_ms(4, 1000, 0, Some(3500), 0.0, 60_000, 60_000),
+            3500
+        );
+        assert_eq!(
+            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 60_000, 60_000),
+            3500
         );
     }
 
@@ -610,13 +657,50 @@ mod retry_delay_tests {
     fn rate_limit_gets_a_larger_total_backoff_budget() {
         // 限流窗口往往几秒内自行恢复：同样的指数退避，总预算放大后允许更晚放弃。
         assert_eq!(
-            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 240_000),
+            retry_delay_ms(4, 1000, 59_000, Some(3500), 1.0, 240_000, 240_000),
             3500
         );
         // attempt=6 → 指数 32 倍，剩余预算 180s，不会被总预算截断
-        assert_eq!(retry_delay_ms(6, 1000, 60_000, None, 1.0, 240_000), 32_000);
+        assert_eq!(
+            retry_delay_ms(6, 1000, 60_000, None, 1.0, 240_000, 240_000),
+            32_000
+        );
         // 普通 60s 封顶时同样的请求会被截到 0（已无剩余预算）
-        assert_eq!(retry_delay_ms(6, 1000, 60_000, None, 1.0, 60_000), 0);
+        assert_eq!(
+            retry_delay_ms(6, 1000, 60_000, None, 1.0, 60_000, 60_000),
+            0
+        );
+    }
+
+    #[test]
+    fn rate_limit_single_wait_is_capped_so_budget_buys_more_attempts() {
+        // 单次等待压到 30s：同样的 240s 预算，从"指数涨到 32s 就吃掉大半"变成
+        // "每次最多等 30s，能多试好几轮"。
+        assert_eq!(
+            retry_delay_ms(
+                8,
+                1000,
+                0,
+                None,
+                1.0,
+                240_000,
+                blockcell_core::config::LlmRetryPolicy::default().rate_limit_attempt_cap_ms
+            ),
+            blockcell_core::config::LlmRetryPolicy::default().rate_limit_attempt_cap_ms
+        );
+        // Retry-After is a minimum wait and must bypass the exponential cap.
+        assert_eq!(
+            retry_delay_ms(
+                2,
+                1000,
+                0,
+                Some(120_000),
+                1.0,
+                240_000,
+                blockcell_core::config::LlmRetryPolicy::default().rate_limit_attempt_cap_ms
+            ),
+            120_000
+        );
     }
 
     #[test]

@@ -565,6 +565,24 @@ impl ProviderPool {
         }
     }
 
+    /// Prefer structured adapter errors. String parsing is a legacy boundary only.
+    pub fn classify_failure(error: &blockcell_core::Error) -> CallResult {
+        if let blockcell_core::Error::ProviderFailure(failure) = error {
+            match failure.kind {
+                blockcell_core::FailureKind::RateLimited => CallResult::RateLimit,
+                blockcell_core::FailureKind::AuthenticationFailed => CallResult::AuthError,
+                blockcell_core::FailureKind::ProviderUnavailable
+                    if failure.status.is_some_and(|status| status >= 500) =>
+                {
+                    CallResult::ServerError
+                }
+                _ => CallResult::Transient,
+            }
+        } else {
+            Self::classify_error(&error.to_string())
+        }
+    }
+
     /// 将错误字符串分类为 CallResult
     pub fn classify_error(err: &str) -> CallResult {
         let lower = err.to_lowercase();
