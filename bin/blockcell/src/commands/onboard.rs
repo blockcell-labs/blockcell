@@ -341,9 +341,8 @@ pub async fn run(
     }
     println!("  ✓ Environment snapshot written to MEMORY.md");
 
-    // Extract builtin skills to workspace/skills/ (skip existing files)
-    let skills_dir = paths.skills_dir();
-    match super::embedded_skills::extract_to_workspace(&skills_dir) {
+    // Extract builtin skills to the managed directory outside the project (skip existing files)
+    match super::embedded_skills::extract_to_directory(&paths.managed_builtin_skills_dir()) {
         Ok(new_skills) if !new_skills.is_empty() => {
             println!(
                 "  ✓ Installed {} builtin skill(s): {}",

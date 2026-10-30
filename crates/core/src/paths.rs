@@ -331,7 +331,16 @@ impl Paths {
         self.ghost_dir().join("reports")
     }
 
+    /// Managed embedded assets live outside the user's project tree.
+    pub fn managed_builtin_skills_dir(&self) -> PathBuf {
+        self.base.join("builtin_skills")
+    }
+
     pub fn builtin_skills_dir(&self) -> PathBuf {
+        let managed = self.managed_builtin_skills_dir();
+        if managed.is_dir() {
+            return managed;
+        }
         // Try multiple candidate paths, return the first that exists on disk.
         // 1. exe/../skills  (installed layout: bin/blockcell + skills/)
         // 2. exe/../../skills (cargo layout: target/debug/blockcell + skills/)
@@ -349,7 +358,83 @@ impl Paths {
         PathBuf::from("./skills")
     }
 
+    fn workspace_ownership_file(&self) -> PathBuf {
+        let workspace = self.workspace();
+        let identity = workspace.canonicalize().unwrap_or(workspace);
+        self.base.join(format!(
+            "workspace-owned-{}.json",
+            stable_hash_session_key(&identity.to_string_lossy())
+        ))
+    }
+
+    fn runtime_workspace_directories(&self) -> Vec<PathBuf> {
+        vec![
+            self.logs_dir(),
+            self.workspace().join("downloads"),
+            self.memory_dir(),
+            self.skills_dir(),
+            self.evolved_tools_dir(),
+            self.tool_artifacts_dir(),
+            self.tool_evolution_records_dir(),
+            self.ghost_dir(),
+        ]
+    }
+
+    /// Actual runtime roots, not a fingerprint inferred from project filenames.
+    /// Pre-existing directories in a configured project are not claimed as ours.
+    pub fn runtime_owned_paths(&self) -> Vec<PathBuf> {
+        let mut owned: Vec<PathBuf> = std::fs::read(self.workspace_ownership_file())
+            .ok()
+            .filter(|bytes| bytes.len() <= 65_536)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let workspace = self.workspace();
+        // The default workspace is dedicated to BlockCell; custom workspaces may
+        // contain user-owned directories with the very same names.
+        if workspace == self.base.join("workspace") {
+            owned.extend(self.runtime_workspace_directories());
+            owned.push(workspace.join("agents"));
+            owned.push(
+                self.import_staging_skills_dir()
+                    .parent()
+                    .unwrap()
+                    .to_path_buf(),
+            );
+        }
+        if self.base != workspace && self.base.starts_with(&workspace) {
+            owned.push(self.base.clone());
+        }
+        owned.push(self.toggles_file());
+        owned.push(workspace.join(".skills_prompt_snapshot.json"));
+        for database in [
+            self.evolution_workflow_db(),
+            self.skill_evolution_workflow_db(),
+        ] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let mut filename = database.as_os_str().to_os_string();
+                filename.push(suffix);
+                owned.push(PathBuf::from(filename));
+            }
+        }
+        owned.retain(|path| path != &workspace && path.starts_with(&workspace));
+        owned.sort();
+        owned.dedup();
+        owned
+    }
+
+    pub fn evolution_workflow_db(&self) -> PathBuf {
+        self.workspace().join("evo_workflow.db")
+    }
+    pub fn skill_evolution_workflow_db(&self) -> PathBuf {
+        self.workspace().join("skill_evolution_workflow.db")
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
+        let newly_owned: Vec<_> = self
+            .runtime_workspace_directories()
+            .into_iter()
+            .filter(|path| !path.exists())
+            .collect();
         std::fs::create_dir_all(&self.base)?;
         std::fs::create_dir_all(self.workspace())?;
         std::fs::create_dir_all(self.sessions_dir())?;
@@ -368,6 +453,17 @@ impl Paths {
         std::fs::create_dir_all(self.ghost_dir())?;
         std::fs::create_dir_all(self.ghost_reports_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
+        let mut owned = self.runtime_owned_paths();
+        owned.extend(newly_owned);
+        owned.sort();
+        owned.dedup();
+        let ownership_file = self.workspace_ownership_file();
+        if let Ok(bytes) = serde_json::to_vec(&owned) {
+            // The ownership record is advisory for snapshots, never authorization.
+            if let Err(error) = std::fs::write(&ownership_file, bytes) {
+                tracing::warn!(%error, "Unable to persist workspace ownership metadata");
+            }
+        }
         // Bootstrap BLOCKCELL.md with default template if it does not exist
         let blockcell_md = self.blockcell_md();
         if !blockcell_md.exists() {

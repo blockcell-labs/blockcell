@@ -356,12 +356,12 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
     }
 
     // 将阻塞 I/O 移至 spawn_blocking，收集可用 skills
-    let skills_dir_clone = skills_dir.clone();
+    let skill_roots = [paths.builtin_skills_dir(), skills_dir.clone()];
     let mut available_skills: Vec<(String, std::path::PathBuf)> =
         tokio::task::spawn_blocking(move || {
-            let mut skills = Vec::new();
-            if skills_dir_clone.exists() && skills_dir_clone.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&skills_dir_clone) {
+            let mut skills = std::collections::BTreeMap::new();
+            for root in skill_roots {
+                if let Ok(entries) = std::fs::read_dir(&root) {
                     for entry in entries.flatten() {
                         let p = entry.path();
                         if p.is_dir()
@@ -374,12 +374,12 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("")
                                 .to_string();
-                            skills.push((name, p));
+                            skills.insert(name, p);
                         }
                     }
                 }
             }
-            skills
+            skills.into_iter().collect()
         })
         .await
         .unwrap_or_default();
@@ -461,11 +461,28 @@ pub async fn list(all: bool, enabled_only: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve user overrides before builtins, accepting only a single skill name.
+fn resolve_skill_path(paths: &Paths, name: &str) -> anyhow::Result<std::path::PathBuf> {
+    let mut components = std::path::Path::new(name).components();
+    anyhow::ensure!(
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none(),
+        "Invalid skill name: {}",
+        name
+    );
+    let user_path = paths.skills_dir().join(name);
+    if user_path.is_dir() {
+        Ok(user_path)
+    } else {
+        Ok(paths.builtin_skills_dir().join(name))
+    }
+}
+
 /// Show details for a specific skill.
 pub async fn show(name: &str) -> anyhow::Result<()> {
     let paths = Paths::new_configured();
     let skills_dir = paths.skills_dir();
-    let skill_path = skills_dir.join(name);
+    let skill_path = resolve_skill_path(&paths, name)?;
 
     if !skill_path.exists() || !skill_path.is_dir() {
         println!("❌ Skill '{}' not found in {}", name, skills_dir.display());
@@ -558,7 +575,7 @@ pub async fn show(name: &str) -> anyhow::Result<()> {
 /// Enable or disable a skill by creating/removing a .disabled marker.
 pub async fn set_enabled(name: &str, enable: bool) -> anyhow::Result<()> {
     let paths = Paths::new_configured();
-    let skill_path = paths.skills_dir().join(name);
+    let skill_path = resolve_skill_path(&paths, name)?;
 
     if !skill_path.exists() || !skill_path.is_dir() {
         println!("❌ Skill '{}' not found.", name);
@@ -585,10 +602,9 @@ pub async fn set_enabled(name: &str, enable: bool) -> anyhow::Result<()> {
 /// Hot-reload: report skill count (actual reload happens at agent startup).
 pub async fn reload() -> anyhow::Result<()> {
     let paths = Paths::new_configured();
-    let skills_dir = paths.skills_dir();
 
     // Re-extract builtin skills (skips existing files)
-    match super::embedded_skills::extract_to_workspace(&skills_dir) {
+    match super::embedded_skills::extract_to_directory(&paths.managed_builtin_skills_dir()) {
         Ok(new_skills) if !new_skills.is_empty() => {
             println!(
                 "✓ Extracted {} new builtin skill(s): {}",
@@ -602,21 +618,11 @@ pub async fn reload() -> anyhow::Result<()> {
         }
     }
 
-    let mut count = 0usize;
-    if skills_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir()
-                    && (p.join("SKILL.rhai").exists()
-                        || p.join("SKILL.py").exists()
-                        || p.join("SKILL.md").exists())
-                {
-                    count += 1;
-                }
-            }
-        }
-    }
+    let index = blockcell_agent::skill_index::SkillIndex::build_from_dirs([
+        paths.builtin_skills_dir(),
+        paths.skills_dir(),
+    ]);
+    let count = index.entries().len();
 
     println!(
         "✅ Skills directory refreshed. {} skill(s) available.",

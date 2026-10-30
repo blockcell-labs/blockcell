@@ -620,21 +620,19 @@ impl ContextBuilder {
     /// 刷新 Skill 索引摘要 (Skill 变更后调用, 使下次 LLM 调用获取最新 Skill 列表)
     /// 使用 `&self` (内部 Arc<RwLock>) 以便后台 Review Agent 在完成后刷新
     pub fn refresh_skill_index_summary(&self) {
-        let skills_dir = self.paths.skills_dir();
+        let index = crate::skill_index::SkillIndex::build_from_dirs([
+            self.paths.builtin_skills_dir(),
+            self.paths.skills_dir(),
+        ]);
         let mut summary = self
             .skill_index_summary
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        if !skills_dir.exists() {
-            *summary = None;
+        *summary = if index.entries().is_empty() {
+            None
         } else {
-            let index = crate::skill_index::SkillIndex::build_from_dir(&skills_dir);
-            *summary = if index.entries().is_empty() {
-                None
-            } else {
-                Some(index.to_prompt_summary())
-            };
-        }
+            Some(index.to_prompt_summary())
+        };
     }
 
     /// Sync available capability IDs from the registry to the SkillManager.

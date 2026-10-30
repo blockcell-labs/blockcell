@@ -87,8 +87,8 @@ pub async fn run(
     let mcp_manager = Arc::new(McpManager::load(&root_paths).await?);
     let provider_pool = build_pool_with_overrides(&mut config, model, provider)?;
 
-    // Ensure builtin skills are extracted to workspace/skills/ (silent, skips existing)
-    let _ = super::embedded_skills::extract_to_workspace(&paths.skills_dir());
+    // Ensure builtin skills are extracted outside the project (silent, skips existing)
+    let _ = super::embedded_skills::extract_to_directory(&paths.managed_builtin_skills_dir());
 
     // Initialize memory store (SQLite + FTS5)
     let memory_store_handle: Option<MemoryStoreHandle> = match open_memory_store(&paths, &config) {
@@ -146,14 +146,14 @@ pub async fn run(
     let core_evo_handle: CoreEvolutionHandle = Arc::new(Mutex::new(core_evo_adapter));
 
     // 创建核心进化工作流存储和 worker（在 if/else 之前创建，两个分支都需要）
-    let evo_workflow_db = paths.workspace().join("evo_workflow.db");
+    let evo_workflow_db = paths.evolution_workflow_db();
     let evo_workflow_store = EvolutionWorkflowStore::open(&evo_workflow_db)?;
     let evo_workflow_store_arc = Arc::new(evo_workflow_store);
     let evo_worker = EvolutionWorker::new((*evo_workflow_store_arc).clone(), core_evo_raw.clone());
     let evo_worker_arc = Arc::new(evo_worker);
 
     let skill_evo_llm_provider = create_skill_evolution_llm_provider(&config, &provider_pool);
-    let skill_evo_workflow_db = paths.workspace().join("skill_evolution_workflow.db");
+    let skill_evo_workflow_db = paths.skill_evolution_workflow_db();
     let skill_evo_workflow_store = EvolutionWorkflowStore::open(&skill_evo_workflow_db)?;
     // 从 Config.evolution 转换配置，而非使用默认值
     let skill_evo_config: EvolutionServiceConfig = config.evolution.clone().into();

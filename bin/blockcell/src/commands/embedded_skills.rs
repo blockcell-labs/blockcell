@@ -7,10 +7,10 @@ use std::path::Path;
 #[folder = "../../skills/"]
 struct BuiltinSkillAssets;
 
-/// Extract all builtin skills to `workspace/skills/`.
+/// Extract builtin assets to the managed directory, outside the user workspace.
 /// Only writes files that do not already exist (never overwrites user modifications).
 /// Returns the list of skill names that were newly extracted.
-pub fn extract_to_workspace(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
+pub fn extract_to_directory(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
     std::fs::create_dir_all(skills_dir)?;
 
     let mut extracted_skills: Vec<String> = Vec::new();
