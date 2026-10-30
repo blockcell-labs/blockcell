@@ -8398,6 +8398,18 @@ async fn write_file_allows_creation_and_rejects_unread_overwrite() {
         )
         .await;
     file_observation_error(&overwritten, "FS_NOT_OBSERVED");
+    // 拒绝时必须回传当前内容：模型才能一次往返完成修正，不必再单独 read_file。
+    let denial: serde_json::Value =
+        serde_json::from_str(&overwritten.text).expect("file observation denial is JSON");
+    assert_eq!(denial["current_content"], "existing");
+    assert!(
+        denial["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("existing"),
+        "{}",
+        overwritten.text
+    );
     assert_eq!(
         std::fs::read_to_string(existing_path).expect("read overwritten file"),
         "existing"

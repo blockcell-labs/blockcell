@@ -724,14 +724,37 @@ impl AgentRuntime {
                 })
                 .to_string())
             }
-            None => Err(serde_json::json!({
-                "error": format!(
-                    "FS_NOT_OBSERVED: {} has not been read in this session — read_file it, then retry",
-                    path.display()
-                ),
-                "code": "FS_NOT_OBSERVED"
-            })
-            .to_string()),
+            None => {
+                // 与 edit_file 的 None 分支保持一致：拒绝时把当前内容一并回传。
+                // 否则模型必须多花一步 read_file 才能重试，而这一步在慢链路上很贵。
+                let content = path.is_file().then(|| {
+                    std::fs::read_to_string(&path)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(8000)
+                        .collect::<String>()
+                });
+                match content {
+                    Some(content) => Err(serde_json::json!({
+                        "error": format!(
+                            "FS_NOT_OBSERVED: current contents of {} follow; retry the write using this content (use read_file if you need the untruncated file):\n{}",
+                            path.display(),
+                            content
+                        ),
+                        "code": "FS_NOT_OBSERVED",
+                        "current_content": content
+                    })
+                    .to_string()),
+                    None => Err(serde_json::json!({
+                        "error": format!(
+                            "FS_NOT_OBSERVED: {} has not been read in this session — read_file it, then retry",
+                            path.display()
+                        ),
+                        "code": "FS_NOT_OBSERVED"
+                    })
+                    .to_string()),
+                }
+            }
             Some(observed)
                 if current.as_ref().ok().and_then(|version| *version) != Some(observed) =>
             {
