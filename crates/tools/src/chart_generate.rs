@@ -13,6 +13,14 @@ pub struct ChartGenerateTool;
 
 #[async_trait]
 impl Tool for ChartGenerateTool {
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        if params["action"] == "generate" {
+            crate::evidence::WorkspaceEffect::Changed
+        } else {
+            crate::evidence::WorkspaceEffect::None
+        }
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "chart_generate".to_string(),

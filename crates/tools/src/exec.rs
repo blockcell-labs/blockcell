@@ -177,6 +177,17 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
+    fn supports_verification(&self) -> bool {
+        true
+    }
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     /// 根据构造时固定的沙箱策略如实声明执行环境：`WorkspaceWrite` / `ReadOnly` 声明为
     /// `Shell`，`FullAccess` 声明为 `FullAccess`。`exec` 不接受 per-call 的
     /// `sandbox_policy` 参数——声明、审计与实际执行同源，不会被参数伪造。

@@ -8,6 +8,10 @@ pub struct GetContextRemainingTool;
 
 #[async_trait]
 impl Tool for GetContextRemainingTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::deferred(false)
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "get_context_remaining".to_string(),

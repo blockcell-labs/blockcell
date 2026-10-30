@@ -41,6 +41,10 @@ pub struct AgentTool;
 
 #[async_trait]
 impl Tool for AgentTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "agent".to_string(),

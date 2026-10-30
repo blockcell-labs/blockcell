@@ -2,6 +2,38 @@
 //! registration and discovery do not implicitly select packs.
 use blockcell_core::config::ToolBasePack;
 
+/// Schema preferences belong to the tool, independently of host capability grants.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodingExposure {
+    pub initial: bool,
+    pub full_schema: bool,
+    pub defer: bool,
+}
+
+impl CodingExposure {
+    pub const fn primary() -> Self {
+        Self {
+            initial: true,
+            full_schema: true,
+            defer: false,
+        }
+    }
+    pub const fn full() -> Self {
+        Self {
+            initial: false,
+            full_schema: true,
+            defer: false,
+        }
+    }
+    pub const fn deferred(full_schema: bool) -> Self {
+        Self {
+            initial: false,
+            full_schema,
+            defer: true,
+        }
+    }
+}
+
 pub const CODING_DEFAULT_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",

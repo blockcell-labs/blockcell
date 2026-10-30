@@ -37,6 +37,10 @@ filesystem_tool!(ListDirTool);
 
 #[async_trait]
 impl Tool for ReadFileTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Local
     }
@@ -272,6 +276,14 @@ async fn write_file_result(
 
 #[async_trait]
 impl Tool for WriteFileTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::WorkspaceWrite
     }
@@ -386,6 +398,14 @@ impl Tool for WriteFileTool {
 
 #[async_trait]
 impl Tool for EditFileTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::WorkspaceWrite
     }
@@ -532,6 +552,10 @@ fn parse_edit(params: &Value, index: Option<usize>) -> Result<Edit<'_>> {
 
 #[async_trait]
 impl Tool for ListDirTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Local
     }

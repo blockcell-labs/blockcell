@@ -218,6 +218,10 @@ fn glob_sync(root: PathBuf, params: Value) -> Result<Value> {
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Local
     }
@@ -261,6 +265,10 @@ impl Tool for GrepTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Local
     }

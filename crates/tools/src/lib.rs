@@ -15,6 +15,7 @@ pub mod cron;
 pub mod data_process;
 pub mod email;
 pub mod encrypt;
+pub mod evidence;
 pub mod evolution_workflow;
 pub mod exec;
 pub mod exec_jobs;
@@ -66,6 +67,7 @@ pub mod toggle_manage;
 pub mod tool_guard;
 pub mod tool_search;
 pub mod tts;
+pub mod verification;
 pub mod video_process;
 pub mod web;
 
@@ -660,6 +662,29 @@ impl<'a> PromptContext<'a> {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
+    /// Descriptive effects only; never used to authorize an operation.
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        use crate::evidence::WorkspaceEffect;
+        match self.execution_environment(params) {
+            ExecutionEnvironment::InProcess
+            | ExecutionEnvironment::Local
+            | ExecutionEnvironment::Network => WorkspaceEffect::None,
+            ExecutionEnvironment::WorkspaceWrite => WorkspaceEffect::Changed,
+            ExecutionEnvironment::Shell | ExecutionEnvironment::FullAccess => {
+                WorkspaceEffect::Unknown
+            }
+        }
+    }
+    /// Whether this tool accepts task/verification annotations for execution.
+    fn accepts_execution_annotations(&self) -> bool {
+        false
+    }
+    fn supports_verification(&self) -> bool {
+        false
+    }
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::default()
+    }
     fn validate(&self, params: &Value) -> Result<()>;
     fn required_permissions(&self, _params: &Value) -> PermissionSet {
         PermissionSet::new()

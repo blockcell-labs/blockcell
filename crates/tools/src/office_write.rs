@@ -13,6 +13,14 @@ pub struct OfficeWriteTool;
 
 #[async_trait]
 impl Tool for OfficeWriteTool {
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        if params["action"] != "info" {
+            crate::evidence::WorkspaceEffect::Changed
+        } else {
+            crate::evidence::WorkspaceEffect::None
+        }
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "office_write".to_string(),

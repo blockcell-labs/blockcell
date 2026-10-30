@@ -480,6 +480,17 @@ pub struct JobOutputTool;
 
 #[async_trait]
 impl Tool for JobOutputTool {
+    fn supports_verification(&self) -> bool {
+        true
+    }
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "job_output".to_string(),
@@ -525,6 +536,10 @@ pub struct JobKillTool;
 
 #[async_trait]
 impl Tool for JobKillTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "job_kill".to_string(),

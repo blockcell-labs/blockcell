@@ -67,6 +67,23 @@ pub fn canonical_shell_args(tool_name: &str, params: &Value) -> Option<Value> {
 
 #[async_trait]
 impl Tool for ShellActionTool {
+    fn supports_verification(&self) -> bool {
+        true
+    }
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        match self.0 {
+            ShellAction::Run => crate::base_packs::CodingExposure::primary(),
+            _ => crate::base_packs::CodingExposure::full(),
+        }
+    }
+
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        ShellTool.workspace_effect(&self.canonical_args(params))
+    }
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn execution_environment(&self, params: &Value) -> ExecutionEnvironment {
         ShellTool.execution_environment(&self.canonical_args(params))
     }

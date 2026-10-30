@@ -31,6 +31,17 @@ pub struct EncryptTool;
 
 #[async_trait]
 impl Tool for EncryptTool {
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        if matches!(
+            params["action"].as_str(),
+            Some("encrypt_file" | "decrypt_file")
+        ) {
+            crate::evidence::WorkspaceEffect::Changed
+        } else {
+            crate::evidence::WorkspaceEffect::None
+        }
+    }
+
     fn schema(&self) -> ToolSchema {
         let mut props = serde_json::Map::new();
         props.insert("action".into(), json!({"type": "string", "description": "Action: encrypt_file|decrypt_file|generate_password|generate_key|hash_file|hash_text|encode|decode|checksum_verify"}));

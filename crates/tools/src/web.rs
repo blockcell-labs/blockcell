@@ -10,6 +10,10 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::deferred(false)
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Network
     }
@@ -319,6 +323,10 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::Network
     }
@@ -330,7 +338,7 @@ impl Tool for WebFetchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "web_fetch".to_string(),
-            description: "Fetch a web page and return its content as clean Markdown. REQUIRED: always provide a valid `http` or `https` URL in parameter `url`; do not call this tool with `{}`. Optional parameters include `extractMode` and `maxChars`. Uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents) for optimal results — if the server supports it, markdown is returned directly with ~80% token savings. Otherwise, HTML is converted to markdown locally. Returns `markdown_tokens` estimate and `content_signal` when available.".to_string(),
+            description: "Fetch a web page and return its content as clean Markdown. REQUIRED: always provide a valid `http` or `https` URL in parameter `url`; do not call this tool with `{}`. Optional parameters include `extractMode`, `maxChars`, and `jsonFields` (map output names to JSON Pointers, e.g. version -> /info/version, author -> /info/author; returns only selected fields, preserving null and types). Uses `Accept: text/markdown` content negotiation (Cloudflare Markdown for Agents) for optimal results — if the server supports it, markdown is returned directly with ~80% token savings. Otherwise, HTML is converted to markdown locally. Returns `markdown_tokens` estimate and `content_signal` when available.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -340,12 +348,19 @@ impl Tool for WebFetchTool {
                     },
                     "extractMode": {
                         "type": "string",
-                        "enum": ["markdown", "text", "raw"],
-                        "description": "Content extraction mode. 'markdown' (default): returns clean markdown via content negotiation + local conversion. 'text': returns plain text only. 'raw': returns raw response body without conversion."
+                        "enum": ["markdown", "text", "raw", "json"],
+                        "description": "Content extraction mode. 'markdown' (default): returns clean markdown via content negotiation + local conversion. 'text': returns plain text only. 'raw': returns raw response body without conversion. 'json': returns only fields selected by jsonFields using JSON Pointers."
                     },
                     "maxChars": {
                         "type": "integer",
                         "description": "Maximum characters to return (default: 50000)"
+                    },
+                    "jsonFields": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "minProperties": 1,
+                        "maxProperties": 32,
+                        "description": "Select JSON fields before returning content to the model. Map output names to RFC 6901 JSON Pointers, e.g. version -> /info/version. Preserves null and value types; missing fields are errors. Implies JSON mode."
                     }
                 },
                 "required": ["url"]
@@ -355,7 +370,7 @@ impl Tool for WebFetchTool {
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
         Some(concat!(
-            "- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). Use `extractMode=raw` if conversion omits requested page metadata or counts; try 1–2 independent sources after rate limits, access blocks, or thin pages. Use `browse` for JS-heavy sites or interactive automation.\n",
+            "- **Web content**: `web_fetch` returns markdown by default (Cloudflare Markdown for Agents content negotiation, ~80% token savings). For JSON APIs, use `jsonFields` to select only needed JSON Pointers before returning data; preserve null values and do not substitute other fields. Use `extractMode=raw` if conversion omits requested page metadata or counts; try 1–2 independent sources after rate limits, access blocks, or thin pages. Use `browse` for JS-heavy sites or interactive automation.\n",
             "- **信息充足性原则（避免过度抓取）**: 每次 `web_fetch` 后先评估已有信息是否满足任务需求，**够用就停止**，不要贪婪地抓取所有搜索结果。判断标准：(1) 用户要求[找N篇/N个] -> 已收集到N个独立来源即可停止；(2) 用户要求[总结/汇总] -> 有2-3个高质量来源即可，无需穷举；(3) 用户要求[最新/最全] -> 才需要多源验证。**错误做法**：搜到10条结果就逐一fetch全部。**正确做法**：fetch前几条最相关的，判断内容是否满足需求，满足则直接执行后续任务（写文件/输出等）。"
         ).to_string())
     }
@@ -387,6 +402,59 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(50000)
             .min(1_000_000) as usize;
+
+        if params.get("jsonFields").is_some() || extract_mode == "json" {
+            let fields = params
+                .get("jsonFields")
+                .and_then(Value::as_object)
+                .filter(|fields| !fields.is_empty() && fields.len() <= 32)
+                .ok_or_else(|| {
+                    Error::Validation("JSON mode requires 1–32 jsonFields entries".into())
+                })?;
+            if fields.iter().any(|(name, pointer)| {
+                name.is_empty()
+                    || !pointer
+                        .as_str()
+                        .is_some_and(|p| p.is_empty() || p.starts_with('/'))
+            }) {
+                return Err(Error::Validation(
+                    "jsonFields values must be JSON Pointers".into(),
+                ));
+            }
+            // Fetch and parse locally; never send the full API response to the model.
+            let raw = fetch_raw(url, 1_000_000).await?;
+            let status = raw["status"].as_u64().unwrap_or(0);
+            if !(200..300).contains(&status) {
+                return Err(Error::Tool(format!("JSON fetch returned HTTP {status}")));
+            }
+            if raw["truncated"] == true {
+                return Err(Error::Tool(
+                    "JSON response exceeds the 1 MB parsing limit".into(),
+                ));
+            }
+            let document: Value = serde_json::from_str(raw["text"].as_str().unwrap_or_default())
+                .map_err(|e| Error::Tool(format!("Invalid JSON response: {e}")))?;
+            let mut selected = serde_json::Map::new();
+            for (name, pointer) in fields {
+                let pointer = pointer.as_str().unwrap_or_default();
+                let value = document
+                    .pointer(pointer)
+                    .ok_or_else(|| Error::Tool(format!("JSON field not found: {pointer}")))?;
+                selected.insert(name.clone(), value.clone());
+            }
+            let data = Value::Object(selected);
+            let serialized = serde_json::to_string(&data)
+                .map_err(|e| Error::Tool(format!("Failed to serialize selected JSON: {e}")))?;
+            if serialized.chars().count() > max_chars {
+                return Err(Error::Tool(
+                    "Selected JSON exceeds maxChars; select fewer fields".into(),
+                ));
+            }
+            return Ok(json!({
+                "url": url, "finalUrl": raw["finalUrl"], "status": status,
+                "format": "json", "data": data, "truncated": false,
+            }));
+        }
 
         match extract_mode {
             "raw" => fetch_raw(url, max_chars).await,

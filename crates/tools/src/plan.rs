@@ -65,6 +65,7 @@ static PLAN_STORE: Lazy<Mutex<SessionPlanStore>> =
 pub struct UpdatePlanTool;
 
 fn parse_plan(params: &Value) -> Result<Vec<PlanItem>> {
+    crate::evidence::ExecutionAnnotations::parse(params)?;
     let plan = params
         .get("plan")
         .and_then(Value::as_array)
@@ -178,6 +179,14 @@ pub fn render_plan_for_recovery(session_key: &str) -> Option<String> {
 
 #[async_trait]
 impl Tool for UpdatePlanTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "update_plan".to_string(),
@@ -214,6 +223,7 @@ impl Tool for UpdatePlanTool {
         let rendered = render_plan(&items, "Current Plan");
         let (changed, revision) = update_plan(&ctx.session_key, items);
         Ok(json!({
+            "task_contract": params.get("task_contract"),
             "changed": changed,
             "revision": revision,
             "plan": rendered,

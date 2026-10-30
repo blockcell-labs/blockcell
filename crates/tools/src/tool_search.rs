@@ -50,6 +50,10 @@ pub struct ToolSearchTool;
 
 #[async_trait]
 impl Tool for ToolSearchTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::primary()
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "tool_search".to_string(),

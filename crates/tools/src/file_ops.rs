@@ -54,6 +54,10 @@ pub struct FileOpsTool;
 
 #[async_trait]
 impl Tool for FileOpsTool {
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::deferred(true)
+    }
+
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
         crate::ExecutionEnvironment::WorkspaceWrite
     }

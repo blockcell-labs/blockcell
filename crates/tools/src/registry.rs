@@ -454,7 +454,14 @@ impl ToolRegistry {
             .and_then(|presentation| presentation.description)
             .unwrap_or(schema.description);
         let parameters = if include_parameters {
-            schema.parameters
+            let mut parameters = schema.parameters;
+            if tool.accepts_execution_annotations() {
+                crate::evidence::add_annotation_schema(
+                    &mut parameters,
+                    tool.supports_verification(),
+                );
+            }
+            parameters
         } else {
             json!({ "type": "object", "properties": {} })
         };
@@ -494,6 +501,23 @@ impl ToolRegistry {
 
     pub fn sort_model_schemas(&self, schemas: &mut [Value]) {
         self.sort_schemas(schemas);
+    }
+
+    pub fn coding_exposure(&self, name: &str) -> crate::base_packs::CodingExposure {
+        self.get(name)
+            .map(|tool| tool.coding_exposure())
+            .unwrap_or_default()
+    }
+
+    pub fn get_coding_schemas(&self, names: &[&str]) -> Vec<Value> {
+        let mut schemas: Vec<_> = self
+            .effective_tools()
+            .iter()
+            .filter(|(name, _)| names.contains(&name.as_str()))
+            .map(|(_, tool)| self.model_schema(tool, tool.coding_exposure().full_schema))
+            .collect();
+        self.sort_schemas(&mut schemas);
+        schemas
     }
 
     pub fn get_tiered_schemas_core_only(&self, names: &[&str], core_tools: &[&str]) -> Vec<Value> {
@@ -632,6 +656,12 @@ impl ToolRegistry {
             .filter(|(name, _)| names.contains(&name.as_str()))
             .filter_map(|(name, tool)| tool.prompt_rule(ctx).map(|rule| (name, rule)))
             .collect();
+        if names.iter().any(|name| {
+            self.get(name)
+                .is_some_and(|tool| tool.accepts_execution_annotations())
+        }) {
+            rules.push(("execution_annotations".into(), "- **Task requirements and evidence**: When the user names required output files or constrains verification, record those requirements with `task_contract` on your first execution/write call or `update_plan`. Record only explicit requirements; current user instructions take precedence. Never run tests/builds/checks that the user prohibits or defers. When executing a check, set `verification` with its kind and target, preserve failure exit status, and report exactly what was checked; a declaration alone does not establish correctness.".into()));
+        }
         rules.sort_by(|a, b| a.0.cmp(&b.0));
         rules.into_iter().map(|(_, rule)| rule).collect()
     }

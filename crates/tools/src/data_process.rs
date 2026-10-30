@@ -9,6 +9,13 @@ pub struct DataProcessTool;
 
 #[async_trait]
 impl Tool for DataProcessTool {
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        if params["action"] == "write_csv" || params["output_path"].is_string() {
+            crate::evidence::WorkspaceEffect::Changed
+        } else {
+            crate::evidence::WorkspaceEffect::None
+        }
+    }
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "data_process".to_string(),

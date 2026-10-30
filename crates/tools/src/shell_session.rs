@@ -1124,6 +1124,27 @@ pub(crate) fn insert_session_policy_for_test(session_id: &str, policy: SandboxPo
 
 #[async_trait]
 impl Tool for ShellTool {
+    fn supports_verification(&self) -> bool {
+        true
+    }
+    fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
+        crate::base_packs::CodingExposure::full()
+    }
+
+    fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
+        match params
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("run")
+        {
+            "poll" | "close" => crate::evidence::WorkspaceEffect::None,
+            _ => crate::evidence::WorkspaceEffect::Unknown,
+        }
+    }
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
     fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
         if crate::execution_env::effective_sandbox_is_full_access(params) {
             crate::ExecutionEnvironment::FullAccess
