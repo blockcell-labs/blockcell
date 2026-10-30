@@ -222,11 +222,14 @@ impl IntentClassifier {
     /// Classify user input into one or more intent categories.
     /// Returns up to 2 categories, sorted by priority.
     pub fn classify(&self, input: &str) -> Vec<IntentCategory> {
-        let input_lower = input.to_lowercase();
+        let clauses: Vec<_> = input
+            .split(['，', '。', '；', ';', '\n', ','])
+            .map(|clause| (clause, clause.to_lowercase()))
+            .collect();
         let mut matches: Vec<(IntentCategory, u8)> = Vec::new();
 
         for rule in &self.rules {
-            if self.rule_matches(rule, input, &input_lower) {
+            if self.rule_matches(rule, &clauses) {
                 matches.push((rule.category.clone(), rule.priority));
             }
         }
@@ -255,30 +258,37 @@ impl IntentClassifier {
         matches.into_iter().take(2).map(|(c, _)| c).collect()
     }
 
-    fn rule_matches(&self, rule: &IntentRule, input: &str, input_lower: &str) -> bool {
-        // 使用预小写的否定词列表（构造时已预处理），避免每次匹配重复 to_lowercase() 分配
-        for neg in &rule.negative_lower {
-            if input_lower.contains(neg.as_str()) {
-                return false;
-            }
-        }
-
-        // Check regex patterns
-        for pattern in &rule.patterns {
-            if pattern.is_match(input) {
-                return true;
-            }
-        }
-
-        // 使用预小写的关键词列表（构造时已预处理），避免每次匹配重复 to_lowercase() 分配
-        for keyword in &rule.keywords_lower {
-            if input_lower.contains(keyword.as_str()) {
-                return true;
-            }
-        }
-
-        false
+    fn rule_matches(&self, rule: &IntentRule, clauses: &[(&str, String)]) -> bool {
+        // Normalize once per input. A negative term suppresses only its own clause.
+        clauses.iter().any(|(clause, lower)| {
+            !rule
+                .negative_lower
+                .iter()
+                .any(|negative| lexical_contains(lower, negative))
+                && (rule.patterns.iter().any(|pattern| pattern.is_match(clause))
+                    || rule
+                        .keywords_lower
+                        .iter()
+                        .any(|keyword| lexical_contains(lower, keyword)))
+        })
     }
+}
+
+/// ASCII keywords require token boundaries, while Chinese terms may occur in
+/// unsegmented text. The same matcher applies to positive and negative terms.
+fn lexical_contains(text: &str, term: &str) -> bool {
+    if term.is_empty() {
+        return false;
+    }
+    let word_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    text.match_indices(term).any(|(start, matched)| {
+        let end = start + matched.len();
+        let left = !term.chars().next().is_some_and(word_char)
+            || !text[..start].chars().next_back().is_some_and(word_char);
+        let right = !term.chars().next_back().is_some_and(word_char)
+            || !text[end..].chars().next().is_some_and(word_char);
+        left && right
+    })
 }
 
 pub struct IntentToolResolver<'a> {
