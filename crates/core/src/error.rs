@@ -3,9 +3,7 @@ use thiserror::Error;
 /// BlockCell 核心错误类型。
 ///
 /// ## 设计说明
-/// 大部分变体使用 `String` 承载自由文本消息，而非强类型字段。
-/// 这是有意为之——灵活的消息格式便于快速迭代和动态错误构造。
-/// 未来版本可视稳定性需求逐步引入 typed 错误字段。
+/// Provider 适配器使用强类型恢复信息；字符串 Provider 变体保留给旧适配器。
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -23,6 +21,9 @@ pub enum Error {
 
     #[error("Provider error: {0}")]
     Provider(String),
+
+    #[error("Provider error: {0}")]
+    ProviderFailure(ProviderFailure),
 
     #[error("Tool error: {0}")]
     Tool(String),
@@ -59,3 +60,29 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Provider adapters retain machine-readable recovery information separately from
+/// the sanitized message shown in logs. Legacy external adapters may use Provider.
+#[derive(Debug, Clone)]
+pub struct ProviderFailure {
+    pub kind: crate::FailureKind,
+    pub status: Option<u16>,
+    pub code: Option<String>,
+    pub retry_after_ms: Option<u64>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ProviderFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error {
+    pub fn provider_failure_kind(&self) -> crate::FailureKind {
+        match self {
+            Self::ProviderFailure(failure) => failure.kind,
+            _ => crate::FailureKind::classify_provider_message(&self.to_string()),
+        }
+    }
+}

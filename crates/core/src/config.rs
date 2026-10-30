@@ -1138,6 +1138,9 @@ impl Config {
             if let Some(llm_retry_delay_ms) = agent.llm_retry_delay_ms {
                 defaults.llm_retry_delay_ms = llm_retry_delay_ms;
             }
+            if let Some(policy) = &agent.llm_retry_policy {
+                defaults.llm_retry_policy = policy.clone();
+            }
             if let Some(max_context_tokens) = agent.max_context_tokens {
                 defaults.max_context_tokens = max_context_tokens;
             }

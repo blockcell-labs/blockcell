@@ -11,6 +11,33 @@ fn is_default_routing_strategy(strategy: &RoutingStrategy) -> bool {
     matches!(strategy, RoutingStrategy::Manual)
 }
 
+/// Recovery defaults preserve existing behavior; hosts can tune policy without
+/// embedding gateway/evaluation-specific exceptions in the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LlmRetryPolicy {
+    pub total_backoff_ms: u64,
+    pub rate_limit_backoff_ms: u64,
+    pub rate_limit_attempt_cap_ms: u64,
+    pub rate_limit_max_retries: u32,
+    pub retry_content_filter: bool,
+    /// Optional deadline across provider fallbacks, responses and backoff.
+    pub deadline_ms: Option<u64>,
+}
+
+impl Default for LlmRetryPolicy {
+    fn default() -> Self {
+        Self {
+            total_backoff_ms: 60_000,
+            rate_limit_backoff_ms: 240_000,
+            rate_limit_attempt_cap_ms: 30_000,
+            rate_limit_max_retries: 12,
+            retry_content_filter: true,
+            deadline_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefaults {
@@ -31,6 +58,8 @@ pub struct AgentDefaults {
     pub llm_max_retries: u32,
     #[serde(default = "default_llm_retry_delay_ms")]
     pub llm_retry_delay_ms: u64,
+    #[serde(default)]
+    pub llm_retry_policy: LlmRetryPolicy,
     /// 首个流式事件允许等待的秒数。
     #[serde(default = "default_stream_first_event_timeout_secs")]
     pub stream_first_event_timeout_secs: u64,
@@ -169,6 +198,7 @@ impl Default for AgentDefaults {
             max_tool_iterations_by_tool: HashMap::new(),
             llm_max_retries: default_llm_max_retries(),
             llm_retry_delay_ms: default_llm_retry_delay_ms(),
+            llm_retry_policy: LlmRetryPolicy::default(),
             stream_first_event_timeout_secs: default_stream_first_event_timeout_secs(),
             stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             max_context_tokens: default_max_context_tokens(),
@@ -229,6 +259,8 @@ pub struct AgentProfileConfig {
     #[serde(default)]
     pub llm_retry_delay_ms: Option<u64>,
     #[serde(default)]
+    pub llm_retry_policy: Option<LlmRetryPolicy>,
+    #[serde(default)]
     pub max_context_tokens: Option<u32>,
     #[serde(default)]
     pub evolution_model: Option<String>,
@@ -264,6 +296,7 @@ impl Default for AgentProfileConfig {
             max_tool_iterations_by_tool: HashMap::new(),
             llm_max_retries: None,
             llm_retry_delay_ms: None,
+            llm_retry_policy: None,
             max_context_tokens: None,
             evolution_model: None,
             evolution_provider: None,

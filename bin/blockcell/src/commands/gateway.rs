@@ -478,7 +478,7 @@ async fn spawn_agent_runtime(
     runtime.set_core_evolution(core_evo_handle);
 
     // 创建核心进化工作流存储和 worker
-    let evo_workflow_db = agent_paths.workspace().join("evo_workflow.db");
+    let evo_workflow_db = agent_paths.evolution_workflow_db();
     let evo_workflow_store = EvolutionWorkflowStore::open(&evo_workflow_db)?;
     let evo_workflow_store_arc = Arc::new(evo_workflow_store);
     let evo_worker = EvolutionWorker::new((*evo_workflow_store_arc).clone(), core_evo_raw.clone());
@@ -488,7 +488,7 @@ async fn spawn_agent_runtime(
 
     let skill_evo_llm_provider =
         create_skill_evolution_llm_provider(&agent_config, &provider_pool, agent_id);
-    let skill_evo_workflow_db = agent_paths.workspace().join("skill_evolution_workflow.db");
+    let skill_evo_workflow_db = agent_paths.skill_evolution_workflow_db();
     let skill_evo_workflow_store = EvolutionWorkflowStore::open(&skill_evo_workflow_db)?;
     // 从 Config.evolution 转换配置，而非使用默认值
     let skill_evo_config: EvolutionServiceConfig = agent_config.evolution.clone().into();
@@ -2426,6 +2426,7 @@ mod tests {
                 max_tool_iterations_by_tool: HashMap::new(),
                 llm_max_retries: None,
                 llm_retry_delay_ms: None,
+                llm_retry_policy: None,
                 max_context_tokens: None,
                 evolution_model: None,
                 evolution_provider: None,

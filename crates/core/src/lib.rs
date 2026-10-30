@@ -38,7 +38,7 @@ pub use capability::{
 };
 pub use config::Config;
 pub use config::EvolutionConfig;
-pub use error::{Error, Result};
+pub use error::{Error, ProviderFailure, Result};
 pub use failure::{FailureKind, Idempotency, RequestRecovery, RequestRetry, ToolOutcome};
 pub use message::{InboundMessage, OutboundMessage};
 pub use paths::Paths;
@@ -62,3 +62,5 @@ pub const CHARS_PER_TOKEN: usize = 4;
 pub(crate) fn default_true() -> bool {
     true
 }
+
+pub mod task_contract;
