@@ -17,8 +17,18 @@ pub struct SessionMetrics {
     pub model_request_errors: usize,
     /// 被丢弃的模型输出（流式中断后重试）。
     pub discarded_attempts: usize,
-    /// 模型提议的工具调用数（每个调用都以一条 `tool/result` 结束）。
+    /// Legacy count of tool/result events, including pre-execution rejections.
     pub tool_calls: usize,
+    /// Model proposals from model/response, before admission checks.
+    pub proposed_tool_calls: usize,
+    /// Calls admitted for execution, from tool/call.
+    pub executed_tool_calls: usize,
+    /// Calls with a terminal tool/result, including rejected/not-started calls.
+    pub completed_tool_calls: usize,
+    pub rejected_tool_calls: usize,
+    pub succeeded_tool_calls: usize,
+    pub failed_tool_calls: usize,
+    pub not_started_tool_calls: usize,
     /// 按 ToolOutcome 统计的工具调用数。
     pub tool_outcomes: BTreeMap<String, usize>,
     pub tool_duration_ms: u64,
@@ -86,6 +96,10 @@ impl SessionMetrics {
                 SessionEventKind::ModelRequestError => metrics.model_request_errors += 1,
                 SessionEventKind::AssistantAttempt => metrics.discarded_attempts += 1,
                 SessionEventKind::ModelResponse => {
+                    metrics.proposed_tool_calls += payload
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
                     metrics.input_tokens += u64_at(payload, &["usage", "input_tokens"]);
                     metrics.output_tokens += u64_at(payload, &["usage", "output_tokens"]);
                     if let Some(model) = payload.get("model").and_then(Value::as_str) {
@@ -94,8 +108,16 @@ impl SessionMetrics {
                         }
                     }
                 }
+                SessionEventKind::ToolCall => metrics.executed_tool_calls += 1,
                 SessionEventKind::ToolResult => {
                     metrics.tool_calls += 1;
+                    metrics.completed_tool_calls += 1;
+                    match tool_outcome(payload) {
+                        "rejected" => metrics.rejected_tool_calls += 1,
+                        "succeeded" => metrics.succeeded_tool_calls += 1,
+                        "not_started" => metrics.not_started_tool_calls += 1,
+                        _ => metrics.failed_tool_calls += 1,
+                    }
                     metrics.tool_duration_ms += u64_at(payload, &["duration_ms"]);
                     *metrics
                         .tool_outcomes

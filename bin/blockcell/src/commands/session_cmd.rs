@@ -230,6 +230,12 @@ fn render_metrics(metrics: &SessionMetrics) -> String {
     let mut lines = vec![
         "Summary".to_string(),
         format!(
+            "  tools: proposed={} executed={} completed={} rejected={} succeeded={} failed={} not_started={}",
+            metrics.proposed_tool_calls, metrics.executed_tool_calls, metrics.completed_tool_calls,
+            metrics.rejected_tool_calls, metrics.succeeded_tool_calls, metrics.failed_tool_calls,
+            metrics.not_started_tool_calls,
+        ),
+        format!(
             "  turns: {} ({} failed)   steps: {}",
             metrics.turns, metrics.failed_turns, metrics.steps
         ),
