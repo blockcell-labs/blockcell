@@ -56,6 +56,8 @@ impl super::AgentRuntime {
         // 克隆一份供 ForkedAgent 使用（spawn_blocking 会 move 原始值）
         let skills_dir_clone = skills_dir.clone();
         let builtin_skills_dir = self.paths.builtin_skills_dir();
+        let review_index_roots = [builtin_skills_dir.clone(), skills_dir.clone()];
+        let refreshed_index_roots = review_index_roots.clone();
         let external_skills_dirs = vec![builtin_skills_dir];
         let provider_pool = self.provider_pool.clone();
         let model = parent_served_model
@@ -92,11 +94,7 @@ impl super::AgentRuntime {
                 ReviewMode::Memory => String::new(),
                 ReviewMode::Skill | ReviewMode::Combined => {
                     let index = match tokio::task::spawn_blocking(move || {
-                        if skills_dir.exists() {
-                            crate::skill_index::SkillIndex::build_from_dir(&skills_dir)
-                        } else {
-                            crate::skill_index::SkillIndex::new()
-                        }
+                        crate::skill_index::SkillIndex::build_from_dirs(review_index_roots)
                     })
                     .await
                     {
@@ -223,11 +221,7 @@ impl super::AgentRuntime {
                     // 与 Hermes 一致: 系统提示词在下次 LLM 调用时反映最新的 Skill 列表
                     if matches!(mode_clone, ReviewMode::Skill | ReviewMode::Combined) {
                         if let Ok(index) = tokio::task::spawn_blocking(move || {
-                            if skills_dir_clone.exists() {
-                                crate::skill_index::SkillIndex::build_from_dir(&skills_dir_clone)
-                            } else {
-                                crate::skill_index::SkillIndex::new()
-                            }
+                            crate::skill_index::SkillIndex::build_from_dirs(refreshed_index_roots)
                         })
                         .await
                         {

@@ -246,7 +246,7 @@ async fn run_background_review_for_episode_with_lease_abort(
                 error = %err,
                 "Restricted ghost review tool loop failed"
             );
-            provider_pool.report(provider_idx, ProviderPool::classify_error(&err.to_string()));
+            provider_pool.report(provider_idx, ProviderPool::classify_failure(&err));
             metrics.record_review_failed();
             record_failed_review_run(
                 ledger,

@@ -107,18 +107,20 @@ impl TaskContext {
         context
     }
 
-    pub(crate) fn observe_user(&mut self, request: &str) {
+    pub(crate) fn observe_user(&mut self, request: &str) -> bool {
         let request = request.trim();
         if request.is_empty() {
-            return;
+            return true;
         }
-        if !is_continuation(request) {
+        let continuing = is_continuation(request);
+        if !continuing {
             self.objective = bounded_text(request, MAX_OBJECTIVE_CHARS);
             self.recent_tools.clear();
         }
         if !self.objective.is_empty() {
             self.recent_request = bounded_text(request, MAX_REQUEST_CHARS);
         }
+        continuing
     }
 
     pub(crate) fn record_tool(&mut self, name: &str, outcome: &str) {

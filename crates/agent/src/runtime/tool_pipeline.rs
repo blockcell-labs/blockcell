@@ -22,7 +22,7 @@ use blockcell_core::config::ApprovalPolicy;
 use blockcell_core::path_policy::{resolve_for_policy, PathOp, PolicyAction};
 use blockcell_tools::tool_guard::requires_human_confirmation;
 
-fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> {
+pub(super) fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> {
     match std::fs::metadata(path) {
         Ok(metadata) => Ok(Some(FileVersion {
             len: metadata.len(),
@@ -332,6 +332,17 @@ impl AgentRuntime {
             self.record_rejected_tool_call(&inv, &denied).await;
             return ToolCallOutput::rejected(denied);
         }
+        if self
+            .tool_registry
+            .get(&inv.call.name)
+            .is_some_and(|tool| tool.accepts_execution_annotations())
+        {
+            if let Err(error) = blockcell_tools::evidence::ExecutionAnnotations::parse(&inv.args) {
+                let denied = error.to_string();
+                self.record_rejected_tool_call(&inv, &denied).await;
+                return ToolCallOutput::rejected(denied);
+            }
+        }
         self.dispatch_event(
             msg,
             &persist_session_key_for(msg),
@@ -361,6 +372,17 @@ impl AgentRuntime {
             }
         }
         let outcome = self.execute_guarded_tool(&mut inv, ctx, prefetched).await;
+        let evidence = self
+            .tool_registry
+            .get(&inv.call.name)
+            .map(|tool| {
+                super::task_progress::ToolEvidence::from_execution(
+                    tool.as_ref(),
+                    &inv.args,
+                    &outcome.result_json,
+                )
+            })
+            .unwrap_or_default();
 
         self.after_tool_execute(&inv, &outcome).await;
         let learning_hint = self.classify_tool_outcome(tool_call, &outcome).await;
@@ -374,6 +396,7 @@ impl AgentRuntime {
             .flatten()
             .fold(outcome.result_str, |text, hint| format!("{text}\n\n{hint}"));
         ToolCallOutput {
+            evidence,
             text,
             outcome: outcome.outcome,
         }

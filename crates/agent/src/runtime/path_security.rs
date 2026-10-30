@@ -731,10 +731,12 @@ impl super::AgentRuntime {
                     || access.path.starts_with("/__unknown_shell_cwd__/")
             });
             let mut alternative = String::from(
-                "Only this invocation was rejected; the tool remains available. Do not use tool_search or rewrite a working script because of this refusal. For test fixtures, use literal workspace paths such as ./.tmp/src, ./.tmp/out and ./.tmp/missing (leave missing absent for negative tests). Retry the corrected verification with the same tool. Do not retry denied access or bypass policy/user denials.",
+                "Only this invocation was rejected; the tool remains available. Do not use tool_search or switch to another tool to get around path policy. For test fixtures, use literal workspace paths such as ./.tmp/src, ./.tmp/out and ./.tmp/missing (leave missing absent for negative tests). Retry the corrected invocation with the same tool. Do not retry denied access or bypass policy/user denials.",
             );
             if unresolved {
-                alternative.push_str(" An unresolved marker is not a real filesystem path: static validation could not determine a shell variable, substitution or cwd. For your own workspace artifacts, use a Python verification script with literal workspace paths and glob/tarfile instead of shell path interpolation. Keep protected/external paths out of the retry.");
+                // 这里的拒绝不是"越权"，是"解析不出来"。原文案统一劝"不要改写脚本"，
+                // 对这种情形正好相反：改写命令（换成字面路径）就是预期动作。
+                alternative.push_str(" This invocation contained a shell variable, substitution, or an unknown working directory that static validation cannot resolve, so it could not be proven to stay inside the workspace. The expected fix is to rewrite the command with literal absolute paths (no $VAR, no $(...), no bare ~) and retry it with the same tool. If you only need to inspect or produce files, prefer the file tools (read_file/write_file/glob) over shell interpolation.");
             }
             Err(serde_json::json!({
                 "error": "path requires confirmation but no confirmation channel is available",

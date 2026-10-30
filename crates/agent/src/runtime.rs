@@ -90,6 +90,7 @@ mod run_loop;
 mod skill_session;
 mod subagent;
 mod subagent_provider;
+mod task_progress;
 mod tool_exec;
 mod tool_pipeline;
 mod turn_flow;
@@ -108,6 +109,7 @@ const MAX_IDENTICAL_TOOL_FAILURES: u32 = 3;
 
 /// 一次工具调用交还给主循环的结果：返回给模型的内容与 Runtime 判定的执行结论。
 pub(crate) struct ToolCallOutput {
+    pub(crate) evidence: task_progress::ToolEvidence,
     pub(crate) text: String,
     pub(crate) outcome: ToolOutcome,
 }
@@ -118,6 +120,7 @@ impl ToolCallOutput {
         Self {
             text,
             outcome: ToolOutcome::Rejected,
+            evidence: task_progress::ToolEvidence::default(),
         }
     }
 }
@@ -591,8 +594,8 @@ fn summarize_result(result: &str) -> String {
 
 /// agent/request-error：错误分类与恢复策略由 Runtime 决定，Provider 只提供错误信息。
 fn request_error_event(error: &blockcell_core::Error) -> AgentEvent {
+    let kind = error.provider_failure_kind();
     let error = error.to_string();
-    let kind = FailureKind::classify_provider_message(&error);
     AgentEvent::AgentRequestError {
         error,
         kind,
@@ -3071,12 +3074,12 @@ impl AgentRuntime {
         ghost_memory_lifecycle.initialize_all("runtime", "primary");
 
         // 构建 Skill 索引摘要并注入到系统提示词
-        let skills_dir = paths.skills_dir();
-        if skills_dir.exists() {
-            let index = crate::skill_index::SkillIndex::build_from_dir(&skills_dir);
-            if !index.entries().is_empty() {
-                context_builder.set_skill_index_summary(index.to_prompt_summary());
-            }
+        let index = crate::skill_index::SkillIndex::build_from_dirs([
+            paths.builtin_skills_dir(),
+            paths.skills_dir(),
+        ]);
+        if !index.entries().is_empty() {
+            context_builder.set_skill_index_summary(index.to_prompt_summary());
         }
 
         // 从 config 中提取 nudge 配置 (在 config 被 move 之前)

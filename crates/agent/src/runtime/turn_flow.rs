@@ -16,7 +16,7 @@ impl AgentRuntime {
                 Ok(_) => self.provider_pool.report(pidx, CallResult::Success),
                 Err(e) => self
                     .provider_pool
-                    .report(pidx, ProviderPool::classify_error(&format!("{}", e))),
+                    .report(pidx, ProviderPool::classify_failure(e)),
             }
             result.map(|response| (response, self.served_by(pidx)))
         } else {

@@ -1,47 +1,30 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "You modified files but have not run any verification after the last change. Run one lightweight check now: tests/build for code, or parse/read back generated data and assert its schema and key totals/counts. Batch the check in one command. If verification is impossible, state why in your final answer.";
-const BLOCKCELL_WORKSPACE_ENTRIES: &[&str] = &[
-    "agents",
-    "downloads",
-    "evo_workflow.db",
-    "evolved_tools",
-    "ghost",
-    "logs",
-    "memory",
-    "skill_evolution_workflow.db",
-    "skills",
-    "tool_artifacts",
-    "tool_evolution_records",
-    "import_staging",
-    "toggles.json",
-    ".skills_prompt_snapshot.json",
-];
-
-fn is_blockcell_workspace_entry(name: &str) -> bool {
-    BLOCKCELL_WORKSPACE_ENTRIES.contains(&name)
-        || name.starts_with("evo_workflow.db")
-        || name.starts_with("skill_evolution_workflow.db")
+const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints first: if compilation/tests/checks are prohibited or deferred, do not run them; record that verification policy in task_contract and report unverified changes. Otherwise run one relevant lightweight check, declare its verification kind and target, and preserve its failure exit status. Distinguish tests, build, syntax, lint and artifact checks. If verification is impossible, explain why.";
+fn is_runtime_owned(path: &std::path::Path, owned: &[std::path::PathBuf]) -> bool {
+    owned.iter().any(|root| path.starts_with(root))
 }
 
-fn is_blockcell_workspace_status_line(line: &str) -> bool {
-    let path = line
-        .get(3..)
-        .unwrap_or_default()
-        .trim()
-        .split(" -> ")
-        .last()
-        .unwrap_or_default()
-        .trim_matches('"');
-    let first_component = std::path::Path::new(path)
-        .components()
-        .next()
-        .and_then(|component| component.as_os_str().to_str())
-        .unwrap_or_default();
-    is_blockcell_workspace_entry(first_component)
+fn is_runtime_owned_status_line(
+    line: &str,
+    workspace: &std::path::Path,
+    owned: &[std::path::PathBuf],
+) -> bool {
+    let Some(paths) = line.get(3..) else {
+        return false;
+    };
+    // A rename out of the project into a runtime directory still changes a user
+    // file. Hide a status entry only when every involved path belongs to us.
+    // Keep quoted Git paths visible rather than guessing their decoding.
+    paths.split(" -> ").all(|path| {
+        !path.is_empty() && !path.starts_with('"') && is_runtime_owned(&workspace.join(path), owned)
+    })
 }
 
-async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<String>) {
+async fn coding_workspace_snapshot(paths: &blockcell_core::Paths) -> (String, Vec<String>) {
+    let workspace_root = paths.workspace();
+    let workspace = workspace_root.as_path();
+    let owned = paths.runtime_owned_paths();
     const SKIP_DIRS: &[&str] = &[
         ".git",
         "__pycache__",
@@ -56,8 +39,6 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
         "rs", "py", "go", "js", "ts", "tsx", "java", "c", "cpp", "h", "rb", "php", "swift", "kt",
         "sh", "toml", "md", "txt", "json", "yaml", "yml", "ini", "cfg",
     ];
-    let blockcell_owned =
-        workspace.join("ghost").is_dir() && workspace.join("tool_artifacts").is_dir();
     let mut pending = vec![(workspace.to_path_buf(), 0usize)];
     let mut listed = Vec::new();
     let mut text_files = Vec::new();
@@ -83,7 +64,7 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
                 continue;
             };
             let name = entry.file_name().to_string_lossy().into_owned();
-            if blockcell_owned && depth == 0 && is_blockcell_workspace_entry(&name) {
+            if is_runtime_owned(&path, &owned) {
                 continue;
             }
             scanned += 1;
@@ -146,7 +127,7 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
                 let status_output = String::from_utf8_lossy(&output.stdout);
                 let lines = status_output
                     .lines()
-                    .filter(|line| !blockcell_owned || !is_blockcell_workspace_status_line(line))
+                    .filter(|line| !is_runtime_owned_status_line(line, workspace, &owned))
                     .take(30)
                     .collect::<Vec<_>>();
                 snapshot.push_str("\nGit status --short:\n");
@@ -201,385 +182,72 @@ async fn coding_workspace_snapshot(workspace: &std::path::Path) -> (String, Vec<
     (snapshot, observed)
 }
 
-fn suggested_test_command(workspace: &std::path::Path, listed: &[String]) -> Option<&'static str> {
-    if workspace.join("Cargo.toml").is_file() {
-        return Some("cargo test");
+fn suggested_test_command(workspace: &std::path::Path, _listed: &[String]) -> Option<String> {
+    for (manifest, command) in [("Cargo.toml", "cargo test"), ("go.mod", "go test ./...")] {
+        if workspace.join(manifest).is_file() {
+            return Some(command.into());
+        }
     }
-    if workspace.join("go.mod").is_file() {
-        return Some("go test ./...");
-    }
-    if std::fs::read_to_string(workspace.join("package.json"))
+    if let Some(package) = std::fs::read_to_string(workspace.join("package.json"))
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|package| {
-            package
-                .get("scripts")?
-                .get("test")?
-                .as_str()
-                .map(str::to_owned)
-        })
-        .is_some()
     {
-        return Some("npm test");
-    }
-    let has_pytest_config = workspace.join("pytest.ini").is_file()
-        || workspace.join("conftest.py").is_file()
-        || std::fs::read_to_string(workspace.join("pyproject.toml"))
-            .is_ok_and(|content| content.contains("[tool.pytest"))
-        || std::fs::read_to_string(workspace.join("setup.cfg"))
-            .is_ok_and(|content| content.contains("[tool:pytest"));
-    if has_pytest_config {
-        return Some("python -m pytest -q");
-    }
-    let has_unittest_tests = listed.iter().any(|path| {
-        path == "tests/"
-            || path.starts_with("tests/")
-            || std::path::Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("test_") && name.ends_with(".py"))
-    });
-    has_unittest_tests.then_some("python -m unittest -q")
-}
-
-fn is_mutating_tool_call(tool_name: &str, args: &serde_json::Value) -> bool {
-    match tool_name {
-        "write_file" | "edit_file" => true,
-        "data_process" => args["action"] == "write_csv" || args["output_path"].is_string(),
-        "exec" | "shell_run" | "shell" => {
-            let command = args["command"]
+        if package
+            .pointer("/scripts/test")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            let manager = package["packageManager"]
                 .as_str()
-                .or_else(|| args["cmd"].as_str())
-                .unwrap_or_default();
-            // Conservative hints only, never a security decision. Cover common
-            // data scripts that create files without calling write_file.
-            static WRITES: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(r#"(?:\bjson\.dump\s*\(|\bcsv\.writer\s*\(|\.write_(?:text|bytes)\s*\(|\bopen\s*\([^\n]*,[ \t]*(?:mode[ \t]*=[ \t]*)?['\"][wax][^'\"]*['\"]|(?:^|\s)>{1,2}\s*[^&\s])"#).expect("file mutation pattern")
-            });
-            WRITES.is_match(command)
+                .and_then(|value| value.split('@').next())
+                .unwrap_or("npm");
+            return match manager {
+                "npm" | "pnpm" | "yarn" => Some(format!("{manager} test")),
+                _ => None,
+            };
         }
-        "file_ops" => matches!(
-            args.get("action").and_then(serde_json::Value::as_str),
-            Some("delete" | "rename" | "move" | "copy" | "compress" | "decompress")
-        ),
-        _ => false,
     }
+    // Only explicit pytest configuration identifies that runner. A tests/
+    // directory or test_*.py filename cannot distinguish pytest from unittest.
+    let has_section = |file: &str, section: &str| {
+        std::fs::read_to_string(workspace.join(file)).is_ok_and(|content| {
+            content.lines().map(str::trim).any(|line| {
+                line.strip_prefix('[')
+                    .and_then(|line| line.split_once(']'))
+                    .is_some_and(|(name, suffix)| {
+                        name.trim() == section
+                            && (suffix.trim().is_empty() || suffix.trim().starts_with('#'))
+                    })
+            })
+        })
+    };
+    (workspace.join("pytest.ini").is_file()
+        || workspace.join("conftest.py").is_file()
+        || has_section("pyproject.toml", "tool.pytest.ini_options")
+        || has_section("setup.cfg", "tool:pytest"))
+    .then(|| "python -m pytest -q".into())
 }
 
 fn should_auto_add_activate_skill(mode: InteractionMode, active_skill: bool) -> bool {
     !matches!(mode, InteractionMode::Coding) || active_skill
 }
 
-fn shell_command_segments(command: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut start = 0;
-    let mut chars = command.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if quote != Some('\'') && ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        if matches!(ch, ';' | '|' | '\n' | '\r')
-            || (ch == '&' && chars.peek().is_some_and(|(_, next)| *next == '&'))
-        {
-            segments.push(&command[start..index]);
-            let width = ch.len_utf8();
-            let mut end = index + width;
-            if matches!(ch, '|' | '&') && chars.peek().is_some_and(|(_, next)| *next == ch) {
-                if let Some((next_index, next)) = chars.next() {
-                    end = next_index + next.len_utf8();
-                }
-            }
-            start = end;
-        }
-    }
-    segments.push(&command[start..]);
-    segments
-}
-
-fn shell_command_words(segment: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut active = false;
-    for ch in segment.chars() {
-        if escaped {
-            word.push(ch);
-            escaped = false;
-            active = true;
-            continue;
-        }
-        if quote != Some('\'') && ch == '\\' {
-            escaped = true;
-            active = true;
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if ch == active_quote {
-                quote = None;
-            } else {
-                word.push(ch);
-            }
-            active = true;
-            continue;
-        }
-        match ch {
-            '\'' | '"' => {
-                quote = Some(ch);
-                active = true;
-            }
-            ch if ch.is_whitespace() => {
-                if active {
-                    words.push(std::mem::take(&mut word));
-                    active = false;
-                }
-            }
-            _ => {
-                word.push(ch);
-                active = true;
-            }
-        }
-    }
-    if escaped {
-        word.push('\\');
-    }
-    if active {
-        words.push(word);
-    }
-    words
-}
-
-fn is_environment_assignment(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name.chars().enumerate().all(|(index, ch)| {
-            ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
-        })
-}
-
-fn strip_verification_prefixes(mut words: Vec<String>) -> Vec<String> {
-    loop {
-        while words
-            .first()
-            .is_some_and(|word| is_environment_assignment(word))
-        {
-            words.remove(0);
-        }
-        match words
-            .first()
-            .map(|word| word.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("timeout")
-                if words.get(1).is_some_and(|duration| {
-                    duration
-                        .trim_end_matches(['s', 'm', 'h', 'd'])
-                        .parse::<f64>()
-                        .is_ok()
-                }) =>
-            {
-                words.drain(..2);
-            }
-            Some("env" | "time") => {
-                words.remove(0);
-                if words.first().is_some_and(|word| word == "-p") {
-                    words.remove(0);
-                }
-            }
-            Some("uv" | "poetry")
-                if words
-                    .get(1)
-                    .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("run")) =>
-            {
-                words.drain(..2);
-            }
-            _ => return words,
-        }
-    }
-}
-
-fn is_python_executable(command: &str) -> bool {
-    command == "python"
-        || command == "python3"
-        || command.strip_prefix("python3.").is_some_and(|version| {
-            !version.is_empty()
-                && version
-                    .chars()
-                    .all(|character| character.is_ascii_digit() || character == '.')
-        })
-}
-
-fn verification_script_name(path: &str, keywords: &[&str]) -> bool {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|filename| keywords.iter().any(|keyword| filename.contains(keyword)))
-}
-
-fn is_verification_segment(segment: &str) -> bool {
-    let words = strip_verification_prefixes(shell_command_words(segment));
-    let Some(command) = words.first().map(|word| word.to_ascii_lowercase()) else {
-        return false;
-    };
-    if command == "cd" {
-        return false;
-    }
-    let arguments = &words[1..];
-    let first_argument = arguments.first().map(String::as_str);
-    match command.as_str() {
-        "pytest" | "ruff" | "mypy" | "tsc" | "tox" | "shellcheck" => true,
-        _ if is_python_executable(&command) => {
-            if first_argument == Some("-m") {
-                arguments.get(1).is_some_and(|module| {
-                    matches!(
-                        module.to_ascii_lowercase().as_str(),
-                        "pytest" | "unittest" | "mypy" | "py_compile" | "compileall"
-                    )
-                })
-            } else if first_argument == Some("-c") {
-                arguments.get(1).is_some_and(|code| {
-                    code.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                        .any(|word| word == "assert")
-                })
-            } else {
-                first_argument.is_some_and(|path| {
-                    verification_script_name(path, &["test", "verify", "check", "bench"])
-                })
-            }
-        }
-        "cargo" => first_argument.is_some_and(|subcommand| {
-            matches!(
-                subcommand.to_ascii_lowercase().as_str(),
-                "test" | "check" | "build" | "clippy" | "nextest"
-            )
-        }),
-        "go" => first_argument.is_some_and(|subcommand| {
-            matches!(
-                subcommand.to_ascii_lowercase().as_str(),
-                "test" | "build" | "vet"
-            )
-        }),
-        "npm" | "pnpm" | "yarn" => {
-            let action = if first_argument == Some("run") {
-                arguments.get(1).map(String::as_str)
-            } else {
-                first_argument
-            };
-            action.is_some_and(|action| {
-                matches!(
-                    action.to_ascii_lowercase().as_str(),
-                    "test" | "build" | "lint" | "check"
-                )
-            })
-        }
-        "npx" => first_argument.is_some_and(|subcommand| {
-            matches!(
-                subcommand.to_ascii_lowercase().as_str(),
-                "jest" | "vitest" | "tsc"
-            )
-        }),
-        "make" => first_argument.is_some_and(|target| {
-            matches!(
-                target.to_ascii_lowercase().as_str(),
-                "test" | "check" | "build"
-            )
-        }),
-        "mvn" => first_argument
-            .is_some_and(|goal| matches!(goal.to_ascii_lowercase().as_str(), "test" | "verify")),
-        "gradle" => first_argument
-            .is_some_and(|task| matches!(task.to_ascii_lowercase().as_str(), "test" | "build")),
-        "./gradlew" => first_argument
-            .is_some_and(|task| matches!(task.to_ascii_lowercase().as_str(), "test" | "build")),
-        "node" | "bash" | "sh" => {
-            let syntax_check = match command.as_str() {
-                "node" => matches!(first_argument, Some("--check" | "-c")),
-                _ => first_argument == Some("-n"),
-            };
-            (syntax_check && arguments.get(1).is_some())
-                || first_argument.is_some_and(|path| {
-                    verification_script_name(path, &["test", "verify", "check"])
-                })
-        }
-        _ => false,
-    }
-}
-
-fn verification_command(tool_name: &str, args: &serde_json::Value, result: &str) -> Option<String> {
-    if !matches!(
-        tool_name,
-        "exec" | "shell_run" | "shell_poll" | "shell" | "job_output"
-    ) {
+#[cfg(test)]
+fn verification_command(
+    _tool_name: &str,
+    args: &serde_json::Value,
+    result: &str,
+) -> Option<String> {
+    let result: serde_json::Value = serde_json::from_str(result).ok()?;
+    if !blockcell_tools::evidence::completed_successfully(&result) {
         return None;
     }
-    let command = args
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| args.get("cmd").and_then(serde_json::Value::as_str))?;
-    let segments = shell_command_segments(command);
-    let heredoc_assertions = segments.iter().any(|segment| {
-        let words = strip_verification_prefixes(shell_command_words(segment));
-        words.first().is_some_and(|word| is_python_executable(word))
-            && words.get(1).is_some_and(|word| word == "-")
-            && segment.contains("<<")
-    }) && command
-        .lines()
-        .any(|line| line.trim_start().starts_with("assert "));
-    if !segments.into_iter().any(is_verification_segment) && !heredoc_assertions {
-        return None;
-    }
-    let exit_zero = match serde_json::from_str::<serde_json::Value>(result) {
-        Ok(value) => {
-            value["exit_code"].as_i64() == Some(0)
-                && (value.get("running").is_none() || value["running"] == false)
-        }
-        Err(_) => result.contains("exit 0"),
-    };
-    exit_zero.then(|| command.to_string())
+    blockcell_tools::verification::command_intent(args)?;
+    args.get("command")
+        .or_else(|| args.get("cmd"))?
+        .as_str()
+        .map(str::to_owned)
 }
-
-const CODING_CORE_TOOL_NAMES: &[&str] = &[
-    "read_file",
-    "write_file",
-    "edit_file",
-    "list_dir",
-    "grep",
-    "glob",
-    "exec",
-    "job_output",
-    "job_kill",
-    "shell_run",
-    "shell_poll",
-    "shell_input",
-    "shell_close",
-    "update_plan",
-    "file_ops",
-    "web_fetch",
-    "web_search",
-    "agent",
-    "tool_search",
-];
-
-const CODING_SCHEMA_EXCLUDED_TOOLS: &[&str] = &["web_search", "file_ops", "get_context_remaining"];
 
 fn extract_tool_search_revealed_tools(result: &str) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(result)
@@ -710,7 +378,7 @@ impl AgentRuntime {
         let mut history = self.session_store.load(&persist_session_key)?;
         let mut session_metadata = self.session_store.load_metadata(&persist_session_key)?;
         let mut task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
-        task_context.observe_user(&msg.content);
+        let task_continues = task_context.observe_user(&msg.content);
         let is_new_session = history.is_empty();
 
         self.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
@@ -990,7 +658,7 @@ impl AgentRuntime {
         if decision.mode == InteractionMode::Coding
             && !history.iter().any(|message| message.role == "user")
         {
-            let (snapshot, observed) = coding_workspace_snapshot(&self.paths.workspace()).await;
+            let (snapshot, observed) = coding_workspace_snapshot(&self.paths).await;
             self.record_file_observations(&persist_session_key, &observed);
             user_content.push_str("\n\n");
             user_content.push_str(&snapshot);
@@ -1116,9 +784,8 @@ impl AgentRuntime {
                 tool_names
                     .iter()
                     .filter(|name| {
-                        !CODING_SCHEMA_EXCLUDED_TOOLS.contains(&name.as_str())
-                            && (CODING_DEFAULT_TOOL_NAMES.contains(&name.as_str())
-                                || name.as_str() == "exec"
+                        !self.tool_registry.coding_exposure(name).defer
+                            && (self.tool_registry.coding_exposure(name).initial
                                 || decision.active_skill.as_ref().is_some_and(|skill| {
                                     skill.tools.iter().any(|tool| tool == *name)
                                 }))
@@ -1159,8 +826,7 @@ impl AgentRuntime {
             let mut schemas = if !uses_static_tool_scope(&self.config)
                 && decision.mode == InteractionMode::Coding
             {
-                self.tool_registry
-                    .get_tiered_schemas_core_only(&tool_name_refs, CODING_CORE_TOOL_NAMES)
+                self.tool_registry.get_coding_schemas(&tool_name_refs)
             } else {
                 let core_names = global_core_tool_names();
                 let core_refs: Vec<&str> = core_names.iter().map(String::as_str).collect();
@@ -1258,9 +924,17 @@ impl AgentRuntime {
         let mut loop_guard = ToolLoopGuard::new(max_iterations, tools_max_iterations.clone());
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
-        let mut tool_call_index = 0usize;
-        let mut last_mutation_idx = None;
-        let mut last_verification_idx = None;
+        let mut task_progress = super::task_progress::TaskProgress::default();
+        if let Some(contract) = msg.metadata.get("task_contract").or_else(|| {
+            task_continues
+                .then(|| session_metadata.get("runtime_task_contract"))
+                .flatten()
+        }) {
+            let contract: blockcell_core::task_contract::TaskContract =
+                serde_json::from_value(contract.clone())?;
+            contract.validate()?;
+            task_progress.register_contract(&contract, &self.paths.workspace());
+        }
         let mut verification_gate_fired = false;
         self.last_verification_command = None;
 
@@ -1351,6 +1025,8 @@ impl AgentRuntime {
         // finish_reason=stop 却给出空内容且没有工具调用：模型"说完就停"（实测发生在
         // 长上下文任务里）。追问一次让它给结论；第二次仍为空则按原样结束。
         let mut empty_response_nudges: u32 = 0;
+        // 交付物契约：记录已经追问过的缺失产物，避免同一轮反复追问。
+        let mut deliverable_nudge_sent: Option<String> = None;
         // 同一 turn 内被策略/技能上下文拒绝的次数。达到阈值后只提醒一次"收尾"，
         // 避免模型把拒绝当成工具缺失、连续换工具硬试（工具漂移）。
         let mut policy_rejection_streak = 0_u32;
@@ -1788,10 +1464,43 @@ impl AgentRuntime {
                         }
                     }
                     let tool_timer = ScopedTimer::new();
+                    if self
+                        .tool_registry
+                        .get(&tool_call.name)
+                        .is_some_and(|tool| tool.accepts_execution_annotations())
+                    {
+                        if let Ok(annotations) =
+                            blockcell_tools::evidence::ExecutionAnnotations::parse(
+                                &tool_call.arguments,
+                            )
+                        {
+                            if let Some(contract) = annotations.task_contract {
+                                task_progress.register_contract(&contract, &self.paths.workspace());
+                            }
+                        }
+                    }
                     let legacy_shell_call = tool_call.name == "shell"
                         && available_tools.contains("shell")
                         && self.tool_within_capability(&tool_call.name, &tool_call.arguments);
-                    let tool_output = if legacy_shell_call
+                    let verification_forbidden =
+                        !task_progress.contract.verification.permits_execution()
+                            && self
+                                .tool_registry
+                                .get(&tool_call.name)
+                                .is_some_and(|tool| tool.accepts_execution_annotations())
+                            && blockcell_tools::verification::command_intent(&tool_call.arguments)
+                                .is_some();
+                    let tool_output = if verification_forbidden {
+                        let denied = "Verification is prohibited or deferred by the current task contract. Report changes as unverified.".to_string();
+                        self.record_unexecuted_tool_call(
+                            tool_call,
+                            &msg,
+                            ToolOutcome::Rejected,
+                            &denied,
+                        )
+                        .await;
+                        ToolCallOutput::rejected(denied)
+                    } else if legacy_shell_call
                         || tool_names.iter().any(|allowed| allowed == &tool_call.name)
                     {
                         match loop_guard.admit(&tool_call.name) {
@@ -1834,21 +1543,19 @@ impl AgentRuntime {
                     tracing::info!(target: "blockcell.routing", session_key = %persist_session_key,
                         turn_id = ?self.current_turn_id, stage = "outcome", tool = %tool_call.name,
                         outcome = ?tool_output.outcome, "Tool routing outcome");
+                    let evidence = tool_output.evidence;
                     let result = tool_output.text;
-                    let current_tool_call_index = tool_call_index;
-                    tool_call_index = tool_call_index.saturating_add(1);
-                    if matches!(tool_output.outcome, ToolOutcome::Succeeded) {
-                        if is_mutating_tool_call(&tool_call.name, &tool_call.arguments) {
-                            last_mutation_idx = Some(current_tool_call_index);
-                            self.last_verification_command = None;
-                        }
-                        if let Some(command) =
-                            verification_command(&tool_call.name, &tool_call.arguments, &result)
-                        {
-                            last_verification_idx = Some(current_tool_call_index);
-                            self.last_verification_command = Some(command);
-                        }
+                    if let Some(contract) = &evidence.annotations.task_contract {
+                        task_progress.register_contract(contract, &self.paths.workspace());
                     }
+                    task_progress.observe(
+                        &evidence,
+                        matches!(tool_output.outcome, ToolOutcome::Succeeded),
+                    );
+                    self.last_verification_command = task_progress
+                        .last_verification
+                        .as_ref()
+                        .map(|(_, command)| command.clone());
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
@@ -2369,12 +2076,7 @@ impl AgentRuntime {
                     continue;
                 }
 
-                if !verification_gate_fired
-                    && last_mutation_idx.is_some_and(|mutation_idx| {
-                        last_verification_idx
-                            .is_none_or(|verification_idx| verification_idx < mutation_idx)
-                    })
-                {
+                if !verification_gate_fired && task_progress.needs_verification() {
                     verification_gate_fired = true;
                     current_messages.push(ChatMessage::assistant_with_reasoning(
                         &response_content,
@@ -2382,6 +2084,27 @@ impl AgentRuntime {
                     ));
                     current_messages.push(ChatMessage::user(CODING_VERIFICATION_HINT));
                     continue;
+                }
+
+                // Requirements come from an explicit contract, never a filename regex.
+                if deliverable_nudge_sent.is_none() {
+                    if let Some(missing) =
+                        task_progress.first_incomplete_output(&self.paths.workspace())
+                    {
+                        deliverable_nudge_sent = Some(missing.clone());
+                        warn!(
+                            missing = %missing,
+                            "Explicitly requested output missing; asking the model to finish"
+                        );
+                        current_messages.push(ChatMessage::assistant_with_reasoning(
+                            &response_content,
+                            response.reasoning_content.clone(),
+                        ));
+                        current_messages.push(ChatMessage::user(&format!(
+                            "声明要求的产物 `{missing}` 尚未满足（文件缺失，或要求本轮更新但仍是原版本）。请按用户要求完成并写入；如果确实无法完成，请明确说明原因与卡点。"
+                        )));
+                        continue;
+                    }
                 }
                 final_response = response_content;
 
@@ -3075,6 +2798,14 @@ impl AgentRuntime {
             }
         }
 
+        if let Some(metadata) = session_metadata.as_object_mut() {
+            metadata.insert(
+                "runtime_task_contract".into(),
+                serde_json::to_value(
+                    task_progress.contract_for_continuation(&self.paths.workspace()),
+                )?,
+            );
+        }
         task_context.write_metadata(&mut session_metadata);
         let delivered_response = self
             .persist_and_deliver_final_response(FinalResponseContext {
@@ -3128,8 +2859,6 @@ mod tests {
         for command in [
             "bash -n backup.sh",
             "sh -n backup.sh",
-            "bash verify_backup.sh",
-            "sh check_output.sh",
             "node --check index.js",
             "shellcheck backup.sh",
         ] {
@@ -3141,49 +2870,36 @@ mod tests {
     }
 
     #[test]
-    fn bench_regression_inline_output_checks_and_shell_writes() {
-        let check = |command: &str, result: &str| {
+    fn custom_checks_require_explicit_verification_intent() {
+        let command = "python3 -c 'assert True'";
+        let args = serde_json::json!({"command": command,
+            "verification": {"kind": "artifact", "target": "report.json"}});
+        assert_eq!(
+            verification_command("shell_run", &args, r#"{"exit_code":0}"#),
+            Some(command.into())
+        );
+        assert_eq!(
+            verification_command("shell_run", &args, r#"{"exit_code":1}"#),
+            None
+        );
+        assert_eq!(
             verification_command(
                 "shell_run",
                 &serde_json::json!({"command": command}),
-                result,
-            )
-        };
-        let command =
-            "python3 -c 'import json; g=json.load(open(\"report.json\")); assert len(g)==4'";
-        assert_eq!(
-            check(command, r#"{"exit_code":0}"#),
-            Some(command.to_string())
-        );
-        assert_eq!(
-            check(command, r#"{"exit_code":1,"output":"exit_code:0"}"#),
-            None
-        );
-        assert_eq!(check("python3 -c 'print(42)'", r#"{"exit_code":0}"#), None);
-        assert_eq!(
-            check(
-                "python3 -c 'import json; assert True'",
-                r#"{"running":true,"exit_code":0}"#
+                r#"{"exit_code":0}"#
             ),
             None
         );
-        assert!(super::is_mutating_tool_call(
-            "shell_run",
-            &serde_json::json!({"command": "python3 -c 'import json; json.dump({},open(\"report.json\",\"w\"))'"})
-        ));
-        assert!(super::is_mutating_tool_call(
-            "shell_run",
-            &serde_json::json!({"command": "printf hello > out.txt"})
-        ));
-        assert!(!super::is_mutating_tool_call(
-            "shell_run",
-            &serde_json::json!({"command": "python3 -c 'import json; print(json.load(open(\"report.json\")))'"})
-        ));
     }
 
     #[tokio::test]
     async fn coding_snapshot_filters_blockcell_runtime_files_and_suggests_tests() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
+        let paths = blockcell_core::Paths::with_base_and_workspace(
+            workspace.path().join(".blockcell"),
+            workspace.path().to_path_buf(),
+        );
+        paths.ensure_dirs().unwrap();
         for directory in [
             "agents",
             "downloads",
@@ -3232,7 +2948,7 @@ mod tests {
             .expect("initialize test repository");
         assert!(git_status.success());
 
-        let (snapshot, observed) = coding_workspace_snapshot(workspace.path()).await;
+        let (snapshot, observed) = coding_workspace_snapshot(&paths).await;
         let files_section = snapshot
             .split_once("Files (depth ≤2):\n")
             .expect("file section")
@@ -3245,14 +2961,16 @@ mod tests {
             .filter_map(|line| line.strip_prefix("- "))
             .collect::<Vec<_>>();
         listed.sort_unstable();
-        assert_eq!(listed, ["cache.py", "test_cache.py"]);
+        assert!(listed.contains(&"cache.py"));
+        assert!(listed.contains(&"test_cache.py"));
+        assert!(listed.contains(&"agents/"));
         assert!(snapshot.contains("CACHE_CONTENT"));
         assert!(snapshot.contains("TEST_CONTENT"));
         assert!(observed.iter().any(|path| path.ends_with("/cache.py")));
         assert!(observed.iter().any(|path| path.ends_with("/test_cache.py")));
-        assert!(snapshot.contains("Suggested test command: `python -m unittest -q`"));
+        assert!(!snapshot.contains("Suggested test command:"));
         assert!(snapshot.contains("Git status --short:"));
-        assert!(!snapshot.contains("agents/"));
+        assert!(snapshot.contains("agents/"));
         assert!(!snapshot.contains("evo_workflow.db-wal"));
         assert!(!snapshot.contains("evo_workflow.db-shm"));
         assert!(!snapshot.contains("skill_evolution_workflow.db-wal"));
@@ -3269,7 +2987,11 @@ mod tests {
         )
         .expect("write project skill");
 
-        let (snapshot, _) = coding_workspace_snapshot(workspace.path()).await;
+        let paths = blockcell_core::Paths::with_base_and_workspace(
+            workspace.path().join(".blockcell"),
+            workspace.path().to_path_buf(),
+        );
+        let (snapshot, _) = coding_workspace_snapshot(&paths).await;
 
         assert!(snapshot.contains("- skills/\n"));
         assert!(snapshot.contains("- skills/foo.py\n"));
@@ -3297,10 +3019,7 @@ mod tests {
             check("timeout 60 cargo test -p a"),
             Some("timeout 60 cargo test -p a".to_string())
         );
-        assert_eq!(
-            check("python test_cache.py"),
-            Some("python test_cache.py".to_string())
-        );
+        assert_eq!(check("python test_cache.py"), None);
         assert_eq!(check("cat check.txt"), None);
         assert_eq!(check("grep -rn build ."), None);
     }

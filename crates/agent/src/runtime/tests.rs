@@ -1037,6 +1037,39 @@ async fn static_scope_mcp_search_does_not_return_denied_schema() {
     );
 }
 
+#[tokio::test]
+async fn missing_deliverable_triggers_one_followup_then_finishes() {
+    // 提示要求 result.json，模型只回文本、什么都没写：收尾前追问一次，且只追问一次。
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.tool_registry = ToolRegistry::with_defaults();
+    runtime.config.agents.ghost.learning.enabled = false;
+    let mut msg = test_main_session_inbound("cli", "deliverable-contract");
+    msg.content = "读取 data.txt，输出 result.json".into();
+    msg.metadata["task_contract"] = serde_json::json!({"deliverables":[{"path":"result.json"}]});
+    std::fs::create_dir_all(runtime.paths.workspace()).unwrap();
+    runtime.process_message(msg).await.expect("process message");
+    let calls = provider.schemas.lock().unwrap().len();
+    assert_eq!(calls, 2, "expected one deliverable follow-up");
+}
+
+#[test]
+fn explicit_deliverables_accept_unicode_and_arbitrary_extensions() {
+    use blockcell_core::task_contract::TaskContract;
+    let dir = tempfile::tempdir().unwrap();
+    let contract: TaskContract = serde_json::from_value(serde_json::json!({
+        "deliverables": [{"path":"报告 结果.jsonl"}]
+    }))
+    .unwrap();
+    contract.validate().unwrap();
+    assert_eq!(
+        contract.first_missing_output(dir.path()),
+        Some("报告 结果.jsonl".into())
+    );
+    std::fs::write(dir.path().join("报告 结果.jsonl"), "").unwrap();
+    assert_eq!(contract.first_missing_output(dir.path()), None);
+}
+
 #[test]
 fn exposure_allowlist_only_constrains_builtin_tools() {
     let empty: HashSet<String> = HashSet::new();
@@ -1413,6 +1446,7 @@ fn tool_call_failure_follows_outcome_and_soft_errors() {
     let output = |text: &str, outcome| ToolCallOutput {
         text: text.to_string(),
         outcome,
+        evidence: task_progress::ToolEvidence::default(),
     };
     // 执行结论为准
     assert!(tool_call_failed(&output("{}", ToolOutcome::Rejected)));
@@ -7895,8 +7929,7 @@ impl blockcell_providers::Provider for VerificationGateProvider {
         messages: &[ChatMessage],
         _tools: &[serde_json::Value],
     ) -> blockcell_core::Result<LLMResponse> {
-        const HINT: &str =
-            "You modified files but have not run any verification after the last change.";
+        const HINT: &str = "Files may have changed without current verification evidence.";
         self.seen_messages.lock().unwrap().push(messages.to_vec());
         if messages.iter().any(|message| {
             message
@@ -7960,6 +7993,15 @@ impl blockcell_tools::Tool for VerificationGateShell {
 
     fn validate(&self, _params: &serde_json::Value) -> Result<()> {
         Ok(())
+    }
+
+    fn accepts_execution_annotations(&self) -> bool {
+        true
+    }
+
+    // 真实 shell/exec 都声明支持验证；替身必须一致，否则"跑一次检查"不会被记成证据。
+    fn supports_verification(&self) -> bool {
+        true
     }
 
     async fn execute(
@@ -9870,8 +9912,23 @@ async fn exhausted_rate_limits_report_actual_retry_count_and_set_failure_flag() 
         .await
         .expect("LLM exhaustion is returned as a response");
 
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    assert!(response.contains("已重试 2 次"), "{response}");
+    let calls_made = calls.load(Ordering::SeqCst);
+    // 限流不再按 llmMaxRetries(=1) 直接收手：放宽尝试次数后明显多试几轮。
+    assert!(
+        calls_made > 3,
+        "rate limits should be retried beyond the configured cap, got {calls_made}"
+    );
+    // 文案里的重试次数来自真实请求数，不是配置值。
+    let reported = response
+        .split("已重试 ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse::<u32>().ok())
+        .unwrap_or(0);
+    assert!(
+        reported > 1,
+        "reported retries must exceed the config: {response}"
+    );
     assert!(!response.contains("已重试 1 次"), "{response}");
     assert!(runtime
         .take_last_turn_llm_failure()
@@ -10748,11 +10805,14 @@ async fn bench_regression_dynamic_path_refusal_explains_static_validation() {
     assert_eq!(result.outcome, ToolOutcome::Rejected, "{}", result.text);
     let error: serde_json::Value = serde_json::from_str(&result.text).unwrap();
     assert_eq!(error["unresolved_expressions"], true);
-    assert!(error["alternative"].as_str().unwrap().contains("Python"));
-    assert!(error["alternative"]
-        .as_str()
-        .unwrap()
-        .contains("not a real filesystem path"));
+    let alternative = error["alternative"].as_str().unwrap();
+    // 解析不出来的拒绝，预期动作是"改写命令"，不能反过来说服模型放弃改写。
+    assert!(alternative.contains("rewrite the command"), "{alternative}");
+    assert!(alternative.contains("literal"), "{alternative}");
+    assert!(
+        !alternative.contains("Do not use tool_search or rewrite"),
+        "unresolved rejection must not tell the model to avoid rewriting: {alternative}"
+    );
 }
 
 #[tokio::test]
