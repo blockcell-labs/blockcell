@@ -404,13 +404,7 @@ impl Tool for WebFetchTool {
             .min(1_000_000) as usize;
 
         if params.get("jsonFields").is_some() || extract_mode == "json" {
-            let fields = params
-                .get("jsonFields")
-                .and_then(Value::as_object)
-                .filter(|fields| !fields.is_empty() && fields.len() <= 32)
-                .ok_or_else(|| {
-                    Error::Validation("JSON mode requires 1–32 jsonFields entries".into())
-                })?;
+            let fields = json_fields_object(params.get("jsonFields"))?;
             if fields.iter().any(|(name, pointer)| {
                 name.is_empty()
                     || !pointer
@@ -440,7 +434,7 @@ impl Tool for WebFetchTool {
                 let value = document
                     .pointer(pointer)
                     .ok_or_else(|| Error::Tool(format!("JSON field not found: {pointer}")))?;
-                selected.insert(name.clone(), value.clone());
+                selected.insert(name, value.clone());
             }
             let data = Value::Object(selected);
             let serialized = serde_json::to_string(&data)
@@ -461,6 +455,63 @@ impl Tool for WebFetchTool {
             "text" => fetch_text(url, max_chars).await,
             _ => fetch_markdown(url, max_chars, Some(&ctx.workspace)).await,
         }
+    }
+}
+
+/// Normalise the `jsonFields` argument into an object.
+///
+/// Models routinely double-encode structured tool arguments, sending
+/// `"{\"version\": \"/info/version\"}"` instead of `{"version": "/info/version"}`.
+/// Rejecting that as "1–32 jsonFields entries" hides the real problem and makes
+/// the model abandon the tool, so the string form is decoded here. Every failure
+/// path names the actual problem (missing / wrong type / bad entry count) so the
+/// model can correct itself in one round trip.
+fn json_fields_object(raw: Option<&Value>) -> Result<serde_json::Map<String, Value>> {
+    let parsed = match raw {
+        None => {
+            return Err(Error::Validation(
+                "JSON mode requires jsonFields: an object mapping output name to JSON Pointer, e.g. {\"version\": \"/info/version\"}".into(),
+            ))
+        }
+        Some(Value::Object(map)) => map.clone(),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            Ok(other) => {
+                return Err(Error::Validation(format!(
+                    "jsonFields must be an object mapping output name to JSON Pointer; the given string decodes to {}, not an object",
+                    json_type_name(&other)
+                )))
+            }
+            Err(error) => {
+                return Err(Error::Validation(format!(
+                    "jsonFields string is not valid JSON ({error}); pass an object mapping output name to JSON Pointer"
+                )))
+            }
+        },
+        Some(other) => {
+            return Err(Error::Validation(format!(
+                "jsonFields must be an object mapping output name to JSON Pointer, got {}",
+                json_type_name(other)
+            )))
+        }
+    };
+    if parsed.is_empty() || parsed.len() > 32 {
+        return Err(Error::Validation(format!(
+            "jsonFields must contain 1–32 entries, got {}",
+            parsed.len()
+        )));
+    }
+    Ok(parsed)
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -833,5 +884,51 @@ mod tests {
         let html = "<html><body><p>Hello World</p></body></html>";
         let text = extract_text_from_html(html);
         assert!(text.contains("Hello World"));
+    }
+
+    #[test]
+    fn json_fields_accepts_object() {
+        let fields = json_fields_object(Some(&json!({"version": "/info/version"})))
+            .expect("object form must be accepted");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["version"], json!("/info/version"));
+    }
+
+    #[test]
+    fn json_fields_accepts_json_encoded_string() {
+        // Models double-encode structured arguments; the string form must decode.
+        let raw = json!(r#"{"version": "/info/version", "author": "/info/author"}"#);
+        let fields = json_fields_object(Some(&raw)).expect("string form must decode");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields["author"], json!("/info/author"));
+    }
+
+    #[test]
+    fn json_fields_reports_the_real_problem() {
+        let missing = json_fields_object(None).expect_err("missing jsonFields must fail");
+        assert!(
+            missing.to_string().contains("jsonFields"),
+            "unexpected message: {missing}"
+        );
+
+        let wrong_type =
+            json_fields_object(Some(&json!(["version"]))).expect_err("array must be rejected");
+        assert!(
+            wrong_type.to_string().contains("got array"),
+            "type must be named: {wrong_type}"
+        );
+
+        let decoded_not_object = json_fields_object(Some(&json!(r#""/info/version""#)))
+            .expect_err("string decoding to a string must be rejected");
+        assert!(
+            decoded_not_object.to_string().contains("decodes to string"),
+            "decoded type must be named: {decoded_not_object}"
+        );
+
+        let empty = json_fields_object(Some(&json!({}))).expect_err("empty object must be rejected");
+        assert!(
+            empty.to_string().contains("1–32"),
+            "entry count must be named: {empty}"
+        );
     }
 }
