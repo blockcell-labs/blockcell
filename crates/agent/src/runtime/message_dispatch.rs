@@ -1,6 +1,11 @@
 use super::*;
 use rand::Rng;
 
+/// 连接层失败在 `llmMaxRetries` 之上额外允许的尝试次数。
+///
+/// 上界必须确定：provider 彻底不可用时，重试次数不能无限增长。
+const TRANSPORT_EXTRA_ATTEMPTS: u32 = 3;
+
 // Runtime policy comes from config; the previous values remain its defaults.
 fn retry_delay_ms(
     attempt: u32,
@@ -25,6 +30,21 @@ fn retry_delay_ms(
         .min(per_attempt_cap_ms)
         .min(remaining_ms);
     (upper_bound_ms as f64 * jitter.clamp(0.0, 1.0)) as u64
+}
+
+/// 连接层失败（DNS/TCP/TLS/连接被重置）由 provider 侧统一标记为 `code="transport"`。
+///
+/// 它与限流一样属于「等一会儿可能恢复」，但单次尝试本身就可能耗时数十秒
+/// （2026-10-30 七牛评测实测：单次请求排队 40–90 s），用普通瞬时错误的 60 s
+/// 退避预算会在 6 次内耗尽，导致已经拿到答案的一轮被直接判死。
+/// 只认 `transport` 而不认整个 `ProviderUnavailable`，是为了让 content_filter
+/// 之类「重试也没用」的失败仍然快速收手。
+fn is_transport_failure(error: &blockcell_core::Error) -> bool {
+    matches!(
+        error,
+        blockcell_core::Error::ProviderFailure(failure)
+            if failure.code.as_deref() == Some("transport")
+    )
 }
 
 fn retry_after_delay_ms(error: &blockcell_core::Error) -> Option<u64> {
@@ -121,21 +141,28 @@ impl AgentRuntime {
             .unwrap_or_else(|| "default".to_string());
 
         for attempt in 0..=max_attempts {
-            // 只有限流允许超过常规次数上限；其余失败按原策略及时收手。
-            if attempt > max_retries && !matches!(last_failure, Some(FailureKind::RateLimited)) {
+            // 只有限流与连接层失败允许超过常规次数上限；其余失败按原策略及时收手。
+            // 连接层失败额外给 `TRANSPORT_EXTRA_ATTEMPTS` 次，避免 provider 短暂抖动
+            // 直接判死，同时给「重试到底」设一个确定上界。
+            let transport_failure = last_error.as_ref().is_some_and(is_transport_failure);
+            let may_exceed_base = matches!(last_failure, Some(FailureKind::RateLimited))
+                || (transport_failure && attempt <= max_retries + TRANSPORT_EXTRA_ATTEMPTS);
+            if attempt > max_retries && !may_exceed_base {
                 break;
             }
             if attempt > 0 {
                 let retry_after_ms = last_error.as_ref().and_then(retry_after_delay_ms);
                 // 限流与普通瞬时错误分开给退避预算：429 通常几秒内恢复，但密集时需要
                 // 更长的总等待窗口；无 Retry-After 时单次指数退避最多 30s。
+                // 连接层失败沿用限流档位：单次尝试本身可能耗时数十秒，60s 预算不够。
                 let rate_limited = matches!(last_failure, Some(FailureKind::RateLimited));
-                let total_cap_ms = if rate_limited {
+                let slow_recovery = rate_limited || transport_failure;
+                let total_cap_ms = if slow_recovery {
                     retry_policy.rate_limit_backoff_ms
                 } else {
                     retry_policy.total_backoff_ms
                 };
-                let per_attempt_cap_ms = if rate_limited {
+                let per_attempt_cap_ms = if slow_recovery {
                     retry_policy.rate_limit_attempt_cap_ms
                 } else {
                     retry_policy.total_backoff_ms
@@ -632,6 +659,33 @@ impl AgentRuntime {
 #[cfg(test)]
 mod retry_delay_tests {
     use super::*;
+
+    #[test]
+    fn transport_failures_are_recognised_by_code() {
+        let failure = |code: Option<&str>, message: &str| {
+            blockcell_core::Error::ProviderFailure(blockcell_core::ProviderFailure {
+                kind: FailureKind::ProviderUnavailable,
+                status: None,
+                code: code.map(str::to_string),
+                retry_after_ms: None,
+                message: message.to_string(),
+            })
+        };
+
+        assert!(is_transport_failure(&failure(
+            Some("transport"),
+            "LLM stream request failed: error sending request"
+        )));
+        // content_filter 也是 ProviderUnavailable，但重试无用，不能被放宽。
+        assert!(!is_transport_failure(&failure(
+            Some("content_filter"),
+            "LLM content filter rejected the request"
+        )));
+        // 首包超时走的是换 provider 的路径，不占用 transport 的额外预算。
+        assert!(!is_transport_failure(&blockcell_core::Error::Provider(
+            "Stream header timeout after 90 seconds".into()
+        )));
+    }
 
     #[test]
     fn retry_delay_uses_full_jitter_within_exponential_bounds() {
