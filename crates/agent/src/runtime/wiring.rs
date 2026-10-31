@@ -766,13 +766,9 @@ impl AgentRuntime {
     }
 
     pub fn init_memory_file_store(&mut self) -> Result<()> {
-        let write_enabled = self.config.agents.ghost.learning.write_enabled();
-        let mut store = if write_enabled {
-            MemoryFileStore::open(&self.paths)?
-        } else {
-            MemoryFileStore::open_shadow(&self.paths)?
-        };
-        if write_enabled {
+        // Explicit durable writes are independent of automatic Ghost shadow learning.
+        let mut store = MemoryFileStore::open(&self.paths)?;
+        {
             let index = Arc::new(blockcell_storage::KnowledgeIndex::open(
                 &self.paths.knowledge_index_db(),
             )?);
