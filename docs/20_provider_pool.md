@@ -196,3 +196,17 @@ blockcell agent --model gpt-6.1-sol --provider openai -m "分析这个文件"
 | `crates/agent/src/runtime.rs` | `AgentRuntime` 持有 `Arc<ProviderPool>`，每次 LLM 调用 acquire + report |
 | `bin/blockcell/src/commands/agent.rs` | `build_pool_with_overrides()` 构建 pool，替代旧 `create_provider_with_overrides()` |
 | `bin/blockcell/src/commands/gateway.rs` | Gateway 模式同样使用 `ProviderPool` |
+
+## 流式完成的判定契约
+
+一次流式回答只有在**收到完成标记**时才算完整：
+
+- OpenAI 兼容接口：`data: [DONE]`；或流中出现 `finish_reason` 后正常结束（`StreamGuard::finish`
+  会确认 `completed`）。
+- 连接在完成标记前关闭、读失败、空闲超时，都视为**中断**：已收到的增量被丢弃，不会作为答案交付，
+  也不会与另一个 provider 的输出拼接。此时会话事件记录 `model/request-error`，审计记录
+  `provider_call{outcome:"failed", failure_kind:...}`。
+
+因此"provider 只发 chunk 不发 `[DONE]`"不再被静默接受；自定义 provider 必须发送完成标记
+（`StreamChunk::Done`）或在 `finish_reason` 出现后正常结束。
+

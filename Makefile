@@ -27,7 +27,7 @@ reload:
 # (see tests/release_workflow_infrastructure.sh), so `make test` is the
 # supported way to run the whole suite. Wire it to git with `make hooks`.
 # ---------------------------------------------------------------------------
-test: test-rust test-python test-infra
+test: test-rust test-python test-infra test-eab60
 
 # Rust tests embed webui/dist and bin/blockcell/build.rs asserts its hash
 # matches webui/src, so rebuild the bundle first when it has gone stale.
@@ -48,6 +48,14 @@ test-infra:
 	sh tests/build_supply_chain_infrastructure.sh
 	sh tests/install_release_infrastructure.sh
 	sh tests/release_workflow_infrastructure.sh
+
+# Isolated gateway survival probe: starts a real gateway with the *default*
+# channel configuration and asserts it stays up. This is the only automated
+# guard for the "disabled channel kills the gateway" regression, so it runs on
+# every `make test` (debug binary keeps it cheap).
+test-eab60:
+	cargo build -p blockcell
+	EAB60_BIN=$(CURDIR)/target/debug/blockcell python3 tests/eab60/startup.py
 
 test-webui:
 	cd webui && npm ci && npm test

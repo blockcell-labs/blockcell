@@ -346,6 +346,25 @@ blockcell 的知识与记忆体系现在遵循四条原则：
 
 *上一篇：[技能（Skill）系统 —— 用 Rhai 脚本扩展 AI 能力](./04_skill_system.md)*
 
+## 长期记忆写到哪：canonical 与 shadow
+
+`memory_manage` 的显式长期写入（`scope=workspace|user`）固定落到 **canonical** 文件：
+
+| 文件 | 路径 |
+|---|---|
+| `USER.md` | `<workspace>/USER.md` |
+| `MEMORY.md` | `<workspace>/memory/MEMORY.md` |
+
+`<workspace>` 默认是 `~/.blockcell/workspace`，可用 `agents.defaults.workspace` 覆盖
+（`Paths::user_md` / `Paths::memory_md`）。
+
+工具的返回值会带上 `canonical`、`shadow` 与 `path`，调用方可以据此确认是否真的落盘。
+
+Ghost 的**自动**学习/复盘另走一套存储：当 `agents.ghost.learning.shadowMode=true`（默认）时，
+自动写入只落在 `memory/shadow/` 影子副本，不会改动 canonical 文件，返回值会显式标注
+`shadow: true` 与 `"Saved to shadow memory only; canonical durable memory was not changed."`。
+显式记忆与自动沉淀互不影响：关闭 shadow 模式不会影响显式写入，反之亦然。
+
 *下一篇：[多渠道接入 —— Telegram/Slack/Discord/飞书都能用](./06_channels.md)*
 
 *项目地址：https://github.com/blockcell-labs/blockcell*

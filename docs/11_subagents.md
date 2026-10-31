@@ -385,6 +385,19 @@ blockcell 的子智能体系统：
 这让 blockcell 从一个"一次只能做一件事"的助手，变成了一个真正的**多任务 AI 工作台**。
 ---
 
+## 任务归属、查询与取消
+
+typed 子 Agent（指定 `subagent_type`）在后台运行并返回 `task_id`。任务归属**发起调用的会话**
+（`channel` + `chat_id` + `session_key`），不是全局 main session，因此：
+
+- `list_tasks` 只能看到本会话发起的任务；跨会话查询返回空。
+- `cancel_task(task_id)` 先校验归属再取消；跨会话任务返回 `Task not found`，重复取消幂等。
+- 子 Agent 的工具调用同样写审计：每次调用记 `tool_call`；被 `disallowed_tools` 或 `can_use_tool`
+  拒绝时额外记 `permission_decision{decision:"Deny", matched_rule:"subagent_permissions"}`，
+  因此"越权尝试"是可追溯的（结果同时是 `tool/result{is_error:true}`）。
+
+取消后任务状态为 `cancelled`，`list_tasks(status="cancelled")` 可查，汇总统计里单独计数。
+
 *上一篇：[金融场景实战 —— 用 blockcell 监控股票和加密货币](./10_finance_use_case.md)*
 *下一篇：[blockcell 架构深度解析 —— 为什么用 Rust 写 AI 框架](./12_architecture.md)*
 
