@@ -686,34 +686,11 @@ impl AgentRuntime {
             .and_then(|m| m.reasoning_content.clone())
             .filter(|r| !r.is_empty());
 
-        // Only cache if this turn had substantive tool results — prevents caching
-        // LLM-hallucinated lists from empty/error tool results.
-        // A tool message with empty/null content (e.g. memory_query returning [])
-        // should not qualify as "real" data backing the assistant's list.
-        // 注意：只扫描当前 turn（最后一条 user 消息之后）的 tool 结果，
-        // 而非整个历史，避免曾经的工具调用导致后续纯文本回复被错误缓存
-        let current_turn_start = history
-            .iter()
-            .rposition(|m| m.role == "user")
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let has_tool_results = history[current_turn_start..].iter().any(|m| {
-            m.role == "tool"
-                && match &m.content {
-                    serde_json::Value::String(s) => {
-                        !s.is_empty() && s != "[]" && !s.starts_with("{\"error\"")
-                    }
-                    serde_json::Value::Null => false,
-                    _ => true,
-                }
-        });
-        if let Some(stub) = self.response_cache.maybe_cache_and_stub(
-            persist_session_key,
-            &final_response,
-            has_tool_results,
-        ) {
-            overwrite_last_assistant_message(history, &stub);
-        }
+        // The delivered answer is persisted verbatim. Context saving happens when
+        // the history is turned into a model request (see
+        // `response_cache::stub_long_answers_for_model`): rewriting the stored
+        // message here made the saved transcript show a cache reference instead
+        // of the answer the user actually received.
 
         self.end_turn(msg, persist_session_key, final_response.clone(), None)
             .await;

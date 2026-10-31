@@ -924,6 +924,13 @@ impl AgentRuntime {
         let mut loop_guard = ToolLoopGuard::new(max_iterations, tools_max_iterations.clone());
         let mut over_iteration: bool = false;
         let mut current_messages = messages;
+        // Context saving for long answers happens on the model-facing copy only;
+        // the persisted transcript keeps the delivered text intact.
+        crate::response_cache::ResponseCache::stub_long_answers_for_model(
+            &self.response_cache,
+            &persist_session_key,
+            &mut current_messages,
+        );
         let mut task_progress = super::task_progress::TaskProgress::default();
         if let Some(contract) = msg.metadata.get("task_contract").or_else(|| {
             task_continues
