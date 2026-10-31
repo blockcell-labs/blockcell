@@ -782,10 +782,15 @@ async fn static_scope_pipeline_rejects_denied_tools_before_hooks_or_execution() 
         .await;
     assert_eq!(result.outcome, ToolOutcome::Rejected);
     assert!(result.text.contains("scope"), "{}", result.text);
-    assert!(!events.lock().unwrap().iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolPreExecute { .. } | AgentEvent::ToolCall { .. }
-    )));
+    // Scope denial happens before hooks, so no pre-execute fires; the attempt is
+    // still recorded as tool/call so the rejection stays auditable.
+    let recorded = events.lock().unwrap();
+    assert!(!recorded
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ToolPreExecute { .. })));
+    assert!(recorded
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ToolCall { .. })));
 }
 
 #[tokio::test]
@@ -951,7 +956,8 @@ async fn static_scope_hook_continue_cannot_override_policy_deny_or_ask() {
         assert!(events
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolPreExecute { .. })));
-        assert!(!events
+        // A policy-denied attempt is still recorded as tool/call; only execution is blocked.
+        assert!(events
             .iter()
             .any(|event| matches!(event, AgentEvent::ToolCall { .. })));
     }
@@ -4594,7 +4600,7 @@ async fn test_stream_retry_emits_reset_before_retrying_ws_response() {
 }
 
 #[tokio::test]
-async fn test_stream_close_without_done_returns_accumulated_response() {
+async fn test_stream_close_without_done_is_treated_as_interruption() {
     let mut runtime = test_runtime_with_provider(Arc::new(StreamingCloseProvider));
 
     let msg = InboundMessage {
@@ -4609,7 +4615,13 @@ async fn test_stream_close_without_done_returns_accumulated_response() {
     };
 
     let result = runtime.process_message(msg).await.expect("process message");
-    assert_eq!(result, "closed answer");
+    // Providers only emit Done after a completion marker (StreamGuard::finish),
+    // so a bare EOF means the answer is incomplete and must not be delivered.
+    assert!(
+        !result.contains("closed answer"),
+        "partial stream must not be delivered: {result}"
+    );
+    assert!(result.contains("Stream interrupted"), "{result}");
 }
 
 #[tokio::test]
@@ -9090,8 +9102,8 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
     assert!(!result.contains("Unknown tool"), "{result}");
     let recorded = events.lock().unwrap().clone();
     let names: Vec<&str> = recorded.iter().map(AgentEvent::name).collect();
-    assert_eq!(names, vec!["tool/pre-execute", "tool/result"]);
-    match &recorded[1] {
+    assert_eq!(names, vec!["tool/pre-execute", "tool/call", "tool/result"]);
+    match &recorded[2] {
         AgentEvent::ToolResult {
             result, outcome, ..
         } => {
@@ -9100,6 +9112,154 @@ async fn tool_pre_execute_listener_can_reject_before_execution() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+}
+
+/// Emits one tool call, then a long list-shaped answer, so the response cache has
+/// something to stub.
+struct LongAnswerAfterToolProvider;
+
+#[async_trait::async_trait]
+impl blockcell_providers::Provider for LongAnswerAfterToolProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> blockcell_core::Result<LLMResponse> {
+        let saw_tool = messages.iter().any(|message| message.role == "tool");
+        if !saw_tool && !tools.is_empty() {
+            return Ok(LLMResponse {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![ToolCallRequest {
+                    id: format!("call-{}", uuid::Uuid::new_v4()),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                    thought_signature: None,
+                }],
+                finish_reason: "tool_calls".to_string(),
+                usage: serde_json::Value::Null,
+            });
+        }
+        let answer = (1..=18)
+            .map(|i| {
+                format!(
+                    "{}. 第{}条结果，包含足够长的标题、完整路径、作者信息与摘要说明，用来超过响应缓存的列表桩化阈值。",
+                    i, i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            answer.chars().count() > 800,
+            "fixture must exceed the cache threshold"
+        );
+        Ok(LLMResponse {
+            content: Some(answer),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+            usage: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn delivered_answer_is_persisted_verbatim_not_as_a_cache_stub() {
+    // Regression: the final answer used to be rewritten to `[已缓存N条结果…]`
+    // before saving, so reloading the conversation showed a cache reference
+    // instead of the answer the user received.
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    let base = std::env::temp_dir().join(format!("blockcell-cache-stub-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp runtime dir");
+    let mut runtime = test_runtime_with_provider_and_paths(
+        Paths::with_base(base),
+        Arc::new(LongAnswerAfterToolProvider),
+        config,
+    );
+    runtime
+        .tool_registry
+        .register(Arc::new(blockcell_tools::fs::ListDirTool::default()));
+
+    let mut msg = test_main_session_inbound("cli", "cache-stub");
+    msg.content = "列出目录内容".to_string();
+    let session_key = msg.session_key();
+    let delivered = runtime.process_message(msg).await.expect("process message");
+
+    let history = runtime
+        .session_store
+        .load(&session_key)
+        .expect("load history");
+    let last_assistant = history
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .expect("assistant message");
+    let stored = last_assistant.content.as_str().unwrap_or_default();
+
+    assert!(
+        !stored.starts_with("[已缓存"),
+        "stored answer must be verbatim: {stored}"
+    );
+    assert_eq!(
+        stored, delivered,
+        "stored answer must match what was delivered"
+    );
+    assert!(
+        stored.contains("18. 第18条结果"),
+        "full list must survive: {stored}"
+    );
+    assert!(
+        stored.chars().count() > 800,
+        "fixture must exceed the cache threshold"
+    );
+
+    // The token saving still happens, but only on the model-facing copy.
+    let mut model_view = history.clone();
+    crate::response_cache::ResponseCache::stub_long_answers_for_model(
+        &runtime.response_cache,
+        &session_key,
+        &mut model_view,
+    );
+    let stubbed = model_view
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .and_then(|message| message.content.as_str())
+        .unwrap_or_default();
+    assert!(
+        stubbed.starts_with("[已缓存"),
+        "model view should be compacted: {stubbed}"
+    );
+}
+
+#[tokio::test]
+async fn exhausted_budget_is_written_to_the_audit_log() {
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".to_string();
+    config.agents.defaults.provider = Some("test".to_string());
+    config.budget.max_tokens_per_session = 10;
+    let paths = test_runtime_paths("blockcell-budget-audit");
+    let runtime = test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config);
+
+    let session_key = "ws:budget-audit";
+    let tracker = runtime.budget_tracker_for_session(session_key);
+    tracker.record_usage(100, 100, 0);
+    let error = tracker
+        .check_budget()
+        .expect_err("budget should be exhausted");
+    runtime.audit_budget_snapshot(session_key, "exhausted", &error.snapshot);
+
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let log = runtime.paths.audit_dir().join(format!("{date}.jsonl"));
+    let content = std::fs::read_to_string(&log).expect("audit log");
+    assert!(content.contains("\"type\":\"budget_event\""), "{content}");
+    assert!(
+        content.contains("\"event_kind\":\"exhausted\""),
+        "{content}"
+    );
+    assert!(content.contains(session_key), "{content}");
 }
 
 #[tokio::test]
@@ -9133,7 +9293,7 @@ async fn guards_check_arguments_rewritten_by_pre_execute_listener() {
         .iter()
         .map(AgentEvent::name)
         .collect();
-    assert_eq!(names, vec!["tool/pre-execute", "tool/result"]);
+    assert_eq!(names, vec!["tool/pre-execute", "tool/call", "tool/result"]);
 }
 
 #[tokio::test]
@@ -9163,10 +9323,11 @@ async fn policy_denied_tool_call_is_recorded_in_session_event_log() {
     let events = JsonlSessionEventLog::new(runtime.paths.clone())
         .read(&msg.session_key())
         .unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, SessionEventKind::ToolResult);
-    assert_eq!(events[0].payload["is_error"], true);
-    assert_eq!(events[0].payload["result"]["policy"], "tool_policy");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, SessionEventKind::ToolCall);
+    assert_eq!(events[1].kind, SessionEventKind::ToolResult);
+    assert_eq!(events[1].payload["is_error"], true);
+    assert_eq!(events[1].payload["result"]["policy"], "tool_policy");
 }
 
 #[tokio::test]
