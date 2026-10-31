@@ -65,7 +65,22 @@ impl super::AgentRuntime {
             .unwrap_or_else(|| self.config.agents.defaults.model.clone());
         let max_review_rounds = self.config.self_improve.review.max_rounds;
         let memory_store = self.memory_store.clone();
-        let memory_file_store = self.memory_file_store.clone();
+        // Automatic reviews obey Ghost's write policy independently of explicit
+        // user memory commands, which always target canonical storage.
+        let memory_file_store = match crate::memory_file_store::MemoryFileStoreRouter::open(
+            &self.paths,
+            None,
+            self.config.agents.ghost.learning.write_enabled(),
+        ) {
+            Ok(mut store) => {
+                store.set_write_guard(Arc::clone(&self.write_guard));
+                Some(Arc::new(store) as blockcell_tools::MemoryFileStoreHandle)
+            }
+            Err(error) => {
+                warn!(%error, "Unable to initialize automatic review memory store");
+                None
+            }
+        };
         let skill_file_store = self.skill_file_store.clone();
         let skill_mutex = self.skill_mutex.clone();
         let mode_clone = mode.clone();

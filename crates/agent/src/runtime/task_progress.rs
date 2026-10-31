@@ -76,6 +76,8 @@ impl ToolEvidence {
 pub(crate) struct TaskProgress {
     pub contract: TaskContract,
     revision: usize,
+    delivery_revision: usize,
+    verification_failed: bool,
     changed: bool,
     uncertain_effects: bool,
     verified_revision: Option<usize>,
@@ -93,6 +95,8 @@ impl Default for TaskProgress {
         Self {
             contract: TaskContract::default(),
             revision: 0,
+            delivery_revision: 0,
+            verification_failed: false,
             changed: false,
             uncertain_effects: false,
             verified_revision: None,
@@ -196,6 +200,12 @@ impl TaskProgress {
         // Failed commands can have partially modified files too. Unknown effects
         // invalidate existing evidence but do not claim a mutation occurred.
         if evidence.effect != WorkspaceEffect::None {
+            if evidence.effect == WorkspaceEffect::Changed
+                || evidence.annotations.verification.is_none()
+            {
+                self.delivery_revision = self.delivery_revision.saturating_add(1);
+                self.verification_failed = false;
+            }
             self.revision = self.revision.saturating_add(1);
             self.last_verification = None;
             if evidence.effect == WorkspaceEffect::Changed {
@@ -249,6 +259,9 @@ impl TaskProgress {
                 .and_then(|process| self.pending.remove(process)),
             _ => None,
         };
+        if verification.is_some() && !evidence.running && !succeeded {
+            self.verification_failed = true;
+        }
         if succeeded && evidence.completed && self.contract.verification.permits_execution() {
             if let Some((intent, command, revision)) =
                 verification.filter(|(_, _, revision)| *revision == self.revision)
@@ -265,6 +278,14 @@ impl TaskProgress {
                 || self.uncertain_effects
                 || self.contract.verification == VerificationPolicy::Required)
             && self.verified_revision != Some(self.revision)
+    }
+
+    pub fn revision(&self) -> usize {
+        self.delivery_revision
+    }
+
+    pub fn verification_failed(&self) -> bool {
+        self.verification_failed
     }
 }
 

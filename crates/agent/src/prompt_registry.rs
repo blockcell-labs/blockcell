@@ -441,12 +441,12 @@ impl PromptSection for ToolsSection {
         let mut prompt = String::from("\n## Tools\n");
         prompt.push_str("- Use tools when needed; otherwise answer directly.\n");
         prompt.push_str(
-            "- Read existing content before modifying it and verify the resulting changes.\n",
+            "- Read existing content before modifying it; verify changes only when the user permits checks. Never run tests/builds prohibited or deferred by the user.\n",
         );
         prompt.push_str("- Prefer fewer tool calls; batch related work.\n");
         prompt.push_str("- Sample data once, then process the original file and parse back/assert output schema and key counts/totals in one script. Never infer totals from a sample or dump full datasets into the conversation.\n");
         prompt.push_str("- Keep temporary verification artifacts unless cleanup is requested. If optional cleanup is denied, skip it; do not try equivalent deletion commands. Finish after checks pass. For shell scripts, combine `bash -n` with a small functional check.\n");
-        prompt.push_str("- State assumptions for ambiguous business boundaries in the final answer. A rejected path affects that invocation only; follow its recovery guidance with the same tool and keep a working script. Use literal workspace paths for test fixtures, including nonexistent inputs. Do not use tool_search after a path refusal; respect policy/user denials.\n");
+        prompt.push_str("- State assumptions for ambiguous business boundaries in the final answer. A rejected path affects that invocation only; preserve discovered files/facts and continue unrelated authorized steps. Never deny earlier evidence because an optional probe failed. Use literal workspace paths for test fixtures, including nonexistent inputs. Do not use tool_search after a path refusal; respect policy/user denials.\n");
         prompt.push_str("- Validate tool parameters against schema.\n");
         prompt.push_str("- For filesystem tools such as `list_dir`, `read_file`, `write_file`, and `edit_file`, always pass the required `path` explicitly. Do not call them with `{}` and do not assume an implicit current directory.\n");
         prompt.push_str("- When the user asks about agent nodes, node status, configured agents, or which agent owns which channel/account, use `agent_status` instead of guessing.\n");
@@ -455,7 +455,7 @@ impl PromptSection for ToolsSection {
         if ctx.available_tool_names.is_empty() {
             prompt.push_str("- There are no callable tools available in the current agent scope for this interaction. Do not claim tools outside the current scope.\n");
         } else {
-            prompt.push_str("- The current callable tools are defined by the attached tool schemas. When asked about capabilities, answer only from those schemas.\n");
+            prompt.push_str("- The current callable tools are defined by the attached tool schemas. Schemas may be loaded on demand: if tool_search is callable, search before declaring a missing capability unavailable. Known catalog names include agent, list_tasks, cancel_task, office_write, data_process and memory_manage. Discovery never grants permissions.\n");
         }
         for rule in ctx.tool_prompt_rules {
             let rule = truncate_to_token_budget(rule, MAX_TOOL_RULE_TOKENS);

@@ -754,11 +754,43 @@ fn write_text_atomic_durable(path: &Path, content: &str) -> Result<()> {
 }
 
 pub fn validate_config_json5_str(content: &str) -> Result<Config> {
-    parse_json5_str(content)
+    parse_config_with_legacy_channels(content, None)
 }
 
 pub fn validate_config_json5_file(path: &Path, content: &str) -> Result<Config> {
-    parse_json5_str_with_context(content, Some(path), "Config JSON5")
+    parse_config_with_legacy_channels(content, Some(path))
+}
+
+fn parse_config_with_legacy_channels(content: &str, path: Option<&Path>) -> Result<Config> {
+    let mut value: Value = parse_json5_str_with_context(content, path, "Config JSON5")?;
+    if let Some(channels) = value.get_mut("channels").and_then(Value::as_object_mut) {
+        for (name, fields) in [
+            ("whatsapp", &["bridgeUrl", "bridge_url"][..]),
+            (
+                "napcat",
+                &["wsUrl", "ws_url", "serverPort", "server_port"][..],
+            ),
+        ] {
+            let Some(channel) = channels.get_mut(name).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            // Defaults are not evidence of a configured legacy listener.
+            // Explicit false and independently configured accounts always win.
+            if channel.contains_key("enabled") || channel.contains_key("accounts") {
+                continue;
+            }
+            let configured = fields.iter().any(|field| {
+                channel.get(*field).is_some_and(|value| {
+                    value.as_str().is_some_and(|text| !text.trim().is_empty())
+                        || value.as_u64().is_some_and(|port| port > 0)
+                })
+            });
+            if configured {
+                channel.insert("enabled".to_string(), Value::Bool(true));
+            }
+        }
+    }
+    serde_json::from_value(value).map_err(Into::into)
 }
 
 pub fn write_raw_validated_config_json5(path: &Path, content: &str) -> Result<Config> {
@@ -2093,5 +2125,56 @@ mod recheck_probe_env {
             result.get("injected").is_none(),
             "unexpected injected key: {result}"
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_channel_migration_tests {
+    use super::{validate_config_json5_str, Config};
+
+    fn parse(json5: &str) -> Config {
+        validate_config_json5_str(json5).expect("config should parse")
+    }
+
+    #[test]
+    fn legacy_whatsapp_bridge_url_implies_enabled() {
+        let cfg = parse(r#"{ channels: { whatsapp: { bridgeUrl: "ws://127.0.0.1:3001" } } }"#);
+        assert!(cfg.channels.whatsapp.enabled);
+    }
+
+    #[test]
+    fn explicit_disabled_wins_over_legacy_fields() {
+        let cfg = parse(
+            r#"{ channels: { whatsapp: { enabled: false, bridgeUrl: "ws://127.0.0.1:3001" } } }"#,
+        );
+        assert!(!cfg.channels.whatsapp.enabled);
+    }
+
+    #[test]
+    fn accounts_are_left_to_their_own_enabled_flags() {
+        let cfg = parse(
+            r#"{ channels: { whatsapp: { bridgeUrl: "ws://127.0.0.1:3001", accounts: {} } } }"#,
+        );
+        assert!(!cfg.channels.whatsapp.enabled);
+    }
+
+    #[test]
+    fn legacy_napcat_server_port_implies_enabled() {
+        let cfg = parse(r#"{ channels: { napcat: { serverPort: 13005 } } }"#);
+        assert!(cfg.channels.napcat.enabled);
+    }
+
+    #[test]
+    fn default_napcat_port_zero_is_not_a_legacy_config() {
+        let cfg = parse(r#"{ channels: { napcat: { serverPort: 0 } } }"#);
+        assert!(!cfg.channels.napcat.enabled);
+    }
+
+    #[test]
+    fn channels_without_legacy_fields_stay_disabled() {
+        let cfg = parse(r#"{ channels: {} }"#);
+        assert!(!cfg.channels.whatsapp.enabled);
+        assert!(!cfg.channels.napcat.enabled);
+        assert!(!cfg.channels.telegram.enabled);
     }
 }

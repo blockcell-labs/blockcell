@@ -22,7 +22,7 @@ impl Tool for ListTasksTool {
                     },
                     "status": {
                         "type": "string",
-                        "enum": ["queued", "running", "completed", "failed", "all"],
+                        "enum": ["queued", "running", "completed", "failed", "cancelled", "all"],
                         "description": "Filter by status (default: all)"
                     }
                 },
@@ -65,6 +65,52 @@ impl Tool for ListTasksTool {
             "summary": summary,
             "tasks": tasks
         }))
+    }
+}
+
+/// Cancels tasks through the standard policy, admission and audit pipeline.
+pub struct CancelTaskTool;
+
+#[async_trait]
+impl Tool for CancelTaskTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "cancel_task".to_string(),
+            description: "Cancel a queued or running background task owned by this conversation. Stops execution; inspect its cancelled status with list_tasks.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "minLength": 1}},
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn validate(&self, params: &Value) -> Result<()> {
+        if params
+            .get("task_id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(Error::Validation(
+                "A non-empty task_id is required".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
+        self.validate(&params)?;
+        let manager = ctx
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| Error::Tool("Task manager not available".to_string()))?;
+        let task_id = params["task_id"].as_str().unwrap();
+        manager.cancel_task(task_id).await?;
+        manager
+            .get_task_json(task_id)
+            .await
+            .ok_or_else(|| Error::NotFound(format!("Task not found: {}", task_id)))
     }
 }
 

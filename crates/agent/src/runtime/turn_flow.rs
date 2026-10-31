@@ -5,6 +5,92 @@ use super::*;
 const MAX_BUDGET_TRACKERS: usize = 64;
 
 impl AgentRuntime {
+    pub(crate) async fn audit_provider_attempt(
+        &self,
+        session_key: &str,
+        served: &ServedBy,
+        usage: Option<&serde_json::Value>,
+        duration_ms: u64,
+        failure: Option<blockcell_core::FailureKind>,
+    ) {
+        let (input_tokens, output_tokens) = usage.map(extract_llm_usage_tokens).unwrap_or_default();
+        let price = self
+            .config
+            .agents
+            .defaults
+            .model_pool
+            .iter()
+            .find(|entry| entry.model == served.model && entry.provider == served.provider);
+        let cost_known = price.is_some_and(|entry| {
+            entry.input_price.is_some_and(|p| p.is_finite() && p >= 0.0)
+                && entry
+                    .output_price
+                    .is_some_and(|p| p.is_finite() && p >= 0.0)
+        });
+        let cost_cents = price.filter(|_| cost_known).map_or(0, |entry| {
+            ((input_tokens as f64 * entry.input_price.unwrap_or_default()
+                + output_tokens as f64 * entry.output_price.unwrap_or_default())
+                / 10_000.0)
+                .ceil() as u64
+        });
+        let event = blockcell_storage::AuditEvent::ProviderCall {
+            provider: served.provider.clone(),
+            model: served.model.clone(),
+            input_tokens,
+            output_tokens,
+            cost_cents,
+            duration_ms,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            session_key: session_key.to_string(),
+            outcome: Some(
+                if failure.is_some() {
+                    "failed"
+                } else {
+                    "succeeded"
+                }
+                .to_string(),
+            ),
+            failure_kind: failure.map(|kind| kind.as_str().to_string()),
+            cost_known: Some(cost_known && usage.is_some()),
+        };
+        let logger = Arc::clone(&self.audit_logger);
+        let key = session_key.to_string();
+        match tokio::task::spawn_blocking(move || {
+            logger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .log_observed_event(&key, event)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            result => warn!(?result, "Provider-call audit write failed"),
+        }
+    }
+
+    pub(crate) fn audit_budget_snapshot(
+        &self,
+        session_key: &str,
+        kind: &str,
+        snapshot: &blockcell_core::BudgetSnapshot,
+    ) {
+        // This path must commit the refusal before control flow returns. Like the
+        // budget check itself it never starts another model request.
+        if let Err(error) = self
+            .audit_logger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log_budget_event(
+                session_key,
+                kind,
+                snapshot.usage_ratio,
+                snapshot.total_tokens_used,
+                snapshot.cost_used_micro_usd / 10_000,
+            )
+        {
+            warn!(%error, "Budget audit write failed");
+        }
+    }
     pub(crate) async fn chat_with_provider(
         &self,
         messages: &[ChatMessage],
@@ -76,6 +162,15 @@ impl AgentRuntime {
         session_key: &str,
         response: &LLMResponse,
     ) -> std::result::Result<(), BudgetExhaustedError> {
+        self.record_served_llm_budget(session_key, response, None)
+    }
+
+    pub(crate) fn record_served_llm_budget(
+        &self,
+        session_key: &str,
+        response: &LLMResponse,
+        served: Option<&ServedBy>,
+    ) -> std::result::Result<(), BudgetExhaustedError> {
         let (input_tokens, output_tokens) = extract_llm_usage_tokens(&response.usage);
         let (cache_read_tokens, cache_creation_tokens) = extract_llm_cache_tokens(&response.usage);
         crate::ghost_metrics::get_ghost_metrics(&self.paths).record_prompt_cache_usage(
@@ -87,7 +182,25 @@ impl AgentRuntime {
             return Ok(());
         }
 
-        let cost_micro_usd = self.estimate_llm_cost_micro_usd(input_tokens, output_tokens);
+        let cost_micro_usd = match served {
+            Some(served) => self
+                .config
+                .agents
+                .defaults
+                .model_pool
+                .iter()
+                .find(|entry| entry.model == served.model && entry.provider == served.provider)
+                .map_or(0, |entry| {
+                    let cost = input_tokens as f64 * entry.input_price.unwrap_or(0.0)
+                        + output_tokens as f64 * entry.output_price.unwrap_or(0.0);
+                    if cost.is_finite() && cost > 0.0 {
+                        cost.ceil() as u64
+                    } else {
+                        0
+                    }
+                }),
+            None => self.estimate_llm_cost_micro_usd(input_tokens, output_tokens),
+        };
         let tracker = self.budget_tracker_for_session(session_key);
         let snapshot = tracker.record_usage(input_tokens, output_tokens, cost_micro_usd);
 
@@ -102,29 +215,29 @@ impl AgentRuntime {
             );
         }
 
-        tracker.check_budget().map(|_| ())
+        if tracker.should_warn() {
+            self.audit_budget_snapshot(session_key, "warning", &snapshot);
+        }
+        match tracker.check_budget() {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.audit_budget_snapshot(session_key, "exhausted", &error.snapshot);
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn estimate_llm_cost_micro_usd(&self, input_tokens: u64, output_tokens: u64) -> u64 {
         let defaults = &self.config.agents.defaults;
-        let priced_entry = defaults
-            .model_pool
-            .iter()
-            .find(|entry| {
-                entry.model == defaults.model
-                    && defaults
-                        .provider
-                        .as_ref()
-                        .map(|provider| provider == &entry.provider)
-                        .unwrap_or(true)
-                    && (entry.input_price.is_some() || entry.output_price.is_some())
-            })
-            .or_else(|| {
-                defaults
-                    .model_pool
-                    .iter()
-                    .find(|entry| entry.input_price.is_some() || entry.output_price.is_some())
-            });
+        let priced_entry = defaults.model_pool.iter().find(|entry| {
+            entry.model == defaults.model
+                && defaults
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider == &entry.provider)
+                    .unwrap_or(true)
+                && (entry.input_price.is_some() || entry.output_price.is_some())
+        });
 
         let Some(entry) = priced_entry else {
             return 0;
@@ -162,13 +275,62 @@ impl AgentRuntime {
             },
         )
         .await;
-        let result = self.chat_with_provider(messages, tools).await;
+        if let Err(error) = self.budget_tracker_for_session(session_id).check_budget() {
+            self.audit_budget_snapshot(session_id, "exhausted", &error.snapshot);
+            return Err(blockcell_core::Error::Other(error.message));
+        }
+        let result = if let Some((index, provider)) = self.provider_pool.acquire() {
+            let served = self.served_by(index);
+            let started = std::time::Instant::now();
+            let response = provider.chat(messages, tools).await;
+            let failure = response
+                .as_ref()
+                .err()
+                .map(|error| error.provider_failure_kind());
+            self.audit_provider_attempt(
+                session_id,
+                &served,
+                response.as_ref().ok().map(|response| &response.usage),
+                started.elapsed().as_millis() as u64,
+                failure,
+            )
+            .await;
+            self.provider_pool.report(
+                index,
+                match &response {
+                    Ok(_) => CallResult::Success,
+                    Err(error) => ProviderPool::classify_failure(error),
+                },
+            );
+            response.map(|response| (response, served))
+        } else {
+            Err(blockcell_core::Error::Config(
+                "ProviderPool: no healthy providers".into(),
+            ))
+        };
         let mut event = match &result {
             Ok((response, served_by)) => model_response_event(response, served_by),
             Err(error) => request_error_event(error),
         };
         self.dispatch_event(msg, session_id, &mut event).await;
-        result.map(|(response, _)| response)
+        let (mut response, served) = result?;
+        if let Err(error) = self.record_served_llm_budget(session_id, &response, Some(&served)) {
+            // A completed answer is still deliverable. The shared tracker blocks
+            // all subsequent requests once the response crosses the limit.
+            if response.tool_calls.is_empty()
+                && response
+                    .content
+                    .as_ref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                if let Some(content) = response.content.as_mut() {
+                    content.push_str(&format!("\n\n⚠️ {}", error.message));
+                }
+            } else {
+                return Err(blockcell_core::Error::Other(error.message));
+            }
+        }
+        Ok(response)
     }
 
     /// 不带工具的收尾模型调用（强制最终回答、子代理结果汇总）作为独立 step 记录，
@@ -686,34 +848,11 @@ impl AgentRuntime {
             .and_then(|m| m.reasoning_content.clone())
             .filter(|r| !r.is_empty());
 
-        // Only cache if this turn had substantive tool results — prevents caching
-        // LLM-hallucinated lists from empty/error tool results.
-        // A tool message with empty/null content (e.g. memory_query returning [])
-        // should not qualify as "real" data backing the assistant's list.
-        // 注意：只扫描当前 turn（最后一条 user 消息之后）的 tool 结果，
-        // 而非整个历史，避免曾经的工具调用导致后续纯文本回复被错误缓存
-        let current_turn_start = history
-            .iter()
-            .rposition(|m| m.role == "user")
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let has_tool_results = history[current_turn_start..].iter().any(|m| {
-            m.role == "tool"
-                && match &m.content {
-                    serde_json::Value::String(s) => {
-                        !s.is_empty() && s != "[]" && !s.starts_with("{\"error\"")
-                    }
-                    serde_json::Value::Null => false,
-                    _ => true,
-                }
-        });
-        if let Some(stub) = self.response_cache.maybe_cache_and_stub(
-            persist_session_key,
-            &final_response,
-            has_tool_results,
-        ) {
-            overwrite_last_assistant_message(history, &stub);
-        }
+        // The delivered answer is persisted verbatim. Context saving happens when
+        // the history is turned into a model request (see
+        // `response_cache::stub_long_answers_for_model`): rewriting the stored
+        // message here made the saved transcript show a cache reference instead
+        // of the answer the user actually received.
 
         self.end_turn(msg, persist_session_key, final_response.clone(), None)
             .await;

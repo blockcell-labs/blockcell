@@ -185,7 +185,7 @@ fn scoped_listener_configs<T: Clone>(
     active_accounts.sort_by(|left, right| left.0.cmp(&right.0));
 
     if active_accounts.is_empty() {
-        if has_legacy_config(config) {
+        if config.is_external_channel_enabled(channel) && has_legacy_config(config) {
             return legacy_listener_config(channel, config);
         }
         return Vec::new();
@@ -633,7 +633,7 @@ pub fn whatsapp_listener_configs(config: &Config) -> Vec<ListenerConfig> {
         config,
         &config.channels.whatsapp.accounts,
         |account| account.enabled && !account.bridge_url.is_empty(),
-        |cfg| !cfg.channels.whatsapp.bridge_url.is_empty(),
+        |cfg| !cfg.channels.whatsapp.bridge_url.trim().is_empty(),
         |scoped, account_id, account: &WhatsAppAccountConfig| {
             scoped.channels.whatsapp.enabled = account.enabled;
             scoped.channels.whatsapp.bridge_url = account.bridge_url.clone();
@@ -652,6 +652,47 @@ mod tests {
         DingTalkAccountConfig, DiscordAccountConfig, FeishuAccountConfig, LarkAccountConfig,
         SlackAccountConfig, TelegramAccountConfig, WeComAccountConfig, WhatsAppAccountConfig,
     };
+
+    #[test]
+    fn disabled_whatsapp_with_legacy_bridge_url_spawns_no_listener() {
+        // Regression: a default bridge_url used to be treated as "legacy
+        // configured" even when the channel was disabled, which spawned a
+        // listener that returned immediately and took the gateway down.
+        let mut config = Config::default();
+        config.channels.whatsapp.enabled = false;
+        config.channels.whatsapp.bridge_url = "ws://127.0.0.1:3001".to_string();
+
+        assert!(whatsapp_listener_configs(&config).is_empty());
+    }
+
+    #[test]
+    fn enabled_whatsapp_with_legacy_bridge_url_spawns_one_listener() {
+        let mut config = Config::default();
+        config.channels.whatsapp.enabled = true;
+        config.channels.whatsapp.bridge_url = "ws://127.0.0.1:3001".to_string();
+
+        let listeners = whatsapp_listener_configs(&config);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].label, "whatsapp");
+    }
+
+    #[test]
+    fn disabled_napcat_with_legacy_port_spawns_no_listener() {
+        let mut config = Config::default();
+        config.channels.napcat.enabled = false;
+        config.channels.napcat.server_port = 13005;
+
+        assert!(napcat_listener_configs(&config).is_empty());
+    }
+
+    #[test]
+    fn enabled_napcat_with_legacy_port_spawns_one_listener() {
+        let mut config = Config::default();
+        config.channels.napcat.enabled = true;
+        config.channels.napcat.server_port = 13005;
+
+        assert_eq!(napcat_listener_configs(&config).len(), 1);
+    }
 
     #[test]
     fn test_telegram_listener_configs_expand_enabled_accounts() {

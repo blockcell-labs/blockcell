@@ -154,9 +154,13 @@ hooks:
 
 - Hook 按配置顺序执行。
 - 每条 hook 有独立超时。
-- Hook 失败、超时或返回非 0 exit code，不会阻断 agent 主流程。
+- Hook 失败、超时或返回非 0 exit code，不会阻断 agent 主流程；失败通过 `hook_execution` 审计事件与
+  `warn` 日志观测（见上）。
 - `pre_tool_use`（`tool/pre-execute`）在策略/路径/危险确认等准入检查**之前**触发——被这些门禁拒绝的调用仍会先发出 `pre_tool_use`，但不会到达 `post_tool_use`（`tool/result`）。被禁用（toggle off）的调用不会进入准入管线，两种事件都不触发。
 - `post_tool_use` 在工具结果产生后触发，因此适合做格式化、审计、通知等副作用。
+- 每次 hook 执行都会写一条审计事件 `hook_execution`（字段：`session_key`、`hook_event`、`tool_name`、
+  `success`、`timed_out`、`duration_ms`），失败同时打一条 `warn` 日志。
+  **命令、参数与输出不写入日志**（可能含密钥），只有结果与耗时。
 
 ---
 

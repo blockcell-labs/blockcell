@@ -57,7 +57,7 @@ impl Tool for ToolSearchTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "tool_search".to_string(),
-            description: "Discover authorized tools by exact name or a short Chinese/English task description. Results reveal schemas, never grant permissions. If no match, inspect the bounded catalog summary; stop after one reformulated search. Do not search for alternatives after a policy or user denial.".to_string(),
+            description: "Discover authorized tools by exact name or Chinese/English task description. Search before declaring an unexposed capability unavailable: agent (delegate), list_tasks (status/results), cancel_task (cancel), office_write (Office), data_process (data), memory_manage (durable memory). Results reveal schemas, never grant permissions. If no match, inspect the bounded catalog summary; stop after one reformulation. Never search to bypass a policy/user denial.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -114,6 +114,14 @@ const TERM_ALIASES: &[(&str, &str)] = &[
     ("日程", "schedule"),
     ("日历", "calendar"),
     ("任务", "task"),
+    ("取消", "cancel"),
+    ("后台", "background"),
+    ("委派", "delegate"),
+    ("子代理", "subagent"),
+    ("记忆", "memory"),
+    ("长期", "durable"),
+    ("表格", "xlsx"),
+    ("文档", "office"),
     ("提醒", "reminder"),
     ("目录", "directory"),
     ("浏览", "browse"),

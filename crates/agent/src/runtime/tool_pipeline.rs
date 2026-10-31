@@ -360,6 +360,14 @@ impl AgentRuntime {
         {
             if let Some(object) = args.as_object_mut() {
                 if !object.contains_key("sandbox_policy") {
+                    if self.config.tools.exec.allow_unsandboxed_shell
+                        && self.config.tools.exec.sandbox_policy.is_none()
+                    {
+                        object.insert(
+                            "sandbox_policy".to_string(),
+                            serde_json::Value::String("full-access".to_string()),
+                        );
+                    }
                     if let Some(policy) = &self.config.tools.exec.sandbox_policy {
                         object.insert(
                             "sandbox_policy".to_string(),
@@ -522,6 +530,18 @@ impl AgentRuntime {
         outcome: ToolOutcome,
         result_text: &str,
     ) {
+        // tool/call denotes an attempted invocation, not permission to execute.
+        self.dispatch_event(
+            msg,
+            &persist_session_key_for(msg),
+            &mut AgentEvent::ToolCall {
+                tool_name: call.name.clone(),
+                call_id: call.id.clone(),
+                arguments: args.clone(),
+                environment: self.tool_registry.execution_environment(&call.name, args),
+            },
+        )
+        .await;
         let result = serde_json::from_str::<serde_json::Value>(result_text)
             .ok()
             .filter(serde_json::Value::is_object)
@@ -1127,7 +1147,9 @@ impl AgentRuntime {
             response_cache: Some(
                 Arc::new(self.response_cache.clone()) as blockcell_tools::ResponseCacheHandle
             ),
-            runtime_handle: self.runtime_handle.clone(),
+            runtime_handle: Some(Arc::new(
+                super::lightweight_handle::LightweightRuntimeHandle::for_invocation(self, msg),
+            )),
             agent_identity: blockcell_core::current_agent_context(),
             skill_mutex: Some(self.skill_mutex.clone()),
             agent_type_registry: Some(Arc::new(self.agent_type_registry.clone())

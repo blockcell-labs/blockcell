@@ -709,14 +709,32 @@ impl super::AgentRuntime {
                     self.cache_authorized_paths(&cacheable, &session_key);
                     Ok(())
                 }
-                Ok(Ok(false)) => Err("path access was denied by the user".to_string()),
+                // Report which paths were refused: without them the model cannot
+                // tell a real escape attempt from a heuristic false positive (for
+                // example zip member names inside an inline script) and gives up.
+                Ok(Ok(false)) => Err(denied_paths_payload(
+                    "path access was denied by the user",
+                    "PATH_ACCESS_DENIED",
+                    &confirm_paths,
+                    &self.paths.workspace(),
+                )),
                 Ok(Err(_)) => {
                     warn!("Confirmation channel closed, denying access");
-                    Err("path confirmation channel closed".to_string())
+                    Err(denied_paths_payload(
+                        "path confirmation channel closed",
+                        "PATH_CONFIRMATION_UNAVAILABLE",
+                        &confirm_paths,
+                        &self.paths.workspace(),
+                    ))
                 }
                 Err(_) => {
                     warn!("Confirmation request timed out, denying access");
-                    Err("path confirmation timed out".to_string())
+                    Err(denied_paths_payload(
+                        "path confirmation timed out",
+                        "PATH_CONFIRMATION_TIMEOUT",
+                        &confirm_paths,
+                        &self.paths.workspace(),
+                    ))
                 }
             }
         } else {
@@ -833,6 +851,30 @@ impl super::AgentRuntime {
 /// treated as a path, so the policy (deny / confirm) gets a chance to run.
 /// 例外：bare `$VAR` 只在"以路径为参数"的命令上下文中才按疑似路径处理，
 /// 避免 `git commit -m "$MSG"` 这类纯文本变量被误报为路径。
+/// Structured denial that names the refused paths.
+///
+/// The path guard is a conservative static heuristic, so a denial can also be a
+/// false positive (a literal such as `/xl/worksheets/sheet1.xml` inside an inline
+/// script). Returning the paths lets the model correct the command instead of
+/// abandoning the task.
+fn denied_paths_payload(
+    error: &str,
+    code: &str,
+    paths: &[PathAccess],
+    workspace: &std::path::Path,
+) -> String {
+    serde_json::json!({
+        "error": error,
+        "code": code,
+        "paths": paths.iter().map(|access| access.path.clone()).collect::<Vec<_>>(),
+        "scope": "invocation",
+        "tool_available": true,
+        "workspace": workspace.display().to_string(),
+        "alternative": "Only this invocation was rejected; the tool and unrelated authorized steps remain available. Keep and use files and facts already discovered. If a listed path is not a real access target (for example a zip member name, URL path or regex inside an inline script), rewrite the command without the leading slash or move that literal out of the command, then retry the same tool. Do not bypass policy or user denials.",
+    })
+    .to_string()
+}
+
 fn extract_command_paths(command: &str) -> Vec<String> {
     let (command_without_heredoc_bodies, heredoc_bodies) = split_heredoc_bodies(command);
     let path_verb_present = command_has_path_consuming_verb(&command_without_heredoc_bodies);
@@ -1393,8 +1435,9 @@ fn is_safe_relative_skill_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_mutates_cwd, extract_command_paths, extract_literal_shell_read_paths,
-        extract_path_accesses, is_safe_relative_skill_path, resolve_shell_access_path, PathAccess,
+        command_mutates_cwd, denied_paths_payload, extract_command_paths,
+        extract_literal_shell_read_paths, extract_path_accesses, is_safe_relative_skill_path,
+        resolve_shell_access_path, PathAccess,
     };
     use blockcell_core::path_policy::PathOp;
     use serde_json::json;
@@ -1533,6 +1576,31 @@ mod tests {
         ] {
             assert!(!is_safe_relative_skill_path(p), "expected `{p}` rejected");
         }
+    }
+
+    #[test]
+    fn denial_names_the_refused_paths_and_how_to_recover() {
+        // A conservative heuristic can flag literals such as zip member names
+        // (`/xl/worksheets/sheet1.xml`). The denial must list them so the model can
+        // rewrite the command instead of abandoning the task.
+        let paths = vec![PathAccess {
+            path: "/xl/worksheets/sheet1.xml".to_string(),
+            op: PathOp::Read,
+        }];
+        let payload: serde_json::Value = serde_json::from_str(&denied_paths_payload(
+            "path access was denied by the user",
+            "PATH_ACCESS_DENIED",
+            &paths,
+            std::path::Path::new("/work"),
+        ))
+        .expect("denial payload must be JSON");
+
+        assert_eq!(payload["code"], "PATH_ACCESS_DENIED");
+        assert_eq!(payload["paths"][0], "/xl/worksheets/sheet1.xml");
+        assert_eq!(payload["workspace"], "/work");
+        let alternative = payload["alternative"].as_str().unwrap();
+        assert!(alternative.contains("zip member name"), "{alternative}");
+        assert!(alternative.contains("rewrite the command"), "{alternative}");
     }
 
     #[test]

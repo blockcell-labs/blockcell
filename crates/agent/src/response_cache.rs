@@ -1,3 +1,4 @@
+use blockcell_core::types::ChatMessage;
 use blockcell_tools::ResponseCacheOps;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -155,6 +156,51 @@ impl ResponseCache {
     /// Without this guard, the LLM can hallucinate a numbered list from empty tool
     /// results (e.g. `memory_query` returning `[]`) and the stub would replace the
     /// hallucinated content with an unreadable cache reference.
+    /// Compact long, list-shaped assistant answers **in the model-facing copy of
+    /// the history only**.
+    ///
+    /// The persisted transcript keeps the answer verbatim (see
+    /// `turn_flow::finalize`), so users and later readers see what the model
+    /// actually said. Stubbing here keeps the token saving without making the
+    /// saved conversation show a cache reference.
+    ///
+    /// A message is only stubbed when its own turn contains a real tool result,
+    /// which is the same guard the previous write-time stubbing applied.
+    pub fn stub_long_answers_for_model(
+        cache: &Self,
+        session_key: &str,
+        messages: &mut [ChatMessage],
+    ) {
+        let mut turn_has_tool_results = false;
+        for message in messages.iter_mut() {
+            match message.role.as_str() {
+                "user" => turn_has_tool_results = false,
+                "tool" => {
+                    let usable = match &message.content {
+                        serde_json::Value::String(text) => {
+                            !text.is_empty() && text != "[]" && !text.starts_with("{\"error\"")
+                        }
+                        serde_json::Value::Null => false,
+                        _ => true,
+                    };
+                    turn_has_tool_results |= usable;
+                }
+                "assistant" if turn_has_tool_results => {
+                    let Some(text) = message.content.as_str() else {
+                        continue;
+                    };
+                    if text.starts_with("[已缓存") {
+                        continue;
+                    }
+                    if let Some(stub) = cache.maybe_cache_and_stub(session_key, text, true) {
+                        message.content = serde_json::Value::String(stub);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn maybe_cache_and_stub(
         &self,
         session_key: &str,

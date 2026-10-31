@@ -216,3 +216,21 @@ Blockcell 内置了可配置的**文件系统访问策略系统**，让你可以
 策略系统的优先级高于会话缓存——如果某目录后来被策略标记为 `deny`，下次会话将直接拒绝，不会被旧缓存绕过。
 
 缓存功能可通过 `cache_confirmed_dirs: false` 关闭，关闭后每次访问都会重新询问。
+
+## 拒绝时返回什么
+
+路径拒绝返回结构化 JSON，**一定会带上被拒的路径**，否则模型无法区分"真的越权"和"静态启发式误判"：
+
+```json
+{"error": "path access was denied by the user", "code": "PATH_ACCESS_DENIED",
+ "paths": ["/xl/worksheets/sheet1.xml"], "scope": "invocation",
+ "tool_available": true, "workspace": "/…/workspace", "alternative": "…"}
+```
+
+`code` 取值：`PATH_ACCESS_DENIED`（用户/策略拒绝）、`PATH_CONFIRMATION_UNAVAILABLE`（无确认渠道）、
+`PATH_CONFIRMATION_TIMEOUT`、`NEEDS_CONFIRMATION_NONINTERACTIVE`（非交互场景需确认）。
+
+路径抽取是**保守的静态启发式**：内联脚本里的 slash 开头字面量（zip 成员名 `/xl/…`、URL path、
+正则）会被当作绝对路径。遇到这种误判，`alternative` 会提示"改写命令去掉前导斜杠，或把该字面量移出
+命令"，模型据此修正即可，不必放弃任务。
+

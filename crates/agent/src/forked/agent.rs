@@ -103,6 +103,8 @@ pub struct ForkedAgentParams {
     pub cache_safe_params: CacheSafeParams,
     /// Provider 池 (必须设置)
     pub provider_pool: Option<Arc<ProviderPool>>,
+    /// Optional origin-scoped observation and shared budget for user delegation.
+    pub observation: Option<ForkObservation>,
     /// 权限检查函数
     pub can_use_tool: CanUseToolFn,
     /// 来源标识符
@@ -183,6 +185,7 @@ impl ForkedAgentParams {
     ) -> Self {
         Self {
             provider_pool: Some(provider_pool),
+            observation: None,
             prompt_messages,
             cache_safe_params,
             // Fail closed: a forked agent must be given an explicit policy (roster or
@@ -340,6 +343,7 @@ pub struct ForkedAgentParamsBuilder {
     prompt_messages: Vec<ChatMessage>,
     cache_safe_params: CacheSafeParams,
     provider_pool: Option<Arc<ProviderPool>>,
+    observation: Option<ForkObservation>,
     can_use_tool: Option<CanUseToolFn>,
     query_source: &'static str,
     fork_label: &'static str,
@@ -380,7 +384,20 @@ pub struct ForkedAgentParamsBuilder {
     color: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct ForkObservation {
+    pub paths: blockcell_core::Paths,
+    pub session_key: String,
+    pub budget: blockcell_core::BudgetTrackerHandle,
+    pub model_prices: Vec<blockcell_core::config::ModelEntry>,
+}
+
 impl ForkedAgentParamsBuilder {
+    pub fn observation(mut self, observation: ForkObservation) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
     /// 设置 provider_pool（必需）
     pub fn provider_pool(mut self, pool: Arc<ProviderPool>) -> Self {
         self.provider_pool = Some(pool);
@@ -612,6 +629,7 @@ impl ForkedAgentParamsBuilder {
             prompt_messages: self.prompt_messages,
             cache_safe_params: self.cache_safe_params,
             provider_pool: self.provider_pool,
+            observation: self.observation,
             can_use_tool,
             query_source: self.query_source,
             fork_label: self.fork_label,

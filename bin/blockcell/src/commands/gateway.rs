@@ -1557,10 +1557,13 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         set_workspace_for_listener("whatsapp", listener.account_id.as_deref());
         let whatsapp = Arc::new(WhatsAppChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
+        let listener_failure_tx = server_failure_tx.clone();
         channel_handles.push((
             listener_name,
             tokio::spawn(async move {
-                whatsapp.run_loop(shutdown_rx).await;
+                if let Err(error) = whatsapp.run_loop(shutdown_rx).await {
+                    let _ = listener_failure_tx.send(format!("Channel listener failed: {error}"));
+                }
             }),
         ));
     }
@@ -1661,10 +1664,13 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
         set_workspace_for_listener("napcat", listener.account_id.as_deref());
         let napcat = Arc::new(NapCatChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
+        let listener_failure_tx = server_failure_tx.clone();
         channel_handles.push((
             listener_name,
             tokio::spawn(async move {
-                napcat.run_loop(shutdown_rx).await;
+                if let Err(error) = napcat.run_loop(shutdown_rx).await {
+                    let _ = listener_failure_tx.send(format!("Channel listener failed: {error}"));
+                }
             }),
         ));
     }
@@ -1690,8 +1696,29 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     runtime_handles =
         supervise_critical_tasks(runtime_handles, &server_failure_tx, &shutdown_started);
     cron_handles = supervise_critical_tasks(cron_handles, &server_failure_tx, &shutdown_started);
-    channel_handles =
-        supervise_critical_tasks(channel_handles, &server_failure_tx, &shutdown_started);
+    // Channels can finish normally when disabled, unconfigured or disconnected.
+    // Keep runtime/cron early exits critical, but do not shut down the gateway
+    // merely because one optional listener returned normally.
+    channel_handles = channel_handles
+        .into_iter()
+        .map(|(name, handle)| {
+            let failure_tx = server_failure_tx.clone();
+            let shutting_down = Arc::clone(&shutdown_started);
+            let label = name.clone();
+            let monitor = tokio::spawn(async move {
+                match handle.await {
+                    Ok(()) => info!(listener = %label, "Channel listener stopped normally"),
+                    Err(error) => report_critical_task_exit(
+                        &failure_tx,
+                        &shutting_down,
+                        &label,
+                        Some(error.to_string()),
+                    ),
+                }
+            });
+            (name, monitor)
+        })
+        .collect();
 
     // ── Build HTTP/WebSocket server ──
     // Guarantee api_token is Some and non-empty — defensive fallback in case auto-gen above

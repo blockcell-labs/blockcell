@@ -437,7 +437,9 @@ pub async fn run(
             let whatsapp = Arc::new(WhatsAppChannel::new(listener.config, inbound_tx.clone()));
             let shutdown_rx = shutdown_tx.subscribe();
             channel_handles.push(tokio::spawn(async move {
-                whatsapp.run_loop(shutdown_rx).await;
+                if let Err(error) = whatsapp.run_loop(shutdown_rx).await {
+                    tracing::error!(%error, "WhatsApp listener failed");
+                }
             }));
         }
 

@@ -9,7 +9,7 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use tokio::process::Command;
 
-const APPROVAL_REQUIRED: &str = "{\"error\":\"native sandbox unavailable; approval required\",\"code\":\"SANDBOX_UNAVAILABLE\",\"alternative\":\"Do not retry shell commands. Install bubblewrap (for example: sudo apt install bubblewrap), or use the available filesystem tools.\"}";
+const APPROVAL_REQUIRED: &str = "{\"error\":\"native sandbox unavailable; approval required\",\"code\":\"SANDBOX_UNAVAILABLE\",\"alternative\":\"Only native shell isolation is unavailable; continue authorized work with filesystem tools and preserve existing results. On Linux install bubblewrap; on macOS check sandbox-exec availability and host restrictions. Full-access execution requires an explicit user-authorized tools.exec.sandboxPolicy=full-access configuration or the runtime approval flow; never downgrade automatically.\"}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -927,7 +927,8 @@ impl TaskManager {
                         task.error = Some(reason.to_string());
                         Some(task.clone())
                     }
-                    _ => None, // 已完成/已失败/已取消的任务不能再取消
+                    TaskStatus::Cancelled => return Ok(()),
+                    _ => None, // 已完成/已失败的任务不能再取消
                 }
             } else {
                 None
@@ -1421,6 +1422,17 @@ fn task_detail_json(t: &TaskInfo) -> serde_json::Value {
 
 #[async_trait]
 impl TaskManagerOps for OriginScopedTaskManager {
+    async fn cancel_task(&self, task_id: &str) -> Result<(), Error> {
+        let task = self
+            .get_owned_task(task_id)
+            .await
+            .ok_or_else(|| Error::NotFound(format!("Task not found: {}", task_id)))?;
+        if task.status == TaskStatus::Cancelled {
+            return Ok(());
+        }
+        self.inner.cancel_task(task_id).await
+    }
+
     async fn list_tasks_json(&self, status_filter: Option<String>) -> serde_json::Value {
         let filter = status_filter.and_then(|status| match status.as_str() {
             "queued" => Some(TaskStatus::Queued),
@@ -1452,12 +1464,18 @@ impl TaskManagerOps for OriginScopedTaskManager {
             .inner
             .summary_for_origin(&self.channel, &self.chat_id)
             .await;
+        let cancelled = self
+            .inner
+            .list_tasks_for_origin(&self.channel, &self.chat_id, Some(&TaskStatus::Cancelled))
+            .await
+            .len();
         json!({
             "queued": queued,
             "running": running,
             "completed": completed,
             "failed": failed,
-            "total": queued + running + completed + failed
+            "cancelled": cancelled,
+            "total": queued + running + completed + failed + cancelled
         })
     }
 
@@ -1485,6 +1503,10 @@ impl TaskManagerOps for OriginScopedTaskManager {
 
 #[async_trait]
 impl TaskManagerOps for TaskManager {
+    async fn cancel_task(&self, task_id: &str) -> Result<(), Error> {
+        TaskManager::cancel_task(self, task_id).await
+    }
+
     async fn list_tasks_json(&self, status_filter: Option<String>) -> serde_json::Value {
         let filter = status_filter.and_then(|s| match s.as_str() {
             "queued" => Some(TaskStatus::Queued),
@@ -1504,13 +1526,16 @@ impl TaskManagerOps for TaskManager {
     }
 
     async fn summary_json(&self) -> serde_json::Value {
-        let (queued, running, completed, failed) = self.summary().await;
+        let (queued, running, completed, failed_with_cancelled) = self.summary().await;
+        let cancelled = self.list_tasks(Some(&TaskStatus::Cancelled)).await.len();
+        let failed = failed_with_cancelled.saturating_sub(cancelled);
         json!({
             "queued": queued,
             "running": running,
             "completed": completed,
             "failed": failed,
-            "total": queued + running + completed + failed
+            "cancelled": cancelled,
+            "total": queued + running + completed + failed + cancelled
         })
     }
 
@@ -1652,6 +1677,53 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn origin_scoped_cancel_rejects_foreign_tasks_and_cancels_owned_ones() {
+        let manager = TaskManager::new();
+        for (id, chat_id) in [("task-owned", "chat-a"), ("task-foreign", "chat-b")] {
+            manager
+                .create_and_start_task(
+                    id,
+                    id,
+                    "cancel scope test",
+                    "ws",
+                    chat_id,
+                    None,
+                    false,
+                    None,
+                    false,
+                )
+                .await;
+        }
+        let scoped = OriginScopedTaskManager::new(manager.clone(), "ws", "chat-a");
+
+        let denied = TaskManagerOps::cancel_task(&scoped, "task-foreign").await;
+        assert!(denied.is_err(), "foreign task must not be cancellable");
+        assert_eq!(
+            manager
+                .get_task("task-foreign")
+                .await
+                .map(|task| task.status),
+            Some(TaskStatus::Running)
+        );
+
+        TaskManagerOps::cancel_task(&scoped, "task-owned")
+            .await
+            .expect("owned task should be cancellable");
+        assert_eq!(
+            manager.get_task("task-owned").await.map(|task| task.status),
+            Some(TaskStatus::Cancelled)
+        );
+
+        // Cancelling twice is idempotent rather than an error.
+        TaskManagerOps::cancel_task(&scoped, "task-owned")
+            .await
+            .expect("repeat cancel should be a no-op");
+        assert!(TaskManagerOps::cancel_task(&scoped, "task-missing")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

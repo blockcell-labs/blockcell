@@ -52,6 +52,7 @@ pub struct MemoryFileMutation {
 
 #[derive(Debug, Clone)]
 pub struct MemoryFileStore {
+    shadow: bool,
     user_path: PathBuf,
     memory_path: PathBuf,
     snapshots_dir: PathBuf,
@@ -125,7 +126,9 @@ impl MemoryFileStore {
 
     pub fn open_shadow(paths: &Paths) -> Result<Self> {
         let root = paths.memory_dir().join("shadow");
-        Self::open_at(root.join("USER.md"), root.join("MEMORY.md"), root)
+        let mut store = Self::open_at(root.join("USER.md"), root.join("MEMORY.md"), root)?;
+        store.shadow = true;
+        Ok(store)
     }
 
     pub fn open_shadow_for_session(paths: &Paths, session_key: &str) -> Result<Self> {
@@ -134,7 +137,9 @@ impl MemoryFileStore {
             .join("shadow")
             .join("sessions")
             .join(blockcell_core::stable_hash_session_key(session_key));
-        Self::open_at(root.join("USER.md"), root.join("MEMORY.md"), root)
+        let mut store = Self::open_at(root.join("USER.md"), root.join("MEMORY.md"), root)?;
+        store.shadow = true;
+        Ok(store)
     }
 
     fn open_at(user_path: PathBuf, memory_path: PathBuf, state_dir: PathBuf) -> Result<Self> {
@@ -142,6 +147,7 @@ impl MemoryFileStore {
         let snapshots_dir = state_dir.join(".snapshots");
         fs::create_dir_all(&snapshots_dir)?;
         Ok(Self {
+            shadow: false,
             user_path,
             memory_path,
             snapshots_dir,
@@ -432,11 +438,29 @@ impl MemoryFileStore {
     }
 }
 
+impl MemoryFileStore {
+    fn mutation_json(&self, mutation: MemoryFileMutation) -> Value {
+        let target = mutation.target;
+        let mut result = mutation_json(mutation);
+        result["shadow"] = json!(self.shadow);
+        result["canonical"] = json!(!self.shadow);
+        result["path"] = json!(match target {
+            MemoryFileTarget::User => &self.user_path,
+            MemoryFileTarget::Memory => &self.memory_path,
+        });
+        if self.shadow {
+            result["message"] =
+                json!("Saved to shadow memory only; canonical durable memory was not changed.");
+        }
+        result
+    }
+}
+
 impl MemoryFileStoreOps for MemoryFileStore {
     fn add_file_memory_json(&self, target: &str, content: &str) -> Result<Value> {
         let target = parse_target(target)?;
         let mutation = self.add(target, content)?;
-        Ok(mutation_json(mutation))
+        Ok(self.mutation_json(mutation))
     }
 
     fn replace_file_memory_json(
@@ -447,19 +471,19 @@ impl MemoryFileStoreOps for MemoryFileStore {
     ) -> Result<Value> {
         let target = parse_target(target)?;
         let mutation = self.replace(target, old_text, content)?;
-        Ok(mutation_json(mutation))
+        Ok(self.mutation_json(mutation))
     }
 
     fn remove_file_memory_json(&self, target: &str, old_text: &str) -> Result<Value> {
         let target = parse_target(target)?;
         let mutation = self.remove(target, old_text)?;
-        Ok(mutation_json(mutation))
+        Ok(self.mutation_json(mutation))
     }
 
     fn restore_latest_file_memory_json(&self, target: &str) -> Result<Value> {
         let target = parse_target(target)?;
         let mutation = self.restore_latest(target)?;
-        Ok(mutation_json(mutation))
+        Ok(self.mutation_json(mutation))
     }
 }
 
@@ -634,6 +658,54 @@ mod tests {
             name,
             Uuid::new_v4()
         )))
+    }
+
+    #[test]
+    fn canonical_store_reports_canonical_target_path() {
+        let paths = test_paths("canonical-report");
+        let store = MemoryFileStore::open(&paths).unwrap();
+
+        let result = MemoryFileStoreOps::add_file_memory_json(
+            &store,
+            "memory",
+            "Rust 2021 edition is used for this project.",
+        )
+        .unwrap();
+
+        assert_eq!(result["shadow"], false);
+        assert_eq!(result["canonical"], true);
+        assert_eq!(
+            result["path"].as_str(),
+            Some(paths.memory_md().to_string_lossy().as_ref())
+        );
+        assert!(paths.memory_md().exists());
+    }
+
+    #[test]
+    fn shadow_store_marks_the_write_and_leaves_canonical_untouched() {
+        // Regression: a shadow write used to be reported as a plain success, so
+        // "remember this" silently never reached canonical memory.
+        let paths = test_paths("shadow-report");
+        let shadow = MemoryFileStore::open_shadow(&paths).unwrap();
+
+        let result = MemoryFileStoreOps::add_file_memory_json(
+            &shadow,
+            "memory",
+            "Rust 2021 edition is used for this project.",
+        )
+        .unwrap();
+
+        assert_eq!(result["shadow"], true);
+        assert_eq!(result["canonical"], false);
+        assert!(result["path"].as_str().unwrap().contains("/shadow/"));
+        assert!(result["message"]
+            .as_str()
+            .unwrap()
+            .contains("canonical durable memory was not changed"));
+        assert!(
+            !paths.memory_md().exists(),
+            "shadow writes must not create canonical memory"
+        );
     }
 
     #[test]

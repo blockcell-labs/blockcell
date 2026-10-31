@@ -87,11 +87,15 @@ fn default_version() -> u32 {
 #[derive(Debug, Clone, Default)]
 pub struct HookManager {
     hooks: Vec<HookConfig>,
+    audit_paths: Option<blockcell_core::Paths>,
 }
 
 impl HookManager {
     pub fn new(hooks: Vec<HookConfig>) -> Self {
-        Self { hooks }
+        Self {
+            hooks,
+            audit_paths: None,
+        }
     }
 
     pub fn load(config_file: &Path) -> Self {
@@ -105,6 +109,7 @@ impl HookManager {
                     info!(hooks = config.hooks.len(), "Loaded hook configuration");
                     Self {
                         hooks: config.hooks,
+                        audit_paths: None,
                     }
                 }
                 Err(error) => {
@@ -117,6 +122,11 @@ impl HookManager {
                 Self::default()
             }
         }
+    }
+
+    pub fn with_audit_paths(mut self, paths: blockcell_core::Paths) -> Self {
+        self.audit_paths = Some(paths);
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -142,7 +152,41 @@ impl HookManager {
         let mut results = Vec::new();
         for hook in &self.hooks {
             if self.matches(hook, ctx) {
-                results.push(self.execute(hook, ctx).await);
+                let started = std::time::Instant::now();
+                let result = self.execute(hook, ctx).await;
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let timed_out = result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("Hook timed out"));
+                if !result.success {
+                    // Never log commands, arguments or output: all may contain secrets.
+                    warn!(event = hook.event.as_str(), session_id = %ctx.session_id,
+                        tool = ?ctx.tool_name, duration_ms, timed_out, "Hook execution failed");
+                }
+                if let Some(paths) = self.audit_paths.as_ref() {
+                    let paths = paths.clone();
+                    let session_key = ctx.session_id.clone();
+                    let event = blockcell_storage::AuditEvent::HookExecution {
+                        session_key: session_key.clone(),
+                        hook_event: hook.event.as_str().to_string(),
+                        tool_name: ctx.tool_name.clone(),
+                        success: result.success,
+                        timed_out,
+                        duration_ms,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    };
+                    match tokio::task::spawn_blocking(move || {
+                        blockcell_storage::AuditLogger::new(paths)
+                            .log_observed_event(&session_key, event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        outcome => warn!(?outcome, "Hook audit write failed"),
+                    }
+                }
+                results.push(result);
             }
         }
         results
@@ -584,6 +628,43 @@ hooks:
                 "post_tool_use:exec",
                 "agent_stop:"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_hook_is_audited_without_logging_its_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = blockcell_core::Paths::with_base(dir.path().join("base"));
+        std::fs::create_dir_all(paths.audit_dir()).expect("audit dir");
+        let manager = HookManager::new(vec![HookConfig {
+            event: HookEvent::PreToolUse,
+            command: "printf 'secret-token'; exit 3".to_string(),
+            matcher: None,
+            timeout: 5.0,
+        }])
+        .with_audit_paths(paths.clone());
+
+        let results = manager
+            .fire(&HookContext {
+                event: HookEvent::PreToolUse,
+                tool_name: Some("exec".to_string()),
+                session_id: "ws:hook-audit".to_string(),
+                ..HookContext::default()
+            })
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let log = paths.audit_dir().join(format!("{date}.jsonl"));
+        let content = std::fs::read_to_string(&log).expect("hook audit file");
+        assert!(content.contains("\"type\":\"hook_execution\""), "{content}");
+        assert!(content.contains("\"success\":false"), "{content}");
+        assert!(content.contains("ws:hook-audit"), "{content}");
+        assert!(
+            !content.contains("secret-token"),
+            "hook stdout/stderr must not reach the audit log: {content}"
         );
     }
 

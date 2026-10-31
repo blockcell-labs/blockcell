@@ -415,3 +415,28 @@ blockcell 的工具系统是它的核心竞争力：
 `requires_confirmation` 表示本次调用必须获得明确确认。例如 full-access 的 `shell` 每次调用都需要确认；`exec` 的危险命令由命令检查流程确认。确认绑定工具及完整参数，修改参数后需要重新确认。没有有效确认渠道且未取得精确确认时，调用被拒绝。
 
 `shell` 首次调用不带 `session_id`，可指定 `sandbox_policy`；后续复用返回的 `session_id` 可保留 cwd、环境变量和虚拟环境。会话创建时固定策略，复用时显式传入不同策略会在执行前报校验错误；省略策略时使用会话快照，确认检查也读取同一快照。切换到 full-access 需要新建会话；当前自动提权重试不会继承旧会话的 cwd/env，调用方需要显式重建所需状态。
+
+### 沙箱不可用时的行为（fail closed）
+
+`exec` / `shell` 的沙箱策略按 `tools.exec.sandboxPolicy` → `tools.exec.restrictToWorkspace` → 全权限的顺序解析。
+当宿主缺少原生沙箱后端（Linux 无 bubblewrap、macOS 的 `sandbox-exec` 被拒）时，WorkspaceWrite 会解析为
+"需要批准"，非交互渠道下调用直接返回 `SANDBOX_UNAVAILABLE`，**不会自动降级为无沙箱执行**。
+
+确实需要无沙箱执行时必须显式选择其一：
+
+```json5
+{ tools: { exec: { sandboxPolicy: "full-access" } } }        // 显式策略
+{ tools: { exec: { allowUnsandboxedShell: true } } }          // 显式开关（不写死策略）
+```
+
+两者都不会绕过工具策略、路径策略与危险命令检查。`blockcell doctor` 会报告当前生效的 shell 策略，
+沙箱不可用时给出告警而不是静默降级。
+
+### 任务查询与取消
+
+- `list_tasks` — 列出当前会话可见的后台任务（`queued`/`running`/`completed`/`failed`/`cancelled`）。
+- `cancel_task` — 取消当前会话拥有的排队中/运行中任务；先校验归属，跨会话任务返回 `Task not found`。
+  重复取消是幂等的。取消走标准准入管线，因此同样受 Tool Policy 与审计约束。
+
+`cancel_task` 属于核心工具（`GLOBAL_CORE_TOOL_NAMES`），但初始 schema 可能只下发一部分工具；
+若模型看不到它，先用 `tool_search` 发现（搜索"取消/cancel"）。

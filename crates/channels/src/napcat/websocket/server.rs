@@ -136,7 +136,10 @@ impl NapCatWsServer {
     }
 
     /// Run the WebSocket server.
-    pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
+    pub async fn run(
+        self: Arc<Self>,
+        mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<()> {
         let napcat = &self.config.channels.napcat;
         let host = &napcat.server_host;
         let port = napcat.server_port;
@@ -145,7 +148,7 @@ impl NapCatWsServer {
 
         if let Err(e) = validate_server_auth(host, access_token) {
             error!(error = %e, host = %host, "Refusing unsafe NapCat WebSocket server configuration");
-            return;
+            return Err(e);
         }
 
         let bind_addr = format!("{}:{}", host, port);
@@ -165,7 +168,7 @@ impl NapCatWsServer {
             Ok(l) => l,
             Err(e) => {
                 error!("Failed to bind to {}: {}", bind_addr, e);
-                return;
+                return Err(e.into());
             }
         };
 
@@ -379,6 +382,7 @@ impl NapCatWsServer {
                 }
             }
         }
+        Ok(())
     }
 
     /// Handle a single WebSocket connection.

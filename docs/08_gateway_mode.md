@@ -473,3 +473,12 @@ Gateway 模式让 blockcell 从一个命令行工具变成了一个完整的 AI 
 
 *项目地址：https://github.com/blockcell-labs/blockcell*
 *官网：https://blockcell.dev*
+
+## 长回答的上下文压缩不改变会话记录
+
+模型答出长列表（≥5 项且超过阈值）时，响应缓存会把**发给模型的那份历史**压缩成
+`[已缓存N条结果，ID: ref:…]` 引用，供后续轮次用 `session_recall` 取回原文。
+
+压缩只作用于"构造模型请求"这一步：**持久化的会话记录保留完整答复**，
+`GET /v1/sessions/:id` 和 WebUI 重新打开对话看到的仍是模型实际输出的内容。
+

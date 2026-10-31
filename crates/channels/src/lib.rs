@@ -1,3 +1,11 @@
+/// A benign reason for a listener to stop. Operational failures return Err.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerExit {
+    Disabled,
+    NotConfigured,
+    Shutdown,
+}
+
 pub mod account;
 pub mod manager;
 pub mod rate_limit;

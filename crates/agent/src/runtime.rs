@@ -3040,7 +3040,8 @@ impl AgentRuntime {
         let path_policy = load_path_policy(&config, &paths);
         let tool_policy = ToolPolicy::load(&paths.base.join("tool_policy.yaml"));
         let event_bus = EventBus::new();
-        let hook_manager = HookManager::load(&paths.base.join("hooks.yaml"));
+        let hook_manager =
+            HookManager::load(&paths.base.join("hooks.yaml")).with_audit_paths(paths.clone());
         if !hook_manager.is_empty() {
             event_bus.register(Arc::new(HookAdapter::new(
                 hook_manager,

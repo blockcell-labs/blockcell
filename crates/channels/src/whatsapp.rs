@@ -96,16 +96,19 @@ impl WhatsAppChannel {
             .any(|allowed| allowed == sender || allowed == phone)
     }
 
-    pub async fn run_loop(self: Arc<Self>, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
+    pub async fn run_loop(
+        self: Arc<Self>,
+        mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<crate::ListenerExit> {
         if !self.config.channels.whatsapp.enabled {
             info!("WhatsApp channel disabled");
-            return;
+            return Ok(crate::ListenerExit::Disabled);
         }
 
         let bridge_url = &self.config.channels.whatsapp.bridge_url;
         if bridge_url.is_empty() {
             warn!("WhatsApp bridge URL not configured");
-            return;
+            return Ok(crate::ListenerExit::NotConfigured);
         }
 
         info!(bridge_url = %bridge_url, "WhatsApp channel starting");
@@ -135,6 +138,7 @@ impl WhatsAppChannel {
                 }
             }
         }
+        Ok(crate::ListenerExit::Shutdown)
     }
 
     async fn connect_and_run(&self) -> Result<()> {
