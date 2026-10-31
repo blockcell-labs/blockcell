@@ -35,12 +35,15 @@ impl NapCatChannel {
     ///
     /// This method starts the appropriate mode (ws-client or ws-server)
     /// based on the configuration.
-    pub async fn run_loop(self: Arc<Self>, shutdown: tokio::sync::broadcast::Receiver<()>) {
+    pub async fn run_loop(
+        self: Arc<Self>,
+        shutdown: tokio::sync::broadcast::Receiver<()>,
+    ) -> blockcell_core::Result<crate::ListenerExit> {
         let napcat = &self.config.channels.napcat;
 
         if !napcat.enabled {
             info!("NapCatQQ channel disabled");
-            return;
+            return Ok(crate::ListenerExit::Disabled);
         }
 
         let mode = self.get_mode();
@@ -50,7 +53,7 @@ impl NapCatChannel {
                 // "client" for backward compatibility
                 if napcat.ws_url.is_empty() {
                     warn!("NapCatQQ ws_url not configured for ws-client mode");
-                    return;
+                    return Ok(crate::ListenerExit::NotConfigured);
                 }
                 info!("NapCatQQ channel started in WebSocket client mode");
                 let client = Arc::new(NapCatWsClient::new(
@@ -69,13 +72,13 @@ impl NapCatChannel {
                     self.config.clone(),
                     self.inbound_tx.clone(),
                 ));
-                server.run(shutdown).await;
+                server.run(shutdown).await?;
             }
             _ => {
                 warn!("Unknown NapCatQQ mode: {}, defaulting to ws-client", mode);
                 if napcat.ws_url.is_empty() {
                     warn!("NapCatQQ ws_url not configured");
-                    return;
+                    return Ok(crate::ListenerExit::NotConfigured);
                 }
                 let client = Arc::new(NapCatWsClient::new(
                     self.config.clone(),
@@ -84,6 +87,7 @@ impl NapCatChannel {
                 client.run(shutdown).await;
             }
         }
+        Ok(crate::ListenerExit::Shutdown)
     }
 }
 
