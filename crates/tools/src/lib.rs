@@ -674,7 +674,18 @@ pub trait Tool: Send + Sync {
             | ExecutionEnvironment::Network => WorkspaceEffect::None,
             ExecutionEnvironment::WorkspaceWrite => WorkspaceEffect::Changed,
             ExecutionEnvironment::Shell | ExecutionEnvironment::FullAccess => {
-                WorkspaceEffect::Unknown
+                let read_only = self.command_operation(params)
+                    == crate::evidence::CommandOperation::Launch
+                    && params
+                        .get("command")
+                        .or_else(|| params.get("cmd"))
+                        .and_then(Value::as_str)
+                        .is_some_and(crate::evidence::is_plain_read_command);
+                if read_only {
+                    WorkspaceEffect::None
+                } else {
+                    WorkspaceEffect::Unknown
+                }
             }
         }
     }

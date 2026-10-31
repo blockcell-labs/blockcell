@@ -24,6 +24,32 @@ pub enum WorkspaceEffect {
     Unknown,
 }
 
+/// Conservative presentation-only classification. Never used for authorization.
+/// Shell syntax, redirection, interpreters and extensible commands stay unknown.
+pub fn is_plain_read_command(command: &str) -> bool {
+    if command.contains([
+        '\n', '\r', ';', '|', '&', '>', '<', '$', '`', '\\', '(', ')',
+    ]) {
+        return false;
+    }
+    let mut words = command.split_whitespace();
+    let Some(program) = words.next() else {
+        return false;
+    };
+    if !matches!(
+        program,
+        "cat" | "head" | "tail" | "wc" | "ls" | "pwd" | "stat" | "file"
+    ) {
+        return false;
+    }
+    // Do not assume option arguments are inert across extensible tool variants.
+    !words.any(|word| {
+        word.starts_with("--") || word.contains(['{', '}'])
+        // BSD file -C creates a compiled magic database.
+        || (program == "file" && word.starts_with('-') && word.contains('C'))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationKind {
@@ -112,4 +138,66 @@ pub fn completed_successfully(result: &Value) -> bool {
         && result
             .get("timed_out")
             .is_none_or(|timed_out| timed_out == false)
+}
+
+#[cfg(test)]
+mod read_only_command_tests {
+    use super::is_plain_read_command;
+
+    #[test]
+    fn plain_reads_are_recognised() {
+        for command in [
+            "cat notice.html",
+            "head -n 8 sales.csv",
+            "tail -n 5 report.md",
+            "wc -l sales.csv",
+            "ls -la",
+            "pwd",
+            "stat report.md",
+            "file report.md",
+        ] {
+            assert!(
+                is_plain_read_command(command),
+                "expected read-only: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_syntax_keeps_the_effect_unknown() {
+        for command in [
+            "cat a.txt | grep x",
+            "cat a.txt > b.txt",
+            "cat a.txt; rm b.txt",
+            "cat $HOME/secret",
+            "cat `whoami`",
+            "cat $(ls)",
+            "cat a.txt && rm -rf out",
+            "cat (x)",
+            "echo hi",
+            "python3 -c 'print(1)'",
+            "node -e 'process.exit(0)'",
+            "sed -i 's/a/b/' f.txt",
+        ] {
+            assert!(
+                !is_plain_read_command(command),
+                "must stay unknown: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn options_that_can_write_are_not_treated_as_reads() {
+        // Long options may map to an extensible variant; BSD `file -C` writes a
+        // compiled magic database.
+        assert!(!is_plain_read_command("wc --files0-from=list.txt"));
+        assert!(!is_plain_read_command("file -C -m magic"));
+        assert!(!is_plain_read_command("cat {file}"));
+    }
+
+    #[test]
+    fn empty_command_is_not_a_read() {
+        assert!(!is_plain_read_command(""));
+        assert!(!is_plain_read_command("   "));
+    }
 }

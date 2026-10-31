@@ -936,6 +936,7 @@ impl AgentRuntime {
             task_progress.register_contract(&contract, &self.paths.workspace());
         }
         let mut verification_gate_fired = false;
+        let mut answer_before_verification: Option<(String, usize)> = None;
         self.last_verification_command = None;
 
         // Layer 1: 消息级别预算检查
@@ -2102,11 +2103,29 @@ impl AgentRuntime {
 
                 if !verification_gate_fired && task_progress.needs_verification() {
                     verification_gate_fired = true;
+                    // Persist the full answer before a verification continuation can
+                    // replace it, fail, or get interrupted.
+                    self.dispatch_event(
+                        &msg,
+                        &persist_session_key,
+                        &mut AgentEvent::AssistantAttempt {
+                            content: response_content.clone(),
+                            tool_calls: Vec::new(),
+                            error: "Awaiting verification; not yet the delivered answer"
+                                .to_string(),
+                        },
+                    )
+                    .await;
+                    answer_before_verification =
+                        Some((response_content.clone(), task_progress.revision()));
                     current_messages.push(ChatMessage::assistant_with_reasoning(
                         &response_content,
                         response.reasoning_content.clone(),
                     ));
-                    current_messages.push(ChatMessage::user(CODING_VERIFICATION_HINT));
+                    current_messages.push(ChatMessage::user(&format!(
+                        "{} Preserve the complete task findings and deliverables in your final answer. Append verification status; revise earlier findings only if checks reveal an error or you change files again.",
+                        CODING_VERIFICATION_HINT,
+                    )));
                     continue;
                 }
 
@@ -2130,7 +2149,19 @@ impl AgentRuntime {
                         continue;
                     }
                 }
-                final_response = response_content;
+                final_response = match answer_before_verification.take() {
+                    Some((original, revision))
+                        if revision == task_progress.revision()
+                            && !task_progress.verification_failed()
+                            && !response_content.contains(&original) =>
+                    {
+                        format!(
+                            "{}\n\n---\n后续核验与更正（如与前文冲突，以此处为准）：\n{}",
+                            original, response_content
+                        )
+                    }
+                    _ => response_content,
+                };
 
                 // 保留 reasoning_content，避免 DeepSeek thinking mode 400 错误
                 history.push(ChatMessage::assistant_with_reasoning(
@@ -2141,6 +2172,18 @@ impl AgentRuntime {
             }
         }
 
+        if let Some((original, revision)) = answer_before_verification.take() {
+            if revision == task_progress.revision()
+                && !task_progress.verification_failed()
+                && !final_response.contains(&original)
+            {
+                final_response = format!(
+                    "{}\n\n---\n后续核验与更正（如与前文冲突，以此处为准）：\n{}",
+                    original, final_response
+                );
+                history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
+            }
+        }
         self.current_step = None;
 
         // ── 等待运行中的子agent任务并汇总结果 ──
