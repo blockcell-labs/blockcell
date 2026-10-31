@@ -925,7 +925,8 @@ mod tests {
             "decoded type must be named: {decoded_not_object}"
         );
 
-        let empty = json_fields_object(Some(&json!({}))).expect_err("empty object must be rejected");
+        let empty =
+            json_fields_object(Some(&json!({}))).expect_err("empty object must be rejected");
         assert!(
             empty.to_string().contains("1–32"),
             "entry count must be named: {empty}"
