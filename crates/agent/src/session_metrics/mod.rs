@@ -37,6 +37,9 @@ pub(crate) struct ProcessingMetrics {
     tool_executions: Vec<(String, u64)>,
     compression_count: u32,
     finalized: bool,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
     pub routing: routing::RoutingMetrics,
 }
 
@@ -49,6 +52,9 @@ impl ProcessingMetrics {
             tool_executions: Vec::new(),
             compression_count: 0,
             finalized: false,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
             routing: routing::RoutingMetrics::default(),
         }
     }
@@ -61,6 +67,21 @@ impl ProcessingMetrics {
     /// Record an LLM call duration.
     pub fn record_llm_call(&mut self, duration_ms: u64) {
         self.llm_calls.push(duration_ms);
+    }
+
+    /// Record token usage for one LLM call.
+    ///
+    /// `cache_read_tokens` is the part of the prompt served from the provider's
+    /// prefix cache. Without it the raw input count overstates cost by an order
+    /// of magnitude on cached workloads (实测 48 题 89% 命中), and nobody can tell
+    /// whether prefix stability is working.
+    ///
+    /// 调用方负责用 `extract_llm_usage_tokens` / `extract_llm_cache_tokens` 归一化：
+    /// provider 原始 usage 用的是 `prompt_tokens`，只有事件层才叫 `input_tokens`。
+    pub fn record_llm_usage(&mut self, input: u64, output: u64, cache_read: u64) {
+        self.input_tokens = self.input_tokens.saturating_add(input);
+        self.output_tokens = self.output_tokens.saturating_add(output);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(cache_read);
     }
 
     /// Record a tool execution duration.
@@ -90,6 +111,12 @@ impl ProcessingMetrics {
         let decision_ms = self.decision_duration_ms.unwrap_or(0);
         let llm_total_ms: u64 = self.llm_calls.iter().sum();
         let tool_total_ms: u64 = self.tool_executions.iter().map(|(_, d)| d).sum();
+        // 缓存命中率：cache_read 属于 input_tokens 的一部分，命中越高有效成本越低。
+        let cache_hit_pct = if self.input_tokens == 0 {
+            0
+        } else {
+            (self.cache_read_tokens as f64 * 100.0 / self.input_tokens as f64).round() as u64
+        };
 
         info!(
             total_ms,
@@ -99,6 +126,10 @@ impl ProcessingMetrics {
             tool_calls = self.tool_executions.len(),
             tool_total_ms,
             compressions = self.compression_count,
+            input_tokens = self.input_tokens,
+            output_tokens = self.output_tokens,
+            cache_read_tokens = self.cache_read_tokens,
+            cache_hit_pct,
             routing = ?self.routing,
             "📊 Message processing metrics"
         );
@@ -689,6 +720,21 @@ mod tests {
         assert_eq!(metrics.compression_count, 1);
         assert!(!metrics.finalized);
         assert!(metrics.total_elapsed_ms() < 1000);
+    }
+
+    #[test]
+    fn llm_usage_accumulates_and_reports_cache_hit_rate() {
+        let mut metrics = ProcessingMetrics::new();
+        metrics.record_llm_usage(8_000, 500, 6_000);
+        metrics.record_llm_usage(2_000, 100, 1_000);
+        assert_eq!(metrics.input_tokens, 10_000);
+        assert_eq!(metrics.output_tokens, 600);
+        assert_eq!(metrics.cache_read_tokens, 7_000);
+        // 7_000 / 10_000 → 70%
+        assert_eq!(
+            (metrics.cache_read_tokens as f64 * 100.0 / metrics.input_tokens as f64).round() as u64,
+            70
+        );
     }
 
     #[test]

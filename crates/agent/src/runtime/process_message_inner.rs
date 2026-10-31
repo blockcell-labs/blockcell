@@ -1138,6 +1138,14 @@ impl AgentRuntime {
                 )
                 .await;
             metrics.record_llm_call(llm_timer.elapsed_ms());
+            // 纯观测：把 token 与 prompt cache 命中记进 session_metrics。
+            // provider 原始 usage 用 prompt_tokens，只有事件层才叫 input_tokens，
+            // 所以复用 runtime 的提取函数而不是直接读字段。
+            if let Ok((response, _)) = &llm_result {
+                let (input, output) = super::extract_llm_usage_tokens(&response.usage);
+                let (cache_read, _) = super::extract_llm_cache_tokens(&response.usage);
+                metrics.record_llm_usage(input, output, cache_read);
+            }
 
             let (response, served_by) = match llm_result {
                 Ok(served) => served,
