@@ -1,7 +1,10 @@
 //! Compatibility adapters for established verification runner interfaces.
-//! Custom scripts use a typed verification annotation; names/source text are not evidence.
+//! An annotation describes intent; only recognized, status-preserving runner
+//! invocations can become completion evidence. Unknown scripts remain unverified.
 use crate::evidence::{ExecutionAnnotations, VerificationIntent, VerificationKind};
 use serde_json::Value;
+
+pub const PROHIBITED_EXECUTION_HINT: &str = "Verification is prohibited or deferred by the current task contract. Unknown commands, scripts, delegated execution and shell input are blocked. Use file tools or a simple read-only command; report changes as unverified.";
 
 fn shell_command_segments(command: &str) -> Vec<&str> {
     let mut segments = Vec::new();
@@ -166,18 +169,64 @@ fn runner_kind(segment: &str) -> Option<VerificationKind> {
     let words = strip_verification_prefixes(shell_command_words(segment));
     let command = words.first()?.as_str();
     let args = &words[1..];
+    // Non-check modes and failure-masking switches cannot produce evidence,
+    // including their --flag=value spelling. Decline conservatively even when
+    // a particular runner might ignore a flag or interpret it differently.
     if args.iter().any(|arg| {
         matches!(
-            arg.as_str(),
-            "--version" | "--help" | "-h" | "--collect-only"
+            arg.split('=').next().unwrap_or(arg),
+            "--version"
+                | "--help"
+                | "-h"
+                | "--collect-only"
+                | "--co"
+                | "--setup-only"
+                | "--notest"
+                | "--list"
+                | "--listTests"
+                | "--list-tests"
+                | "--showConfig"
+                | "--show-config"
+                | "--show-files"
+                | "--listFilesOnly"
+                | "--dry-run"
+                | "--dryRun"
+                | "--explain"
+                | "--init"
+                | "--if-present"
+                | "--watch"
+                | "--watchAll"
+                | "--watch-all"
+                | "--skip-tests"
+                | "-DskipTests"
+                | "-Dmaven.test.skip"
+                | "-Dmaven.test.failure.ignore"
+                | "--exit-zero"
+                | "--exitZero"
+                | "--suppress-nonzero-exit-code"
+                | "--ignore-scripts"
+                | "--fixtures"
+                | "--fixtures-per-test"
+                | "--listenvs"
+                | "--show"
+                | "--clean"
+                | "--exclude-task"
+                | "--just-print"
+                | "--recon"
+                | "--question"
+                | "--touch"
+                | "--ignore-errors"
+                | "--fail-never"
         )
     }) {
         return None;
     }
     let action = args.first().map(String::as_str);
     match (command, action) {
+        ("tox", _) if args.iter().any(|arg| matches!(arg.as_str(), "-l" | "-a")) => None,
         ("pytest" | "tox", _) => Some(Test),
-        ("ruff" | "mypy" | "shellcheck", _) => Some(Lint),
+        ("ruff", Some("check")) => Some(Lint),
+        ("mypy" | "shellcheck", _) => Some(Lint),
         ("tsc", _) => Some(Build),
         (python, Some("-m")) if is_python_executable(python) => match args.get(1)?.as_str() {
             "pytest" | "unittest" => Some(Test),
@@ -185,10 +234,26 @@ fn runner_kind(segment: &str) -> Option<VerificationKind> {
             "py_compile" | "compileall" => Some(Syntax),
             _ => None,
         },
+        ("cargo", Some("test")) if args.iter().any(|arg| arg == "--no-run") => Some(Build),
         ("cargo", Some("test")) => Some(Test),
-        ("cargo", Some("nextest")) if args.get(1).is_some_and(|arg| arg == "run") => Some(Test),
+        ("cargo", Some("nextest"))
+            if args.get(1).is_some_and(|arg| arg == "run")
+                && !args.iter().any(|arg| arg == "--no-run") =>
+        {
+            Some(Test)
+        }
         ("cargo", Some("check" | "build")) => Some(Build),
         ("cargo", Some("clippy")) => Some(Lint),
+        ("go", Some("test"))
+            if args
+                .iter()
+                .any(|arg| arg == "-list" || arg.starts_with("-list=")) =>
+        {
+            None
+        }
+        ("go", Some("test")) if args.iter().any(|arg| arg == "-c" || arg == "-c=true") => {
+            Some(Build)
+        }
         ("go", Some("test")) => Some(Test),
         ("go", Some("build")) => Some(Build),
         ("go", Some("vet")) => Some(Lint),
@@ -202,11 +267,29 @@ fn runner_kind(segment: &str) -> Option<VerificationKind> {
             Some("lint") => Some(Lint),
             _ => None,
         },
-        ("npx", Some("jest" | "vitest")) => Some(Test),
+        ("npx", Some("jest")) => Some(Test),
+        ("npx", Some("vitest")) if args.get(1).is_some_and(|arg| arg == "run") => Some(Test),
         ("npx", Some("tsc")) => Some(Build),
+        ("make", _)
+            if args.iter().any(|arg| {
+                arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg[1..]
+                        .chars()
+                        .any(|ch| matches!(ch, 'n' | 'q' | 't' | 'i'))
+            }) =>
+        {
+            None
+        }
         ("make", Some("test")) => Some(Test),
         ("make", Some("check" | "build")) => Some(Build),
+        ("mvn", _) if args.iter().any(|arg| arg == "-fn") => None,
         ("mvn", Some("test" | "verify")) => Some(Test),
+        ("gradle" | "./gradlew", _)
+            if args.iter().any(|arg| arg == "-m" || arg.starts_with("-x")) =>
+        {
+            None
+        }
         ("gradle" | "./gradlew", Some("test")) => Some(Test),
         ("gradle" | "./gradlew", Some("build")) => Some(Build),
         ("node", Some("--check" | "-c")) | ("bash" | "sh", Some("-n")) if args.get(1).is_some() => {
@@ -216,42 +299,113 @@ fn runner_kind(segment: &str) -> Option<VerificationKind> {
     }
 }
 
-/// Describes the intended check; callers must separately verify completion and
-/// its exit status. This function alone never proves that a check passed.
+/// Accept only simple commands joined by &&. Shell syntax is deliberately
+/// restricted: parsing arbitrary shell is not proof of preserved exit status.
+fn status_preserving_segments(command: &str) -> Option<Vec<&str>> {
+    if command.trim().is_empty() || command.contains(['$', '`', '\n', '\r', '\\']) {
+        return None;
+    }
+    let mut quote = None;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '&' if chars.next() == Some('&') => {}
+            '&' | '|' | ';' | '>' | '<' | '(' | ')' | '{' | '}' | '#' | '!' => return None,
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let segments = shell_command_segments(command);
+    if segments.iter().any(|segment| segment.trim().is_empty()) {
+        return None;
+    }
+    Some(segments)
+}
+
+/// Eligible evidence, not merely a caller's declaration. An explicit kind must
+/// agree with the runner. Unknown custom scripts cannot discharge the gate.
 pub fn command_intent(params: &Value) -> Option<VerificationIntent> {
     let annotations = ExecutionAnnotations::parse(params).ok()?;
-    if let Some(intent) = annotations.verification {
-        return Some(intent);
-    }
     let command = params
         .get("command")
         .or_else(|| params.get("cmd"))?
         .as_str()?;
-    // Do not infer a check through shell programs, redirections, pipelines,
-    // substitutions or status-masking constructs. Declare custom checks explicitly.
-    if command.contains(['|', ';', '>', '<', '$', '`', '\n', '\r']) {
-        return None;
-    }
-    if command.replace("&&", "").contains('&') {
-        return None;
-    }
-    let segments = shell_command_segments(command);
+    let segments = status_preserving_segments(command)?;
     let mut kind = None;
     for (index, segment) in segments.iter().enumerate() {
-        let words = strip_verification_prefixes(shell_command_words(segment));
+        let words = shell_command_words(segment);
         if index == 0 && segments.len() > 1 && words.first().is_some_and(|word| word == "cd") {
+            // A directory change is the only non-check prefix allowed.
+            if words.len() != 2 || words[1].starts_with('-') {
+                return None;
+            }
             continue;
         }
         let current = runner_kind(segment)?;
-        // Mixed verification kinds are represented explicitly rather than silently
-        // upgrading a build/syntax check to a test.
         if kind.is_some_and(|previous| previous != current) {
             return None;
         }
         kind = Some(current);
     }
+    let kind = kind?;
+    if let Some(intent) = annotations.verification {
+        return (intent.kind == kind).then_some(intent);
+    }
     Some(VerificationIntent {
-        kind: kind?,
+        kind,
         target: command.to_owned(),
     })
+}
+
+/// Execution restrictions are separate from successful-check evidence. Unknown
+/// commands fail closed under a forbidden/deferred contract; they are not
+/// classified as ordinary work merely because no runner was recognized.
+pub fn allowed_without_verification(params: &Value) -> bool {
+    if params.get("verification").is_some() {
+        return false;
+    }
+    let Some(command) = params
+        .get("command")
+        .or_else(|| params.get("cmd"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Some(segments) = status_preserving_segments(command) else {
+        return false;
+    };
+    segments.iter().all(|segment| {
+        // No env/timeout/interpreter wrappers, assignments or arbitrary scripts.
+        let words = shell_command_words(segment);
+        matches!(
+            words.first().map(String::as_str),
+            Some("pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "readlink")
+        )
+    })
+}
+
+/// Apply a registered task prohibition to the actual tool/arguments. Script
+/// executors and delegation fail closed even when they expose no command field.
+pub fn violates_verification_prohibition(tool: &dyn crate::Tool, params: &Value) -> bool {
+    use crate::evidence::CommandOperation;
+    if params.get("verification").is_some() {
+        return true;
+    }
+    match tool.command_operation(params) {
+        CommandOperation::Launch => {
+            !tool.supports_verification() || !allowed_without_verification(params)
+        }
+        CommandOperation::Input | CommandOperation::Opaque => true,
+        CommandOperation::Poll | CommandOperation::Close => false,
+        CommandOperation::None => false,
+    }
 }

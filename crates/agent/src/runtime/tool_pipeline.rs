@@ -3,7 +3,7 @@
 //! ```text
 //! ToolCall
 //!  → admission: Toggle → tool/pre-execute（listener 可改写参数或拒绝）
-//!               → Policy → DangerousOperation → PathAccess → FileObservation → ExplicitConfirmation
+//!               → ExecutionContract → Policy → DangerousOperation → PathAccess → FileObservation → ExplicitConfirmation
 //!  → tool/call（任一阶段拒绝则直接记录 outcome=rejected 的 tool/result）
 //!  → execute（含 shell sandbox escalation 审批与重试）
 //!  → tool/post-execute
@@ -31,6 +31,39 @@ pub(super) fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// A bounded diagnostic preview is not a complete, versioned read observation.
+fn file_observation_required(path: &Path) -> String {
+    use std::io::Read;
+    const PREVIEW_CHARS: usize = 8000;
+    const PREVIEW_BYTES: u64 = (PREVIEW_CHARS as u64) * 4;
+    let preview = std::fs::File::open(path).and_then(|file| {
+        let mut bytes = Vec::new();
+        file.take(PREVIEW_BYTES + 1).read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut chars = text.chars();
+        let content: String = chars.by_ref().take(PREVIEW_CHARS).collect();
+        let truncated = chars.next().is_some() || bytes.len() as u64 > PREVIEW_BYTES;
+        Ok((content, truncated))
+    });
+    let mut error = serde_json::json!({
+        "error": format!(
+            "FS_NOT_OBSERVED: {} has no recorded read observation. Call read_file on this path, inspect the content, then retry. A diagnostic preview does not satisfy the read requirement.",
+            path.display()
+        ),
+        "code": "FS_NOT_OBSERVED",
+        "next_action": "read_file",
+        "path": path.to_string_lossy(),
+    });
+    match preview {
+        Ok((content, truncated)) => {
+            error["current_content"] = serde_json::json!(content);
+            error["current_content_truncated"] = serde_json::json!(truncated);
+        }
+        Err(read_error) => error["preview_error"] = serde_json::json!(read_error.to_string()),
+    }
+    error.to_string()
 }
 
 fn canonicalize_shell_tool_call(call: &ToolCallRequest) -> ToolCallRequest {
@@ -80,6 +113,7 @@ pub(crate) struct ToolInvocation<'a> {
     /// 危险命令批准只证明"用户同意这条命令"，作用域限于本次调用——可以跳过
     /// 后续确认弹窗，但不能把 Confirm 级路径写入会话级授权缓存。
     pub(crate) dangerous_confirmed: bool,
+    verification_policy: Option<blockcell_core::task_contract::VerificationPolicy>,
 }
 
 /// 工具实际执行后的返回内容。
@@ -104,6 +138,7 @@ type GuardResult = std::result::Result<(), String>;
 enum AdmissionStage {
     Toggle,
     PreExecute,
+    ExecutionContract,
     Policy,
     DangerousOperation,
     PathAccess,
@@ -114,9 +149,10 @@ enum AdmissionStage {
 }
 
 /// pre-execute 必须先于所有安全检查，确保检查的是 listener 改写后的最终参数。
-const ADMISSION_STAGES: [AdmissionStage; 7] = [
+const ADMISSION_STAGES: [AdmissionStage; 8] = [
     AdmissionStage::Toggle,
     AdmissionStage::PreExecute,
+    AdmissionStage::ExecutionContract,
     AdmissionStage::Policy,
     AdmissionStage::DangerousOperation,
     AdmissionStage::PathAccess,
@@ -253,7 +289,19 @@ impl AgentRuntime {
         prefetched: Option<super::prefetch::PrefetchedToolResult>,
     ) -> ToolCallOutput {
         // 管线 future 较大，放到堆上避免把调用方（主循环）的 future 撑大导致栈溢出。
-        Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir, prefetched)).await
+        Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir, prefetched, None)).await
+    }
+
+    pub(crate) async fn execute_tool_call_with_verification_policy(
+        &mut self,
+        tool_call: &ToolCallRequest,
+        msg: &InboundMessage,
+        active_skill_dir: Option<PathBuf>,
+        prefetched: Option<super::prefetch::PrefetchedToolResult>,
+        policy: blockcell_core::task_contract::VerificationPolicy,
+    ) -> ToolCallOutput {
+        Box::pin(self.run_tool_pipeline(tool_call, msg, active_skill_dir, prefetched, Some(policy)))
+            .await
     }
 
     async fn run_tool_pipeline(
@@ -262,6 +310,7 @@ impl AgentRuntime {
         msg: &InboundMessage,
         active_skill_dir: Option<PathBuf>,
         prefetched: Option<super::prefetch::PrefetchedToolResult>,
+        verification_policy: Option<blockcell_core::task_contract::VerificationPolicy>,
     ) -> ToolCallOutput {
         let original_name = tool_call.name.clone();
         if !self.tool_within_capability(&original_name, &tool_call.arguments) {
@@ -327,21 +376,11 @@ impl AgentRuntime {
             args,
             policy_confirmed: false,
             dangerous_confirmed: false,
+            verification_policy,
         };
         if let Err(denied) = self.admit_tool_call(&mut inv, pre_execute_done).await {
             self.record_rejected_tool_call(&inv, &denied).await;
             return ToolCallOutput::rejected(denied);
-        }
-        if self
-            .tool_registry
-            .get(&inv.call.name)
-            .is_some_and(|tool| tool.accepts_execution_annotations())
-        {
-            if let Err(error) = blockcell_tools::evidence::ExecutionAnnotations::parse(&inv.args) {
-                let denied = error.to_string();
-                self.record_rejected_tool_call(&inv, &denied).await;
-                return ToolCallOutput::rejected(denied);
-            }
         }
         self.dispatch_event(
             msg,
@@ -414,12 +453,43 @@ impl AgentRuntime {
             match stage {
                 AdmissionStage::Toggle => self.guard_disabled_toggles(inv),
                 AdmissionStage::PreExecute => self.dispatch_tool_pre_execute(inv).await,
+                AdmissionStage::ExecutionContract => self.guard_execution_contract(inv),
                 AdmissionStage::Policy => self.guard_tool_policy(inv).await,
                 AdmissionStage::DangerousOperation => self.guard_dangerous_operation(inv).await,
                 AdmissionStage::PathAccess => self.guard_path_access(inv).await,
                 AdmissionStage::FileObservation => self.guard_file_observation(inv),
                 AdmissionStage::ExplicitConfirmation => self.guard_explicit_confirmation(inv).await,
             }?;
+        }
+        Ok(())
+    }
+
+    fn guard_execution_contract(&self, inv: &ToolInvocation<'_>) -> GuardResult {
+        let Some(tool) = self.tool_registry.get(&inv.call.name) else {
+            return Ok(());
+        };
+        let annotations = if tool.accepts_execution_annotations() {
+            blockcell_tools::evidence::ExecutionAnnotations::parse(&inv.args)
+                .map_err(|error| error.to_string())?
+        } else {
+            blockcell_tools::evidence::ExecutionAnnotations::default()
+        };
+        // Run immediately after PreExecute, before approvals or any file reads.
+        // A listener may strengthen a contract but cannot erase a turn policy.
+        let forbidden = inv
+            .verification_policy
+            .is_some_and(|policy| !policy.permits_execution())
+            || annotations
+                .task_contract
+                .as_ref()
+                .is_some_and(|contract| !contract.verification.permits_execution());
+        if forbidden
+            && blockcell_tools::verification::violates_verification_prohibition(
+                tool.as_ref(),
+                &inv.args,
+            )
+        {
+            return Err(blockcell_tools::verification::PROHIBITED_EXECUTION_HINT.into());
         }
         Ok(())
     }
@@ -712,49 +782,9 @@ impl AgentRuntime {
                 if edit_old_texts_match_uniquely(&content, &inv.args) {
                     return Ok(());
                 }
-                let content: String = content.chars().take(8000).collect();
-                Err(serde_json::json!({
-                    "error": format!(
-                        "FS_NOT_OBSERVED: current contents of {} follow; retry the edit using this content:\n{}",
-                        path.display(),
-                        content
-                    ),
-                    "code": "FS_NOT_OBSERVED",
-                    "current_content": content
-                })
-                .to_string())
+                Err(file_observation_required(&path))
             }
-            None => {
-                // 与 edit_file 的 None 分支保持一致：拒绝时把当前内容一并回传。
-                // 否则模型必须多花一步 read_file 才能重试，而这一步在慢链路上很贵。
-                let content = path.is_file().then(|| {
-                    std::fs::read_to_string(&path)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(8000)
-                        .collect::<String>()
-                });
-                match content {
-                    Some(content) => Err(serde_json::json!({
-                        "error": format!(
-                            "FS_NOT_OBSERVED: current contents of {} follow; retry the write using this content (use read_file if you need the untruncated file):\n{}",
-                            path.display(),
-                            content
-                        ),
-                        "code": "FS_NOT_OBSERVED",
-                        "current_content": content
-                    })
-                    .to_string()),
-                    None => Err(serde_json::json!({
-                        "error": format!(
-                            "FS_NOT_OBSERVED: {} has not been read in this session — read_file it, then retry",
-                            path.display()
-                        ),
-                        "code": "FS_NOT_OBSERVED"
-                    })
-                    .to_string()),
-                }
-            }
+            None => Err(file_observation_required(&path)),
             Some(observed)
                 if current.as_ref().ok().and_then(|version| *version) != Some(observed) =>
             {

@@ -223,6 +223,13 @@ impl AgentRuntime {
         tool_names: &[String],
         active_skill_dir: Option<PathBuf>,
     ) -> Result<PromptSkillLoopOutput> {
+        let mut task_progress = super::task_progress::TaskProgress::default();
+        if let Some(value) = msg.metadata.get("task_contract") {
+            let contract: blockcell_core::task_contract::TaskContract =
+                serde_json::from_value(value.clone())?;
+            contract.validate()?;
+            task_progress.register_contract(&contract, &self.paths.workspace());
+        }
         let session_id = persist_session_key_for(msg);
         let allowed_tool_names = tool_names.iter().cloned().collect::<HashSet<_>>();
         let mut loop_guard = ToolLoopGuard::new(
@@ -284,6 +291,19 @@ impl AgentRuntime {
             trace_messages.push(assistant_tool_call);
 
             for tool_call in response.tool_calls {
+                if self
+                    .tool_registry
+                    .get(&tool_call.name)
+                    .is_some_and(|tool| tool.accepts_execution_annotations())
+                {
+                    if let Ok(annotations) =
+                        blockcell_tools::evidence::ExecutionAnnotations::parse(&tool_call.arguments)
+                    {
+                        if let Some(contract) = annotations.task_contract {
+                            task_progress.register_contract(&contract, &self.paths.workspace());
+                        }
+                    }
+                }
                 let tool_output =
                     if crate::prompt_skill_executor::PromptSkillExecutor::is_tool_allowed(
                         &tool_call.name,
@@ -291,8 +311,14 @@ impl AgentRuntime {
                     ) {
                         match loop_guard.admit(&tool_call.name) {
                             Ok(()) => {
-                                self.execute_tool_call(&tool_call, msg, active_skill_dir.clone())
-                                    .await
+                                self.execute_tool_call_with_verification_policy(
+                                    &tool_call,
+                                    msg,
+                                    active_skill_dir.clone(),
+                                    None,
+                                    task_progress.contract.verification,
+                                )
+                                .await
                             }
                             Err(denied) => {
                                 over_iteration = true;
@@ -325,6 +351,9 @@ impl AgentRuntime {
                         .await;
                         ToolCallOutput::rejected(denied)
                     };
+                if let Some(contract) = &tool_output.evidence.annotations.task_contract {
+                    task_progress.register_contract(contract, &self.paths.workspace());
+                }
                 tool_outcomes.push((tool_call.name.clone(), format!("{:?}", tool_output.outcome)));
                 if loop_guard.record(&tool_call, tool_call_failed(&tool_output)) {
                     over_iteration = true;
@@ -364,6 +393,7 @@ impl AgentRuntime {
 
         let final_response = strip_fake_tool_calls(final_response.trim());
         Ok(PromptSkillLoopOutput {
+            task_contract: task_progress.contract_for_continuation(&self.paths.workspace()),
             tool_outcomes,
             final_response: final_response.trim().to_string(),
             trace_messages,

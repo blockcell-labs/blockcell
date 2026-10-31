@@ -113,6 +113,9 @@ fn normalize_rhai_result(
 
 #[async_trait]
 impl Tool for ExecSkillScriptTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Opaque
+    }
     /// Rhai 脚本在进程内运行、原生脚本直接拉起进程，均不经沙箱 → 如实声明 `FullAccess`。
     /// 脚本路径已限制在技能目录内，故不需要逐次确认。
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {

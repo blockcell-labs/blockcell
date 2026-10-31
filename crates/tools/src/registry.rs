@@ -660,7 +660,7 @@ impl ToolRegistry {
             self.get(name)
                 .is_some_and(|tool| tool.accepts_execution_annotations())
         }) {
-            rules.push(("execution_annotations".into(), "- **Task requirements and evidence**: When the user names required output files or constrains verification, record those requirements with `task_contract` on your first execution/write call or `update_plan`. Record only explicit requirements; current user instructions take precedence. Never run tests/builds/checks that the user prohibits or defers. When executing a check, set `verification` with its kind and target, preserve failure exit status, and report exactly what was checked; a declaration alone does not establish correctness.".into()));
+            rules.push(("execution_annotations".into(), "- **Task requirements and evidence**: When the user names required output files or constrains verification, record those requirements with `task_contract` on your first execution/write call or `update_plan`. Record only explicit requirements; current user instructions take precedence. Never run tests/builds/checks that the user prohibits or defers. When executing a check, set `verification` with its kind and target, preserve failure exit status, and report exactly what was checked; the kind must match the recognized runner. A declaration alone or an unknown custom script does not establish verification evidence. Under a forbidden/deferred contract, use file tools or simple read-only commands; do not switch to scripts, shell input or delegated agents.".into()));
         }
         rules.sort_by(|a, b| a.0.cmp(&b.0));
         rules.into_iter().map(|(_, rule)| rule).collect()

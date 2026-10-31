@@ -1,11 +1,14 @@
 //! Turn-scoped completion evidence. No natural-language requirements are inferred here.
 use blockcell_core::task_contract::{TaskContract, VerificationPolicy};
-use blockcell_tools::evidence::{ExecutionAnnotations, VerificationIntent, WorkspaceEffect};
+use blockcell_tools::evidence::{
+    CommandOperation, ExecutionAnnotations, VerificationIntent, WorkspaceEffect,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolEvidence {
+    pub operation: CommandOperation,
     pub annotations: ExecutionAnnotations,
     pub effect: WorkspaceEffect,
     pub command: Option<String>,
@@ -17,6 +20,7 @@ pub(crate) struct ToolEvidence {
 impl Default for ToolEvidence {
     fn default() -> Self {
         Self {
+            operation: CommandOperation::None,
             annotations: ExecutionAnnotations::default(),
             effect: WorkspaceEffect::None,
             command: None,
@@ -41,17 +45,27 @@ impl ToolEvidence {
         } else {
             ExecutionAnnotations::default()
         };
-        if tool.supports_verification() && annotations.verification.is_none() {
-            annotations.verification = blockcell_tools::verification::command_intent(args);
-        }
+        let operation = tool.command_operation(args);
+        // Keep task requirements, but never turn an unchecked declaration into
+        // successful verification evidence. Poll/input arguments are not launches.
+        annotations.verification =
+            if operation == CommandOperation::Launch && tool.supports_verification() {
+                blockcell_tools::verification::command_intent(args)
+            } else {
+                None
+            };
         Self {
+            operation,
             annotations,
             effect: tool.workspace_effect(args),
-            command: args
-                .get("command")
-                .or_else(|| args.get("cmd"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            command: (operation == CommandOperation::Launch)
+                .then(|| {
+                    args.get("command")
+                        .or_else(|| args.get("cmd"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten(),
             process,
             running: result["running"] == true || result["status"] == "running",
             completed: blockcell_tools::evidence::completed_successfully(result),
@@ -196,22 +210,44 @@ impl TaskProgress {
             .verification
             .clone()
             .zip(evidence.command.clone());
+        if matches!(
+            evidence.operation,
+            CommandOperation::Input | CommandOperation::Close
+        ) {
+            if let Some(process) = &evidence.process {
+                self.pending.remove(process);
+            }
+            // Input can change command behavior; closing never proves success.
+            return;
+        }
         if evidence.running {
             if let Some(process) = &evidence.process {
-                if let Some((intent, command)) = verification {
-                    self.pending
-                        .insert(process.clone(), (intent, command, self.revision));
-                } else if evidence.command.is_some() {
+                if evidence.operation == CommandOperation::Launch {
                     self.pending.remove(process);
+                    if succeeded {
+                        if let Some((intent, command)) = verification {
+                            self.pending
+                                .insert(process.clone(), (intent, command, self.revision));
+                        }
+                    }
                 }
             }
             return;
         }
         // 轮询只能兑现"当初真正执行过"的那条命令：参数里临时声明的验证不算数，
         // 否则一次 poll 就能凭自己带的一段文本把自己标成"验证过"。
-        let verification = match &evidence.process {
-            Some(process) => self.pending.remove(process),
-            None => verification.map(|(intent, command)| (intent, command, self.revision)),
+        let verification = match evidence.operation {
+            CommandOperation::Launch => {
+                if let Some(process) = &evidence.process {
+                    self.pending.remove(process);
+                }
+                verification.map(|(intent, command)| (intent, command, self.revision))
+            }
+            CommandOperation::Poll => evidence
+                .process
+                .as_ref()
+                .and_then(|process| self.pending.remove(process)),
+            _ => None,
         };
         if succeeded && evidence.completed && self.contract.verification.permits_execution() {
             if let Some((intent, command, revision)) =

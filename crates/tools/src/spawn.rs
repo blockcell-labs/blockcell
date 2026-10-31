@@ -8,6 +8,9 @@ pub struct SpawnTool;
 
 #[async_trait]
 impl Tool for SpawnTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Opaque
+    }
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "spawn".to_string(),

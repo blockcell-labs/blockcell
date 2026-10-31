@@ -480,8 +480,8 @@ pub struct JobOutputTool;
 
 #[async_trait]
 impl Tool for JobOutputTool {
-    fn supports_verification(&self) -> bool {
-        true
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Poll
     }
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
         crate::base_packs::CodingExposure::full()
@@ -536,6 +536,9 @@ pub struct JobKillTool;
 
 #[async_trait]
 impl Tool for JobKillTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Close
+    }
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
         crate::base_packs::CodingExposure::full()
     }

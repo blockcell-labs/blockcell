@@ -3,6 +3,19 @@ use blockcell_core::{task_contract::TaskContract, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Execution lifecycle is supplied by the tool, never inferred from caller fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommandOperation {
+    #[default]
+    None,
+    Launch,
+    Poll,
+    Input,
+    Close,
+    /// Scripts or delegation whose verification behavior is not inspectable.
+    Opaque,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WorkspaceEffect {
     None,
@@ -90,7 +103,7 @@ pub fn add_annotation_schema(parameters: &mut Value, supports_verification: bool
     if !supports_verification {
         return;
     }
-    properties.insert("verification".into(), json!({"type":"object","description":"Set only when this command actually verifies the named target. Use a command whose exit status preserves check failures; a declaration alone is not proof. Omit when not verifying. Never execute verification forbidden/deferred by the user.","properties":{"kind":{"type":"string","enum":["test","build","lint","syntax","artifact"]},"target":{"type":"string"}},"required":["kind","target"],"additionalProperties":false}));
+    properties.insert("verification".into(), json!({"type":"object","description":"Set only when this command actually verifies the named target. Use a recognized test/build/lint/syntax runner whose exit status preserves check failures. The kind must match the runner. A declaration alone, an unknown custom script, or a status-masking command does not establish verification evidence. Omit when not verifying. Never execute verification forbidden/deferred by the user.","properties":{"kind":{"type":"string","enum":["test","build","lint","syntax","artifact"]},"target":{"type":"string"}},"required":["kind","target"],"additionalProperties":false}));
 }
 
 pub fn completed_successfully(result: &Value) -> bool {

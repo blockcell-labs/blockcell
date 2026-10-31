@@ -32,7 +32,15 @@ impl AgentRuntime {
             .unwrap_or(false);
         let mut session_metadata = self.session_store.load_metadata(session_key)?;
         let mut task_context = crate::task_context::TaskContext::from_metadata(&session_metadata);
-        task_context.observe_user(&msg.content);
+        let continuing = task_context.observe_user(&msg.content);
+        let mut skill_msg = msg.clone();
+        if let Some(contract) = msg.metadata.get("task_contract").or_else(|| {
+            continuing
+                .then(|| session_metadata.get("runtime_task_contract"))
+                .flatten()
+        }) {
+            skill_msg.metadata["task_contract"] = contract.clone();
+        }
         // 先异步预取项目环境探测（git 子进程），避免同步构建阻塞 executor
         self.context_builder
             .prefetch_project_environment(session_key)
@@ -80,7 +88,7 @@ impl AgentRuntime {
 
         let prompt_result = self
             .run_prompt_skill_loop(
-                msg,
+                &skill_msg,
                 messages,
                 tools,
                 tool_names,
@@ -90,6 +98,9 @@ impl AgentRuntime {
                     .map(|skill| skill.path.clone()),
             )
             .await?;
+
+        session_metadata["runtime_task_contract"] =
+            serde_json::to_value(&prompt_result.task_contract)?;
 
         for (name, outcome) in &prompt_result.tool_outcomes {
             task_context.record_tool(name, outcome);

@@ -1124,6 +1124,20 @@ pub(crate) fn insert_session_policy_for_test(session_id: &str, policy: SandboxPo
 
 #[async_trait]
 impl Tool for ShellTool {
+    fn command_operation(&self, params: &Value) -> crate::evidence::CommandOperation {
+        use crate::evidence::CommandOperation;
+        match params
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("run")
+        {
+            "run" => CommandOperation::Launch,
+            "poll" => CommandOperation::Poll,
+            "write_stdin" => CommandOperation::Input,
+            "close" => CommandOperation::Close,
+            _ => CommandOperation::None,
+        }
+    }
     fn supports_verification(&self) -> bool {
         true
     }

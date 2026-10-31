@@ -41,6 +41,10 @@ pub struct AgentTool;
 
 #[async_trait]
 impl Tool for AgentTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        // Delegated execution cannot be proven non-verifying from a prompt.
+        crate::evidence::CommandOperation::Opaque
+    }
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
         crate::base_packs::CodingExposure::full()
     }

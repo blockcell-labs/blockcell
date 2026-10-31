@@ -67,8 +67,11 @@ pub fn canonical_shell_args(tool_name: &str, params: &Value) -> Option<Value> {
 
 #[async_trait]
 impl Tool for ShellActionTool {
+    fn command_operation(&self, params: &Value) -> crate::evidence::CommandOperation {
+        ShellTool.command_operation(&self.canonical_args(params))
+    }
     fn supports_verification(&self) -> bool {
-        true
+        matches!(self.0, ShellAction::Run)
     }
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
         match self.0 {

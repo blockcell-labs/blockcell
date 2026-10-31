@@ -177,6 +177,9 @@ pub(crate) fn is_dangerous_command(command: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExecTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Launch
+    }
     fn supports_verification(&self) -> bool {
         true
     }

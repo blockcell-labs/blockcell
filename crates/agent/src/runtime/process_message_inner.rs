@@ -1,6 +1,6 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints first: if compilation/tests/checks are prohibited or deferred, do not run them; record that verification policy in task_contract and report unverified changes. Otherwise run one relevant lightweight check, declare its verification kind and target, and preserve its failure exit status. Distinguish tests, build, syntax, lint and artifact checks. If verification is impossible, explain why.";
+const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints first: if compilation/tests/checks are prohibited or deferred, do not run them; record that verification policy in task_contract and report unverified changes. Otherwise run one relevant lightweight check using a recognized test/build/lint/syntax runner, declare the matching verification kind and target, and preserve its failure exit status. Unknown custom scripts and declarations alone do not satisfy this gate; if only a custom check is applicable, report its scope and that verification remains unconfirmed. Distinguish tests, build, syntax, lint and artifact checks. If verification is impossible, explain why.";
 fn is_runtime_owned(path: &std::path::Path, owned: &[std::path::PathBuf]) -> bool {
     owned.iter().any(|root| path.starts_with(root))
 }
@@ -1388,10 +1388,13 @@ impl AgentRuntime {
                         .rposition(|m| m.role == "assistant")
                         .unwrap_or_else(|| history.len().saturating_sub(1));
                     let skill_history_seed = history[..assistant_turn_idx].to_vec();
+                    let mut skill_msg = msg.clone();
+                    skill_msg.metadata["task_contract"] =
+                        serde_json::to_value(&task_progress.contract)?;
                     let skill_outcome = self
                         .run_skill_for_turn(
                             &skill_ctx,
-                            &msg,
+                            &skill_msg,
                             &skill_history_seed,
                             &persist_session_key,
                         )
@@ -1418,6 +1421,12 @@ impl AgentRuntime {
                             return Err(error);
                         }
                     };
+                    if let Some(value) = updated_metadata.get("runtime_task_contract") {
+                        let contract: blockcell_core::task_contract::TaskContract =
+                            serde_json::from_value(value.clone())?;
+                        contract.validate()?;
+                        task_progress.register_contract(&contract, &self.paths.workspace());
+                    }
                     session_metadata = updated_metadata;
                     task_context =
                         crate::task_context::TaskContext::from_metadata(&session_metadata);
@@ -1492,14 +1501,15 @@ impl AgentRuntime {
                         && self.tool_within_capability(&tool_call.name, &tool_call.arguments);
                     let verification_forbidden =
                         !task_progress.contract.verification.permits_execution()
-                            && self
-                                .tool_registry
-                                .get(&tool_call.name)
-                                .is_some_and(|tool| tool.accepts_execution_annotations())
-                            && blockcell_tools::verification::command_intent(&tool_call.arguments)
-                                .is_some();
+                            && self.tool_registry.get(&tool_call.name).is_some_and(|tool| {
+                                blockcell_tools::verification::violates_verification_prohibition(
+                                    tool.as_ref(),
+                                    &tool_call.arguments,
+                                )
+                            });
                     let tool_output = if verification_forbidden {
-                        let denied = "Verification is prohibited or deferred by the current task contract. Report changes as unverified.".to_string();
+                        let denied =
+                            blockcell_tools::verification::PROHIBITED_EXECUTION_HINT.to_string();
                         self.record_unexecuted_tool_call(
                             tool_call,
                             &msg,
@@ -1514,8 +1524,14 @@ impl AgentRuntime {
                         match loop_guard.admit(&tool_call.name) {
                             Ok(()) => {
                                 let pre = prefetched.remove(&tool_call.id);
-                                self.execute_tool_call_prefetched(tool_call, &msg, None, pre)
-                                    .await
+                                self.execute_tool_call_with_verification_policy(
+                                    tool_call,
+                                    &msg,
+                                    None,
+                                    pre,
+                                    task_progress.contract.verification,
+                                )
+                                .await
                             }
                             Err(denied) => {
                                 over_iteration = true;
@@ -2878,13 +2894,13 @@ mod tests {
     }
 
     #[test]
-    fn custom_checks_require_explicit_verification_intent() {
+    fn custom_check_declarations_do_not_establish_verification_evidence() {
         let command = "python3 -c 'assert True'";
         let args = serde_json::json!({"command": command,
             "verification": {"kind": "artifact", "target": "report.json"}});
         assert_eq!(
             verification_command("shell_run", &args, r#"{"exit_code":0}"#),
-            Some(command.into())
+            None
         );
         assert_eq!(
             verification_command("shell_run", &args, r#"{"exit_code":1}"#),

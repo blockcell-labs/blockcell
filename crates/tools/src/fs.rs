@@ -324,7 +324,7 @@ impl Tool for WriteFileTool {
     }
 
     fn prompt_rule(&self, _ctx: &crate::PromptContext) -> Option<String> {
-        Some("- **write_file**: Use `path`+`content` or up to 10 `files`; batch all new-project files. Never call with `{}`. Example: `{\"path\":\"out.txt\",\"content\":\"text\"}`. To change an existing file, `read_file` it first — content seen only through `exec` (cat/head/grep) does not count as an observation, so the write is rejected with the current contents.".to_string())
+        Some("- **write_file**: Use `path`+`content` or up to 10 `files`; batch all new-project files. Never call with `{}`. Example: `{\"path\":\"out.txt\",\"content\":\"text\"}`. To change an existing file, use `read_file` first so its current version is recorded. If a write returns FS_NOT_OBSERVED, follow its read_file instruction before retrying; the diagnostic preview alone does not record an observation. Never replace a whole file based on a truncated preview.".to_string())
     }
 
     fn validate(&self, params: &Value) -> Result<()> {

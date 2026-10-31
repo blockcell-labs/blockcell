@@ -169,6 +169,9 @@ fn build_python_command(runner: &str, script_path: &Path, args: &[String]) -> Co
 
 #[async_trait]
 impl Tool for ExecLocalTool {
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        crate::evidence::CommandOperation::Opaque
+    }
     /// 直接以 `tokio::process::Command` 拉起解释器，不经沙箱 → 如实声明 `FullAccess`。
     /// 路径已限制在技能目录内，故不需要逐次确认。
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {

@@ -665,6 +665,9 @@ pub trait Tool: Send + Sync {
     /// Descriptive effects only; never used to authorize an operation.
     fn workspace_effect(&self, params: &Value) -> crate::evidence::WorkspaceEffect {
         use crate::evidence::WorkspaceEffect;
+        if self.command_operation(params) == crate::evidence::CommandOperation::Opaque {
+            return WorkspaceEffect::Unknown;
+        }
         match self.execution_environment(params) {
             ExecutionEnvironment::InProcess
             | ExecutionEnvironment::Local
@@ -681,6 +684,15 @@ pub trait Tool: Send + Sync {
     }
     fn supports_verification(&self) -> bool {
         false
+    }
+    /// Declare command lifecycle independently of the audit environment. Script
+    /// and delegation tools must return Opaque when their behavior is unknown.
+    fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
+        if self.supports_verification() {
+            crate::evidence::CommandOperation::Launch
+        } else {
+            crate::evidence::CommandOperation::None
+        }
     }
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
         crate::base_packs::CodingExposure::default()
