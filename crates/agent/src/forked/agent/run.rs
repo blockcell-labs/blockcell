@@ -241,7 +241,21 @@ pub async fn run_forked_agent(
             let _ = event_tx.send(event.to_string());
         }
 
+        if let Some(observation) = params.observation.as_ref() {
+            if let Err(error) = observation.budget.check_budget() {
+                let mut logger = blockcell_storage::AuditLogger::new(observation.paths.clone());
+                let _ = logger.log_budget_event(
+                    &observation.session_key,
+                    "exhausted",
+                    error.snapshot.usage_ratio,
+                    error.snapshot.total_tokens_used,
+                    error.snapshot.cost_used_micro_usd / 10_000,
+                );
+                return Err(ForkedAgentError::ToolError(error.message));
+            }
+        }
         // 调用 LLM（传入过滤后的工具 schema，让 LLM 知道可以调用哪些工具）
+        let provider_started = Instant::now();
         let provider_result = tokio::select! {
             biased;
             _ = context.abort_token.cancelled() => {
@@ -251,6 +265,95 @@ pub async fn run_forked_agent(
             }
             result = provider.chat(&current_messages, &filtered_tool_schemas) => result,
         };
+        if let Some(observation) = params.observation.as_ref() {
+            let (input, output, _, _) = provider_result
+                .as_ref()
+                .ok()
+                .map(|response| extract_forked_usage(&response.usage))
+                .unwrap_or_default();
+            // The acquired provider is identified by Arc identity, never by a
+            // second acquisition (which might choose a different pool entry).
+            let served = provider_pool.identity_for_provider(&provider);
+            let price = served.as_ref().and_then(|served| {
+                observation
+                    .model_prices
+                    .iter()
+                    .find(|entry| entry.provider == served.provider && entry.model == served.model)
+            });
+            let cost_known = price.is_some_and(|entry| {
+                entry.input_price.is_some_and(|p| p.is_finite() && p >= 0.0)
+                    && entry
+                        .output_price
+                        .is_some_and(|p| p.is_finite() && p >= 0.0)
+            });
+            let cost_micro_usd = price.filter(|_| cost_known).map_or(0, |entry| {
+                (input as f64 * entry.input_price.unwrap_or_default()
+                    + output as f64 * entry.output_price.unwrap_or_default())
+                .ceil() as u64
+            });
+            let event = blockcell_storage::AuditEvent::ProviderCall {
+                provider: served
+                    .as_ref()
+                    .map(|s| s.provider.clone())
+                    .unwrap_or_default(),
+                model: served.as_ref().map(|s| s.model.clone()).unwrap_or_default(),
+                input_tokens: input,
+                output_tokens: output,
+                cost_cents: cost_micro_usd.div_ceil(10_000),
+                duration_ms: provider_started.elapsed().as_millis() as u64,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                session_key: observation.session_key.clone(),
+                outcome: Some(
+                    if provider_result.is_ok() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    }
+                    .into(),
+                ),
+                failure_kind: provider_result
+                    .as_ref()
+                    .err()
+                    .map(|error| error.provider_failure_kind().as_str().to_string()),
+                cost_known: Some(cost_known && provider_result.is_ok()),
+            };
+            let mut logger = blockcell_storage::AuditLogger::new(observation.paths.clone());
+            if let Err(error) = logger.log_observed_event(&observation.session_key, event) {
+                tracing::warn!(%error, "Subagent provider audit failed");
+            }
+            let snapshot = observation
+                .budget
+                .record_usage(input, output, cost_micro_usd);
+            if observation.budget.should_warn() {
+                let _ = logger.log_budget_event(
+                    &observation.session_key,
+                    "warning",
+                    snapshot.usage_ratio,
+                    snapshot.total_tokens_used,
+                    snapshot.cost_used_micro_usd / 10_000,
+                );
+            }
+            if let Err(error) = observation.budget.check_budget() {
+                let _ = logger.log_budget_event(
+                    &observation.session_key,
+                    "exhausted",
+                    error.snapshot.usage_ratio,
+                    error.snapshot.total_tokens_used,
+                    error.snapshot.cost_used_micro_usd / 10_000,
+                );
+                // Keep a completed final answer; never execute pending tools
+                // after crossing the budget. The next iteration is pre-gated.
+                if !provider_result.as_ref().is_ok_and(|response| {
+                    response.tool_calls.is_empty()
+                        && response
+                            .content
+                            .as_ref()
+                            .is_some_and(|text| !text.trim().is_empty())
+                }) {
+                    return Err(ForkedAgentError::ToolError(error.message));
+                }
+            }
+        }
         let response = match provider_result {
             Ok(r) => r,
             Err(e) => {
@@ -361,6 +464,8 @@ pub async fn run_forked_agent(
                     let agent_type_str = params.agent_type.as_deref().unwrap_or("fork");
                     // 从工具参数中提取摘要信息（文件路径、搜索模式等）
                     let tool_summary = extract_tool_summary(tool_name, tool_input);
+                    let mut masked_input = tool_input.clone();
+                    blockcell_core::config::mask_secret_values(&mut masked_input);
                     let event = serde_json::json!({
                         "type": "tool_call_start",
                         "tool": tool_name,
@@ -368,7 +473,7 @@ pub async fn run_forked_agent(
                         "agent_type": agent_type_str,
                         "task_id": params.task_id,
                         "summary": tool_summary,
-                        "params": tool_input,
+                        "params": masked_input,
                     });
                     if let Err(e) = event_tx.send(event.to_string()) {
                         tracing::warn!(error = %e, tool = tool_name, "[forked_agent] failed to send tool_call_start event");
@@ -390,30 +495,111 @@ pub async fn run_forked_agent(
                         .await;
                 }
 
+                let tool_started = Instant::now();
+                let policy_denied = params.disallowed_tools.iter().any(|name| name == tool_name)
+                    || matches!(
+                        (params.can_use_tool)(tool_name, tool_input),
+                        ToolPermission::Deny { .. }
+                    );
+                // Persist attempts before execution, including rejected calls.
+                if let Some(observation) = params.observation.as_ref() {
+                    let mut masked = tool_input.clone();
+                    blockcell_core::config::mask_secret_values(&mut masked);
+                    let writer =
+                        blockcell_storage::JsonlSessionEventLog::new(observation.paths.clone());
+                    let _ = blockcell_storage::SessionEventWriter::append(
+                        &writer,
+                        &observation.session_key,
+                        blockcell_storage::NewSessionEvent {
+                            turn_id: None,
+                            step: None,
+                            kind: blockcell_storage::SessionEventKind::ToolCall,
+                            payload: json!({"tool": tool_name, "call_id": tool_call.id,
+                                "arguments": masked, "environment": "in-process", "task_id": params.task_id}),
+                        },
+                    );
+                }
                 // 执行工具
-                let tool_result = tokio::select! {
-                    biased;
-                    _ = context.abort_token.cancelled() => {
-                        return Err(ForkedAgentError::Aborted(
-                            format!("Cancelled while executing tool '{}'", tool_name),
-                        ));
+                let tool_result = if policy_denied {
+                    Err(ForkedAgentError::ToolError(
+                        "Tool denied by subagent permissions".to_string(),
+                    ))
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = context.abort_token.cancelled() => {
+                            return Err(ForkedAgentError::Aborted(
+                                format!("Cancelled while executing tool '{}'", tool_name),
+                            ));
+                        }
+                        result = execute_forked_tool(
+                            tool_name,
+                            tool_input,
+                            &params.can_use_tool,
+                            &params.disallowed_tools,
+                            &params.memory_store,
+                            &params.memory_file_store,
+                            &params.skill_file_store,
+                            &params.skills_dir,
+                            &params.external_skills_dirs,
+                            &params.skill_mutex,
+                            &params.working_dir,
+                            &params.workspace_scope,
+                        ) => result,
                     }
-                    result = execute_forked_tool(
-                        tool_name,
-                        tool_input,
-                        &params.can_use_tool,
-                        &params.disallowed_tools,
-                        &params.memory_store,
-                        &params.memory_file_store,
-                        &params.skill_file_store,
-                        &params.skills_dir,
-                        &params.external_skills_dirs,
-                        &params.skill_mutex,
-                        &params.working_dir,
-                        &params.workspace_scope,
-                    ) => result,
                 };
-
+                if let Some(observation) = params.observation.as_ref() {
+                    let outcome = if policy_denied {
+                        "rejected"
+                    } else if tool_result.is_ok() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    };
+                    let mut result = match &tool_result {
+                        Ok(text) => json!({"output": text}),
+                        Err(error) => json!({"error": error.to_string()}),
+                    };
+                    blockcell_core::config::mask_secret_values(&mut result);
+                    let duration_ms = tool_started.elapsed().as_millis() as u64;
+                    let mut logger = blockcell_storage::AuditLogger::new(observation.paths.clone());
+                    logger.set_session_id(&observation.session_key);
+                    if policy_denied {
+                        let _ = logger.log_permission_decision(
+                            tool_name,
+                            "Deny".into(),
+                            Some("subagent_permissions".into()),
+                            Some("Tool unavailable in this subagent permission scope".into()),
+                            false,
+                            &observation.session_key,
+                        );
+                    }
+                    let _ = logger.log_tool_call_audit(blockcell_storage::ToolCallAudit {
+                        tool_name,
+                        params: tool_input.clone(),
+                        result: result.clone(),
+                        session_key: &observation.session_key,
+                        trace_id: params.task_id.clone(),
+                        duration_ms: Some(duration_ms),
+                        call_id: Some(tool_call.id.clone()),
+                        outcome: Some(outcome),
+                        environment: Some("in-process"),
+                    });
+                    let writer =
+                        blockcell_storage::JsonlSessionEventLog::new(observation.paths.clone());
+                    let _ = blockcell_storage::SessionEventWriter::append(
+                        &writer,
+                        &observation.session_key,
+                        blockcell_storage::NewSessionEvent {
+                            turn_id: None,
+                            step: None,
+                            kind: blockcell_storage::SessionEventKind::ToolResult,
+                            payload: json!({"tool": tool_name, "call_id": tool_call.id, "task_id": params.task_id,
+                                "outcome": outcome, "is_error": tool_result.is_err(),
+                                "result": result, "duration_ms": duration_ms}),
+                        },
+                    );
+                }
                 // 跟踪修改的文件
                 if tool_result.is_ok() {
                     match tool_name.as_str() {

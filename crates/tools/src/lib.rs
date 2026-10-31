@@ -523,6 +523,12 @@ pub trait TaskManagerOps: Send + Sync {
     async fn list_tasks_json(&self, status_filter: Option<String>) -> Value;
     async fn get_task_json(&self, task_id: &str) -> Option<Value>;
     async fn summary_json(&self) -> Value;
+    /// Cancel only tasks visible to this handle; unsupported backends fail closed.
+    async fn cancel_task(&self, _task_id: &str) -> Result<()> {
+        Err(blockcell_core::Error::Tool(
+            "Task cancellation unavailable for this backend".to_string(),
+        ))
+    }
     /// Send a message to a running agent task's message queue.
     async fn send_message(&self, task_id: &str, message: String) -> Result<()>;
     /// Check if a task is a ONE_SHOT type (cannot receive SendMessage).

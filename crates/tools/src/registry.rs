@@ -46,7 +46,7 @@ use crate::skills::{ListSkillsTool, SkillManageTool, SkillViewTool};
 use crate::spawn::SpawnTool;
 use crate::stream_subscribe::StreamSubscribeTool;
 use crate::system_info::{CapabilityEvolveTool, SystemInfoTool};
-use crate::tasks::ListTasksTool;
+use crate::tasks::{CancelTaskTool, ListTasksTool};
 use crate::termux_api::TermuxApiTool;
 use crate::toggle_manage::ToggleManageTool;
 use crate::tool_search::{ToolSearchEntry, ToolSearchTool};
@@ -67,6 +67,7 @@ pub const GLOBAL_CORE_TOOL_NAMES: &[&str] = &[
     "spawn",
     "agent",
     "list_tasks",
+    "cancel_task",
     "agent_status",
     "list_skills",
     "skill_view",
@@ -186,6 +187,7 @@ impl ToolRegistry {
 
         // Task management
         registry.register(Arc::new(ListTasksTool));
+        registry.register(Arc::new(CancelTaskTool));
         registry.register(Arc::new(SendMessageTool));
 
         // Browser tools

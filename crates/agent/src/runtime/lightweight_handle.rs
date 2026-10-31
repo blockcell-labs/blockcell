@@ -13,6 +13,13 @@ pub struct LightweightRuntimeHandle {
 }
 
 impl LightweightRuntimeHandle {
+    pub(crate) fn for_invocation(runtime: &AgentRuntime, msg: &InboundMessage) -> Self {
+        let mut handle = Self::from_runtime(runtime);
+        handle.subagents =
+            Arc::new(InProcessSubagentProvider::from_runtime(runtime).for_invocation(runtime, msg));
+        handle
+    }
+
     pub fn from_runtime(runtime: &AgentRuntime) -> Self {
         Self {
             subagents: Arc::new(InProcessSubagentProvider::from_runtime(runtime)),

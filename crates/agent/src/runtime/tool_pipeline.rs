@@ -1139,7 +1139,9 @@ impl AgentRuntime {
             response_cache: Some(
                 Arc::new(self.response_cache.clone()) as blockcell_tools::ResponseCacheHandle
             ),
-            runtime_handle: self.runtime_handle.clone(),
+            runtime_handle: Some(Arc::new(
+                super::lightweight_handle::LightweightRuntimeHandle::for_invocation(self, msg),
+            )),
             agent_identity: blockcell_core::current_agent_context(),
             skill_mutex: Some(self.skill_mutex.clone()),
             agent_type_registry: Some(Arc::new(self.agent_type_registry.clone())

@@ -115,6 +115,7 @@ pub fn default_read_only_fork_disallowed_tools() -> Vec<String> {
     [
         "agent",
         "spawn",
+        "cancel_task",
         "exec",
         "shell",
         "edit_file",

@@ -17,6 +17,9 @@ const TYPED_SUBAGENT_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::
 
 #[derive(Clone)]
 pub struct InProcessSubagentProvider {
+    invocation_target: Option<MainSessionTarget>,
+    invocation_budget: Option<BudgetTrackerHandle>,
+    model_prices: Vec<blockcell_core::config::ModelEntry>,
     provider_pool: Arc<ProviderPool>,
     /// 与 AgentRuntime 共享，始终读取当前主会话目标。
     main_session_target: Arc<std::sync::RwLock<Option<MainSessionTarget>>>,
@@ -38,6 +41,9 @@ pub struct InProcessSubagentProvider {
 impl InProcessSubagentProvider {
     pub fn from_runtime(runtime: &AgentRuntime) -> Self {
         Self {
+            invocation_target: None,
+            invocation_budget: None,
+            model_prices: runtime.config.agents.defaults.model_pool.clone(),
             provider_pool: runtime.provider_pool.clone(),
             main_session_target: runtime.shared_session_target.clone(),
             task_manager: runtime.task_manager.clone(),
@@ -56,7 +62,23 @@ impl InProcessSubagentProvider {
         }
     }
 
+    pub(crate) fn for_invocation(mut self, runtime: &AgentRuntime, msg: &InboundMessage) -> Self {
+        self.invocation_budget =
+            Some(runtime.budget_tracker_for_session(&persist_session_key_for(msg)));
+        self.invocation_target = Some(MainSessionTarget {
+            channel: msg.channel.clone(),
+            account_id: msg.account_id.clone(),
+            chat_id: msg.chat_id.clone(),
+            session_key: persist_session_key_for(msg),
+            agent_id: runtime.agent_id.clone(),
+        });
+        self
+    }
+
     fn main_session_target(&self) -> Option<MainSessionTarget> {
+        if let Some(target) = self.invocation_target.as_ref() {
+            return Some(target.clone());
+        }
         self.main_session_target
             .read()
             .ok()
@@ -211,6 +233,14 @@ impl InProcessSubagentProvider {
         }
         if let Some(tx) = self.task_manager.progress_tx() {
             builder = builder.progress_tx(tx);
+        }
+        if let (Some(target), Some(budget)) = (&self.invocation_target, &self.invocation_budget) {
+            builder = builder.observation(crate::forked::ForkObservation {
+                paths: self.paths.clone(),
+                session_key: target.session_key.clone(),
+                budget: budget.clone(),
+                model_prices: self.model_prices.clone(),
+            });
         }
         builder = builder.skill_mutex(self.skill_mutex.clone());
         if let Some(ref store) = self.memory_store {

@@ -358,11 +358,11 @@ pub(crate) async fn execute_forked_tool(
 ) -> Result<String, ForkedAgentError> {
     // Check disallowed tools list
     if disallowed_tools.iter().any(|d| d == tool_name) {
-        return Ok(format!(
+        return Err(ForkedAgentError::ToolError(format!(
             "Tool '{}' is not allowed in this agent. Disallowed tools: {}",
             tool_name,
             disallowed_tools.join(", ")
-        ));
+        )));
     }
 
     // 辅助函数: 解析文件路径 (相对于 working_dir，用于 worktree 隔离)
