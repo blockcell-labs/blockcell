@@ -257,6 +257,16 @@ impl AgentRuntime {
                             "Stream header timeout after {} seconds",
                             first_event_timeout.as_secs()
                         );
+                        self.audit_provider_attempt(
+                            &persist_session_key_for(msg),
+                            &self.served_by(pool_idx),
+                            None,
+                            stream_started.elapsed().as_millis() as u64,
+                            Some(blockcell_core::FailureKind::classify_provider_message(
+                                &message,
+                            )),
+                        )
+                        .await;
                         last_error = Some(blockcell_core::Error::Provider(message));
                         self.provider_pool.report(pool_idx, CallResult::Transient);
                         excluded_provider_indices.push(pool_idx);
@@ -412,6 +422,14 @@ impl AgentRuntime {
                                                 pool_idx,
                                                 "LLM stream completed"
                                             );
+                                            self.audit_provider_attempt(
+                                                &persist_session_key_for(msg),
+                                                &self.served_by(pool_idx),
+                                                Some(&response.usage),
+                                                stream_started.elapsed().as_millis() as u64,
+                                                None,
+                                            )
+                                            .await;
                                             return Ok((
                                                 LLMResponse {
                                                     content: final_content,
@@ -448,43 +466,11 @@ impl AgentRuntime {
                             }
                         }
 
-                        // Fallback: tolerate providers that close the stream cleanly without an
-                        // explicit Done event. If the stream ended with an error, retry instead of
-                        // committing a partial answer.
-                        if stream_error.is_none()
-                            && (!tool_call_accumulators.is_empty()
-                                || !accumulated_content.is_empty())
-                        {
-                            self.provider_pool.report(pool_idx, CallResult::Success);
-                            info!(
-                                ttft_ms = first_event_ms.unwrap_or_default() as u64,
-                                total_ms = stream_started.elapsed().as_millis() as u64,
-                                attempt,
-                                ?iteration,
-                                pool_idx,
-                                "LLM stream completed without an explicit done event"
-                            );
-                            let final_tool_calls =
-                                merge_stream_tool_calls(tool_call_accumulators, Vec::new());
-
-                            let served_by = self.served_by(pool_idx);
-                            return Ok((
-                                LLMResponse {
-                                    content: if accumulated_content.is_empty() {
-                                        None
-                                    } else {
-                                        Some(accumulated_content)
-                                    },
-                                    reasoning_content: if accumulated_reasoning.is_empty() {
-                                        None
-                                    } else {
-                                        Some(accumulated_reasoning)
-                                    },
-                                    tool_calls: final_tool_calls,
-                                    finish_reason: "stop".to_string(),
-                                    usage: serde_json::Value::Null,
-                                },
-                                served_by,
+                        // EOF without Done is not proof of a complete answer.
+                        // Discard the partial completion and retain failure evidence.
+                        if stream_error.is_none() {
+                            stream_error = Some(blockcell_core::Error::Provider(
+                                "Stream interrupted before completion event".to_string(),
                             ));
                         }
 
@@ -521,6 +507,14 @@ impl AgentRuntime {
                             )
                             .await;
                         }
+                        self.audit_provider_attempt(
+                            &persist_session_key_for(msg),
+                            &self.served_by(pool_idx),
+                            None,
+                            stream_started.elapsed().as_millis() as u64,
+                            Some(err.provider_failure_kind()),
+                        )
+                        .await;
                         let call_result = ProviderPool::classify_failure(&err);
                         if matches!(&call_result, CallResult::RateLimit) {
                             *saw_rate_limit_this_turn = true;
@@ -536,6 +530,14 @@ impl AgentRuntime {
                         break;
                     }
                     Ok(Err(e)) => {
+                        self.audit_provider_attempt(
+                            &persist_session_key_for(msg),
+                            &self.served_by(pool_idx),
+                            None,
+                            stream_started.elapsed().as_millis() as u64,
+                            Some(e.provider_failure_kind()),
+                        )
+                        .await;
                         let err_str = format!("{}", e);
                         warn!(error = %err_str, attempt, max_retries, ?iteration, pool_idx, "LLM stream call failed");
                         let call_result = ProviderPool::classify_failure(&e);

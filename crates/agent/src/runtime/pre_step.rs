@@ -106,9 +106,12 @@ impl AgentRuntime {
     fn budget_pre_step(&self, session_key: &str) -> PreStepDecision {
         match self.budget_tracker_for_session(session_key).check_budget() {
             Ok(_) => PreStepDecision::Continue,
-            Err(error) => PreStepDecision::Stop {
-                reason: format!("⚠️ {}", error.message),
-            },
+            Err(error) => {
+                self.audit_budget_snapshot(session_key, "exhausted", &error.snapshot);
+                PreStepDecision::Stop {
+                    reason: format!("⚠️ {}", error.message),
+                }
+            }
         }
     }
 

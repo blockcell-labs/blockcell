@@ -1232,10 +1232,17 @@ impl AgentRuntime {
             // Budget usage is reported by providers after an LLM call completes, so this
             // is post-hoc enforcement: the current call may exceed the configured limit,
             // and the runtime stops before the next loop iteration.
-            if let Err(e) = self.record_llm_budget(&persist_session_key, &response) {
+            if let Err(e) =
+                self.record_served_llm_budget(&persist_session_key, &response, Some(&served_by))
+            {
                 error!(error = %e, "Budget exhausted, stopping agent loop");
                 self.end_step(&msg, &persist_session_key, step, 0).await;
-                final_response = format!("⚠️ {}", e.message);
+                let completed_answer = response.content.as_deref().unwrap_or_default().trim();
+                final_response = if response.tool_calls.is_empty() && !completed_answer.is_empty() {
+                    format!("{}\n\n⚠️ {}", completed_answer, e.message)
+                } else {
+                    format!("⚠️ {}", e.message)
+                };
                 history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
                 break;
             }
@@ -2206,7 +2213,11 @@ impl AgentRuntime {
                 .filter(|t| t.agent_type.is_some())
                 .collect();
 
-            if !typed_running.is_empty() {
+            if !typed_running.is_empty()
+                && !self
+                    .budget_tracker_for_session(&persist_session_key)
+                    .is_exhausted()
+            {
                 info!(
                     running_count = typed_running.len(),
                     "Waiting for sub-agent tasks to complete before summarizing"

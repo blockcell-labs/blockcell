@@ -626,6 +626,14 @@ impl ProviderPool {
         })
     }
 
+    /// Resolve the exact acquired provider without changing routing state.
+    pub fn identity_for_provider(&self, provider: &Arc<dyn Provider>) -> Option<ServedBy> {
+        self.entries
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.provider, provider))
+            .and_then(|index| self.served_by(index))
+    }
+
     pub fn status_summary(&self) -> Vec<PoolEntryStatus> {
         let state = self.state.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("ProviderPool 状态 Mutex 被污染，正在恢复");

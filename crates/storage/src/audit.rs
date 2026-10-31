@@ -68,6 +68,21 @@ pub enum AuditEvent {
         duration_ms: u64,
         timestamp_ms: i64,
         session_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_known: Option<bool>,
+    },
+    HookExecution {
+        session_key: String,
+        hook_event: String,
+        tool_name: Option<String>,
+        success: bool,
+        timed_out: bool,
+        duration_ms: u64,
+        timestamp_ms: i64,
     },
     BudgetEvent {
         event_kind: String,
@@ -271,7 +286,15 @@ impl AuditLogger {
             duration_ms,
             timestamp_ms: Utc::now().timestamp_millis(),
             session_key: session_key.to_string(),
+            outcome: Some("succeeded".to_string()),
+            failure_kind: None,
+            cost_known: Some(true),
         };
+        self.write_event(event)
+    }
+
+    pub fn log_observed_event(&mut self, session_key: &str, event: AuditEvent) -> Result<()> {
+        self.set_session_id(session_key);
         self.write_event(event)
     }
 

@@ -522,6 +522,18 @@ impl AgentRuntime {
         outcome: ToolOutcome,
         result_text: &str,
     ) {
+        // tool/call denotes an attempted invocation, not permission to execute.
+        self.dispatch_event(
+            msg,
+            &persist_session_key_for(msg),
+            &mut AgentEvent::ToolCall {
+                tool_name: call.name.clone(),
+                call_id: call.id.clone(),
+                arguments: args.clone(),
+                environment: self.tool_registry.execution_environment(&call.name, args),
+            },
+        )
+        .await;
         let result = serde_json::from_str::<serde_json::Value>(result_text)
             .ok()
             .filter(serde_json::Value::is_object)
