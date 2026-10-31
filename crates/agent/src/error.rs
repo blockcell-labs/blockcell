@@ -109,7 +109,7 @@ pub(crate) fn path_access_denied(tool_name: &str, path: &str) -> String {
         "error": format!("Path access denied by security policy: {}", path),
         "tool": tool_name,
         "code": "PATH_ACCESS_DENIED",
-        "hint": "Only this invocation was rejected; the tool remains available. Do not retry the denied access. Use a different, allowed path inside the workspace (e.g. ./.tmp/) and resubmit the corrected command. Respect explicit user and policy denials.",
+        "hint": "Only this invocation was rejected; the tool and unrelated authorized steps remain available. Keep and use files and facts already discovered. A rejected optional probe does not invalidate earlier results or prove that project files are inaccessible. Continue the remaining authorized work. Do not retry denied access or bypass explicit user/policy denials; correct the path only when the intended access itself is allowed.",
     }).to_string()
 }
 
@@ -297,7 +297,10 @@ mod tests {
         let denied = path_access_denied("shell_run", "path access denied by policy: /outside/out");
         let value: serde_json::Value = serde_json::from_str(&denied).unwrap();
         assert_eq!(value["code"], "PATH_ACCESS_DENIED");
-        assert!(value["hint"].as_str().unwrap().contains("workspace"));
+        let hint = value["hint"].as_str().unwrap();
+        assert!(hint.contains("Only this invocation was rejected"));
+        assert!(hint.contains("Keep and use files and facts already discovered"));
+        assert!(hint.contains("Continue the remaining authorized work"));
         assert_eq!(classify_tool_failure(&denied), ToolFailureKind::Transient);
         assert_eq!(
             classify_tool_failure(
