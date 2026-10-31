@@ -51,6 +51,8 @@ impl ExecTool {
     ) -> Result<SandboxPolicy> {
         if let Some(raw_policy) = config.sandbox_policy.as_deref() {
             SandboxPolicy::parse(Some(raw_policy))
+        } else if config.allow_unsandboxed_shell {
+            Ok(SandboxPolicy::FullAccess)
         } else if config.restrict_to_workspace {
             Ok(SandboxPolicy::WorkspaceWrite)
         } else {
@@ -519,6 +521,7 @@ mod tests {
             timeout: 60,
             restrict_to_workspace: false,
             sandbox_policy: None,
+            allow_unsandboxed_shell: false,
             approval_policy: None,
         };
         let unrestricted_tool = ExecTool::from_config(&unrestricted_cfg);
@@ -531,6 +534,7 @@ mod tests {
             timeout: 60,
             restrict_to_workspace: false,
             sandbox_policy: Some("read-only".to_string()),
+            allow_unsandboxed_shell: false,
             approval_policy: None,
         };
         let readonly_tool = ExecTool::from_config(&readonly_cfg);

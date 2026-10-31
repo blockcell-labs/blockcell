@@ -61,6 +61,9 @@ pub struct ExecConfig {
     pub restrict_to_workspace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_policy: Option<String>,
+    /// Explicit user opt-in; tool/path policy and dangerous-command checks still apply.
+    #[serde(default)]
+    pub allow_unsandboxed_shell: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<String>,
 }
@@ -71,6 +74,7 @@ impl Default for ExecConfig {
             timeout: default_exec_timeout(),
             restrict_to_workspace: true,
             sandbox_policy: None,
+            allow_unsandboxed_shell: false,
             approval_policy: None,
         }
     }

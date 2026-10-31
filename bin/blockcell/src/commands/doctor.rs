@@ -208,6 +208,21 @@ pub async fn run() -> anyhow::Result<()> {
             );
             warn_count += 1;
         }
+    } else if cfg!(target_os = "macos") {
+        if blockcell_tools::sandbox::native_sandbox_available() {
+            print_ok("sandbox-exec available", "");
+            ok_count += 1;
+        } else {
+            // Fail closed: shell tools will refuse to run rather than silently
+            // dropping isolation. The opt-in must be explicit.
+            print_warn(
+                "sandbox-exec unavailable",
+                "Shell tools fail closed with SANDBOX_UNAVAILABLE. Only if you accept \
+                 unsandboxed execution, set tools.exec.sandboxPolicy=\"full-access\" or \
+                 tools.exec.allowUnsandboxedShell=true.",
+            );
+            warn_count += 1;
+        }
     }
 
     // --- 1. Config ---
@@ -311,6 +326,33 @@ pub async fn run() -> anyhow::Result<()> {
     let tool_count = registry.tool_names().len();
     print_ok(&format!("{} tools registered", tool_count), "");
     ok_count += 1;
+
+    let exec_cfg = &config.tools.exec;
+    let exec_policy = exec_cfg.sandbox_policy.clone().unwrap_or_else(|| {
+        if exec_cfg.restrict_to_workspace {
+            "workspace-write"
+        } else {
+            "full-access"
+        }
+        .to_string()
+    });
+    if exec_cfg.allow_unsandboxed_shell && exec_cfg.sandbox_policy.is_none() {
+        print_warn(
+            "Shell execution is unsandboxed (explicit opt-in)",
+            "tools.exec.allowUnsandboxedShell=true; tool/path policy and dangerous-command checks still apply",
+        );
+        warn_count += 1;
+    } else if !blockcell_tools::sandbox::native_sandbox_available() && exec_policy != "full-access"
+    {
+        print_warn(
+            "Shell execution unavailable without a native sandbox",
+            "exec/shell will return SANDBOX_UNAVAILABLE until a sandbox backend exists or full access is explicitly configured",
+        );
+        warn_count += 1;
+    } else {
+        print_ok("Shell sandbox policy", &exec_policy);
+        ok_count += 1;
+    }
 
     match config.intent_router.as_ref() {
         Some(router) if router.enabled => {

@@ -360,6 +360,14 @@ impl AgentRuntime {
         {
             if let Some(object) = args.as_object_mut() {
                 if !object.contains_key("sandbox_policy") {
+                    if self.config.tools.exec.allow_unsandboxed_shell
+                        && self.config.tools.exec.sandbox_policy.is_none()
+                    {
+                        object.insert(
+                            "sandbox_policy".to_string(),
+                            serde_json::Value::String("full-access".to_string()),
+                        );
+                    }
                     if let Some(policy) = &self.config.tools.exec.sandbox_policy {
                         object.insert(
                             "sandbox_policy".to_string(),
