@@ -107,8 +107,8 @@ impl Default for PathPolicyFileConfig {
     }
 }
 
-/// Built-in sensitive path prefixes that are always denied when
-/// `builtin_protected_paths = true` (the default).
+/// Built-in protected path prefixes used when `builtin_protected_paths = true`
+/// (the default): the union of [`builtin_secret_paths`] and [`builtin_system_paths`].
 pub fn builtin_sensitive_paths() -> &'static [&'static str] {
     &[
         "~/.ssh",
@@ -122,6 +122,42 @@ pub fn builtin_sensitive_paths() -> &'static [&'static str] {
         "/System",
         "/private/etc",
         "/private/var",
+        "/usr/bin",
+        "/usr/sbin",
+        "/bin",
+        "/sbin",
+    ]
+}
+
+/// Credential and secret locations: every operation is denied.
+pub fn builtin_secret_paths() -> &'static [&'static str] {
+    &[
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg",
+        "~/.kube",
+        "~/.config/gcloud",
+        "~/.azure",
+        "~/.netrc",
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/sudoers",
+        "/etc/sudoers.d",
+        "/etc/ssl/private",
+        "/private/etc/master.passwd",
+        "/private/etc/sudoers",
+        "/private/etc/sudoers.d",
+        "/private/var",
+    ]
+}
+
+/// System configuration and binary directories: read/list/exec follow the normal
+/// rules, writes are denied unless a user `allow` rule names a more specific path.
+pub fn builtin_system_paths() -> &'static [&'static str] {
+    &[
+        "/etc",
+        "/System",
+        "/private/etc",
         "/usr/bin",
         "/usr/sbin",
         "/bin",
@@ -204,7 +240,8 @@ impl PathPolicy {
     /// and operation type.
     ///
     /// Evaluation priority:
-    /// 1. Built-in sensitive paths → always `Deny`
+    /// 1. Built-in secret paths → always `Deny`; built-in system dirs → `Deny` for
+    ///    writes not covered by a more specific user `allow` rule
     /// 2. User `deny` rules (most-specific prefix wins within the same action)
     /// 3. User `allow` rules (most-specific prefix)
     ///    — an `allow` rule that is MORE specific than a `deny` rule wins
@@ -213,10 +250,23 @@ impl PathPolicy {
     pub fn evaluate(&self, resolved: &Path, op: PathOp) -> PolicyAction {
         // 1. Built-in sensitive paths
         if self.config.builtin_protected_paths {
-            for sensitive in builtin_sensitive_paths() {
-                let expanded = expand_tilde(sensitive);
-                if path_starts_with_normalized(resolved, &expanded) {
+            for secret in builtin_secret_paths() {
+                if path_starts_with_normalized(resolved, &expand_tilde(secret)) {
                     return PolicyAction::Deny;
+                }
+            }
+            if op == PathOp::Write {
+                for system in builtin_system_paths() {
+                    let expanded = expand_tilde(system);
+                    if path_starts_with_normalized(resolved, &expanded) {
+                        let explicit_allow = self
+                            .best_match_len(resolved, op, PolicyAction::Allow)
+                            .is_some_and(|len| len > expanded.as_os_str().len());
+                        if !explicit_allow {
+                            return PolicyAction::Deny;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -604,6 +654,47 @@ mod tests {
         };
         let ssh_key = home().join(".ssh").join("id_rsa");
         assert_eq!(policy.evaluate(&ssh_key, PathOp::Read), PolicyAction::Deny);
+    }
+
+    #[test]
+    fn test_builtin_system_paths_read_allowed_write_denied() {
+        let mk = |rules| PathPolicy {
+            config: PathPolicyFileConfig {
+                builtin_protected_paths: true,
+                rules,
+                default_policy: PolicyAction::Allow,
+                ..Default::default()
+            },
+            from_file: false,
+        };
+        let policy = mk(vec![]);
+        let conf = PathBuf::from("/etc/nginx/conf.d/site.conf");
+        assert_eq!(policy.evaluate(&conf, PathOp::Read), PolicyAction::Allow);
+        assert_eq!(
+            policy.evaluate(&PathBuf::from("/etc/nginx"), PathOp::List),
+            PolicyAction::Allow
+        );
+        assert_eq!(policy.evaluate(&conf, PathOp::Write), PolicyAction::Deny);
+        assert_eq!(
+            policy.evaluate(&PathBuf::from("/etc/shadow"), PathOp::Read),
+            PolicyAction::Deny
+        );
+        assert_eq!(
+            policy.evaluate(&PathBuf::from("/etc/sudoers.d/x"), PathOp::Exec),
+            PolicyAction::Deny
+        );
+
+        let allowed = mk(vec![PathRule {
+            name: "nginx".into(),
+            paths: vec!["/etc/nginx".into()],
+            ops: vec![PathOp::Write],
+            action: PolicyAction::Allow,
+        }]);
+        assert_eq!(allowed.evaluate(&conf, PathOp::Write), PolicyAction::Allow);
+        assert_eq!(
+            allowed.evaluate(&PathBuf::from("/etc/hosts"), PathOp::Write),
+            PolicyAction::Deny
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 ## Coding
 - Follow safety and approval policies; never expose secrets or discard user changes.
 - Read files before editing and make minimal, focused diffs.
+- For bug fixes, trace the failing behavior to the function that produces it and fix it there, not only at one caller; reproduce the bug with a quick script before and after the change.
+- Start servers and other long-running processes in the background with output redirected (`nohup cmd > /tmp/name.log 2>&1 &`), then poll the port or log; never run them in the foreground.
 - Batch related reads with `read_file(paths)` and commands with one `shell_run`; write all new-project files in one `write_file(files)` call.
 - `edit_file`: `old_text` must match exactly (read first). `read_file`/`write_file`: use `paths`/`files` for up to 10; never call any tool with `{}`.
 - Shell cwd and environment persist; do not `cd` to the absolute workspace path.
