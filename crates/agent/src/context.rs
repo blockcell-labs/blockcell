@@ -40,6 +40,7 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 - `edit_file`: `old_text` must match exactly (read first). `read_file`/`write_file`: use `paths`/`files` for up to 10; never call any tool with `{}`.
 - Shell cwd and environment persist; do not `cd` to the absolute workspace path.
 - Run relevant checks only when the user permits them; explicit prohibitions on tests/builds take precedence. Report unverified changes accurately. After permitted checks pass, stop with a brief summary.
+- Run test/build/lint commands directly, without pipes, redirections or semicolon wrappers (including `2>&1 | tail` or `| head`). Tool output is bounded already. These wrappers cannot establish verification evidence; if used, rerun the relevant check directly once, not the same pipeline or unrelated checks.
 - Sample data once, then process the original file and parse back/assert output schema and key counts/totals in one script. Never infer totals from a sample or dump full datasets into the conversation.
 - Keep temporary verification artifacts unless cleanup is requested. If optional cleanup is denied, skip it; do not try equivalent deletion commands. Finish after checks pass. For shell scripts, combine `bash -n` with a small functional check.
 - For ambiguous business boundaries, use existing conventions and state your assumption in the final answer; ask only if blocked.
@@ -1491,6 +1492,15 @@ mod tests {
     use blockcell_core::Result;
     use serde_json::{json, Value};
     use std::sync::Arc;
+
+    #[test]
+    fn coding_guidance_uses_direct_checks_instead_of_output_pipelines() {
+        assert!(CODING_MODE_PROMPT.contains("without pipes, redirections or semicolon wrappers"));
+        assert!(CODING_MODE_PROMPT.contains("rerun the relevant check directly once"));
+        assert!(
+            CODING_MODE_PROMPT.contains("explicit prohibitions on tests/builds take precedence")
+        );
+    }
 
     fn test_chat_message_text(msg: &ChatMessage) -> String {
         match &msg.content {

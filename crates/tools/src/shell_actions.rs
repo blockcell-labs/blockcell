@@ -102,7 +102,7 @@ impl Tool for ShellActionTool {
     fn schema(&self) -> ToolSchema {
         let (description, properties, required) = match self.0 {
             ShellAction::Run => (
-                "Persistent shell; cwd/env persist; omit session_id to reuse.",
+                "Persistent shell; cwd/env persist; omit session_id to reuse. Run checks directly: no pipes (tail/head), redirections or semicolon wrappers; output is already bounded.",
                 json!({
                     "command": {"type": "string"},
                     "session_id": {"type": "string"},

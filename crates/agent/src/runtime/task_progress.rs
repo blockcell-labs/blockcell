@@ -296,6 +296,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn piped_checks_require_one_direct_status_preserving_check() {
+        for command in ["cargo test 2>&1 | tail -n 20", "npm test | head -20"] {
+            let evidence = ToolEvidence::from_execution(
+                &ShellActionTool::run(),
+                &json!({"command":command,"verification":{"kind":"test","target":"workspace"}}),
+                &json!({"exit_code":0,"running":false,"output":"PASS"}),
+            );
+            let mut progress = TaskProgress::default();
+            progress.observe(&evidence, true);
+            assert!(progress.needs_verification());
+            assert!(progress.last_verification.is_none());
+            let direct = ToolEvidence::from_execution(
+                &ShellActionTool::run(),
+                &json!({"command":"cargo test"}),
+                &json!({"exit_code":0,"running":false}),
+            );
+            progress.observe(&direct, true);
+            assert!(!progress.needs_verification());
+            let failed = ToolEvidence::from_execution(
+                &ShellActionTool::run(),
+                &json!({"command":"cargo test"}),
+                &json!({"exit_code":1,"running":false,"output":"PASS"}),
+            );
+            progress.observe(&failed, false);
+            assert!(progress.needs_verification());
+            assert!(progress.last_verification.is_none());
+        }
+    }
+
+    #[test]
     fn polling_cannot_invent_a_command_that_was_never_executed() {
         let evidence = ToolEvidence::from_execution(
             &JobOutputTool,

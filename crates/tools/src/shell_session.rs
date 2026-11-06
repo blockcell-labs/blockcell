@@ -1179,7 +1179,7 @@ impl Tool for ShellTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "shell".to_string(),
-            description: "Run commands in a persistent shell session. Reuse session_id to preserve cwd, environment variables, and activated virtual environments. Accepts command, cmd, commands, or args as command inputs; exec, execute, and start are aliases for run. Timed-out commands keep running and can be polled or sent stdin.".to_string(),
+            description: "Run commands in a persistent shell session. Reuse session_id to preserve cwd, environment variables, and activated virtual environments. Accepts command, cmd, commands, or args as command inputs; exec, execute, and start are aliases for run. Timed-out commands keep running and can be polled or sent stdin. Run verification commands directly: pipes (tail/head), redirections and semicolon wrappers cannot establish verification evidence. Output is bounded already.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
