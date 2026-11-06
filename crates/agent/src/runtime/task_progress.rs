@@ -612,6 +612,14 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let mut progress = TaskProgress::default();
         std::fs::write(workspace.path().join("todos.md"), "- item\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(workspace.path().join("todos.md"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                progress.turn_started_at + std::time::Duration::from_secs(1),
+            ))
+            .unwrap();
 
         let contract: TaskContract = serde_json::from_value(json!({"verification":"allowed",
             "deliverables":[{"path":"todos.md","must_update":true,"required":true}]}))

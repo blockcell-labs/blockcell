@@ -33,6 +33,11 @@ fn verification_continuation_delivers_one_answer_without_substring_concatenation
     assert!(interrupted.contains("audit log"));
 }
 
+fn allow_test_exec(runtime: &mut AgentRuntime) {
+    allow_test_tool(runtime, "exec");
+    runtime.config.tools.exec.sandbox_policy = Some("full-access".into());
+}
+
 fn allow_test_tool(runtime: &mut AgentRuntime, name: &str) {
     runtime
         .config
@@ -318,9 +323,16 @@ fn static_scope_survives_coding_unknown_and_chat_followups() {
             )
         })
         .collect();
+    let exec_expected = !exec_bypasses_sandbox(&config);
     for scope in &scopes {
         assert_eq!(scope, &scopes[0], "message changed the capability ceiling");
-        for name in &available {
+        // exec 的可见性只跟宿主沙箱能力有关，不能随消息/mode 变化。
+        assert_eq!(
+            scope.contains(&"exec".to_string()),
+            exec_expected,
+            "exec exposure must follow sandbox availability, not the message"
+        );
+        for name in available.iter().filter(|name| name.as_str() != "exec") {
             assert!(
                 scope.contains(name),
                 "missing foundational/profile tool {name}"
@@ -698,6 +710,7 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
     let mut runtime = test_runtime_with_provider(provider.clone());
     runtime.tool_registry = ToolRegistry::with_defaults();
     runtime.config.agents.ghost.learning.enabled = false;
+    runtime.config.tools.web.search.api_key = "schema-test-placeholder".into();
     for content in ["修复代码", "再跑一遍测试", "继续", "OK", "好的"] {
         let mut msg = test_main_session_inbound("cli", "scope-followup");
         msg.content = content.into();
@@ -708,6 +721,7 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
     }
     let calls = provider.schemas.lock().unwrap();
     assert_eq!(calls.len(), 5);
+    let exec_exposed = !exec_bypasses_sandbox(&runtime.config);
     for schemas in calls.iter() {
         let names: Vec<_> = schemas
             .iter()
@@ -715,7 +729,6 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
             .collect();
         // 曝光收敛只能改变"可见"，不能按意图/mode 改变"哪些核心工具可见"。
         for required in [
-            "exec",
             "read_file",
             "write_file",
             "edit_file",
@@ -731,6 +744,11 @@ async fn static_scope_runtime_schemas_stay_available_across_coding_and_chat() {
         ] {
             assert!(names.contains(&required), "missing {required}: {names:?}");
         }
+        assert_eq!(
+            names.contains(&"exec"),
+            exec_exposed,
+            "exec exposure must follow sandbox availability: {names:?}"
+        );
         // 核心集之外默认不曝光，但必须仍可经 tool_search 发现（能力集不变）。
         for deferred in [
             "office_write",
@@ -2612,10 +2630,9 @@ async fn exec_uses_path_approved_working_dir_as_bubblewrap_writable_root() {
         .execute_tool_call(
             &tool_call_with_id(
                 "exec-working-dir",
-                "exec",
+                "shell_run",
                 serde_json::json!({
-                    "command": "printf result > result.csv",
-                    "working_dir": allowed,
+                    "command": format!("cd \"{}\" && printf result > result.csv", allowed.display()),
                 }),
             ),
             &msg,
@@ -4001,7 +4018,7 @@ fn one_shot_general_intent_uses_code_workspace_fallback() {
 }
 
 #[test]
-fn test_static_coding_scope_keeps_exec_and_shell_tools() {
+fn test_static_coding_scope_keeps_core_tools_and_shell_run() {
     let available: HashSet<String> = [
         "read_file",
         "write_file",
@@ -4023,8 +4040,9 @@ fn test_static_coding_scope_keeps_exec_and_shell_tools() {
     .map(str::to_string)
     .collect();
 
+    let config = Config::default();
     let tools = resolve_effective_tool_names(
-        &Config::default(),
+        &config,
         InteractionMode::Coding,
         None,
         None,
@@ -4055,7 +4073,11 @@ fn test_static_coding_scope_keeps_exec_and_shell_tools() {
         ]
     );
     assert!(!tools.contains(&"shell".to_string()));
-    assert!(tools.contains(&"exec".to_string()));
+    assert_eq!(
+        tools.contains(&"exec".to_string()),
+        !exec_bypasses_sandbox(&config),
+        "exec exposure follows sandbox availability"
+    );
 }
 
 #[test]
@@ -4997,8 +5019,11 @@ fn test_runtime_with_file_memory_recall(provider: Arc<dyn Provider>) -> (AgentRu
 fn test_runtime_with_provider_and_paths(
     paths: Paths,
     provider: Arc<dyn Provider>,
-    config: Config,
+    mut config: Config,
 ) -> AgentRuntime {
+    if config.security.path_access.policy_file == Config::default().security.path_access.policy_file {
+        config.security.path_access.policy_file = paths.path_access_file().display().to_string();
+    }
     let provider_pool =
         blockcell_providers::ProviderPool::from_single_provider("test/mock", "test", provider);
 
@@ -5028,6 +5053,7 @@ fn test_runtime_with_default_tools() -> AgentRuntime {
     ));
     std::fs::create_dir_all(&base).expect("create temp default-tools runtime dir");
     let paths = Paths::with_base(base);
+    config.security.path_access.policy_file = paths.path_access_file().display().to_string();
     let provider_pool = blockcell_providers::ProviderPool::from_single_provider(
         "test/mock",
         "test",
@@ -7586,6 +7612,7 @@ async fn tool_policy_deny_blocks_tool_before_execution() {
     use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
 
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let mut deny_exec = tool_policy_rule("deny-exec", "exec", ToolPolicyDecision::Deny);
     deny_exec.description = Some("exec is disabled by policy".to_string());
     runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
@@ -7703,6 +7730,7 @@ async fn tool_policy_ask_uses_existing_confirmation_flow() {
     use blockcell_core::tool_policy::{ToolPolicy, ToolPolicyConfig, ToolPolicyDecision};
 
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let ask_exec = tool_policy_rule("ask-exec", "exec", ToolPolicyDecision::Ask);
     runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
         rules: vec![ask_exec],
@@ -8527,6 +8555,7 @@ async fn write_file_allows_creation_and_rejects_unread_overwrite() {
 #[tokio::test]
 async fn sensitive_config_reads_remain_denied_after_static_cd() {
     let mut runtime = test_runtime_with_default_tools();
+    allow_test_exec(&mut runtime);
     let command = format!(
         "cd {} && cat ~/.config/blockcell-test-denied.ini",
         runtime.paths.workspace().display()
@@ -8832,6 +8861,7 @@ async fn text_confirmation_is_consumed_once_per_message() {
     // 非交互通道（confirm_tx=None）的文本确认按消息一次性消费：
     // 同一条"确认执行"最多放行一个危险操作，新消息重新获得一次额度。
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let mut msg = test_main_session_inbound("cli", "text-confirm-once");
     msg.content =
         "确认执行 exec {\"command\":\"pkill -9 blockcell-nonexistent-marker\"}".to_string();
@@ -8867,6 +8897,7 @@ async fn text_confirmation_is_consumed_once_per_message() {
 #[tokio::test]
 async fn generic_text_confirmation_cannot_approve_an_unidentified_operation() {
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let mut msg = test_main_session_inbound("cli", "p2-confirm");
     msg.content = "确认执行".into();
     let call = tool_call(
@@ -8996,6 +9027,7 @@ async fn tool_policy_channel_condition_only_applies_to_matching_channel() {
     };
 
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let mut telegram_only =
         tool_policy_rule("deny-telegram-exec", "exec", ToolPolicyDecision::Deny);
     telegram_only.when = Some(ToolPolicyCondition {
@@ -9054,6 +9086,7 @@ impl crate::runtime_kernel::AgentEventListener for RecordingToolListener {
 #[tokio::test]
 async fn tool_pre_execute_listener_rewrites_arguments_for_downstream_events() {
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let events = Arc::new(Mutex::new(Vec::new()));
     runtime
         .event_bus()
@@ -9104,6 +9137,7 @@ async fn tool_pre_execute_listener_rewrites_arguments_for_downstream_events() {
 #[tokio::test]
 async fn tool_pre_execute_listener_can_reject_before_execution() {
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let events = Arc::new(Mutex::new(Vec::new()));
     runtime
         .event_bus()
@@ -9290,6 +9324,7 @@ async fn exhausted_budget_is_written_to_the_audit_log() {
 #[tokio::test]
 async fn guards_check_arguments_rewritten_by_pre_execute_listener() {
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let events = Arc::new(Mutex::new(Vec::new()));
     runtime
         .event_bus()
@@ -9327,6 +9362,7 @@ async fn policy_denied_tool_call_is_recorded_in_session_event_log() {
     use blockcell_storage::{JsonlSessionEventLog, SessionEventKind, SessionEventReader};
 
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     runtime.tool_policy = ToolPolicy::from_config(ToolPolicyConfig {
         rules: vec![tool_policy_rule(
             "deny-exec",
@@ -9665,6 +9701,8 @@ async fn completed_exec_job_is_injected_at_the_next_pre_step() {
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
     config.tools.exec.timeout = 1;
+    config.tools.exec.sandbox_policy = Some("full-access".into());
+    config.security.path_access.policy_file.clear();
     config.tools.exec.restrict_to_workspace = false;
     config.tools.exec.approval_policy = Some("workspace-auto".to_string());
     let intent_router = config
@@ -9692,6 +9730,7 @@ async fn completed_exec_job_is_injected_at_the_next_pre_step() {
     let mut runtime =
         AgentRuntime::new(config, paths, provider_pool, tools).expect("create runtime");
     runtime.set_agent_id(Some("default".to_string()));
+    allow_test_exec(&mut runtime);
 
     assert_eq!(
         runtime
@@ -10302,6 +10341,7 @@ async fn candidate_scope_isolates_listeners_and_prompt_sections_from_production(
     }
 
     let mut runtime = test_runtime();
+    allow_test_exec(&mut runtime);
     let hits = Arc::new(AtomicUsize::new(0));
     runtime
         .event_bus()
@@ -10943,6 +10983,7 @@ fn session_pool_is_bounded_and_evicts_least_recently_returned() {
 #[tokio::test]
 async fn bench_regression_path_refusal_guides_literal_retry_without_disabling_tool() {
     let mut runtime = test_runtime_with_default_tools();
+    allow_test_exec(&mut runtime);
     // Exercise real policy/dispatch, isolating host-native sandbox availability.
     let calls = Arc::new(Mutex::new(Vec::new()));
     runtime
@@ -10996,6 +11037,7 @@ async fn bench_regression_path_refusal_guides_literal_retry_without_disabling_to
 #[tokio::test]
 async fn bench_regression_dynamic_path_refusal_explains_static_validation() {
     let mut runtime = test_runtime_with_default_tools();
+    allow_test_exec(&mut runtime);
     let result = runtime.execute_tool_call(
         &tool_call("exec", serde_json::json!({"command": "tar -tzf \"$(find .tmp/out -name '*.tar.gz' | tail -1)\""})),
         &test_main_session_inbound("cli", "dynamic-path-recovery"), None,
