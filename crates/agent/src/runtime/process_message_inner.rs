@@ -1615,6 +1615,9 @@ impl AgentRuntime {
                         .map(|(_, command)| command.clone());
                     self.last_verification_reason =
                         Some(task_progress.verification_reason().to_string());
+                    if task_progress.duplicate_check {
+                        tool_round_hints.push(ChatMessage::user("This identical check already succeeded with no intervening observed workspace change. Avoid another repetition unless there is a concrete need; use the existing result and state its verification scope. This is a reminder, not a tool restriction."));
+                    }
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 

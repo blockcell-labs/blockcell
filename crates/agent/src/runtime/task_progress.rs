@@ -16,6 +16,7 @@ pub(crate) struct ToolEvidence {
     pub running: bool,
     pub completed: bool,
     pub rejection: Option<&'static str>,
+    pub check_candidate: bool,
 }
 
 impl Default for ToolEvidence {
@@ -29,6 +30,7 @@ impl Default for ToolEvidence {
             running: false,
             completed: false,
             rejection: None,
+            check_candidate: false,
         }
     }
 }
@@ -48,6 +50,8 @@ impl ToolEvidence {
             ExecutionAnnotations::default()
         };
         let operation = tool.command_operation(args);
+        let check_candidate = args.get("verification").is_some()
+            || blockcell_tools::verification::command_intent(args).is_some();
         let rejection = (operation == CommandOperation::Launch && tool.supports_verification())
             .then(|| blockcell_tools::verification::command_rejection_reason(args))
             .flatten();
@@ -75,6 +79,7 @@ impl ToolEvidence {
             running: result["running"] == true || result["status"] == "running",
             completed: blockcell_tools::evidence::completed_successfully(result),
             rejection,
+            check_candidate,
         }
     }
 }
@@ -91,6 +96,8 @@ pub(crate) struct TaskProgress {
     pub last_verification: Option<(VerificationIntent, String)>,
     last_rejection: Option<(&'static str, bool)>,
     test_required: bool,
+    successful_check: Option<(String, usize)>,
+    pub duplicate_check: bool,
     initial_outputs: HashMap<String, Option<super::FileVersion>>,
     /// 本轮开始时间。`must_update` 的语义是「本轮更新」，所以基线必须是轮次起点，
     /// 而不是契约注册的时刻——模型常常先写文件、再声明契约，用注册时刻做基线会让
@@ -112,6 +119,8 @@ impl Default for TaskProgress {
             last_verification: None,
             last_rejection: None,
             test_required: false,
+            successful_check: None,
+            duplicate_check: false,
             initial_outputs: HashMap::new(),
             turn_started_at: std::time::SystemTime::now(),
         }
@@ -207,6 +216,16 @@ impl TaskProgress {
     }
 
     pub fn observe(&mut self, evidence: &ToolEvidence, succeeded: bool) {
+        self.duplicate_check = succeeded
+            && evidence.completed
+            && evidence.check_candidate
+            && evidence.command.as_ref().is_some_and(|command| {
+                self.successful_check
+                    .as_ref()
+                    .is_some_and(|(previous, revision)| {
+                        previous == command && *revision == self.revision
+                    })
+            });
         // Failed commands can have partially modified files too. Unknown effects
         // invalidate existing evidence but do not claim a mutation occurred.
         if evidence.effect != WorkspaceEffect::None {
@@ -237,6 +256,11 @@ impl TaskProgress {
                 .is_some_and(|intent| intent.kind == VerificationKind::Test)
             {
                 self.test_required = true;
+            }
+            if succeeded && evidence.completed && evidence.check_candidate {
+                if let Some(command) = &evidence.command {
+                    self.successful_check = Some((command.clone(), self.revision));
+                }
             }
         }
         let verification = evidence
@@ -442,6 +466,29 @@ mod tests {
         let mut progress = TaskProgress::default();
         progress.observe(&check("pytest | tail", 1), false);
         assert!(progress.verification_hint().contains("directly once"));
+    }
+
+    #[test]
+    fn identical_successful_checks_only_get_a_soft_signal_until_workspace_changes() {
+        let mut progress = TaskProgress::default();
+        progress.observe(&check("pytest", 0), true);
+        assert!(!progress.duplicate_check);
+        progress.observe(&ToolEvidence::default(), true);
+        progress.observe(&check("pytest", 0), true);
+        assert!(progress.duplicate_check);
+        assert!(!progress.needs_verification());
+        progress.observe(
+            &ToolEvidence {
+                effect: WorkspaceEffect::Changed,
+                ..ToolEvidence::default()
+            },
+            true,
+        );
+        progress.observe(&check("pytest", 0), true);
+        assert!(!progress.duplicate_check);
+        progress.observe(&check("pytest", 1), false);
+        assert!(!progress.duplicate_check);
+        assert!(progress.needs_verification());
     }
 
     #[test]
