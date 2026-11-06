@@ -395,6 +395,30 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_reads_preserve_evidence_even_when_a_read_fails_but_shell_stays_unknown() {
+        use blockcell_tools::{
+            code_search::{GlobTool, GrepTool},
+            fs::{ListDirTool, ReadFileTool},
+            Tool,
+        };
+        let mut progress = TaskProgress::default();
+        progress.observe(&check("pytest", 0), true);
+        for tool in [
+            &ReadFileTool::default() as &dyn Tool,
+            &ListDirTool::default(),
+            &GrepTool,
+            &GlobTool,
+        ] {
+            let read = ToolEvidence::from_execution(tool, &json!({"path":"."}), &json!({}));
+            assert_eq!(read.effect, WorkspaceEffect::None);
+            progress.observe(&read, false);
+            assert!(!progress.needs_verification());
+        }
+        progress.observe(&check("cat report.json", 0), true);
+        assert!(progress.needs_verification());
+    }
+
+    #[test]
     fn rejected_checks_explain_reason_without_requesting_identical_successful_reruns() {
         for (command, reason) in [
             ("python3 custom.py", "unsupported runner"),
