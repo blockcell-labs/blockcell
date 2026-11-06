@@ -1,6 +1,21 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints first: if compilation/tests/checks are prohibited or deferred, do not run them; record that verification policy in task_contract and report unverified changes. Otherwise run one relevant lightweight check using a recognized test/build/lint/syntax runner, declare the matching verification kind and target, and preserve its failure exit status. Pipes (including tail/head), redirections (including 2>&1), semicolon wrappers and status echoes are not accepted as runner exit-status evidence, even when their output says PASS. If a prior check used them, rerun that check directly once, without wrappers; do not repeat the pipeline or add unrelated checks. Tool output is bounded already. Unknown custom scripts and declarations alone do not satisfy this gate; if only a custom check is applicable, report its scope and that verification remains unconfirmed. Distinguish tests, build, syntax, lint and artifact checks. If verification is impossible, explain why.";
+const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints: never run prohibited or deferred checks. Only recognized runners with preserved exit status establish evidence, not PASS text or declared kinds. Pipes, redirections and status wrappers are rejected; output is already bounded. Use one relevant check, not unrelated checks. Return a single complete final answer preserving the task findings and deliverables, with an honest verification scope; correct findings if checks reveal errors.";
+
+pub(super) fn merge_verification_answer(
+    original: &str,
+    continuation: &str,
+    preserve_original: bool,
+    reason: &str,
+) -> String {
+    if !continuation.trim().is_empty() {
+        continuation.to_string()
+    } else if preserve_original {
+        format!("{original}\n\nVerification scope: {reason}.")
+    } else {
+        format!("Verification scope: {reason}; the earlier attempt is retained in the audit log, not a current delivered conclusion.")
+    }
+}
 fn is_runtime_owned(path: &std::path::Path, owned: &[std::path::PathBuf]) -> bool {
     owned.iter().any(|root| path.starts_with(root))
 }
@@ -2142,7 +2157,7 @@ impl AgentRuntime {
                         response.reasoning_content.clone(),
                     ));
                     current_messages.push(ChatMessage::user(&format!(
-                        "{} {} Preserve the complete task findings and deliverables in your final answer. Append verification status; revise earlier findings only if checks reveal an error or you change files again.",
+                        "{} {}",
                         CODING_VERIFICATION_HINT,
                         task_progress.verification_hint(),
                     )));
@@ -2170,17 +2185,14 @@ impl AgentRuntime {
                     }
                 }
                 final_response = match answer_before_verification.take() {
-                    Some((original, revision))
-                        if revision == task_progress.revision()
-                            && !task_progress.verification_failed()
-                            && !response_content.contains(&original) =>
-                    {
-                        format!(
-                            "{}\n\n---\n后续核验与更正（如与前文冲突，以此处为准）：\n{}",
-                            original, response_content
-                        )
-                    }
-                    _ => response_content,
+                    Some((original, revision)) => merge_verification_answer(
+                        &original,
+                        &response_content,
+                        revision == task_progress.revision()
+                            && !task_progress.verification_failed(),
+                        task_progress.verification_reason(),
+                    ),
+                    None => response_content,
                 };
 
                 // 保留 reasoning_content，避免 DeepSeek thinking mode 400 错误
@@ -2193,16 +2205,13 @@ impl AgentRuntime {
         }
 
         if let Some((original, revision)) = answer_before_verification.take() {
-            if revision == task_progress.revision()
-                && !task_progress.verification_failed()
-                && !final_response.contains(&original)
-            {
-                final_response = format!(
-                    "{}\n\n---\n后续核验与更正（如与前文冲突，以此处为准）：\n{}",
-                    original, final_response
-                );
-                history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
-            }
+            final_response = merge_verification_answer(
+                &original,
+                &final_response,
+                revision == task_progress.revision() && !task_progress.verification_failed(),
+                task_progress.verification_reason(),
+            );
+            history.push(ChatMessage::assistant_with_reasoning(&final_response, None));
         }
         self.current_step = None;
 

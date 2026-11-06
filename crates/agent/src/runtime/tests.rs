@@ -1,12 +1,37 @@
 //! Unit and integration tests for the agent runtime.
 //! Extracted from runtime.rs (mechanical move; logic unchanged).
 
+use super::process_message_inner::merge_verification_answer;
 use super::*;
 use blockcell_core::types::LLMResponse;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+
+#[test]
+fn verification_continuation_delivers_one_answer_without_substring_concatenation() {
+    assert_eq!(
+        merge_verification_answer(
+            "old findings",
+            "corrected findings and verification",
+            true,
+            "ok"
+        ),
+        "corrected findings and verification"
+    );
+    assert_eq!(
+        merge_verification_answer("old", "new", false, "failed"),
+        "new"
+    );
+    assert!(
+        merge_verification_answer("original findings", "", true, "unsupported runner")
+            .contains("original findings\n\nVerification scope:")
+    );
+    let interrupted = merge_verification_answer("stale findings", " ", false, "failed");
+    assert!(!interrupted.contains("stale findings"));
+    assert!(interrupted.contains("audit log"));
+}
 
 fn allow_test_tool(runtime: &mut AgentRuntime, name: &str) {
     runtime
