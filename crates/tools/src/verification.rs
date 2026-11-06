@@ -366,6 +366,45 @@ pub fn command_intent(params: &Value) -> Option<VerificationIntent> {
     })
 }
 
+/// Explain a rejection without promoting declarations or output text to evidence.
+pub fn command_rejection_reason(params: &Value) -> Option<&'static str> {
+    if command_intent(params).is_some() {
+        return None;
+    }
+    if ExecutionAnnotations::parse(params).is_err() {
+        return Some("invalid verification annotations");
+    }
+    let Some(command) = params
+        .get("command")
+        .or_else(|| params.get("cmd"))
+        .and_then(Value::as_str)
+    else {
+        return Some("no inspectable command");
+    };
+    let Some(segments) = status_preserving_segments(command) else {
+        return Some("shell pipes, redirections, wrappers or expansions do not preserve recognized runner evidence");
+    };
+    let mut kinds = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let words = shell_command_words(segment);
+        if index == 0 && segments.len() > 1 && words.first().is_some_and(|word| word == "cd") {
+            if words.len() != 2 || words[1].starts_with('-') {
+                return Some("unsupported directory-change prefix");
+            }
+            continue;
+        }
+        let Some(kind) = runner_kind(segment) else {
+            return Some("unsupported runner or non-check options; custom scripts are not recognized test evidence");
+        };
+        kinds.push(kind);
+    }
+    if kinds.windows(2).any(|pair| pair[0] != pair[1]) {
+        Some("mixed verification kinds in one command")
+    } else {
+        Some("declared verification kind does not match the recognized runner")
+    }
+}
+
 /// Execution restrictions are separate from successful-check evidence. Unknown
 /// commands fail closed under a forbidden/deferred contract; they are not
 /// classified as ordinary work merely because no runner was recognized.
@@ -407,5 +446,29 @@ pub fn violates_verification_prohibition(tool: &dyn crate::Tool, params: &Value)
         CommandOperation::Input | CommandOperation::Opaque => true,
         CommandOperation::Poll | CommandOperation::Close => false,
         CommandOperation::None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rejection_reasons_distinguish_wrappers_custom_runners_and_kind_mismatch() {
+        for (params, expected) in [
+            (json!({"command":"pytest | tail"}), "pipes"),
+            (json!({"command":"python3 custom.py"}), "unsupported runner"),
+            (
+                json!({"command":"pytest", "verification":{"kind":"bogus","target":"x"}}),
+                "invalid",
+            ),
+            (json!({}), "no inspectable"),
+        ] {
+            assert!(command_rejection_reason(&params)
+                .unwrap()
+                .contains(expected));
+        }
+        assert!(command_rejection_reason(&json!({"command":"pytest"})).is_none());
     }
 }

@@ -946,6 +946,7 @@ impl AgentRuntime {
         let mut verification_gate_fired = false;
         let mut answer_before_verification: Option<(String, usize)> = None;
         self.last_verification_command = None;
+        self.last_verification_reason = None;
 
         // Layer 1: 消息级别预算检查
         // 如果工具结果总和超过预算，持久化最大的结果
@@ -1595,7 +1596,10 @@ impl AgentRuntime {
                     self.last_verification_command = task_progress
                         .last_verification
                         .as_ref()
+                        .filter(|_| !task_progress.needs_verification())
                         .map(|(_, command)| command.clone());
+                    self.last_verification_reason =
+                        Some(task_progress.verification_reason().to_string());
 
                     metrics.record_tool_execution(&tool_call.name, tool_timer.elapsed_ms());
 
@@ -2138,8 +2142,9 @@ impl AgentRuntime {
                         response.reasoning_content.clone(),
                     ));
                     current_messages.push(ChatMessage::user(&format!(
-                        "{} Preserve the complete task findings and deliverables in your final answer. Append verification status; revise earlier findings only if checks reveal an error or you change files again.",
+                        "{} {} Preserve the complete task findings and deliverables in your final answer. Append verification status; revise earlier findings only if checks reveal an error or you change files again.",
                         CODING_VERIFICATION_HINT,
+                        task_progress.verification_hint(),
                     )));
                     continue;
                 }

@@ -15,6 +15,7 @@ pub(crate) struct ToolEvidence {
     pub process: Option<String>,
     pub running: bool,
     pub completed: bool,
+    pub rejection: Option<&'static str>,
 }
 
 impl Default for ToolEvidence {
@@ -27,6 +28,7 @@ impl Default for ToolEvidence {
             process: None,
             running: false,
             completed: false,
+            rejection: None,
         }
     }
 }
@@ -46,6 +48,9 @@ impl ToolEvidence {
             ExecutionAnnotations::default()
         };
         let operation = tool.command_operation(args);
+        let rejection = (operation == CommandOperation::Launch && tool.supports_verification())
+            .then(|| blockcell_tools::verification::command_rejection_reason(args))
+            .flatten();
         // Keep task requirements, but never turn an unchecked declaration into
         // successful verification evidence. Poll/input arguments are not launches.
         annotations.verification =
@@ -69,6 +74,7 @@ impl ToolEvidence {
             process,
             running: result["running"] == true || result["status"] == "running",
             completed: blockcell_tools::evidence::completed_successfully(result),
+            rejection,
         }
     }
 }
@@ -83,6 +89,7 @@ pub(crate) struct TaskProgress {
     verified_revision: Option<usize>,
     pending: HashMap<String, (VerificationIntent, String, usize)>,
     pub last_verification: Option<(VerificationIntent, String)>,
+    last_rejection: Option<(&'static str, bool)>,
     initial_outputs: HashMap<String, Option<super::FileVersion>>,
     /// 本轮开始时间。`must_update` 的语义是「本轮更新」，所以基线必须是轮次起点，
     /// 而不是契约注册的时刻——模型常常先写文件、再声明契约，用注册时刻做基线会让
@@ -102,6 +109,7 @@ impl Default for TaskProgress {
             verified_revision: None,
             pending: HashMap::new(),
             last_verification: None,
+            last_rejection: None,
             initial_outputs: HashMap::new(),
             turn_started_at: std::time::SystemTime::now(),
         }
@@ -208,12 +216,18 @@ impl TaskProgress {
             }
             self.revision = self.revision.saturating_add(1);
             self.last_verification = None;
+            self.last_rejection = None;
             if evidence.effect == WorkspaceEffect::Changed {
                 self.changed = true;
             }
             if evidence.effect == WorkspaceEffect::Unknown {
                 self.uncertain_effects = true;
             }
+        }
+        if evidence.operation == CommandOperation::Launch {
+            self.last_rejection = evidence
+                .rejection
+                .map(|reason| (reason, succeeded && evidence.completed));
         }
         let verification = evidence
             .annotations
@@ -268,6 +282,7 @@ impl TaskProgress {
             {
                 self.verified_revision = Some(revision);
                 self.last_verification = Some((intent, command));
+                self.verification_failed = false;
             }
         }
     }
@@ -278,6 +293,34 @@ impl TaskProgress {
                 || self.uncertain_effects
                 || self.contract.verification == VerificationPolicy::Required)
             && self.verified_revision != Some(self.revision)
+    }
+
+    pub fn verification_reason(&self) -> &'static str {
+        if !self.contract.verification.permits_execution() {
+            return "verification prohibited or deferred by task policy";
+        }
+        if !self.needs_verification() && self.last_verification.is_some() {
+            return "recognized check succeeded for the current revision";
+        }
+        if self.verification_failed {
+            return "the recognized verification command failed";
+        }
+        if let Some((reason, _)) = self.last_rejection {
+            return reason;
+        }
+        if !self.pending.is_empty() {
+            return "verification is still running or its completion has not been observed";
+        }
+        "no completed recognized check for the current workspace revision"
+    }
+
+    pub fn verification_hint(&self) -> String {
+        let repeat = if self.last_rejection.is_some_and(|(_, completed)| completed) {
+            "The unsupported command already completed successfully at this revision. Do not repeat it: repetition cannot make it evidence."
+        } else {
+            "For a wrapped check, run the recognized runner directly once without wrappers."
+        };
+        format!("Reason: {}. {} Use a relevant recognized runner (pytest/unittest for semantic tests); otherwise state the custom check's scope and that formal verification remains unconfirmed. Syntax evidence proves parsing only, not semantic correctness.", self.verification_reason(), repeat)
     }
 
     pub fn revision(&self) -> usize {
@@ -294,6 +337,40 @@ mod tests {
     use super::*;
     use blockcell_tools::{exec_jobs::JobOutputTool, shell_actions::ShellActionTool};
     use serde_json::json;
+
+    fn check(command: &str, exit_code: i32) -> ToolEvidence {
+        ToolEvidence::from_execution(
+            &ShellActionTool::run(),
+            &json!({"command":command}),
+            &json!({"exit_code":exit_code,"running":false,"output":"PASS"}),
+        )
+    }
+
+    #[test]
+    fn rejected_checks_explain_reason_without_requesting_identical_successful_reruns() {
+        for (command, reason) in [
+            ("python3 custom.py", "unsupported runner"),
+            ("pytest | tail", "pipes"),
+        ] {
+            let mut progress = TaskProgress::default();
+            progress.observe(&check(command, 0), true);
+            assert!(progress.needs_verification());
+            let hint = progress.verification_hint();
+            assert!(hint.contains(reason) && hint.contains("Do not repeat"));
+            assert!(hint.contains("pytest/unittest") && hint.contains("scope"));
+            progress.observe(
+                &ToolEvidence {
+                    effect: WorkspaceEffect::Changed,
+                    ..ToolEvidence::default()
+                },
+                true,
+            );
+            assert!(!progress.verification_hint().contains("already completed"));
+        }
+        let mut progress = TaskProgress::default();
+        progress.observe(&check("pytest | tail", 1), false);
+        assert!(progress.verification_hint().contains("directly once"));
+    }
 
     #[test]
     fn piped_checks_require_one_direct_status_preserving_check() {

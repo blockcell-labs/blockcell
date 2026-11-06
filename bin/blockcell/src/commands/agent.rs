@@ -329,7 +329,12 @@ pub async fn run(
         if let Some(command) = runtime.last_verification_command() {
             eprintln!("[blockcell] verification: verified ({command}, exit 0)");
         } else {
-            eprintln!("[blockcell] verification: unverified");
+            eprintln!(
+                "[blockcell] verification: unverified ({})",
+                runtime
+                    .last_verification_reason()
+                    .unwrap_or("no recognized completed check")
+            );
         }
         // Event handler already printed streaming output, just print final newline if needed
         if !response.is_empty() {
