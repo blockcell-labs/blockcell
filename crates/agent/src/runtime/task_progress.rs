@@ -1,7 +1,7 @@
 //! Turn-scoped completion evidence. No natural-language requirements are inferred here.
 use blockcell_core::task_contract::{TaskContract, VerificationPolicy};
 use blockcell_tools::evidence::{
-    CommandOperation, ExecutionAnnotations, VerificationIntent, WorkspaceEffect,
+    CommandOperation, ExecutionAnnotations, VerificationIntent, VerificationKind, WorkspaceEffect,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -90,6 +90,7 @@ pub(crate) struct TaskProgress {
     pending: HashMap<String, (VerificationIntent, String, usize)>,
     pub last_verification: Option<(VerificationIntent, String)>,
     last_rejection: Option<(&'static str, bool)>,
+    test_required: bool,
     initial_outputs: HashMap<String, Option<super::FileVersion>>,
     /// 本轮开始时间。`must_update` 的语义是「本轮更新」，所以基线必须是轮次起点，
     /// 而不是契约注册的时刻——模型常常先写文件、再声明契约，用注册时刻做基线会让
@@ -110,6 +111,7 @@ impl Default for TaskProgress {
             pending: HashMap::new(),
             last_verification: None,
             last_rejection: None,
+            test_required: false,
             initial_outputs: HashMap::new(),
             turn_started_at: std::time::SystemTime::now(),
         }
@@ -228,6 +230,14 @@ impl TaskProgress {
             self.last_rejection = evidence
                 .rejection
                 .map(|reason| (reason, succeeded && evidence.completed));
+            if evidence
+                .annotations
+                .verification
+                .as_ref()
+                .is_some_and(|intent| intent.kind == VerificationKind::Test)
+            {
+                self.test_required = true;
+            }
         }
         let verification = evidence
             .annotations
@@ -292,7 +302,12 @@ impl TaskProgress {
             && (self.changed
                 || self.uncertain_effects
                 || self.contract.verification == VerificationPolicy::Required)
-            && self.verified_revision != Some(self.revision)
+            && (self.verified_revision != Some(self.revision)
+                || (self.test_required
+                    && !self
+                        .last_verification
+                        .as_ref()
+                        .is_some_and(|(intent, _)| intent.kind == VerificationKind::Test)))
     }
 
     pub fn verification_reason(&self) -> &'static str {
@@ -300,7 +315,23 @@ impl TaskProgress {
             return "verification prohibited or deferred by task policy";
         }
         if !self.needs_verification() && self.last_verification.is_some() {
-            return "recognized check succeeded for the current revision";
+            return if self
+                .last_verification
+                .as_ref()
+                .is_some_and(|(intent, _)| intent.kind == VerificationKind::Syntax)
+            {
+                "recognized syntax check succeeded; semantic correctness is not established"
+            } else {
+                "recognized check succeeded for the current revision"
+            };
+        }
+        if self.test_required
+            && self
+                .last_verification
+                .as_ref()
+                .is_some_and(|(intent, _)| intent.kind != VerificationKind::Test)
+        {
+            return "only non-test evidence is current; syntax/build/lint checks do not replace an attempted semantic test";
         }
         if self.verification_failed {
             return "the recognized verification command failed";
@@ -344,6 +375,23 @@ mod tests {
             &json!({"command":command}),
             &json!({"exit_code":exit_code,"running":false,"output":"PASS"}),
         )
+    }
+
+    #[test]
+    fn syntax_cannot_discharge_a_semantic_test_and_failure_does_not_trust_pass_text() {
+        let mut progress = TaskProgress::default();
+        progress.observe(&check("pytest", 1), false);
+        progress.observe(&check("python3 -m json.tool report.json", 0), true);
+        assert!(progress.needs_verification());
+        assert!(progress.verification_reason().contains("do not replace"));
+        progress.observe(&check("pytest", 0), true);
+        assert!(!progress.needs_verification());
+        let mut syntax = TaskProgress::default();
+        syntax.observe(&check("python3 -m json.tool report.json", 0), true);
+        assert!(!syntax.needs_verification());
+        syntax.observe(&check("python3 -m json.tool report.json", 1), false);
+        assert!(syntax.needs_verification());
+        assert!(syntax.verification_reason().contains("failed"));
     }
 
     #[test]

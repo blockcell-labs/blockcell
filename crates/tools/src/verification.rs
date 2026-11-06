@@ -166,7 +166,11 @@ fn is_python_executable(command: &str) -> bool {
 
 fn runner_kind(segment: &str) -> Option<VerificationKind> {
     use VerificationKind::*;
-    let words = strip_verification_prefixes(shell_command_words(segment));
+    let original = shell_command_words(segment);
+    let direct_python = original
+        .first()
+        .is_some_and(|word| is_python_executable(word));
+    let words = strip_verification_prefixes(original);
     let command = words.first()?.as_str();
     let args = &words[1..];
     // Non-check modes and failure-masking switches cannot produce evidence,
@@ -232,6 +236,14 @@ fn runner_kind(segment: &str) -> Option<VerificationKind> {
             "pytest" | "unittest" => Some(Test),
             "mypy" => Some(Lint),
             "py_compile" | "compileall" => Some(Syntax),
+            "json.tool"
+                if direct_python
+                    && args.len() == 3
+                    && !args[2].is_empty()
+                    && !args[2].starts_with('-') =>
+            {
+                Some(Syntax)
+            }
             _ => None,
         },
         ("cargo", Some("test")) if args.iter().any(|arg| arg == "--no-run") => Some(Build),
@@ -455,10 +467,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn json_tool_only_accepts_a_direct_single_input_syntax_check() {
+        for command in [
+            "python -m json.tool report.json",
+            "python3 -m json.tool 'a b.json'",
+            "python3.10 -m json.tool report.json",
+        ] {
+            assert_eq!(
+                command_intent(&json!({"command": command})).unwrap().kind,
+                VerificationKind::Syntax
+            );
+        }
+        for command in [
+            "",
+            "python3 -m json.tool",
+            "python3 -m json.tool -",
+            "python3 -m json.tool --help",
+            "python3 -m json.tool in.json out.json",
+            "python3 -m json.tool x > y",
+            "python3 -m json.tool x | head",
+            "python3 -m json.tool x 2>&1",
+            "env python3 -m json.tool x",
+            "sh -c 'python3 -m json.tool x'",
+            "python3 -c 'import json; json.load(open(\"x\"))'",
+        ] {
+            assert!(
+                command_intent(&json!({"command": command})).is_none(),
+                "{command}"
+            );
+        }
+        assert!(command_intent(&json!({"command":"python3 -m json.tool x", "verification":{"kind":"test","target":"x"}})).is_none());
+    }
+
+    #[test]
     fn rejection_reasons_distinguish_wrappers_custom_runners_and_kind_mismatch() {
         for (params, expected) in [
             (json!({"command":"pytest | tail"}), "pipes"),
             (json!({"command":"python3 custom.py"}), "unsupported runner"),
+            (
+                json!({"command":"python3 -m json.tool x", "verification":{"kind":"test","target":"x"}}),
+                "does not match",
+            ),
             (
                 json!({"command":"pytest", "verification":{"kind":"bogus","target":"x"}}),
                 "invalid",
