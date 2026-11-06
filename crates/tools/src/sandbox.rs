@@ -440,11 +440,18 @@ fn go_cache_defaults(
         .or_else(|| home.as_ref().map(|path| path.join("go")));
     let mut roots = workspace_write_temp_roots();
     roots.extend_from_slice(writable_roots);
+    // 待判定路径常常还不存在（缓存目录首次使用），canonicalize 会失败；而 macOS 上
+    // /var 与 /private/var 互为符号链接，只比较规范化形态会把 $TMPDIR 下的路径误判
+    // 为不可写。因此 raw 与规范化两种形态都要比较。
     let writable = |path: &Path| {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let candidates = [path.to_path_buf(), canonical];
         roots.iter().any(|root| {
-            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-            path.is_absolute() && path.starts_with(root)
+            let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            candidates.iter().any(|candidate| {
+                candidate.is_absolute()
+                    && (candidate.starts_with(root) || candidate.starts_with(&canonical_root))
+            })
         })
     };
     let mut defaults = Vec::new();
