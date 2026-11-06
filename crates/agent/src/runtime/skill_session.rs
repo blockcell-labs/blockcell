@@ -11,6 +11,9 @@ impl AgentRuntime {
     ) -> Result<(String, Vec<ChatMessage>, serde_json::Value)> {
         let (disabled_tools, disabled_skills) =
             load_disabled_toggles_pair(&self.paths, "tools", "skills");
+        let mut tool_names = tool_names.to_vec();
+        blockcell_tools::web::retain_configured_tools(&mut tool_names, &self.config);
+        let tool_names = tool_names.as_slice();
 
         let mode_names = vec![format!("Skill:{}", active_skill.name)];
         let prompt_ctx = blockcell_tools::PromptContext {

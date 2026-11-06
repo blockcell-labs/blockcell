@@ -8,6 +8,33 @@ use crate::{Tool, ToolContext, ToolSchema};
 
 pub struct WebSearchTool;
 
+fn baidu_search_key(config: &blockcell_core::Config, env_key: Option<String>) -> Option<String> {
+    let key = &config.tools.web.search.baidu_api_key;
+    if !key.is_empty() {
+        Some(key.clone())
+    } else {
+        env_key.filter(|key| !key.is_empty())
+    }
+}
+
+fn search_configured(config: &blockcell_core::Config, env_key: Option<String>) -> bool {
+    !config.tools.web.search.api_key.is_empty() || baidu_search_key(config, env_key).is_some()
+}
+
+pub fn retain_configured_tools(names: &mut Vec<String>, config: &blockcell_core::Config) {
+    retain_tools_with_search_key(names, config, std::env::var("BAIDU_API_KEY").ok());
+}
+
+fn retain_tools_with_search_key(
+    names: &mut Vec<String>,
+    config: &blockcell_core::Config,
+    env_key: Option<String>,
+) {
+    if !search_configured(config, env_key) {
+        names.retain(|name| name != "web_search");
+    }
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn coding_exposure(&self) -> crate::base_packs::CodingExposure {
@@ -75,16 +102,7 @@ impl Tool for WebSearchTool {
             .map(|s| s.to_string());
 
         // Resolve Baidu API key: config > env
-        let baidu_key = {
-            let k = &ctx.config.tools.web.search.baidu_api_key;
-            if !k.is_empty() {
-                Some(k.clone())
-            } else {
-                std::env::var("BAIDU_API_KEY")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-            }
-        };
+        let baidu_key = baidu_search_key(&ctx.config, std::env::var("BAIDU_API_KEY").ok());
 
         let brave_key = &ctx.config.tools.web.search.api_key;
 
@@ -830,6 +848,60 @@ fn extract_text_from_html(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_readiness_matches_execution_credentials() {
+        let mut config = blockcell_core::Config::default();
+        assert!(!search_configured(&config, None));
+        assert!(!search_configured(&config, Some(String::new())));
+        assert!(search_configured(&config, Some("env-key".into())));
+        config.tools.web.search.baidu_api_key = "configured-baidu".into();
+        assert_eq!(
+            baidu_search_key(&config, Some("env-key".into())).as_deref(),
+            Some("configured-baidu")
+        );
+        assert!(search_configured(&config, None));
+        config.tools.web.search.baidu_api_key.clear();
+        config.tools.web.search.api_key = "configured-brave".into();
+        assert!(search_configured(&config, None));
+    }
+
+    #[test]
+    fn unavailable_search_has_no_schema_or_prompt_rule() {
+        let config = blockcell_core::Config::default();
+        let mut names = vec!["web_search".into(), "web_fetch".into()];
+        retain_tools_with_search_key(&mut names, &config, None);
+        let registry = crate::ToolRegistry::with_defaults();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let schemas = registry.get_filtered_schemas(&refs);
+        assert!(schemas
+            .iter()
+            .all(|schema| schema["function"]["name"] != "web_search"));
+        assert!(schemas
+            .iter()
+            .any(|schema| schema["function"]["name"] == "web_fetch"));
+        let ctx = crate::PromptContext {
+            channel: "cli",
+            intents: &[],
+            default_timezone: None,
+        };
+        assert!(registry
+            .get_prompt_rules(&refs, &ctx)
+            .iter()
+            .all(|rule| !rule.contains("**Web search**")));
+        let mut configured = vec!["web_search".into(), "web_fetch".into()];
+        retain_tools_with_search_key(&mut configured, &config, Some("env-key".into()));
+        assert_eq!(configured, ["web_search", "web_fetch"]);
+        let refs = configured.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(registry
+            .get_filtered_schemas(&refs)
+            .iter()
+            .any(|schema| schema["function"]["name"] == "web_search"));
+        assert!(registry
+            .get_prompt_rules(&refs, &ctx)
+            .iter()
+            .any(|rule| rule.contains("**Web search**")));
+    }
 
     #[tokio::test]
     async fn web_fetch_ssrf_guard_rejects_private_targets() {

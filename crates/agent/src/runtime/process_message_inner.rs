@@ -611,6 +611,7 @@ impl AgentRuntime {
 
         tool_names.sort();
         tool_names.dedup();
+        blockcell_tools::web::retain_configured_tools(&mut tool_names, &self.config);
 
         // Collect tool-specific prompt rules from the registry for actually loaded tools.
         let mode_names: Vec<String> = match decision.mode {
