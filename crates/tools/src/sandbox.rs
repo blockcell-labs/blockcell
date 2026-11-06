@@ -405,7 +405,8 @@ pub async fn prepare_sandboxed(
     request: SandboxRequest,
 ) -> Result<SandboxHandle> {
     let policy = request.policy;
-    let handle = provider.prepare(request).await?;
+    let writable_roots = request.writable_roots.clone();
+    let mut handle = provider.prepare(request).await?;
     if !handle.backend.enforces(policy) {
         return Err(Error::PermissionDenied(format!(
             "sandbox provider '{}' returned backend {:?} that does not enforce policy {}",
@@ -414,7 +415,58 @@ pub async fn prepare_sandboxed(
             policy.as_str()
         )));
     }
+    if policy == SandboxPolicy::WorkspaceWrite {
+        let cache_root =
+            std::env::temp_dir().join(format!("blockcell-go-{}", uuid::Uuid::new_v4()));
+        let defaults = go_cache_defaults(&writable_roots, &cache_root, |key| std::env::var_os(key));
+        for (key, path) in defaults {
+            std::fs::create_dir_all(&path).map_err(|error| {
+                Error::Tool(format!("Failed to create sandbox Go cache: {error}"))
+            })?;
+            handle.command.env(key, path);
+        }
+    }
     Ok(handle)
+}
+
+fn go_cache_defaults(
+    writable_roots: &[PathBuf],
+    cache_root: &Path,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, PathBuf)> {
+    let home = env("HOME").map(PathBuf::from);
+    let gopath = env("GOPATH")
+        .and_then(|value| std::env::split_paths(&value).next())
+        .or_else(|| home.as_ref().map(|path| path.join("go")));
+    let mut roots = workspace_write_temp_roots();
+    roots.extend_from_slice(writable_roots);
+    let writable = |path: &Path| {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        roots.iter().any(|root| {
+            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            path.is_absolute() && path.starts_with(root)
+        })
+    };
+    let mut defaults = Vec::new();
+    for (key, default, directory) in [
+        (
+            "GOCACHE",
+            env("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|path| path.join(".cache")))
+                .map(|path| path.join("go-build")),
+            "build",
+        ),
+        ("GOMODCACHE", gopath.map(|path| path.join("pkg/mod")), "mod"),
+    ] {
+        if env(key).is_some_and(|value| !value.is_empty()) {
+            continue;
+        }
+        if !default.as_deref().is_some_and(writable) {
+            defaults.push((key, cache_root.join(directory)));
+        }
+    }
+    defaults
 }
 
 /// 本机原生沙箱：macOS Seatbelt / Linux Bubblewrap；不可用时要求审批。
@@ -929,6 +981,61 @@ fn apply_network_seccomp() -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::shell_executor::{LocalShellExecutor, ShellExecutor, ShellRequest};
+
+    #[tokio::test]
+    async fn sandbox_go_caches_are_writable_without_workspace_artifacts() {
+        if !native_sandbox_available() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let mut handle = prepare_sandboxed(&NativeSandboxProvider, SandboxRequest {
+            agent_id: "cache-test".into(), session_id: "cache-test".into(),
+            policy: SandboxPolicy::WorkspaceWrite,
+            writable_roots: vec![workspace.path().to_path_buf()],
+            program: "sh".into(),
+            args: vec!["-c".into(), "test -n \"$GOCACHE\" && test -n \"$GOMODCACHE\" && touch \"$GOCACHE/probe\" \"$GOMODCACHE/probe\"".into()],
+        }).await.unwrap();
+        let output = handle
+            .command
+            .current_dir(workspace.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn go_cache_defaults_avoid_read_only_home_and_preserve_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        let cache = std::env::temp_dir().join("blockcell-go-test");
+        let env = |key: &str| (key == "HOME").then(|| home.clone().into_os_string());
+        let defaults = go_cache_defaults(&[workspace.clone()], &cache, env);
+        // Home is under /tmp in this fixture, so it is already writable.
+        assert!(defaults.is_empty());
+        let env = |key: &str| (key == "HOME").then(|| OsString::from("/read-only-home"));
+        let defaults = go_cache_defaults(&[workspace], &cache, env);
+        assert_eq!(
+            defaults,
+            vec![
+                ("GOCACHE", cache.join("build")),
+                ("GOMODCACHE", cache.join("mod"))
+            ]
+        );
+        let env = |key: &str| match key {
+            "GOCACHE" => Some(OsString::from("off")),
+            "GOMODCACHE" => Some(OsString::from("/custom/modules")),
+            _ => None,
+        };
+        assert!(go_cache_defaults(&[], &cache, env).is_empty());
+        assert_eq!(go_cache_defaults(&[], &cache, |_| None).len(), 2);
+    }
 
     #[test]
     fn native_backend_selection_degrades_to_approval_when_unavailable() {
