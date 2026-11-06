@@ -111,12 +111,12 @@ impl Tool for ShellActionTool {
                 vec!["command"],
             ),
             ShellAction::Poll => (
-                "Poll shell.",
+                "Poll shell. Omit session_id only when exactly one caller-owned session exists.",
                 json!({
                     "session_id": {"type": "string"},
                     "timeout_secs": {"type": "integer", "minimum": 0, "maximum": 3600}
                 }),
-                vec!["session_id"],
+                vec![],
             ),
             ShellAction::Input => (
                 "Send input to a persistent shell session.",
@@ -124,9 +124,9 @@ impl Tool for ShellActionTool {
                 vec!["session_id", "input"],
             ),
             ShellAction::Close => (
-                "Close a persistent shell session.",
+                "Close a persistent shell session. Omit session_id only when exactly one caller-owned session exists.",
                 json!({"session_id": {"type": "string"}}),
-                vec!["session_id"],
+                vec![],
             ),
         };
         ToolSchema {
@@ -163,6 +163,17 @@ impl Tool for ShellActionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poll_and_close_allow_omitted_id_but_input_still_requires_it() {
+        for tool in [ShellActionTool::poll(), ShellActionTool::close()] {
+            assert!(tool.validate(&json!({})).is_ok());
+            assert_eq!(tool.schema().parameters["required"], json!([]));
+        }
+        assert!(ShellActionTool::input()
+            .validate(&json!({"input":"x"}))
+            .is_err());
+    }
 
     #[test]
     fn each_action_maps_to_legacy_shell_arguments() {

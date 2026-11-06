@@ -492,7 +492,13 @@ impl ShellSessionManager {
         session_id: &str,
         caller: SessionOwner<'_>,
     ) -> Result<()> {
-        let session = self.get(session_id).await?;
+        let session = match self.get(session_id).await {
+            Err(Error::NotFound(_)) => return Err(Error::NotFound(format!(
+                "Shell session not found: {session_id}. Valid active ids for this caller: {:?}. Do not infer that a mistyped id expired.",
+                self.owned_session_ids(caller).await
+            ))),
+            other => other?,
+        };
         let session = session.lock().await;
         if session.owner_session_id != caller.session_id
             || session.owner_agent_id != caller.agent_id
@@ -502,6 +508,45 @@ impl ShellSessionManager {
             )));
         }
         Ok(())
+    }
+
+    async fn owned_session_ids(&self, caller: SessionOwner<'_>) -> Vec<String> {
+        let entries: Vec<_> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect();
+        let mut ids = Vec::new();
+        for (id, session) in entries {
+            let session = session.lock().await;
+            if session.owner_agent_id == caller.agent_id
+                && session.owner_session_id == caller.session_id
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    async fn resolve_session_id(
+        &self,
+        requested: Option<&str>,
+        caller: SessionOwner<'_>,
+    ) -> Result<String> {
+        if let Some(id) = requested {
+            self.verify_owner(id, caller).await?;
+            return Ok(id.to_string());
+        }
+        let ids = self.owned_session_ids(caller).await;
+        if ids.len() == 1 {
+            return Ok(ids[0].clone());
+        }
+        Err(Error::Validation(format!(
+            "Omitting session_id requires exactly one caller-owned session. Valid active ids: {ids:?}; select one explicitly."
+        )))
     }
 
     /// 回收子进程已退出的僵尸会话：
@@ -1208,7 +1253,7 @@ impl Tool for ShellTool {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Existing persistent shell session. Omit on the first run to create one."
+                        "description": "Existing persistent shell session. Omit on the first run to create one; poll/close may omit it only when exactly one session belongs to this caller."
                     },
                     "input": {
                         "type": "string",
@@ -1255,7 +1300,7 @@ impl Tool for ShellTool {
                     ));
                 }
             }
-            "poll" | "close" => require_session_id(&params, action)?,
+            "poll" | "close" => {}
             "write_stdin" => {
                 require_session_id(&params, action)?;
                 let session_id = params
@@ -1280,7 +1325,22 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let params = normalize_shell_args(params);
+        let mut params = normalize_shell_args(params);
+        if matches!(params["action"].as_str(), Some("poll" | "close")) {
+            let owner = SessionOwner {
+                agent_id: ctx
+                    .agent_identity
+                    .as_ref()
+                    .map(|identity| identity.agent_id.as_str())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or("default"),
+                session_id: &ctx.session_key,
+            };
+            let id = SHELL_SESSIONS
+                .resolve_session_id(params["session_id"].as_str(), owner)
+                .await?;
+            params["session_id"] = Value::String(id);
+        }
         let action = params
             .get("action")
             .and_then(Value::as_str)
@@ -1654,6 +1714,67 @@ mod tests {
     use super::*;
     use blockcell_core::Config;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn omitted_session_id_is_unambiguous_and_errors_list_only_owned_ids() {
+        let manager = ShellSessionManager::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let owner = SessionOwner {
+            agent_id: "a",
+            session_id: "turn",
+        };
+        let other = SessionOwner {
+            agent_id: "b",
+            session_id: "turn",
+        };
+        assert!(manager.resolve_session_id(None, owner).await.is_err());
+        let first = manager
+            .create(workspace.path(), SandboxPolicy::FullAccess, owner)
+            .await
+            .unwrap();
+        let foreign = manager
+            .create(workspace.path(), SandboxPolicy::FullAccess, other)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.resolve_session_id(None, owner).await.unwrap(),
+            first
+        );
+        assert!(manager
+            .resolve_session_id(Some(&foreign), owner)
+            .await
+            .is_err());
+        let error = manager
+            .resolve_session_id(Some("typo"), owner)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&first));
+        assert!(!error.contains(&foreign));
+        assert!(error.contains("Do not infer"));
+        let second = manager
+            .create(workspace.path(), SandboxPolicy::FullAccess, owner)
+            .await
+            .unwrap();
+        let ambiguous = manager
+            .resolve_session_id(None, owner)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(ambiguous.contains(&first) && ambiguous.contains(&second));
+        assert_eq!(
+            manager
+                .resolve_session_id(Some(&first), owner)
+                .await
+                .unwrap(),
+            first
+        );
+        manager.close(&second).await.unwrap();
+        let id = manager.resolve_session_id(None, owner).await.unwrap();
+        manager.close(&id).await.unwrap();
+        assert!(manager.resolve_session_id(None, owner).await.is_err());
+        manager.close(&foreign).await.unwrap();
+    }
 
     #[test]
     fn shell_tool_schema_exposes_session_actions_and_sandbox_policy() {
