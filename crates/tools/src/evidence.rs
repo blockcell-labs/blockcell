@@ -50,15 +50,7 @@ pub fn is_plain_read_command(command: &str) -> bool {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VerificationKind {
-    Test,
-    Build,
-    Lint,
-    Syntax,
-    Artifact,
-}
+pub use blockcell_core::config::VerificationKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
