@@ -20,6 +20,28 @@ pub struct ExecTool {
     timeout_secs: u32,
 }
 
+pub(crate) fn skill_readonly_roots(ctx: &ToolContext) -> Vec<std::path::PathBuf> {
+    let Some(skill_dir) = ctx
+        .active_skill_dir
+        .as_ref()
+        .and_then(|dir| dir.canonicalize().ok())
+    else {
+        return Vec::new();
+    };
+    let writable = ctx
+        .sandbox_writable_roots
+        .clone()
+        .unwrap_or_else(|| vec![ctx.workspace.clone()]);
+    if writable.iter().any(|root| {
+        root.canonicalize()
+            .is_ok_and(|root| skill_dir.starts_with(root))
+    }) {
+        Vec::new()
+    } else {
+        vec![skill_dir]
+    }
+}
+
 impl ExecTool {
     pub fn new(executor: Arc<dyn ShellExecutor>) -> Self {
         Self {
@@ -315,6 +337,7 @@ impl Tool for ExecTool {
                 working_dir,
                 policy,
                 writable_roots,
+                readonly_roots: skill_readonly_roots(&ctx),
                 timeout: Duration::from_secs(timeout_secs),
                 max_output_bytes: max_output_chars * 4,
             })

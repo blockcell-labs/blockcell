@@ -128,6 +128,7 @@ struct ShellSession {
     output: Arc<Mutex<SharedOutput>>,
     active: Option<ActiveCommand>,
     sandbox_policy: SandboxPolicy,
+    readonly_roots: Vec<PathBuf>,
     pid: Option<u32>,
     exit_code: Option<i32>,
     exited_at: Option<tokio::time::Instant>,
@@ -384,6 +385,7 @@ impl ShellSessionManager {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_with_task_manager(
         &self,
         workspace: &Path,
@@ -398,6 +400,7 @@ impl ShellSessionManager {
             owner,
             task_manager,
             writable_roots,
+            Vec::new(),
             self.current_sandbox(),
         )
         .await
@@ -410,12 +413,14 @@ impl ShellSessionManager {
         owner: SessionOwner<'_>,
         task_manager: Option<crate::TaskManagerHandle>,
         writable_roots: Vec<PathBuf>,
+        readonly_roots: Vec<PathBuf>,
         sandbox: Arc<dyn SandboxProvider>,
     ) -> Result<String> {
         let request = SandboxRequest {
             agent_id: owner.agent_id.to_string(),
             session_id: owner.session_id.to_string(),
             policy: sandbox_policy,
+            readonly_roots: readonly_roots.clone(),
             writable_roots: if sandbox_policy == SandboxPolicy::WorkspaceWrite {
                 writable_roots
             } else {
@@ -476,6 +481,7 @@ impl ShellSessionManager {
                 output,
                 active: None,
                 sandbox_policy,
+                readonly_roots,
                 pid,
                 exit_code: None,
                 exited_at: None,
@@ -515,6 +521,17 @@ impl ShellSessionManager {
             return Err(Error::PermissionDenied(format!(
                 "Shell session {session_id} belongs to another session or agent"
             )));
+        }
+        Ok(())
+    }
+
+    async fn verify_readonly_roots(&self, session_id: &str, roots: &[PathBuf]) -> Result<()> {
+        let session = self.get(session_id).await?;
+        if session.lock().await.readonly_roots != roots {
+            return Err(Error::PermissionDenied(
+                "Shell session resource scope differs from the active skill; start a new session"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -1093,6 +1110,7 @@ pub(crate) struct ExecShellRequest<'a> {
     pub owner_session_id: &'a str,
     pub task_manager: Option<crate::TaskManagerHandle>,
     pub writable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub sandbox: Arc<dyn SandboxProvider>,
     pub command: &'a str,
     pub timeout: Duration,
@@ -1112,6 +1130,7 @@ pub(crate) async fn start_exec_shell_session(
             owner,
             request.task_manager,
             request.writable_roots,
+            request.readonly_roots,
             request.sandbox,
         )
         .await?;
@@ -1381,6 +1400,7 @@ impl Tool for ShellTool {
             agent_id: caller_agent_id,
             session_id: &ctx.session_key,
         };
+        let readonly_roots = crate::exec::skill_readonly_roots(&ctx);
 
         match action {
             "run" => {
@@ -1398,6 +1418,9 @@ impl Tool for ShellTool {
                         .await
                     {
                         Ok(()) => {
+                            SHELL_SESSIONS
+                                .verify_readonly_roots(requested_session_id, &readonly_roots)
+                                .await?;
                             if params.get("sandbox_policy").is_some() {
                                 let requested = SandboxPolicy::parse(
                                     params.get("sandbox_policy").and_then(Value::as_str),
@@ -1419,12 +1442,14 @@ impl Tool for ShellTool {
                                 params.get("sandbox_policy").and_then(Value::as_str),
                             )?;
                             let session_id = SHELL_SESSIONS
-                                .create_with_task_manager(
+                                .create_with_task_manager_and_sandbox(
                                     &ctx.workspace,
                                     policy,
                                     caller_owner,
                                     ctx.task_manager.clone(),
                                     writable_roots.clone(),
+                                    readonly_roots.clone(),
+                                    SHELL_SESSIONS.current_sandbox(),
                                 )
                                 .await?;
                             note = Some(format!(
@@ -1438,12 +1463,14 @@ impl Tool for ShellTool {
                     let policy =
                         SandboxPolicy::parse(params.get("sandbox_policy").and_then(Value::as_str))?;
                     SHELL_SESSIONS
-                        .create_with_task_manager(
+                        .create_with_task_manager_and_sandbox(
                             &ctx.workspace,
                             policy,
                             caller_owner,
                             ctx.task_manager.clone(),
                             writable_roots,
+                            readonly_roots,
+                            SHELL_SESSIONS.current_sandbox(),
                         )
                         .await?
                 };
@@ -1483,6 +1510,9 @@ impl Tool for ShellTool {
                 let session_id = params["session_id"].as_str().unwrap_or_default();
                 SHELL_SESSIONS
                     .verify_owner(session_id, caller_owner)
+                    .await?;
+                SHELL_SESSIONS
+                    .verify_readonly_roots(session_id, &readonly_roots)
                     .await?;
                 let input = params["input"].as_str().unwrap_or_default();
                 SHELL_SESSIONS.write_stdin(session_id, input).await?;
@@ -1946,6 +1976,7 @@ mod tests {
             session_id: String::new(),
             policy: SandboxPolicy::FullAccess,
             writable_roots: vec![workspace.path().to_path_buf()],
+            readonly_roots: Vec::new(),
             program: String::new(),
             args: Vec::new(),
         };
@@ -2387,6 +2418,45 @@ mod tests {
                 manager.close(&session_id).await.expect("close session");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn session_scope_tracks_the_active_skill_resources() {
+        // 会话绑定创建时的只读资源范围：切出技能后同一个会话不能再访问旧技能目录。
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let skill = tempfile::tempdir().expect("temp skill");
+        let manager = ShellSessionManager::new();
+        let owner = SessionOwner {
+            agent_id: "agent-a",
+            session_id: "cli:skill-scope",
+        };
+        let skill_root = skill.path().to_path_buf();
+        let session_id = manager
+            .create_with_task_manager_and_sandbox(
+                workspace.path(),
+                SandboxPolicy::FullAccess,
+                owner,
+                None,
+                vec![workspace.path().to_path_buf()],
+                vec![skill_root.clone()],
+                manager.current_sandbox(),
+            )
+            .await
+            .expect("create scoped session");
+
+        assert!(manager
+            .verify_readonly_roots(&session_id, std::slice::from_ref(&skill_root))
+            .await
+            .is_ok());
+        let error = manager
+            .verify_readonly_roots(&session_id, &[])
+            .await
+            .expect_err("session must not outlive its skill scope");
+        assert!(
+            error.to_string().contains("differs from the active skill"),
+            "unexpected error: {error}"
+        );
+        manager.close(&session_id).await.expect("close session");
     }
 
     #[tokio::test]

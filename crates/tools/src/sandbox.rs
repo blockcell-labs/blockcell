@@ -231,6 +231,7 @@ fn workspace_write_temp_roots() -> Vec<PathBuf> {
 fn build_bubblewrap_args(
     policy: SandboxPolicy,
     writable_roots: &[PathBuf],
+    readonly_roots: &[PathBuf],
     sensitive_paths: &[SensitiveReadPath],
 ) -> Vec<OsString> {
     let mut args = [
@@ -270,6 +271,23 @@ fn build_bubblewrap_args(
             args.push(OsString::from("--bind"));
             args.push(root.as_os_str().to_os_string());
             args.push(root.into_os_string());
+        }
+    }
+
+    for root in readonly_roots {
+        args.push(OsString::from("--ro-bind"));
+        args.push(root.as_os_str().to_os_string());
+        args.push(root.as_os_str().to_os_string());
+    }
+    if policy == SandboxPolicy::WorkspaceWrite {
+        for root in writable_roots.iter().filter(|root| {
+            readonly_roots
+                .iter()
+                .any(|readonly| root.starts_with(readonly))
+        }) {
+            args.push(OsString::from("--bind"));
+            args.push(root.as_os_str().to_os_string());
+            args.push(root.as_os_str().to_os_string());
         }
     }
 
@@ -380,6 +398,7 @@ pub struct SandboxRequest {
     pub policy: SandboxPolicy,
     /// `WorkspaceWrite` 时允许写入的根目录。
     pub writable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub program: String,
     pub args: Vec<String>,
 }
@@ -490,6 +509,7 @@ impl SandboxProvider for NativeSandboxProvider {
         let SandboxRequest {
             policy,
             writable_roots,
+            readonly_roots,
             program,
             args,
             ..
@@ -502,20 +522,44 @@ impl SandboxProvider for NativeSandboxProvider {
                 command
             }
             SandboxBackend::MacOsSeatbelt => {
-                let profile = build_seatbelt_profile(policy, &writable_roots)?;
+                let mut profile = build_seatbelt_profile(policy, &writable_roots)?;
+                for root in &readonly_roots {
+                    profile.push_str(&format!(
+                        "(deny file-write* (subpath \"{}\"))\n",
+                        escape_seatbelt_path(root)?
+                    ));
+                }
+                if policy == SandboxPolicy::WorkspaceWrite {
+                    for root in writable_roots.iter().filter(|root| {
+                        readonly_roots
+                            .iter()
+                            .any(|readonly| root.starts_with(readonly))
+                    }) {
+                        append_seatbelt_writable_root(&mut profile, root)?;
+                    }
+                }
                 let mut command = Command::new("/usr/bin/sandbox-exec");
                 command.arg("-p").arg(profile).arg(&program).args(&args);
                 command
             }
             SandboxBackend::LinuxBubblewrap => {
                 let mut command = Command::new("bwrap");
-                let bwrap_args =
-                    build_bubblewrap_args(policy, &writable_roots, &sensitive_read_paths());
+                let bwrap_args = build_bubblewrap_args(
+                    policy,
+                    &writable_roots,
+                    &readonly_roots,
+                    &sensitive_read_paths(),
+                );
                 tracing::debug!(?bwrap_args, "Prepared Bubblewrap sandbox arguments");
                 command.args(bwrap_args).arg("--").arg(&program).args(&args);
                 command
             }
             SandboxBackend::LinuxLandlockSeccomp => {
+                if !readonly_roots.is_empty() {
+                    return Err(Error::PermissionDenied(
+                        "Sandbox cannot enforce read-only resource roots".into(),
+                    ));
+                }
                 let roots = if policy == SandboxPolicy::ReadOnly {
                     Vec::new()
                 } else {
@@ -999,6 +1043,7 @@ mod tests {
             agent_id: "cache-test".into(), session_id: "cache-test".into(),
             policy: SandboxPolicy::WorkspaceWrite,
             writable_roots: vec![workspace.path().to_path_buf()],
+            readonly_roots: Vec::new(),
             program: "sh".into(),
             args: vec!["-c".into(), "test -n \"$GOCACHE\" && test -n \"$GOMODCACHE\" && touch \"$GOCACHE/probe\" \"$GOMODCACHE/probe\"".into()],
         }).await.unwrap();
@@ -1115,6 +1160,7 @@ mod tests {
             session_id: "cli:test".into(),
             policy,
             writable_roots: vec![PathBuf::from("/tmp")],
+            readonly_roots: Vec::new(),
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
         }
@@ -1128,6 +1174,7 @@ mod tests {
             working_dir: workspace.to_path_buf(),
             policy: SandboxPolicy::WorkspaceWrite,
             writable_roots: vec![workspace.to_path_buf()],
+            readonly_roots: Vec::new(),
             timeout: std::time::Duration::from_secs(5),
             max_output_bytes: 4096,
         }
@@ -1163,6 +1210,7 @@ mod tests {
         let args = build_bubblewrap_args(
             SandboxPolicy::WorkspaceWrite,
             &[workspace.path().to_path_buf()],
+            &[],
             &sensitive_paths,
         );
         let workspace = workspace.path().to_string_lossy().into_owned();
@@ -1187,6 +1235,7 @@ mod tests {
         let args = build_bubblewrap_args(
             SandboxPolicy::WorkspaceWrite,
             &[],
+            &[],
             &[SensitiveReadPath::File(PathBuf::from("/dev/null"))],
         );
         for device in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/tty"] {
@@ -1202,6 +1251,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn readonly_resources_overlay_writable_roots_before_sensitive_masks() {
+        let root = tempfile::tempdir().unwrap();
+        let resource = root.path().join("skill");
+        std::fs::create_dir(&resource).unwrap();
+        let secret = resource.join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let args = build_bubblewrap_args(
+            SandboxPolicy::WorkspaceWrite,
+            &[root.path().to_path_buf()],
+            std::slice::from_ref(&resource),
+            &[SensitiveReadPath::File(secret.clone())],
+        );
+        let bind = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsString::from("--bind"),
+                    root.path().into(),
+                    root.path().into(),
+                ]
+            })
+            .unwrap();
+        let readonly = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsString::from("--ro-bind"),
+                    resource.as_os_str().into(),
+                    resource.as_os_str().into(),
+                ]
+            })
+            .unwrap();
+        let mask = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsString::from("--ro-bind"),
+                    OsString::from("/dev/null"),
+                    secret.as_os_str().into(),
+                ]
+            })
+            .unwrap();
+        assert!(bind < readonly && readonly < mask);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bubblewrap_never_masks_a_device_directory_through_a_symlink() {
@@ -1210,6 +1305,7 @@ mod tests {
         std::os::unix::fs::symlink("/dev", &alias).unwrap();
         let args = build_bubblewrap_args(
             SandboxPolicy::WorkspaceWrite,
+            &[],
             &[],
             &[SensitiveReadPath::Directory(alias.clone())],
         );
@@ -1229,6 +1325,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &alias).unwrap();
         let args = build_bubblewrap_args(
             SandboxPolicy::WorkspaceWrite,
+            &[],
             &[],
             &[SensitiveReadPath::File(alias.clone())],
         );
@@ -1427,6 +1524,7 @@ mod tests {
                 working_dir: allowed.path().to_path_buf(),
                 policy: SandboxPolicy::WorkspaceWrite,
                 writable_roots: vec![workspace.path().to_path_buf(), allowed.path().to_path_buf()],
+                readonly_roots: Vec::new(),
                 timeout: std::time::Duration::from_secs(5),
                 max_output_bytes: 4096,
             })

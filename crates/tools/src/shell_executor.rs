@@ -26,6 +26,7 @@ pub struct ShellRequest {
     pub working_dir: PathBuf,
     pub policy: SandboxPolicy,
     pub writable_roots: Vec<PathBuf>,
+    pub readonly_roots: Vec<PathBuf>,
     pub timeout: Duration,
     /// stdout / stderr 各自保留的最大字节数。
     pub max_output_bytes: usize,
@@ -99,6 +100,7 @@ impl ShellExecutor for LocalShellExecutor {
                 session_id: request.session_id,
                 policy: request.policy,
                 writable_roots: request.writable_roots,
+                readonly_roots: request.readonly_roots,
                 program: program.to_string(),
                 args,
             },
@@ -137,6 +139,7 @@ mod tests {
             working_dir,
             policy: SandboxPolicy::FullAccess,
             writable_roots: Vec::new(),
+            readonly_roots: Vec::new(),
             timeout: Duration::from_secs(5),
             max_output_bytes: 1024,
         }

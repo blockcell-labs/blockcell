@@ -236,6 +236,7 @@ pub(crate) async fn execute_shell_command(
                 .unwrap_or_default(),
             policy: blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
             writable_roots,
+            readonly_roots: Vec::new(),
             timeout: Duration::from_secs(60),
             max_output_bytes: 40_000,
         })

@@ -314,6 +314,7 @@ pub(crate) async fn execute_exec_job(
             owner_session_id: &owner_session_id,
             task_manager: ctx.task_manager.clone(),
             writable_roots,
+            readonly_roots: crate::exec::skill_readonly_roots(&ctx),
             sandbox,
             command,
             timeout: Duration::from_secs(timeout_secs),

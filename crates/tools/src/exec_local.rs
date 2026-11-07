@@ -519,6 +519,7 @@ impl ExecLocalTool {
             session_id: ctx.session_key.clone(),
             policy: self.policy,
             writable_roots,
+            readonly_roots: Vec::new(),
             program: original.get_program().to_string_lossy().into_owned(),
             args: original
                 .get_args()
