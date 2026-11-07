@@ -703,6 +703,9 @@ impl AgentRuntime {
                 &mut messages,
                 &skill_cards,
                 recent_skill_name.as_deref(),
+                SkillCatalogBudget::for_context_window(
+                    self.config.agents.defaults.max_context_tokens,
+                ),
             );
         }
 

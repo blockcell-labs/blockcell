@@ -653,10 +653,42 @@ fn build_activate_skill_tool_schema(skill_cards: &[SkillCard]) -> Option<serde_j
     }))
 }
 
+#[derive(Clone, Copy)]
+enum SkillCatalogBudget {
+    Tokens(usize),
+    Characters(usize),
+}
+
+impl SkillCatalogBudget {
+    fn for_context_window(window: u32) -> Self {
+        if window == 0 {
+            Self::Characters(8_000)
+        } else {
+            Self::Tokens(
+                (window as usize)
+                    .saturating_mul(2)
+                    .saturating_div(100)
+                    .max(1),
+            )
+        }
+    }
+
+    fn fits(self, text: &str) -> bool {
+        let wrapped = format!("<runtime-context>\n{}\n</runtime-context>", text.trim());
+        match self {
+            Self::Tokens(limit) => {
+                wrapped.chars().count() <= 1_000 || crate::token::estimate_tokens(&wrapped) <= limit
+            }
+            Self::Characters(limit) => wrapped.chars().count() <= limit.max(1_000),
+        }
+    }
+}
+
 fn inject_skill_cards_into_system_prompt(
     messages: &mut Vec<ChatMessage>,
     skill_cards: &[SkillCard],
     recent_skill_name: Option<&str>,
+    budget: SkillCatalogBudget,
 ) {
     if skill_cards.is_empty() {
         return;
@@ -679,7 +711,15 @@ fn inject_skill_cards_into_system_prompt(
         ));
     }
 
-    for card in skill_cards {
+    let mut cards = skill_cards.iter().collect::<Vec<_>>();
+    cards.sort_by(|left, right| left.name.cmp(&right.name));
+    let omission_note =
+        |count| format!("{count} skills omitted; use `list_skills` to inspect them.\n");
+    if !budget.fits(&format!("{}{}", section, omission_note(cards.len()))) {
+        section.clear();
+    }
+    let mut carded = 0;
+    for card in &cards {
         let local_exec_note = if card.supports_local_exec {
             if card.local_exec_entrypoints.is_empty() {
                 " | 本地入口: active skill 目录内的相对脚本".to_string()
@@ -710,10 +750,54 @@ fn inject_skill_cards_into_system_prompt(
             outputs_note,
             when_to_use,
         );
-        section.push_str(&crate::retrieval::truncate_to_token_budget(&card_text, 300));
+        let card_text = crate::retrieval::truncate_to_token_budget(&card_text, 300);
+        let remaining = cards.len() - carded - 1;
+        let note = if remaining == 0 {
+            String::new()
+        } else {
+            omission_note(remaining)
+        };
+        if !budget.fits(&format!("{section}{card_text}{note}")) {
+            break;
+        }
+        section.push_str(&card_text);
         if !section.ends_with('\n') {
             section.push('\n');
         }
+        carded += 1;
+    }
+    let mut names = String::new();
+    let mut listed = 0;
+    for card in &cards[carded..] {
+        let candidate = if names.is_empty() {
+            format!("Other skills: `{}`", card.name)
+        } else {
+            format!("{names}, `{}`", card.name)
+        };
+        let remaining = cards.len() - carded - listed - 1;
+        let note = if remaining == 0 {
+            String::new()
+        } else {
+            omission_note(remaining)
+        };
+        if !budget.fits(&format!("{section}{candidate}\n{note}")) {
+            break;
+        }
+        names = candidate;
+        listed += 1;
+    }
+    if !names.is_empty() {
+        section.push_str(&names);
+        section.push('\n');
+    }
+    let omitted = cards.len() - carded - listed;
+    if omitted > 0 {
+        let note = omission_note(omitted);
+        warn!(
+            omitted,
+            "Installed skills catalog exceeded its total budget; use list_skills"
+        );
+        section.push_str(&note);
     }
 
     append_ephemeral_user_context(messages, &section);

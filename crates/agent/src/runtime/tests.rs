@@ -3282,7 +3282,12 @@ fn test_skill_prompt_injection_keeps_activate_skill_mainline() {
         supports_local_exec: true,
     }];
 
-    inject_skill_cards_into_system_prompt(&mut messages, &skill_cards, Some("local_demo"));
+    inject_skill_cards_into_system_prompt(
+        &mut messages,
+        &skill_cards,
+        Some("local_demo"),
+        SkillCatalogBudget::Characters(8_000),
+    );
 
     assert_eq!(messages[0].content.as_str(), Some("You are BlockCell."));
     let prompt = messages[messages.len() - 2]
@@ -3323,7 +3328,12 @@ fn skill_card_prompt_caps_each_card() {
         supports_local_exec: false,
     }];
 
-    inject_skill_cards_into_system_prompt(&mut messages, &skill_cards, None);
+    inject_skill_cards_into_system_prompt(
+        &mut messages,
+        &skill_cards,
+        None,
+        SkillCatalogBudget::Characters(8_000),
+    );
 
     let context = messages[messages.len() - 2]
         .content
@@ -3331,6 +3341,75 @@ fn skill_card_prompt_caps_each_card() {
         .expect("skill context");
     assert!(!context.contains("SKILL_CARD_END"));
     assert!(crate::token::estimate_tokens(context) < 700);
+}
+
+#[test]
+fn skill_catalog_total_budget_and_stable_order() {
+    let cards = (0..80)
+        .rev()
+        .map(|i| SkillCard {
+            name: format!("catalog_{i:03}"),
+            description: "A reusable procedure with a long descriptive summary".repeat(10),
+            execution_layout: "PromptTool".into(),
+            when_to_use: "A matching task".into(),
+            outputs: "result".into(),
+            allowed_tools: vec![],
+            local_exec_entrypoints: vec![],
+            supports_local_exec: false,
+        })
+        .collect::<Vec<_>>();
+    for budget in [
+        SkillCatalogBudget::Characters(200),
+        SkillCatalogBudget::Characters(1800),
+        SkillCatalogBudget::Tokens(400),
+    ] {
+        let mut messages = vec![ChatMessage::user("task")];
+        inject_skill_cards_into_system_prompt(&mut messages, &cards, None, budget);
+        assert_eq!(messages.len(), 2);
+        let context = messages[0].content.as_str().unwrap();
+        let section = context
+            .strip_prefix("<runtime-context>\n")
+            .unwrap()
+            .strip_suffix("\n</runtime-context>")
+            .unwrap();
+        assert!(budget.fits(section));
+        assert!(context.contains("skills omitted; use `list_skills`"));
+        assert!(context.contains("catalog_000"));
+        let mut reversed = cards.clone();
+        reversed.reverse();
+        let mut other = vec![ChatMessage::user("task")];
+        inject_skill_cards_into_system_prompt(&mut other, &reversed, None, budget);
+        assert_eq!(messages[0].content, other[0].content);
+    }
+    let mut messages = vec![ChatMessage::user("task")];
+    inject_skill_cards_into_system_prompt(
+        &mut messages,
+        &[],
+        None,
+        SkillCatalogBudget::Characters(200),
+    );
+    assert_eq!(messages.len(), 1);
+    inject_skill_cards_into_system_prompt(
+        &mut messages,
+        &cards,
+        None,
+        SkillCatalogBudget::Characters(1),
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0]
+        .content
+        .as_str()
+        .unwrap()
+        .contains("skills omitted; use `list_skills`"));
+    assert!(messages[0].content.as_str().unwrap().chars().count() <= 1_000);
+    assert!(matches!(
+        SkillCatalogBudget::for_context_window(0),
+        SkillCatalogBudget::Characters(8000)
+    ));
+    assert!(matches!(
+        SkillCatalogBudget::for_context_window(100_000),
+        SkillCatalogBudget::Tokens(2000)
+    ));
 }
 
 #[test]
