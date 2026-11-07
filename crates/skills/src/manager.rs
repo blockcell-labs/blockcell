@@ -14,7 +14,7 @@ use markdown::{
     resolve_markdown_path, split_markdown_target, MarkdownSection,
 };
 
-/// 技能来源标识，区分 BlockCell 原生格式和 OpenClaw 格式。
+/// 技能来源标识。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SkillSource {
     /// BlockCell 原生格式 (meta.yaml + 锚点区块 SKILL.md)
@@ -22,6 +22,7 @@ pub enum SkillSource {
     BlockCell,
     /// OpenClaw 格式 (YAML frontmatter SKILL.md)
     OpenClaw,
+    Standard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,6 +339,9 @@ impl SkillDocCache {
 }
 
 fn skill_supports_local_exec(skill: &Skill, _manual: &str) -> bool {
+    if skill.meta.source == SkillSource::Standard {
+        return false;
+    }
     if skill.path.join("SKILL.py").exists() || skill.path.join("SKILL.rhai").exists() {
         return true;
     }
@@ -680,6 +684,14 @@ fn detect_skill_format(skill_dir: &Path) -> SkillSource {
                 // 支持 UTF-8 BOM（\xEF\xBB\xBF）
                 let prefix = prefix.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(prefix);
                 if prefix.starts_with(b"---\n") || prefix.starts_with(b"---\r\n") {
+                    if !is_gbrain_skill_dir(skill_dir)
+                        && std::fs::metadata(&skill_md).is_ok_and(|m| m.len() <= 256 * 1024)
+                        && std::fs::read_to_string(&skill_md).is_ok_and(|content| {
+                            crate::openclaw_parser::is_standard_skill(&content)
+                        })
+                    {
+                        return SkillSource::Standard;
+                    }
                     return SkillSource::OpenClaw;
                 }
             }
@@ -1021,9 +1033,10 @@ impl SkillManager {
                     );
                     return Ok(None);
                 }
-                self.load_openclaw_skill(skill_dir)
+                self.load_frontmatter_skill(skill_dir, false)
             }
             SkillSource::BlockCell => self.load_blockcell_skill(skill_dir),
+            SkillSource::Standard => self.load_frontmatter_skill(skill_dir, true),
         }
     }
 
@@ -1065,8 +1078,13 @@ impl SkillManager {
         }))
     }
 
-    /// 加载 OpenClaw 格式技能
-    fn load_openclaw_skill(&self, skill_dir: &std::path::Path) -> Result<Option<Skill>> {
+    /// 加载带 frontmatter 的 SKILL.md。`standard` 决定按标准技能解析（不过 OpenClaw 开关），
+    /// 由 `load_skill` 的格式判定结果传入，避免重复读一遍 SKILL.md。
+    fn load_frontmatter_skill(
+        &self,
+        skill_dir: &std::path::Path,
+        standard: bool,
+    ) -> Result<Option<Skill>> {
         let skill_md_path = skill_dir.join("SKILL.md");
 
         // 文件大小检查（对齐 OpenClaw 的 256KB 限制）
@@ -1083,18 +1101,22 @@ impl SkillManager {
         let content = std::fs::read_to_string(&skill_md_path)?;
 
         // 解析 frontmatter + body
-        let (meta, prompt_body) =
-            match crate::openclaw_parser::parse_openclaw_skill(skill_dir, &content) {
-                Ok(result) => result,
-                Err(e) => {
-                    warn!(
-                        path = %skill_md_path.display(),
-                        error = %e,
-                        "Failed to parse OpenClaw SKILL.md, skipping"
-                    );
-                    return Ok(None);
-                }
-            };
+        let parsed = if standard {
+            crate::openclaw_parser::parse_standard_skill(skill_dir, &content)
+        } else {
+            crate::openclaw_parser::parse_openclaw_skill(skill_dir, &content)
+        };
+        let (meta, prompt_body) = match parsed {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(
+                    path = %skill_md_path.display(),
+                    error = %e,
+                    "Failed to parse OpenClaw SKILL.md, skipping"
+                );
+                return Ok(None);
+            }
+        };
 
         // OS 过滤
         if let Some(ref os_list) = meta.os {
@@ -2149,5 +2171,153 @@ tools:
         let dir = temp_skill_dir("detect-empty");
         assert_eq!(detect_skill_format(&dir), SkillSource::BlockCell);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn standard_skill_loads_by_default_with_general_tools() {
+        let root = temp_skill_dir("standard-load");
+        let paths = Paths::with_base(root.clone());
+        fs::create_dir_all(paths.managed_builtin_skills_dir()).unwrap();
+        let dir = paths.skills_dir().join("folder");
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(dir.join("scripts/hello.py"), "print('hello')").unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: standard-demo\ndescription: Example\n---\nRun scripts/hello.py.",
+        )
+        .unwrap();
+        let mut manager = SkillManager::new();
+        manager.load_from_paths(&paths).unwrap();
+        let skill = manager.get("standard-demo").unwrap();
+        assert_eq!(skill.meta.source, SkillSource::Standard);
+        assert_eq!(skill.meta.description, "Example");
+        assert!(skill.available);
+        assert_eq!(
+            skill.meta.tools,
+            [
+                "exec",
+                "shell_run",
+                "shell_poll",
+                "shell_close",
+                "read_file",
+                "list_dir"
+            ]
+        );
+        assert_eq!(skill.load_prompt_bundle().unwrap(), "Run scripts/hello.py.");
+        let cards = manager.list_enabled_skill_cards(&HashSet::new());
+        assert_eq!(cards.len(), 1);
+        assert!(!cards[0].supports_local_exec);
+        assert_eq!(
+            cards[0].allowed_tools,
+            [
+                "exec",
+                "shell_run",
+                "shell_poll",
+                "shell_close",
+                "read_file",
+                "list_dir"
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_skill_rejects_invalid_or_oversized_frontmatter_and_keeps_openclaw_gate() {
+        let dir = temp_skill_dir("standard-invalid");
+        let manager = SkillManager::new();
+        for content in [
+            "",
+            "---\nname: demo\n---\nBody",
+            "---\nname: demo\ndescription: Demo\nallowed-tools: 42\n---\nBody",
+            "---\nname: demo\ndescription: Demo\nmetadata:\n  openclaw: {}\n---\nBody",
+            "---\nname: demo\ndescription: Demo\ntriggers: []\n---\nBody",
+        ] {
+            fs::write(dir.join("SKILL.md"), content).unwrap();
+            if !content.is_empty() {
+                assert!(manager.load_skill(&dir).unwrap().is_none(), "{content}");
+            } else {
+                assert_eq!(detect_skill_format(&dir), SkillSource::BlockCell);
+            }
+        }
+        let oversized = format!(
+            "---\nname: demo\ndescription: Demo\n---\n{}",
+            "a".repeat(256 * 1024)
+        );
+        fs::write(dir.join("SKILL.md"), oversized).unwrap();
+        let mut enabled = SkillManager::new();
+        enabled.set_openclaw_skill_enabled(true);
+        assert!(enabled.load_skill(&dir).unwrap().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn standard_skill_explicit_tools_and_sidecar_policy() {
+        let dir = temp_skill_dir("standard-policy");
+        for (field, expected) in [
+            ("allowed-tools: exec read_file\n", vec!["exec", "read_file"]),
+            (
+                "allowed-tools: [list_dir]\ntools: [exec]\n",
+                vec!["list_dir"],
+            ),
+            ("allowed-tools: []\n", vec![]),
+            ("tools: [read_file]\n", vec!["read_file"]),
+            ("capabilities: [list_dir]\n", vec!["list_dir"]),
+        ] {
+            let content = format!("---\nname: demo\ndescription: Demo\n{field}---\nBody");
+            fs::write(dir.join("SKILL.md"), content).unwrap();
+            assert_eq!(
+                SkillManager::new()
+                    .load_skill(&dir)
+                    .unwrap()
+                    .unwrap()
+                    .meta
+                    .tools,
+                expected
+            );
+        }
+        fs::create_dir_all(dir.join("agents")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo\n---\nBody",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("agents/openai.yaml"),
+            "policy:\n  allow_implicit_invocation: false\n",
+        )
+        .unwrap();
+        let skill = SkillManager::new().load_skill(&dir).unwrap().unwrap();
+        assert!(skill.meta.disable_model_invocation);
+        assert!(skill.meta.user_invocable);
+        for invalid in ["[", "policy: {allow_implicit_invocation: not-a-bool}"] {
+            fs::write(dir.join("agents/openai.yaml"), invalid).unwrap();
+            assert!(
+                !SkillManager::new()
+                    .load_skill(&dir)
+                    .unwrap()
+                    .unwrap()
+                    .meta
+                    .disable_model_invocation
+            );
+        }
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo\ndisable-model-invocation: true\n---\nBody",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("agents/openai.yaml"),
+            "policy:\n  allow_implicit_invocation: true\n",
+        )
+        .unwrap();
+        assert!(
+            SkillManager::new()
+                .load_skill(&dir)
+                .unwrap()
+                .unwrap()
+                .meta
+                .disable_model_invocation
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 }

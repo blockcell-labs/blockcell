@@ -20,6 +20,8 @@ struct OpenClawFrontmatter {
     description: Option<String>,
     tools: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
+    #[serde(rename = "allowed-tools")]
+    allowed_tools: Option<AllowedTools>,
     triggers: Option<Vec<String>>,
     always: Option<bool>,
     mutating: Option<bool>,
@@ -30,6 +32,77 @@ struct OpenClawFrontmatter {
     #[serde(rename = "disable-model-invocation")]
     disable_model_invocation: Option<bool>,
     metadata: Option<OpenClawMetadataWrapper>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AllowedTools {
+    Text(String),
+    List(Vec<String>),
+}
+
+impl AllowedTools {
+    fn into_tools(self) -> Vec<String> {
+        match self {
+            Self::Text(text) => text.split_whitespace().map(str::to_string).collect(),
+            Self::List(tools) => tools,
+        }
+    }
+}
+
+pub(crate) fn is_standard_skill(content: &str) -> bool {
+    let Ok((yaml, _)) = extract_frontmatter(content) else {
+        return false;
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+        return false;
+    };
+    ["name", "description"].iter().all(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| !v.trim().is_empty())
+    }) && !["triggers", "mutating", "always"]
+        .iter()
+        .any(|key| value.get(*key).is_some())
+        && value
+            .get("metadata")
+            .and_then(|v| v.get("openclaw"))
+            .is_none()
+}
+
+pub(crate) fn parse_standard_skill(skill_dir: &Path, content: &str) -> Result<(SkillMeta, String)> {
+    let (mut meta, body) = parse_skill(skill_dir, content, true)?;
+    #[derive(Deserialize)]
+    struct Sidecar {
+        policy: Option<Policy>,
+    }
+    #[derive(Deserialize)]
+    struct Policy {
+        allow_implicit_invocation: Option<bool>,
+    }
+    let path = skill_dir.join("agents/openai.yaml");
+    if path.exists() {
+        let policy = (|| -> Result<Sidecar> {
+            if std::fs::metadata(&path)?.len() > 256 * 1024 {
+                return Err(blockcell_core::Error::Skill(
+                    "Skill sidecar exceeds 256KB limit".into(),
+                ));
+            }
+            Ok(serde_yaml::from_str(&std::fs::read_to_string(&path)?)?)
+        })();
+        match policy {
+            Ok(sidecar) => {
+                if sidecar.policy.and_then(|p| p.allow_implicit_invocation) == Some(false) {
+                    meta.disable_model_invocation = true;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Ignoring invalid skill sidecar")
+            }
+        }
+    }
+    Ok((meta, body))
 }
 
 #[derive(Deserialize)]
@@ -153,6 +226,10 @@ pub fn read_skill_description(skill_dir: &Path) -> String {
 /// - 替换正文中的 `{baseDir}` 占位符
 /// - 推断工具列表（扫描脚本文件）
 pub fn parse_openclaw_skill(skill_dir: &Path, content: &str) -> Result<(SkillMeta, String)> {
+    parse_skill(skill_dir, content, false)
+}
+
+fn parse_skill(skill_dir: &Path, content: &str, standard: bool) -> Result<(SkillMeta, String)> {
     // 1. 提取 frontmatter
     let (yaml_str, body) = extract_frontmatter(content)?;
 
@@ -176,12 +253,31 @@ pub fn parse_openclaw_skill(skill_dir: &Path, content: &str) -> Result<(SkillMet
     let body = body.replace("{baseDir}", &base_dir);
 
     // 5. 推断工具列表
-    let tools = fm
-        .tools
-        .clone()
-        .or_else(|| fm.capabilities.clone())
-        .filter(|tools| !tools.is_empty())
-        .unwrap_or_else(|| infer_tools_for_openclaw(skill_dir, &body));
+    let tools = if standard {
+        fm.allowed_tools
+            .map(AllowedTools::into_tools)
+            .or_else(|| fm.tools.clone())
+            .or_else(|| fm.capabilities.clone())
+            .unwrap_or_else(|| {
+                [
+                    "exec",
+                    "shell_run",
+                    "shell_poll",
+                    "shell_close",
+                    "read_file",
+                    "list_dir",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            })
+    } else {
+        fm.tools
+            .clone()
+            .or_else(|| fm.capabilities.clone())
+            .filter(|tools| !tools.is_empty())
+            .unwrap_or_else(|| infer_tools_for_openclaw(skill_dir, &body))
+    };
 
     let output_format = build_gbrain_output_hint(
         fm.mutating.unwrap_or(false),
@@ -191,7 +287,11 @@ pub fn parse_openclaw_skill(skill_dir: &Path, content: &str) -> Result<(SkillMet
     let meta = SkillMeta {
         name: fm.name.unwrap_or(dir_name),
         description: fm.description.unwrap_or_default(),
-        source: SkillSource::OpenClaw,
+        source: if standard {
+            SkillSource::Standard
+        } else {
+            SkillSource::OpenClaw
+        },
         requires: SkillRequires {
             bins: requires.and_then(|r| r.bins.clone()).unwrap_or_default(),
             env: requires.and_then(|r| r.env.clone()).unwrap_or_default(),
