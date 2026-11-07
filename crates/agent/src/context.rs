@@ -22,6 +22,13 @@ pub(crate) const MAX_ACTIVE_SKILL_TOKENS: usize = 10_000;
 pub(crate) const MAX_TOOL_RULE_TOKENS: usize = 1_000;
 const MAX_CACHED_SESSIONS: usize = 256;
 
+#[derive(Debug, Clone, Copy)]
+pub enum SkillInvocationSource {
+    User,
+    Model,
+    Scheduled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InteractionMode {
     Skill,
@@ -947,27 +954,40 @@ impl ContextBuilder {
         if skill_name.is_empty() {
             return None;
         }
-        self.resolve_active_skill_by_name(skill_name, disabled_skills)
+        self.resolve_active_skill_by_name(skill_name, disabled_skills, SkillInvocationSource::User)
+            .ok()
     }
 
     pub fn resolve_active_skill_by_name(
         &self,
         skill_name: &str,
         disabled_skills: &HashSet<String>,
-    ) -> Option<ActiveSkillContext> {
-        if skill_name.is_empty() {
-            return None;
+        source: SkillInvocationSource,
+    ) -> blockcell_core::Result<ActiveSkillContext> {
+        let unavailable =
+            || blockcell_core::Error::Skill(format!("Skill '{}' is not available", skill_name));
+        let skill = self
+            .skill_manager
+            .as_ref()
+            .and_then(|manager| manager.get(skill_name))
+            .ok_or_else(unavailable)?;
+        if !skill.available || disabled_skills.contains(skill_name) {
+            return Err(unavailable());
         }
-        if disabled_skills.contains(skill_name) {
-            return None;
+        let allowed = match source {
+            SkillInvocationSource::Model => !skill.meta.disable_model_invocation,
+            SkillInvocationSource::User | SkillInvocationSource::Scheduled => {
+                skill.meta.user_invocable
+            }
+        };
+        if !allowed {
+            return Err(blockcell_core::Error::Skill(format!(
+                "Skill '{}' does not allow {:?} invocation",
+                skill_name, source
+            )));
         }
-        let manager = self.skill_manager.as_ref()?;
-        let skill = manager.get(skill_name)?;
-        if !skill.available {
-            return None;
-        }
-        let prompt_md = skill.load_prompt_bundle()?;
-        Some(ActiveSkillContext {
+        let prompt_md = skill.load_prompt_bundle().ok_or_else(unavailable)?;
+        Ok(ActiveSkillContext {
             name: skill.name.clone(),
             prompt_md,
             inject_prompt_md: true,
@@ -1724,6 +1744,55 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn skill_invocation_policy_matrix_and_catalog_filtering() {
+        let base = std::env::temp_dir().join(format!("skill-invocation-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_base(base.clone());
+        fs::create_dir_all(paths.managed_builtin_skills_dir()).unwrap();
+        for user in [false, true] {
+            for model_disabled in [false, true] {
+                let name = format!("policy_{user}_{model_disabled}");
+                let dir = paths.skills_dir().join(&name);
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("meta.yaml"), format!("name: {name}\ndescription: policy\nuser_invocable: {user}\ndisable_model_invocation: {model_disabled}\n")).unwrap();
+                fs::write(dir.join("SKILL.md"), "Policy manual").unwrap();
+            }
+        }
+        let builder = ContextBuilder::new(paths, Config::default());
+        let empty = HashSet::new();
+        for user in [false, true] {
+            for model_disabled in [false, true] {
+                let name = format!("policy_{user}_{model_disabled}");
+                for (source, allowed) in [
+                    (SkillInvocationSource::User, user),
+                    (SkillInvocationSource::Scheduled, user),
+                    (SkillInvocationSource::Model, !model_disabled),
+                ] {
+                    let result = builder.resolve_active_skill_by_name(&name, &empty, source);
+                    assert_eq!(result.is_ok(), allowed, "{name} {source:?}");
+                    if !allowed {
+                        assert!(result.err().unwrap().to_string().contains("does not allow"));
+                    }
+                    assert!(builder
+                        .resolve_active_skill_by_name(&name, &HashSet::from([name.clone()]), source)
+                        .is_err());
+                }
+                let cards = builder
+                    .skill_manager()
+                    .unwrap()
+                    .list_enabled_skill_cards(&empty);
+                assert_eq!(cards.iter().any(|card| card.name == name), !model_disabled);
+            }
+        }
+        assert!(builder
+            .resolve_active_skill_by_name("", &empty, SkillInvocationSource::User)
+            .is_err());
+        assert!(builder
+            .resolve_active_skill_by_name("missing", &empty, SkillInvocationSource::Model)
+            .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn skill_index_uses_manager_winner_and_metadata_identity() {
         let base =
             std::env::temp_dir().join(format!("skill-index-manager-{}", uuid::Uuid::new_v4()));
@@ -1793,7 +1862,11 @@ description: structured demo
         let builder = ContextBuilder::new(paths, Config::default());
 
         let ctx = builder
-            .resolve_active_skill_by_name("structured_demo", &HashSet::new())
+            .resolve_active_skill_by_name(
+                "structured_demo",
+                &HashSet::new(),
+                SkillInvocationSource::User,
+            )
             .expect("active skill should resolve");
 
         assert!(ctx.inject_prompt_md);
@@ -1840,7 +1913,11 @@ Prompt-only rule.
         let builder = ContextBuilder::new(paths, Config::default());
 
         let ctx = builder
-            .resolve_active_skill_by_name("prompt_demo", &HashSet::new())
+            .resolve_active_skill_by_name(
+                "prompt_demo",
+                &HashSet::new(),
+                SkillInvocationSource::User,
+            )
             .expect("active skill should resolve");
 
         assert!(ctx.inject_prompt_md);

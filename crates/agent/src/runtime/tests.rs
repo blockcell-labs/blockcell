@@ -11074,7 +11074,11 @@ fn skill_mutations_across_all_four_paths_are_visible_in_next_forked_message_runt
         );
         let active = msg3
             .context_builder
-            .resolve_active_skill_by_name("skill_via_manage", &HashSet::new())
+            .resolve_active_skill_by_name(
+                "skill_via_manage",
+                &HashSet::new(),
+                SkillInvocationSource::User,
+            )
             .expect("resolve evolved skill");
         assert!(active.prompt_md.contains("evolved body v2"));
         let summary = msg3

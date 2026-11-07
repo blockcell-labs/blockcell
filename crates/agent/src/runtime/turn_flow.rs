@@ -611,18 +611,16 @@ impl AgentRuntime {
         if !forced_skill_name.is_empty() {
             let active_skill = self
                 .context_builder
-                .resolve_active_skill_by_name(forced_skill_name, disabled_skills)
+                .resolve_active_skill_by_name(
+                    forced_skill_name,
+                    disabled_skills,
+                    SkillInvocationSource::Scheduled,
+                )
                 .map(|skill| {
                     suppress_prompt_reinjection_for_continued_skill(
                         skill,
                         session_skill_name.as_deref(),
                     )
-                })
-                .ok_or_else(|| {
-                    blockcell_core::Error::Skill(format!(
-                        "Forced skill '{}' is not available",
-                        forced_skill_name
-                    ))
                 })?;
 
             info!(

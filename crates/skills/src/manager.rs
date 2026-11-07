@@ -1311,6 +1311,7 @@ impl SkillManager {
     pub fn list_enabled_skill_cards(&self, disabled_skills: &HashSet<String>) -> Vec<SkillCard> {
         self.list_enabled_skills(disabled_skills)
             .into_iter()
+            .filter(|skill| !skill.meta.disable_model_invocation)
             .map(Self::build_skill_card)
             .collect()
     }

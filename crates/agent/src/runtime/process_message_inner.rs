@@ -1369,6 +1369,17 @@ impl AgentRuntime {
                         .to_string();
                     // 技能解析失败同样要关闭当前 step，避免留下只有 step/start 的悬空 step。
                     let resolved_skill: Result<ActiveSkillContext> = (|| {
+                        if self
+                            .context_builder
+                            .skill_manager()
+                            .and_then(|manager| manager.get(raw_skill_name))
+                            .is_some_and(|skill| skill.meta.disable_model_invocation)
+                        {
+                            return Err(blockcell_core::Error::Skill(format!(
+                                "Skill '{}' does not allow Model invocation",
+                                raw_skill_name
+                            )));
+                        }
                         let skill_name =
                             normalize_selected_skill_name(raw_skill_name, &skill_cards)
                                 .ok_or_else(|| {
@@ -1379,18 +1390,16 @@ impl AgentRuntime {
                                 })?;
                         let skill_ctx = self
                             .context_builder
-                            .resolve_active_skill_by_name(&skill_name, &disabled_skills)
+                            .resolve_active_skill_by_name(
+                                &skill_name,
+                                &disabled_skills,
+                                SkillInvocationSource::Model,
+                            )
                             .map(|skill| {
                                 suppress_prompt_reinjection_for_continued_skill(
                                     skill,
                                     recent_skill_name.as_deref(),
                                 )
-                            })
-                            .ok_or_else(|| {
-                                blockcell_core::Error::Skill(format!(
-                                    "Skill '{}' is not available",
-                                    skill_name
-                                ))
                             })?;
                         Ok(skill_ctx)
                     })();
