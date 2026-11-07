@@ -7,6 +7,64 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
+use blockcell_core::{Error, Result};
+use std::path::Path;
+
+/// Shared security scanner for all learned memory and skill writes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnifiedSecurityScanner;
+
+impl UnifiedSecurityScanner {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn scan_memory_content(&self, content: &str) -> Result<()> {
+        ensure_passed(scan_memory_content(content), "learned memory content")
+    }
+
+    pub fn scan_skill_content(&self, content: &str, trust: TrustLevel) -> Result<()> {
+        ensure_passed(
+            report_with_trust_blocking(scan_skill_content_with_trust(content, trust), trust),
+            "learned skill content",
+        )
+    }
+
+    pub fn scan_skill_dir(&self, dir: &Path, trust: TrustLevel) -> Result<()> {
+        ensure_passed(
+            report_with_trust_blocking(scan_skill_dir_with_trust(dir, trust), trust),
+            "learned skill directory",
+        )
+    }
+}
+
+fn ensure_passed(report: SecurityReport, label: &str) -> Result<()> {
+    if report.passed {
+        return Ok(());
+    }
+
+    Err(Error::Validation(format!(
+        "{label} failed safety scan: {}",
+        serde_json::json!({
+            "passed": report.passed,
+            "issues": report.issues.iter().map(|issue| serde_json::json!({
+                "level": format!("{:?}", issue.level),
+                "rule": issue.rule,
+                "message": issue.message,
+                "line": issue.line,
+            })).collect::<Vec<_>>()
+        })
+    )))
+}
+
+fn report_with_trust_blocking(mut report: SecurityReport, trust: TrustLevel) -> SecurityReport {
+    report.passed = !report
+        .issues
+        .iter()
+        .any(|issue| trust.should_block(issue.level));
+    report
+}
+
 /// Skill 信任级别, 决定安全扫描的严格程度
 ///
 /// 参考 Hermes `skills_guard.py` 的 4 级信任策略:
