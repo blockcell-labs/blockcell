@@ -7,6 +7,65 @@ use std::collections::HashMap;
 
 use super::{GhostConfig, ModelEntry, RoutingStrategy};
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationMode {
+    #[default]
+    Auto,
+    Enforce,
+    Report,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationKind {
+    #[default]
+    Test,
+    Build,
+    Lint,
+    Syntax,
+    Artifact,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VerificationCommand {
+    pub command: String,
+    pub kind: VerificationKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VerificationConfig {
+    pub mode: VerificationMode,
+    pub commands: Vec<VerificationCommand>,
+    pub piped_output_filters: bool,
+    pub ignore_extensions: Vec<String>,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            mode: VerificationMode::Auto,
+            commands: Vec::new(),
+            piped_output_filters: true,
+            ignore_extensions: ["md", "txt", "rst", "adoc"].map(str::to_owned).to_vec(),
+        }
+    }
+}
+
+impl VerificationConfig {
+    pub fn should_gate(&self, one_shot: bool, required: bool) -> bool {
+        match self.mode {
+            VerificationMode::Off => false,
+            VerificationMode::Enforce => true,
+            VerificationMode::Auto => one_shot || required,
+            VerificationMode::Report => required,
+        }
+    }
+}
+
 fn is_default_routing_strategy(strategy: &RoutingStrategy) -> bool {
     matches!(strategy, RoutingStrategy::Manual)
 }
@@ -41,6 +100,8 @@ impl Default for LlmRetryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefaults {
+    #[serde(default)]
+    pub verification: VerificationConfig,
     #[serde(default = "default_workspace")]
     pub workspace: String,
     #[serde(default = "default_model")]
@@ -190,6 +251,7 @@ fn default_max_context_tokens() -> u32 {
 impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
+            verification: VerificationConfig::default(),
             workspace: default_workspace(),
             model: default_model(),
             max_tokens: default_max_tokens(),
@@ -318,6 +380,26 @@ pub struct ResolvedAgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_modes_and_defaults() {
+        let mut policy: VerificationConfig = serde_json::from_str("{}").unwrap();
+        assert!(!policy.should_gate(false, false));
+        assert!(policy.should_gate(true, false));
+        assert!(policy.should_gate(false, true));
+        policy.mode = VerificationMode::Report;
+        assert!(!policy.should_gate(true, false));
+        assert!(policy.should_gate(false, true));
+        policy.mode = VerificationMode::Enforce;
+        assert!(policy.should_gate(false, false));
+        policy.mode = VerificationMode::Off;
+        assert!(!policy.should_gate(true, true));
+        let command: VerificationCommand =
+            serde_json::from_str(r#"{"command":"make e2e"}"#).unwrap();
+        assert_eq!(command.kind, VerificationKind::Test);
+        assert!(policy.piped_output_filters);
+        assert_eq!(policy.ignore_extensions, ["md", "txt", "rst", "adoc"]);
+    }
 
     #[test]
     fn default_tool_iteration_budget_supports_long_coding_tasks() {
