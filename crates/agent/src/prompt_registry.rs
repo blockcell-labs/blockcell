@@ -518,6 +518,10 @@ impl PromptSection for ActiveSkillSection {
     fn render(&self, ctx: &SystemPromptContext<'_>) -> Option<String> {
         let skill = ctx.active_skill?;
         let mut prompt = format!("## Active Skill: {}\n", skill.name);
+        prompt.push_str(&format!(
+            "Skill directory: {}\nResolve relative paths in this manual (scripts/, references/, assets/) against this directory. Use absolute paths for file tools. Use the available shell tool: for shell_run, cd to this directory (quote the absolute path) before running relative script paths; for exec, set working_dir to this directory. Use shell_poll for unfinished commands and shell_close to release sessions. Skill resources are read-only unless existing policy permits writes.\n\n",
+            skill.skill_dir.display()
+        ));
         if skill.inject_prompt_md {
             let body = truncate_to_token_budget(&skill.prompt_md, MAX_ACTIVE_SKILL_TOKENS);
             if skill.learned {
@@ -766,6 +770,7 @@ mod tests {
         let paths = Paths::with_base(std::env::temp_dir().join("blockcell-prompt-registry-test"));
         let skill = |learned| ActiveSkillContext {
             name: "deploy".to_string(),
+            skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
             prompt_md: "Run rollout checks.".to_string(),
             inject_prompt_md: true,
             tools: Vec::new(),

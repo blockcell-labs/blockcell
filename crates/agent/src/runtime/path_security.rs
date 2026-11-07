@@ -553,6 +553,7 @@ impl super::AgentRuntime {
     /// `confirmed_may_cache`：仅当确认为"策略级确认"（`policy_confirmed`）时才把
     /// `Confirm` 路径写入会话授权缓存；危险命令批准（`dangerous_confirmed`）作用域
     /// 仅限本次调用，不得扩大为本会话授权。
+    #[cfg(test)]
     pub(super) async fn check_path_permission_with_confirmation(
         &mut self,
         tool_name: &str,
@@ -560,6 +561,26 @@ impl super::AgentRuntime {
         msg: &InboundMessage,
         policy_confirmed: bool,
         confirmed_may_cache: bool,
+    ) -> Result<(), String> {
+        self.check_skill_path_permission_with_confirmation(
+            tool_name,
+            args,
+            msg,
+            policy_confirmed,
+            confirmed_may_cache,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn check_skill_path_permission_with_confirmation(
+        &mut self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        msg: &InboundMessage,
+        policy_confirmed: bool,
+        confirmed_may_cache: bool,
+        active_skill_dir: Option<&Path>,
     ) -> Result<(), String> {
         if matches!(tool_name, "exec_local" | "exec_skill_script") {
             // These run scripts addressed relative to the active skill
@@ -619,6 +640,15 @@ impl super::AgentRuntime {
                     "Path access denied by policy"
                 );
                 deny_paths.push(access.path.clone());
+                continue;
+            }
+
+            if active_skill_dir.is_some_and(|dir| is_path_within_base(dir, &resolved))
+                && (matches!(tool_name, "read_file" | "list_dir")
+                    && matches!(access.op, PathOp::Read | PathOp::List)
+                    || matches!(tool_name, "exec" | "shell" | "shell_run")
+                        && matches!(access.op, PathOp::Read | PathOp::Exec))
+            {
                 continue;
             }
 

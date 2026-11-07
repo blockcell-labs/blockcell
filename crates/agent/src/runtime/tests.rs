@@ -199,6 +199,7 @@ async fn routing_refactor_skill_grants_require_host_configuration() {
         tools: vec!["email".into()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
     assert!(runtime.resolved_skill_tool_names(&skill).is_empty());
@@ -576,6 +577,7 @@ fn static_scope_deny_wins_over_global_skill_and_shell_alias_additions() {
         tools: vec!["email".into()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
     let tools = resolve_effective_tool_names(
@@ -609,6 +611,7 @@ fn static_scope_skill_declaration_cannot_add_an_unconfigured_tool() {
         tools: vec!["custom_admin".into()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
     let tools = resolve_effective_tool_names(
@@ -881,6 +884,7 @@ async fn static_scope_skill_tools_are_intersected_with_agent_ceiling() {
         ],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
     assert_eq!(runtime.resolved_skill_tool_names(&skill), vec!["read_file"]);
@@ -2779,6 +2783,63 @@ async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
 }
 
 #[tokio::test]
+async fn active_skill_resources_are_readable_without_confirmation_but_not_writable() {
+    // 激活技能的资源目录（scripts/、references/、assets/）允许直接读与执行，
+    // 不弹确认；写权限仍按原策略判定。没有激活技能时同一路径照旧要确认。
+    let skill_dir = dirs::home_dir().expect("home directory").join(format!(
+        "blockcell-skill-scope-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let script = skill_dir.join("scripts").join("hello.py");
+    let read = serde_json::json!({"path": script.to_string_lossy()});
+    let list = serde_json::json!({"path": skill_dir.to_string_lossy()});
+    let msg = test_main_session_inbound("cli", "skill-scope");
+    let mut runtime = test_runtime();
+
+    for (tool, args) in [("read_file", read.clone()), ("list_dir", list.clone())] {
+        assert!(
+            runtime
+                .check_skill_path_permission_with_confirmation(
+                    tool,
+                    &args,
+                    &msg,
+                    false,
+                    false,
+                    Some(&skill_dir)
+                )
+                .await
+                .is_ok(),
+            "{tool} inside the active skill must not require confirmation"
+        );
+        assert!(
+            runtime
+                .check_skill_path_permission_with_confirmation(
+                    tool, &args, &msg, false, false, None
+                )
+                .await
+                .is_err(),
+            "{tool} outside any active skill must still require confirmation"
+        );
+    }
+
+    let write = serde_json::json!({"path": skill_dir.join("out.txt").to_string_lossy()});
+    assert!(
+        runtime
+            .check_skill_path_permission_with_confirmation(
+                "write_file",
+                &write,
+                &msg,
+                false,
+                false,
+                Some(&skill_dir)
+            )
+            .await
+            .is_err(),
+        "read-only skill resources must not widen write access"
+    );
+}
+
+#[tokio::test]
 async fn test_authorized_read_directory_does_not_authorize_writes() {
     let outside = std::env::temp_dir().join(format!(
         "blockcell-op-cache-policy-{}",
@@ -3066,6 +3127,7 @@ fn test_active_tool_names_for_skill_include_kernel_and_declared_tools() {
         tools: vec!["finance_api".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
 
@@ -3679,6 +3741,7 @@ description: script demo
         tools: vec![],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
 
@@ -4554,6 +4617,7 @@ fn test_continued_skill_suppresses_prompt_reinjection_for_same_skill() {
         tools: vec!["write_file".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
 
@@ -6581,6 +6645,7 @@ fn test_resolve_effective_tool_names_load_all_rejects_unregistered_skill_tools()
         tools: vec!["skill_tool_1".to_string(), "skill_tool_2".to_string()],
         fallback_message: None,
         source: blockcell_skills::manager::SkillSource::BlockCell,
+        skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
         learned: false,
     };
     let tools = resolve_effective_tool_names(

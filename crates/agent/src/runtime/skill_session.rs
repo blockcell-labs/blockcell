@@ -95,10 +95,7 @@ impl AgentRuntime {
                 messages,
                 tools,
                 tool_names,
-                self.context_builder
-                    .skill_manager()
-                    .and_then(|manager| manager.get(&active_skill.name))
-                    .map(|skill| skill.path.clone()),
+                Some(active_skill.skill_dir.clone()),
             )
             .await?;
 

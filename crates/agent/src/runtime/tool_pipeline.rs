@@ -754,12 +754,13 @@ impl AgentRuntime {
 
     /// Check path safety before executing filesystem/exec tools
     async fn guard_path_access(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
-        self.check_path_permission_with_confirmation(
+        self.check_skill_path_permission_with_confirmation(
             &inv.call.name,
             &inv.args,
             inv.msg,
             inv.policy_confirmed || inv.dangerous_confirmed,
             inv.policy_confirmed,
+            inv.active_skill_dir.as_deref(),
         )
         .await
         .map_err(|reason| crate::error::path_access_denied(&inv.call.name, &reason))

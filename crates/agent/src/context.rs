@@ -59,6 +59,8 @@ pub(crate) const CODING_MODE_PROMPT: &str = r#"
 #[derive(Debug, Clone)]
 pub struct ActiveSkillContext {
     pub name: String,
+    /// 技能目录绝对路径：prompt 里据此说明相对路径基准，路径校验据此放行只读访问。
+    pub skill_dir: std::path::PathBuf,
     pub prompt_md: String,
     pub inject_prompt_md: bool,
     pub tools: Vec<String>,
@@ -989,6 +991,7 @@ impl ContextBuilder {
         let prompt_md = skill.load_prompt_bundle().ok_or_else(unavailable)?;
         Ok(ActiveSkillContext {
             name: skill.name.clone(),
+            skill_dir: skill.path.clone(),
             prompt_md,
             inject_prompt_md: true,
             tools: skill.meta.effective_tools(),
@@ -1967,6 +1970,7 @@ description: deploy demo
         );
         let active_skill = ActiveSkillContext {
             name: "structured_demo".to_string(),
+            skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
             prompt_md: "DO NOT INCLUDE".to_string(),
             inject_prompt_md: false,
             tools: vec!["finance_api".to_string()],
@@ -2465,6 +2469,7 @@ description: deploy demo
         let builder = ContextBuilder::new(paths, config);
         let active_skill = ActiveSkillContext {
             name: "oversized".to_string(),
+            skill_dir: std::path::PathBuf::from("/tmp/test-skill"),
             prompt_md: format!("{} ACTIVE_SKILL_END", "procedure ".repeat(15_000)),
             inject_prompt_md: true,
             tools: vec![],
