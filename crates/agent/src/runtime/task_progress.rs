@@ -82,7 +82,13 @@ impl ToolEvidence {
         Self {
             operation,
             annotations,
-            effect: tool.workspace_effect(args),
+            effect: if matches!(tool.schema().name.as_str(), "write_file" | "edit_file")
+                && docs_only_paths(args, policy)
+            {
+                WorkspaceEffect::None
+            } else {
+                tool.workspace_effect(args)
+            },
             command: (operation == CommandOperation::Launch)
                 .then(|| {
                     args.get("command")
@@ -98,6 +104,31 @@ impl ToolEvidence {
             check_candidate,
         }
     }
+}
+
+fn docs_only_paths(args: &Value, policy: &blockcell_core::config::VerificationConfig) -> bool {
+    let paths: Vec<_> = if let Some(files) = args.get("files").and_then(Value::as_array) {
+        files
+            .iter()
+            .map(|file| file.get("path").and_then(Value::as_str))
+            .collect()
+    } else {
+        vec![args.get("path").and_then(Value::as_str)]
+    };
+    !paths.is_empty()
+        && paths.iter().all(|path| {
+            path.is_some_and(|path| {
+                std::path::Path::new(path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        policy
+                            .ignore_extensions
+                            .iter()
+                            .any(|ignored| ignored.eq_ignore_ascii_case(ext))
+                    })
+            })
+        })
 }
 
 pub(crate) struct TaskProgress {
@@ -411,6 +442,41 @@ mod tests {
     use super::*;
     use blockcell_tools::{exec_jobs::JobOutputTool, shell_actions::ShellActionTool};
     use serde_json::json;
+
+    #[test]
+    fn documentation_edits_do_not_require_checks_but_code_does() {
+        let policy = blockcell_core::config::VerificationConfig::default();
+        for args in [
+            serde_json::json!({"path":"README.md"}),
+            serde_json::json!({"files":[{"path":"a.txt"},{"path":"b.rst"}]}),
+        ] {
+            let evidence = ToolEvidence::from_execution_with_policy(
+                &blockcell_tools::fs::WriteFileTool::default(),
+                &args,
+                &serde_json::json!({}),
+                &policy,
+            );
+            let mut progress = TaskProgress::default();
+            progress.observe(&evidence, true);
+            assert!(!progress.needs_verification());
+        }
+        for args in [
+            serde_json::json!({"path":"main.rs"}),
+            serde_json::json!({"files":[{"path":"a.md"},{"path":"b.py"}]}),
+        ] {
+            let evidence = ToolEvidence::from_execution_with_policy(
+                &blockcell_tools::fs::WriteFileTool::default(),
+                &args,
+                &serde_json::json!({}),
+                &policy,
+            );
+            let mut progress = TaskProgress::default();
+            progress.observe(&evidence, true);
+            assert!(progress.needs_verification());
+        }
+        assert!(!docs_only_paths(&serde_json::json!({"files":[]}), &policy));
+        assert!(!docs_only_paths(&serde_json::json!({}), &policy));
+    }
 
     #[test]
     fn piped_checks_require_executor_flag_and_success() {
