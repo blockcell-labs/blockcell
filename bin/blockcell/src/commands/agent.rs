@@ -326,15 +326,18 @@ pub async fn run(
             eprintln!("[blockcell] llm_failed: {error}");
             std::process::exit(2);
         }
-        if let Some(command) = runtime.last_verification_command() {
-            eprintln!("[blockcell] verification: verified ({command}, exit 0)");
-        } else {
-            eprintln!(
-                "[blockcell] verification: unverified ({})",
-                runtime
-                    .last_verification_reason()
-                    .unwrap_or("no recognized completed check")
-            );
+        if config.agents.defaults.verification.mode != blockcell_core::config::VerificationMode::Off
+        {
+            if let Some(command) = runtime.last_verification_command() {
+                eprintln!("[blockcell] verification: verified ({command}, exit 0)");
+            } else {
+                eprintln!(
+                    "[blockcell] verification: unverified ({})",
+                    runtime
+                        .last_verification_reason()
+                        .unwrap_or("no recognized completed check")
+                );
+            }
         }
         // Event handler already printed streaming output, just print final newline if needed
         if !response.is_empty() {

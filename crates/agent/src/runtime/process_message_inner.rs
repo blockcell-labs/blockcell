@@ -1,6 +1,6 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints: never run prohibited or deferred checks. Only recognized runners with preserved exit status establish evidence, not PASS text or declared kinds. Pipes, redirections and status wrappers are rejected; output is already bounded. Use one relevant check, not unrelated checks. Return a single complete final answer preserving the task findings and deliverables, with an honest verification scope; correct findings if checks reveal errors.";
+const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints: never run prohibited or deferred checks. Only recognized runners or configured trusted commands with exit code 0 establish evidence, not PASS text or declared kinds. Built-in checks may pipe output to numeric tail/head filters with executor-confirmed pipefail; other pipes, redirections and status wrappers are rejected. Use one relevant check, not unrelated checks. Return a single complete final answer preserving the task findings and deliverables, with an honest verification scope; correct findings if checks reveal errors.";
 
 pub(super) fn merge_verification_answer(
     original: &str,
@@ -948,6 +948,7 @@ impl AgentRuntime {
             &mut current_messages,
         );
         let mut task_progress = super::task_progress::TaskProgress::default();
+        task_progress.verification_policy = self.config.agents.defaults.verification.clone();
         if let Some(contract) = msg.metadata.get("task_contract").or_else(|| {
             task_continues
                 .then(|| session_metadata.get("runtime_task_contract"))
@@ -2138,7 +2139,14 @@ impl AgentRuntime {
                     continue;
                 }
 
-                if !verification_gate_fired && task_progress.needs_verification() {
+                if !verification_gate_fired
+                    && task_progress.needs_verification()
+                    && self.config.agents.defaults.verification.should_gate(
+                        self.one_shot_cli_auto_coding,
+                        task_progress.contract.verification
+                            == blockcell_core::task_contract::VerificationPolicy::Required,
+                    )
+                {
                     verification_gate_fired = true;
                     // Persist the full answer before a verification continuation can
                     // replace it, fail, or get interrupted.

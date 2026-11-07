@@ -36,7 +36,22 @@ impl Default for ToolEvidence {
 }
 
 impl ToolEvidence {
+    #[cfg(test)]
     pub fn from_execution(tool: &dyn blockcell_tools::Tool, args: &Value, result: &Value) -> Self {
+        Self::from_execution_with_policy(tool, args, result, &Default::default())
+    }
+
+    pub fn from_execution_with_policy(
+        tool: &dyn blockcell_tools::Tool,
+        args: &Value,
+        result: &Value,
+        policy: &blockcell_core::config::VerificationConfig,
+    ) -> Self {
+        let intent = blockcell_tools::verification::command_intent_with_policy(
+            args,
+            policy,
+            result["pipefail"] == true,
+        );
         let process = ["job_id", "session_id"].into_iter().find_map(|field| {
             result
                 .get(field)
@@ -50,16 +65,17 @@ impl ToolEvidence {
             ExecutionAnnotations::default()
         };
         let operation = tool.command_operation(args);
-        let check_candidate = args.get("verification").is_some()
-            || blockcell_tools::verification::command_intent(args).is_some();
-        let rejection = (operation == CommandOperation::Launch && tool.supports_verification())
-            .then(|| blockcell_tools::verification::command_rejection_reason(args))
-            .flatten();
+        let check_candidate = args.get("verification").is_some() || intent.is_some();
+        let rejection = (intent.is_none()
+            && operation == CommandOperation::Launch
+            && tool.supports_verification())
+        .then(|| blockcell_tools::verification::command_rejection_reason(args))
+        .flatten();
         // Keep task requirements, but never turn an unchecked declaration into
         // successful verification evidence. Poll/input arguments are not launches.
         annotations.verification =
             if operation == CommandOperation::Launch && tool.supports_verification() {
-                blockcell_tools::verification::command_intent(args)
+                intent
             } else {
                 None
             };
@@ -85,6 +101,7 @@ impl ToolEvidence {
 }
 
 pub(crate) struct TaskProgress {
+    pub verification_policy: blockcell_core::config::VerificationConfig,
     pub contract: TaskContract,
     revision: usize,
     delivery_revision: usize,
@@ -108,6 +125,7 @@ pub(crate) struct TaskProgress {
 impl Default for TaskProgress {
     fn default() -> Self {
         Self {
+            verification_policy: Default::default(),
             contract: TaskContract::default(),
             revision: 0,
             delivery_revision: 0,
@@ -322,7 +340,8 @@ impl TaskProgress {
     }
 
     pub fn needs_verification(&self) -> bool {
-        self.contract.verification.permits_execution()
+        self.verification_policy.mode != blockcell_core::config::VerificationMode::Off
+            && self.contract.verification.permits_execution()
             && (self.changed
                 || self.uncertain_effects
                 || self.contract.verification == VerificationPolicy::Required)
@@ -375,7 +394,7 @@ impl TaskProgress {
         } else {
             "For a wrapped check, run the recognized runner directly once without wrappers."
         };
-        format!("Reason: {}. {} Use a relevant recognized runner (pytest/unittest for semantic tests); otherwise state the custom check's scope and that formal verification remains unconfirmed. Syntax evidence proves parsing only, not semantic correctness.", self.verification_reason(), repeat)
+        format!("Reason: {}. {} Use a relevant recognized runner (pytest/unittest for semantic tests) or configured commands: {:?}. Piped output to numeric tail/head filters is fine only with executor-confirmed pipefail. Otherwise report the custom check's scope as unconfirmed. Syntax evidence proves parsing only, not semantic correctness.", self.verification_reason(), repeat, self.verification_policy.commands)
     }
 
     pub fn revision(&self) -> usize {
@@ -393,6 +412,19 @@ mod tests {
     use blockcell_tools::{exec_jobs::JobOutputTool, shell_actions::ShellActionTool};
     use serde_json::json;
 
+    #[test]
+    fn piped_checks_require_executor_flag_and_success() {
+        for (flag, exit, expected) in [(true, 0, false), (false, 0, true), (true, 1, true)] {
+            let evidence = ToolEvidence::from_execution(
+                &ShellActionTool::run(),
+                &serde_json::json!({"command":"pytest | tail -n 5"}),
+                &serde_json::json!({"exit_code":exit, "pipefail":flag, "stdout":"PASS"}),
+            );
+            let mut progress = TaskProgress::default();
+            progress.observe(&evidence, exit == 0);
+            assert_eq!(progress.needs_verification(), expected);
+        }
+    }
     fn check(command: &str, exit_code: i32) -> ToolEvidence {
         ToolEvidence::from_execution(
             &ShellActionTool::run(),
@@ -616,9 +648,10 @@ mod tests {
             .write(true)
             .open(workspace.path().join("todos.md"))
             .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(
-                progress.turn_started_at + std::time::Duration::from_secs(1),
-            ))
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(progress.turn_started_at + std::time::Duration::from_secs(1)),
+            )
             .unwrap();
 
         let contract: TaskContract = serde_json::from_value(json!({"verification":"allowed",

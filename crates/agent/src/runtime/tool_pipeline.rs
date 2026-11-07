@@ -423,10 +423,11 @@ impl AgentRuntime {
             .tool_registry
             .get(&inv.call.name)
             .map(|tool| {
-                super::task_progress::ToolEvidence::from_execution(
+                super::task_progress::ToolEvidence::from_execution_with_policy(
                     tool.as_ref(),
                     &inv.args,
                     &outcome.result_json,
+                    &self.config.agents.defaults.verification,
                 )
             })
             .unwrap_or_default();

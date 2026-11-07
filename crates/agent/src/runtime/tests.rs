@@ -5021,7 +5021,8 @@ fn test_runtime_with_provider_and_paths(
     provider: Arc<dyn Provider>,
     mut config: Config,
 ) -> AgentRuntime {
-    if config.security.path_access.policy_file == Config::default().security.path_access.policy_file {
+    if config.security.path_access.policy_file == Config::default().security.path_access.policy_file
+    {
         config.security.path_access.policy_file = paths.path_access_file().display().to_string();
     }
     let provider_pool =
@@ -8105,6 +8106,7 @@ fn verification_gate_runtime(
         seen_messages: Mutex::new(Vec::new()),
     });
     let mut config = Config::default();
+    config.agents.defaults.verification.mode = blockcell_core::config::VerificationMode::Enforce;
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
     let router = config.intent_router.get_or_insert_with(Default::default);
@@ -8138,6 +8140,35 @@ async fn coding_verification_gate_fires_once_after_edit_before_final() {
 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
     assert_eq!(provider.hint_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn verification_policy_controls_continuation_in_interactive_and_headless_modes() {
+    use blockcell_core::config::VerificationMode;
+    for (mode, headless, required, expected) in [
+        (VerificationMode::Auto, false, false, 0),
+        (VerificationMode::Auto, true, false, 1),
+        (VerificationMode::Report, true, false, 0),
+        (VerificationMode::Off, true, false, 0),
+        (VerificationMode::Auto, false, true, 1),
+        (VerificationMode::Report, false, true, 1),
+        (VerificationMode::Off, true, true, 0),
+    ] {
+        let (mut runtime, provider, _) = verification_gate_runtime(false);
+        runtime.config.agents.defaults.verification.mode = mode;
+        runtime.set_one_shot_cli_auto_coding(headless);
+        let mut msg = test_main_session_inbound("cli", "verification-policy");
+        if required {
+            msg.metadata = serde_json::json!({"task_contract":{"verification":"required"}});
+        }
+        msg.content = "Please edit this code file and make a code change.".to_string();
+        runtime.process_message(msg).await.expect("process message");
+        assert_eq!(
+            provider.hint_calls.load(Ordering::SeqCst),
+            expected,
+            "{mode:?}, headless={headless}"
+        );
+    }
 }
 
 #[tokio::test]

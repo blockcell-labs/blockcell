@@ -2,6 +2,32 @@
 
 blockcell 命令行工具的完整参数说明。
 
+## 验证续轮策略
+
+在 `config.json5` 中配置（省略时使用下列默认值）：
+
+```json5
+{
+  agents: { defaults: { verification: {
+    mode: "auto",
+    commands: [], // 例如 [{ command: "make e2e", kind: "test" }]
+    pipedOutputFilters: true,
+    ignoreExtensions: ["md", "txt", "rst", "adoc"],
+  } } },
+}
+```
+
+| mode | 自动验证续轮 | CLI 验证页脚 |
+|---|---|---|
+| `auto`（默认） | 仅 `blockcell agent -m` 单次无头任务，或契约明确 `required` | 显示 |
+| `enforce` | 所有需要验证的任务 | 显示 |
+| `report` | 仅契约明确 `required` | 显示 |
+| `off` | 不续轮（契约也不强制） | 不显示 |
+
+每个任务最多触发一次验证续轮；禁止或延后验证的契约仍受尊重。仅文件写入/编辑工具的全部目标扩展名都在 `ignoreExtensions` 中时豁免，未知 shell 效果仍按原规则处理。
+
+`commands` 是项目可信命令前缀，按 shell 单词匹配（允许额外参数及已有的 env、timeout、cd 前缀）；`kind` 默认 `test`，可选 `test/build/lint/syntax/artifact`。自定义命令不允许通过管道取得证据。内置检查可使用 `pytest 2>&1 | tail -n 20` 等纯数字 head/tail 过滤；仅执行器实际使用 `bash -o pipefail -c` 且返回 `pipefail: true` 时有效，bash 不可用则退回原执行方式、不计为证据。设置 `pipedOutputFilters: false` 可禁用此类证据。其他管道、文件重定向、展开与状态包装仍被拒绝。退出码必须为 0，PASS 文本或模型声明的 kind 均不能作为成功证据。
+
 ## 全局选项
 
 ```
