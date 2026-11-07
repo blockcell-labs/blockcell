@@ -28,8 +28,16 @@ pub struct ShellTool;
 
 static SHELL_SESSIONS: Lazy<ShellSessionManager> = Lazy::new(ShellSessionManager::new);
 
+fn bash_available() -> bool {
+    std::process::Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellCommandOutput {
+    pub pipefail: bool,
     pub output: String,
     pub stdout: String,
     pub stderr: String,
@@ -105,6 +113,7 @@ impl SharedOutput {
 }
 
 struct ActiveCommand {
+    pipefail: bool,
     marker: String,
     delivered_offset: u64,
     stderr_delivered_offset: u64,
@@ -689,6 +698,7 @@ impl ShellSessionManager {
         exec_compatibility_shell: bool,
     ) -> Result<ShellCommandOutput> {
         let session = self.get(session_id).await?;
+        let pipefail = cfg!(unix) && crate::verification::piped_check(command) && bash_available();
         let combined = self.preview_stdin(session_id, command);
         if crate::exec::is_dangerous_command(command)
             || crate::exec::is_dangerous_command(&combined)
@@ -714,7 +724,9 @@ impl ShellSessionManager {
                 )
             };
             #[cfg(unix)]
-            let shell_command = if exec_compatibility_shell {
+            let shell_command = if pipefail {
+                format!("bash -o pipefail -c {}", shell_quote_argument(command))
+            } else if exec_compatibility_shell {
                 format!("sh -c {}", shell_quote_argument(command))
             } else {
                 command.to_string()
@@ -735,6 +747,7 @@ impl ShellSessionManager {
                 .await
                 .map_err(|error| Error::Tool(format!("Failed to flush shell command: {error}")))?;
             session.active = Some(ActiveCommand {
+                pipefail,
                 marker,
                 delivered_offset,
                 stderr_delivered_offset,
@@ -770,6 +783,7 @@ impl ShellSessionManager {
                 truncated || capped_output || capped_stdout || capped_stderr || polled.truncated;
             if !polled.running || tokio::time::Instant::now() >= deadline {
                 return Ok(ShellCommandOutput {
+                    pipefail: polled.pipefail,
                     output,
                     stdout,
                     stderr,
@@ -801,6 +815,7 @@ impl ShellSessionManager {
                 }
             }
             return Ok(ShellCommandOutput {
+                pipefail: false,
                 output: String::new(),
                 stdout: String::new(),
                 stderr: String::new(),
@@ -810,6 +825,7 @@ impl ShellSessionManager {
             });
         };
         let marker = active.marker.clone();
+        let pipefail = active.pipefail;
         let delivered_offset = active.delivered_offset;
         let stderr_delivered_offset = active.stderr_delivered_offset;
         let combined_delivered_offset = active.combined_delivered_offset;
@@ -875,6 +891,7 @@ impl ShellSessionManager {
                 drop(shared);
                 session.active = None;
                 return Ok(ShellCommandOutput {
+                    pipefail,
                     output,
                     stdout,
                     stderr,
@@ -942,6 +959,7 @@ impl ShellSessionManager {
             shared.combined_bytes.shrink_to_fit();
             drop(shared);
             return Ok(ShellCommandOutput {
+                pipefail,
                 output,
                 stdout,
                 stderr,
@@ -952,6 +970,7 @@ impl ShellSessionManager {
         }
 
         Ok(ShellCommandOutput {
+            pipefail,
             output,
             stdout,
             stderr,
@@ -1528,6 +1547,7 @@ fn shell_output_json(
     note: Option<&str>,
 ) -> Value {
     let mut result = json!({
+        "pipefail": output.pipefail,
         "session_id": session_id,
         "sandbox_policy": policy.as_str(),
         "output": output.output,

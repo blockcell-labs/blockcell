@@ -345,6 +345,7 @@ impl Tool for ExecTool {
                 }
 
                 Ok(json!({
+                    "pipefail": output.pipefail,
                     "exit_code": output.exit_code,
                     "stdout": stdout,
                     "stderr": stderr,

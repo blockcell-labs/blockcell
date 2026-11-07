@@ -346,12 +346,57 @@ fn status_preserving_segments(command: &str) -> Option<Vec<&str>> {
 /// Eligible evidence, not merely a caller's declaration. An explicit kind must
 /// agree with the runner. Unknown custom scripts cannot discharge the gate.
 pub fn command_intent(params: &Value) -> Option<VerificationIntent> {
+    command_intent_with_policy(params, &Default::default(), false)
+}
+
+/// Only built-in checks with numeric head/tail filters qualify for pipefail.
+pub fn piped_check(command: &str) -> bool {
+    let Some((runner, filters)) = command.split_once('|') else {
+        return false;
+    };
+    let runner = runner
+        .trim()
+        .strip_suffix("2>&1")
+        .unwrap_or(runner.trim())
+        .trim();
+    if command_intent(&serde_json::json!({"command": runner})).is_none() {
+        return false;
+    }
+    filters.split('|').all(|filter| {
+        let words: Vec<_> = filter.split_whitespace().collect();
+        let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        matches!(words.first(), Some(&"head" | &"tail"))
+            && match &words[1..] {
+                [] => true,
+                [n] => n.strip_prefix('-').is_some_and(numeric),
+                ["-n", n] => numeric(n),
+                _ => false,
+            }
+    })
+}
+
+pub fn command_intent_with_policy(
+    params: &Value,
+    policy: &blockcell_core::config::VerificationConfig,
+    pipefail: bool,
+) -> Option<VerificationIntent> {
     let annotations = ExecutionAnnotations::parse(params).ok()?;
     let command = params
         .get("command")
         .or_else(|| params.get("cmd"))?
         .as_str()?;
-    let segments = status_preserving_segments(command)?;
+    let checked_command = if policy.piped_output_filters && pipefail && piped_check(command) {
+        command
+            .split_once('|')?
+            .0
+            .trim()
+            .strip_suffix("2>&1")
+            .unwrap_or(command.split_once('|')?.0.trim())
+            .trim()
+    } else {
+        command
+    };
+    let segments = status_preserving_segments(checked_command)?;
     let mut kind = None;
     for (index, segment) in segments.iter().enumerate() {
         let words = shell_command_words(segment);
@@ -362,7 +407,13 @@ pub fn command_intent(params: &Value) -> Option<VerificationIntent> {
             }
             continue;
         }
-        let current = runner_kind(segment)?;
+        let current = runner_kind(segment).or_else(|| {
+            let words = strip_verification_prefixes(shell_command_words(segment));
+            policy.commands.iter().find_map(|trusted| {
+                let prefix = strip_verification_prefixes(shell_command_words(&trusted.command));
+                (!prefix.is_empty() && words.starts_with(&prefix)).then_some(trusted.kind)
+            })
+        })?;
         if kind.is_some_and(|previous| previous != current) {
             return None;
         }
@@ -394,7 +445,7 @@ pub fn command_rejection_reason(params: &Value) -> Option<&'static str> {
         return Some("no inspectable command");
     };
     let Some(segments) = status_preserving_segments(command) else {
-        return Some("shell pipes, redirections, wrappers or expansions do not preserve recognized runner evidence");
+        return Some("shell pipes, redirections, wrappers or expansions rejected; only built-in checks piped to numeric tail/head filters with executor-confirmed pipefail preserve evidence");
     };
     let mut kinds = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
@@ -466,6 +517,49 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn trusted_commands_and_pipefail_filters() {
+        use blockcell_core::config::{VerificationCommand, VerificationConfig};
+        let mut policy = VerificationConfig::default();
+        policy.commands.push(VerificationCommand {
+            command: "./run_tests.sh".into(),
+            kind: VerificationKind::Test,
+        });
+        for command in [
+            "./run_tests.sh",
+            "cd repo && env X=1 timeout 5 ./run_tests.sh --fast",
+        ] {
+            assert!(command_intent_with_policy(
+                &serde_json::json!({"command":command}),
+                &policy,
+                false
+            )
+            .is_some());
+        }
+        for command in [
+            "./other.sh",
+            "./run_tests.sh | tail -n 5",
+            "pytest | grep PASS",
+            "pytest | tail > result.txt",
+            "pytest | tail -n x",
+            "pytest | tail ; true",
+            "pytest | tail $(true)",
+        ] {
+            assert!(
+                command_intent_with_policy(&serde_json::json!({"command":command}), &policy, true)
+                    .is_none(),
+                "{command}"
+            );
+        }
+        for command in ["pytest | tail", "pytest 2>&1 | tail -n 5 | head -2"] {
+            let params = serde_json::json!({"command":command});
+            assert!(command_intent_with_policy(&params, &policy, false).is_none());
+            assert!(command_intent_with_policy(&params, &policy, true).is_some());
+            policy.piped_output_filters = false;
+            assert!(command_intent_with_policy(&params, &policy, true).is_none());
+            policy.piped_output_filters = true;
+        }
+    }
     #[test]
     fn json_tool_only_accepts_a_direct_single_input_syntax_check() {
         for command in [

@@ -33,6 +33,7 @@ pub struct ShellRequest {
 
 #[derive(Debug, Clone)]
 pub struct ShellResult {
+    pub pipefail: bool,
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -74,10 +75,23 @@ impl Default for LocalShellExecutor {
 #[async_trait]
 impl ShellExecutor for LocalShellExecutor {
     async fn execute(&self, request: ShellRequest) -> Result<ShellResult> {
+        let pipefail = cfg!(unix)
+            && crate::verification::piped_check(&request.command)
+            && std::process::Command::new("bash")
+                .arg("--version")
+                .output()
+                .is_ok();
         #[cfg(windows)]
         let (program, args) = ("cmd", vec!["/C".to_string(), request.command]);
         #[cfg(not(windows))]
-        let (program, args) = ("sh", vec!["-c".to_string(), request.command]);
+        let (program, args) = if pipefail {
+            (
+                "bash",
+                vec!["-o".into(), "pipefail".into(), "-c".into(), request.command],
+            )
+        } else {
+            ("sh", vec!["-c".to_string(), request.command])
+        };
         let mut handle = prepare_sandboxed(
             self.sandbox.as_ref(),
             SandboxRequest {
@@ -98,6 +112,7 @@ impl ShellExecutor for LocalShellExecutor {
         )
         .await?;
         Ok(ShellResult {
+            pipefail,
             exit_code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
@@ -125,6 +140,21 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_output_bytes: 1024,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn piped_builtin_uses_pipefail_and_preserves_runner_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = LocalShellExecutor::default()
+            .execute(request(
+                "python3 -m py_compile missing_file.py 2>&1 | tail -n 2",
+                dir.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+        assert!(result.pipefail);
+        assert_ne!(result.exit_code, Some(0));
     }
 
     #[cfg(unix)]

@@ -348,6 +348,7 @@ pub(crate) async fn execute_exec_job(
             truncated = true;
         }
         return Ok(json!({
+            "pipefail": output.pipefail,
             "exit_code": output.exit_code,
             "stdout": stdout,
             "stderr": stderr,
@@ -373,6 +374,7 @@ pub(crate) async fn execute_exec_job(
         owner_session_id,
     ));
     Ok(json!({
+        "pipefail": output.pipefail,
         "status": "running",
         "job_id": job_id,
         "elapsed_secs": started.elapsed().as_secs_f64(),
