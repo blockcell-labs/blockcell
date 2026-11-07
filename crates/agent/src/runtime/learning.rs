@@ -56,8 +56,12 @@ impl super::AgentRuntime {
         // 克隆一份供 ForkedAgent 使用（spawn_blocking 会 move 原始值）
         let skills_dir_clone = skills_dir.clone();
         let builtin_skills_dir = self.paths.builtin_skills_dir();
-        let review_index_roots = [builtin_skills_dir.clone(), skills_dir.clone()];
-        let refreshed_index_roots = review_index_roots.clone();
+        let review_manager = self.context_builder.skill_manager().cloned();
+        let refreshed_manager = review_manager.clone();
+        let refreshed_paths = self.paths.clone();
+        let (_, review_disabled) =
+            super::load_disabled_toggles_pair(&self.paths, "tools", "skills");
+        let refreshed_disabled = review_disabled.clone();
         let external_skills_dirs = vec![builtin_skills_dir];
         let provider_pool = self.provider_pool.clone();
         let model = parent_served_model
@@ -109,7 +113,7 @@ impl super::AgentRuntime {
                 ReviewMode::Memory => String::new(),
                 ReviewMode::Skill | ReviewMode::Combined => {
                     let index = match tokio::task::spawn_blocking(move || {
-                        crate::skill_index::SkillIndex::build_from_dirs(review_index_roots)
+                        review_manager.as_ref().map(|manager| crate::skill_index::SkillIndex::from_manager(manager, &review_disabled)).unwrap_or_default()
                     })
                     .await
                     {
@@ -236,9 +240,12 @@ impl super::AgentRuntime {
                     // 与 Hermes 一致: 系统提示词在下次 LLM 调用时反映最新的 Skill 列表
                     if matches!(mode_clone, ReviewMode::Skill | ReviewMode::Combined) {
                         if let Ok(index) = tokio::task::spawn_blocking(move || {
-                            crate::skill_index::SkillIndex::build_from_dirs(refreshed_index_roots)
+                            let mut manager = refreshed_manager?;
+                            manager.reload_skills(&refreshed_paths).ok()?;
+                            Some(crate::skill_index::SkillIndex::from_manager(&manager, &refreshed_disabled))
                         })
                         .await
+                        .map(|index| index.unwrap_or_default())
                         {
                             let mut cache =
                                 skill_index_cache.write().unwrap_or_else(|e| e.into_inner());

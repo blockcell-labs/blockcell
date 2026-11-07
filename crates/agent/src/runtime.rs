@@ -2715,7 +2715,7 @@ fn collect_disabled(val: &serde_json::Value, category: &str, out: &mut HashSet<S
 
 /// Read toggles.json once and return the disabled item sets for two categories.
 /// Avoids reading and parsing the same file twice back-to-back on the message hot path.
-fn load_disabled_toggles_pair(
+pub(crate) fn load_disabled_toggles_pair(
     paths: &Paths,
     category_a: &str,
     category_b: &str,
@@ -3082,13 +3082,7 @@ impl AgentRuntime {
         ghost_memory_lifecycle.initialize_all("runtime", "primary");
 
         // 构建 Skill 索引摘要并注入到系统提示词
-        let index = crate::skill_index::SkillIndex::build_from_dirs([
-            paths.builtin_skills_dir(),
-            paths.skills_dir(),
-        ]);
-        if !index.entries().is_empty() {
-            context_builder.set_skill_index_summary(index.to_prompt_summary());
-        }
+        context_builder.refresh_skill_index_summary();
 
         // 从 config 中提取 nudge 配置 (在 config 被 move 之前)
         let nudge_config = crate::skill_nudge::NudgeConfig::from_config(&config.self_improve.nudge);

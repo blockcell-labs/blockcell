@@ -514,6 +514,7 @@ impl AgentRuntime {
             load_disabled_toggles_pair(&self.paths, "tools", "skills");
         let recent_skill_name = continued_skill_name(&session_metadata, &history);
         let _ = self.context_builder.reload_skills();
+        self.context_builder.refresh_skill_index_summary();
         let skill_cards = self
             .context_builder
             .skill_manager()

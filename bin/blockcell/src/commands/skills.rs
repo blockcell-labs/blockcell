@@ -618,10 +618,24 @@ pub async fn reload() -> anyhow::Result<()> {
         }
     }
 
-    let index = blockcell_agent::skill_index::SkillIndex::build_from_dirs([
-        paths.builtin_skills_dir(),
-        paths.skills_dir(),
-    ]);
+    let mut manager = blockcell_skills::SkillManager::new();
+    manager.set_openclaw_skill_enabled(Config::load_or_default(&paths)?.openclaw_skill_enabled);
+    manager.load_from_paths(&paths)?;
+    let disabled = std::fs::read_to_string(paths.toggles_file())
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|value| {
+            value
+                .get("skills")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, enabled)| *enabled == false)
+        .map(|(name, _)| name)
+        .collect();
+    let index = blockcell_agent::skill_index::SkillIndex::from_manager(&manager, &disabled);
     let count = index.entries().len();
 
     println!(

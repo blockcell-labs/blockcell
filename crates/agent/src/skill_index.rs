@@ -58,6 +58,35 @@ fn composite_key(category: &str, name: &str) -> String {
 }
 
 impl SkillIndex {
+    pub fn from_manager(
+        manager: &blockcell_skills::SkillManager,
+        disabled: &HashSet<String>,
+    ) -> Self {
+        let mut index = Self::new();
+        for skill in manager.list_enabled_skills(disabled) {
+            if skill.meta.disable_model_invocation {
+                continue;
+            }
+            index.entries.insert(
+                skill.name.clone(),
+                SkillIndexEntry {
+                    name: skill.name.clone(),
+                    category: String::new(),
+                    description: skill.meta.description.clone(),
+                    tools: skill.meta.effective_tools(),
+                    always: skill.meta.always,
+                    path: skill.path.clone(),
+                    version: skill
+                        .current_version
+                        .clone()
+                        .unwrap_or_else(default_version),
+                    updated_at: None,
+                },
+            );
+        }
+        index
+    }
+
     /// 创建空索引
     pub fn new() -> Self {
         Self {

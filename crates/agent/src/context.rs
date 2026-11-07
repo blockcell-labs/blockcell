@@ -623,10 +623,13 @@ impl ContextBuilder {
     /// 刷新 Skill 索引摘要 (Skill 变更后调用, 使下次 LLM 调用获取最新 Skill 列表)
     /// 使用 `&self` (内部 Arc<RwLock>) 以便后台 Review Agent 在完成后刷新
     pub fn refresh_skill_index_summary(&self) {
-        let index = crate::skill_index::SkillIndex::build_from_dirs([
-            self.paths.builtin_skills_dir(),
-            self.paths.skills_dir(),
-        ]);
+        let (_, disabled) =
+            crate::runtime::load_disabled_toggles_pair(&self.paths, "tools", "skills");
+        let index = self
+            .skill_manager
+            .as_ref()
+            .map(|manager| crate::skill_index::SkillIndex::from_manager(manager, &disabled))
+            .unwrap_or_default();
         let mut summary = self
             .skill_index_summary
             .write()
@@ -1162,11 +1165,17 @@ impl ContextBuilder {
             && self.memory_recall_policy.allows(recall_mode, channel)
             && !user_query.is_empty()
         {
-            let skill_summary = self
-                .skill_index_summary
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
+            let skill_summary = if !disabled_skills.is_empty() {
+                self.skill_manager.as_ref().map(|manager| {
+                    crate::skill_index::SkillIndex::from_manager(manager, disabled_skills)
+                        .to_prompt_summary()
+                })
+            } else {
+                self.skill_index_summary
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            };
             let snapshot = memory_snapshot
                 .map(|snapshot| (snapshot.user.as_deref(), snapshot.memory.as_deref()));
             if let Ok(items) = RetrievalOrchestrator::retrieve_with_snapshot(
@@ -1713,6 +1722,55 @@ mod tests {
         assert!(!prompt.contains("Shadow Layer5 project memory."));
     }
     use std::fs;
+
+    #[test]
+    fn skill_index_uses_manager_winner_and_metadata_identity() {
+        let base =
+            std::env::temp_dir().join(format!("skill-index-manager-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_base(base.clone());
+        for (root, description) in [
+            (paths.managed_builtin_skills_dir(), "builtin"),
+            (paths.skills_dir(), "workspace"),
+        ] {
+            let dir = root.join(format!("{description}_directory"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("meta.yaml"),
+                format!("name: canonical\ndescription: {description}\n"),
+            )
+            .unwrap();
+            fs::write(dir.join("SKILL.md"), "Canonical manual").unwrap();
+        }
+        let missing = paths.skills_dir().join("unavailable");
+        fs::create_dir_all(&missing).unwrap();
+        fs::write(
+            missing.join("meta.yaml"),
+            "name: unavailable\nrequires:\n  bins: [blockcell_nonexistent_test_binary_49201]\n",
+        )
+        .unwrap();
+        fs::write(missing.join("SKILL.md"), "Unavailable").unwrap();
+        let builder = ContextBuilder::new(paths, Config::default());
+        let manager = builder.skill_manager().unwrap();
+        let index = crate::skill_index::SkillIndex::from_manager(manager, &HashSet::new());
+        assert_eq!(index.entries().len(), 1);
+        let winner = &index.entries()["canonical"];
+        assert_eq!(winner.description, "workspace");
+        assert!(winner.path.ends_with("workspace_directory"));
+        assert!(!index.entries().contains_key("workspace_directory"));
+        assert!(crate::skill_index::SkillIndex::from_manager(
+            manager,
+            &HashSet::from(["canonical".into()])
+        )
+        .entries()
+        .is_empty());
+        assert!(crate::skill_index::SkillIndex::from_manager(
+            &SkillManager::new(),
+            &HashSet::new()
+        )
+        .entries()
+        .is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn test_resolve_active_skill_by_name_keeps_manual_injection_for_script_skill() {
