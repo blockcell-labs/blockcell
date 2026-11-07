@@ -2754,6 +2754,7 @@ pub struct AgentRuntime {
     /// 危险操作，而非本回合所有危险操作（逐操作确认在无交互通道的最强近似）。
     /// 键 = channel + sender + timestamp_ms，按消息去重；跨 clone 共享。
     consumed_text_confirmations: Arc<Mutex<HashSet<String>>>,
+    skill_script_approvals: Arc<Mutex<HashSet<(String, String, PathBuf, String)>>>,
     /// Shared task manager for tracking background subagent tasks.
     task_manager: TaskManager,
     /// Agent id bound to this runtime.
@@ -3133,6 +3134,7 @@ impl AgentRuntime {
             authorized_dirs: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(FileObservationState::default())),
             consumed_text_confirmations: Arc::new(Mutex::new(HashSet::new())),
+            skill_script_approvals: Arc::new(Mutex::new(HashSet::new())),
             task_manager: TaskManager::new(),
             agent_id: None,
             memory_store: None,
@@ -3236,6 +3238,7 @@ impl AgentRuntime {
             authorized_dirs: Arc::clone(&self.authorized_dirs),
             file_observations: Arc::clone(&self.file_observations),
             consumed_text_confirmations: Arc::clone(&self.consumed_text_confirmations),
+            skill_script_approvals: Arc::clone(&self.skill_script_approvals),
             task_manager: self.task_manager.clone(),
             agent_id: self.agent_id.clone(),
             memory_store: self.memory_store.clone(),

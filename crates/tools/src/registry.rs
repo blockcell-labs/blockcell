@@ -171,8 +171,8 @@ impl ToolRegistry {
         registry.register(Arc::new(ShellActionTool::input()));
         registry.register(Arc::new(ShellActionTool::close()));
         registry.register(Arc::new(ToolSearchTool));
-        registry.register(Arc::new(ExecLocalTool));
-        registry.register(Arc::new(ExecSkillScriptTool));
+        registry.register(Arc::new(ExecLocalTool::default()));
+        registry.register(Arc::new(ExecSkillScriptTool::default()));
 
         // Web tools
         registry.register(Arc::new(WebSearchTool));
@@ -1298,11 +1298,11 @@ mod tests {
                 json!({"command": "ls", "sandbox_policy": "full-access"}),
                 Shell,
             ),
-            ("exec_local", json!({"path": "scripts/run.py"}), FullAccess),
+            ("exec_local", json!({"path": "scripts/run.py"}), Shell),
             (
                 "exec_skill_script",
                 json!({"path": "scripts/run.py"}),
-                FullAccess,
+                Shell,
             ),
             ("shell", json!({"command": "ls"}), Shell),
             (

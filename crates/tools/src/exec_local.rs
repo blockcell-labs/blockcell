@@ -1,15 +1,25 @@
 use async_trait::async_trait;
 use blockcell_core::{Error, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
 
+use crate::sandbox::{prepare_sandboxed, NativeSandboxProvider, SandboxPolicy, SandboxRequest};
 use crate::{Tool, ToolContext, ToolSchema};
 
-pub struct ExecLocalTool;
+pub struct ExecLocalTool {
+    policy: SandboxPolicy,
+}
+
+impl Default for ExecLocalTool {
+    fn default() -> Self {
+        Self::from_config(&blockcell_core::config::ExecConfig::default())
+    }
+}
 
 pub(crate) const ALLOWED_RUNNERS: &[&str] =
     &["python3", "python", "bash", "sh", "node", "php", "uv"];
@@ -109,6 +119,18 @@ pub(crate) fn infer_runner_from_extension(path: &str) -> Option<&'static str> {
     }
 }
 
+pub fn script_runner_description(params: &Value, path: &Path) -> String {
+    params
+        .get("runner")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            infer_runner_from_extension(&path.to_string_lossy())
+                .unwrap_or("direct executable")
+                .to_string()
+        })
+}
+
 pub(crate) fn truncate_output(text: String, max_chars: usize, suffix: &str) -> String {
     if text.chars().count() <= max_chars {
         return text;
@@ -120,7 +142,7 @@ pub(crate) fn truncate_output(text: String, max_chars: usize, suffix: &str) -> S
     }
 }
 
-pub(crate) fn resolve_script_path(skill_dir: &Path, relative_path: &str) -> Result<PathBuf> {
+pub fn resolve_script_path(skill_dir: &Path, relative_path: &str) -> Result<PathBuf> {
     validate_relative_skill_path(relative_path)?;
     let joined = skill_dir.join(relative_path);
     let canonical_skill_dir = std::fs::canonicalize(skill_dir)?;
@@ -172,10 +194,15 @@ impl Tool for ExecLocalTool {
     fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
         crate::evidence::CommandOperation::Opaque
     }
-    /// 直接以 `tokio::process::Command` 拉起解释器，不经沙箱 → 如实声明 `FullAccess`。
-    /// 路径已限制在技能目录内，故不需要逐次确认。
     fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
-        crate::ExecutionEnvironment::FullAccess
+        match self.policy {
+            SandboxPolicy::FullAccess => crate::ExecutionEnvironment::FullAccess,
+            _ => crate::ExecutionEnvironment::Shell,
+        }
+    }
+
+    fn requires_confirmation(&self, _params: &Value) -> bool {
+        self.policy == SandboxPolicy::FullAccess
     }
 
     fn schema(&self) -> ToolSchema {
@@ -242,7 +269,7 @@ impl Tool for ExecLocalTool {
     }
 
     async fn execute(&self, ctx: ToolContext, params: Value) -> Result<Value> {
-        let skill_dir = ctx.active_skill_dir.ok_or_else(|| {
+        let skill_dir = ctx.active_skill_dir.clone().ok_or_else(|| {
             // Use Tool error (not PermissionDenied) to avoid Permanent classification.
             // Hint tells the LLM to use activate_skill first.
             Error::Tool(
@@ -256,6 +283,18 @@ impl Tool for ExecLocalTool {
             .as_str()
             .ok_or_else(|| Error::Validation("Missing required parameter: path".to_string()))?;
         let resolved_path = resolve_script_path(&skill_dir, relative_path)?;
+        if let Some(approved) = params
+            .get("_approved_script_sha256")
+            .and_then(Value::as_str)
+        {
+            let digest = format!("{:x}", Sha256::digest(std::fs::read(&resolved_path)?));
+            if digest != approved {
+                return Err(Error::PermissionDenied(
+                    "Skill script content changed after approval; request confirmation again"
+                        .into(),
+                ));
+            }
+        }
         let explicit_runner = params.get("runner").and_then(|value| value.as_str());
         if let Some(runner) = explicit_runner {
             validate_runner(runner)?;
@@ -290,6 +329,7 @@ impl Tool for ExecLocalTool {
         if relative_path.ends_with(".py") && explicit_runner.is_none() {
             return self
                 .execute_python_with_fallback(
+                    &ctx,
                     &skill_dir,
                     &resolved_path,
                     &args,
@@ -303,6 +343,7 @@ impl Tool for ExecLocalTool {
         let effective_runner =
             explicit_runner.or_else(|| infer_runner_from_extension(relative_path));
         self.execute_single_runner(
+            &ctx,
             effective_runner,
             &skill_dir,
             &resolved_path,
@@ -315,9 +356,18 @@ impl Tool for ExecLocalTool {
 }
 
 impl ExecLocalTool {
+    pub fn from_config(config: &blockcell_core::config::ExecConfig) -> Self {
+        Self {
+            policy: crate::exec::ExecTool::resolve_config_policy(config)
+                .unwrap_or(SandboxPolicy::WorkspaceWrite),
+        }
+    }
+
     /// Execute Python script with automatic fallback between python3 and python.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_python_with_fallback(
         &self,
+        ctx: &ToolContext,
         skill_dir: &Path,
         resolved_path: &Path,
         args: &[String],
@@ -348,6 +398,7 @@ impl ExecLocalTool {
             command.current_dir(skill_dir);
             let result = self
                 .run_command(
+                    ctx,
                     command,
                     resolved_path,
                     Some(runner),
@@ -370,8 +421,10 @@ impl ExecLocalTool {
     }
 
     /// Execute script with a single runner (no fallback).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_single_runner(
         &self,
+        ctx: &ToolContext,
         effective_runner: Option<&str>,
         skill_dir: &Path,
         resolved_path: &Path,
@@ -397,6 +450,7 @@ impl ExecLocalTool {
                 command.current_dir(skill_dir);
                 return self
                     .run_command(
+                        ctx,
                         command,
                         resolved_path,
                         effective_runner,
@@ -429,6 +483,7 @@ impl ExecLocalTool {
             .env("PYTHONUNBUFFERED", "1");
 
         self.run_command(
+            ctx,
             command,
             resolved_path,
             effective_runner,
@@ -439,9 +494,44 @@ impl ExecLocalTool {
         .await
     }
 
+    fn sandbox_request(&self, ctx: &ToolContext, command: &Command) -> SandboxRequest {
+        let original = command.as_std();
+        let mut writable_roots = if self.policy == SandboxPolicy::WorkspaceWrite {
+            ctx.sandbox_writable_roots
+                .clone()
+                .unwrap_or_else(|| vec![ctx.workspace.clone()])
+        } else {
+            Vec::new()
+        };
+        if self.policy == SandboxPolicy::WorkspaceWrite {
+            if let Some(skill_dir) = &ctx.active_skill_dir {
+                if !writable_roots.contains(skill_dir) {
+                    writable_roots.push(skill_dir.clone());
+                }
+            }
+        }
+        SandboxRequest {
+            agent_id: ctx
+                .agent_identity
+                .as_ref()
+                .map(|identity| identity.agent_id.clone())
+                .unwrap_or_default(),
+            session_id: ctx.session_key.clone(),
+            policy: self.policy,
+            writable_roots,
+            program: original.get_program().to_string_lossy().into_owned(),
+            args: original
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+        }
+    }
+
     /// Run the command and process output.
+    #[allow(clippy::too_many_arguments)]
     async fn run_command(
         &self,
+        ctx: &ToolContext,
         command: Command,
         resolved_path: &Path,
         effective_runner: Option<&str>,
@@ -449,8 +539,26 @@ impl ExecLocalTool {
         timeout_secs: u64,
         max_output_chars: usize,
     ) -> Result<Value> {
+        let original = command.as_std();
+        let mut handle =
+            prepare_sandboxed(&NativeSandboxProvider, self.sandbox_request(ctx, &command)).await?;
+        if let Some(cwd) = original.get_current_dir() {
+            handle.command.current_dir(cwd);
+        }
+        for (key, value) in original.get_envs() {
+            if let Some(value) = value {
+                handle.command.env(key, value);
+            } else {
+                handle.command.env_remove(key);
+            }
+        }
+        handle
+            .command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let output = crate::process::run_command_bounded(
-            command,
+            handle.command,
             Duration::from_secs(timeout_secs),
             max_output_chars.saturating_mul(4),
         )
@@ -529,6 +637,100 @@ mod tests {
         dir
     }
 
+    fn full_access_tool() -> ExecLocalTool {
+        ExecLocalTool::from_config(&blockcell_core::config::ExecConfig {
+            sandbox_policy: Some("full-access".into()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn script_sandbox_request_preserves_argv_policy_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = tool_context(dir.path().to_path_buf());
+        ctx.workspace = dir.path().join("workspace");
+        let mut command = build_python_command(
+            "python3",
+            &dir.path().join("a script.py"),
+            &["a; echo unsafe".into(), "two words".into()],
+        );
+        command.current_dir(dir.path());
+        let tool = ExecLocalTool::default();
+        let request = tool.sandbox_request(&ctx, &command);
+        assert_eq!(request.policy, SandboxPolicy::WorkspaceWrite);
+        assert_eq!(request.program, "python3");
+        assert!(request.args.contains(&"a; echo unsafe".to_string()));
+        assert!(request.args.contains(&"two words".to_string()));
+        assert_eq!(
+            request.writable_roots,
+            vec![ctx.workspace.clone(), dir.path().to_path_buf()]
+        );
+        ctx.sandbox_writable_roots = Some(vec![dir.path().join("authorized")]);
+        assert_eq!(
+            tool.sandbox_request(&ctx, &command).writable_roots,
+            vec![dir.path().join("authorized"), dir.path().to_path_buf()]
+        );
+        assert!(!tool.requires_confirmation(&json!({})));
+        assert_eq!(
+            tool.execution_environment(&json!({})),
+            crate::ExecutionEnvironment::Shell
+        );
+        assert!(full_access_tool().requires_confirmation(&json!({})));
+        assert!(full_access_tool()
+            .sandbox_request(&ctx, &command)
+            .writable_roots
+            .is_empty());
+        let readonly = ExecLocalTool::from_config(&blockcell_core::config::ExecConfig {
+            sandbox_policy: Some("read-only".into()),
+            ..Default::default()
+        });
+        assert!(readonly
+            .sandbox_request(&ctx, &command)
+            .writable_roots
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn script_sandbox_unavailable_never_falls_back() {
+        if crate::sandbox::native_sandbox_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.sh"), "echo ran > marker").unwrap();
+        let result = ExecLocalTool::default()
+            .execute(
+                tool_context(dir.path().to_path_buf()),
+                json!({"path":"test.sh"}),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!dir.path().join("marker").exists());
+        assert_eq!(
+            crate::sandbox::native_backend(SandboxPolicy::WorkspaceWrite),
+            crate::sandbox::SandboxBackend::ApprovalRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn python_special_environment_and_changed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.py");
+        std::fs::write(&path, "import os,sys\nprint(os.environ['PYTHONIOENCODING'], os.environ['PYTHONUNBUFFERED'], sys.argv[1])\n").unwrap();
+        let params = json!({"path":"test.py", "runner":"python3", "args":["a; echo unsafe"]});
+        let result = full_access_tool()
+            .execute(tool_context(dir.path().to_path_buf()), params.clone())
+            .await
+            .unwrap();
+        assert_eq!(result["stdout"], "utf-8 1 a; echo unsafe\n");
+        let mut params = params;
+        params["_approved_script_sha256"] = json!("not-the-script-digest");
+        let err = full_access_tool()
+            .execute(tool_context(dir.path().to_path_buf()), params)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("changed after approval"));
+    }
+
     fn tool_context(skill_dir: PathBuf) -> ToolContext {
         ToolContext {
             workspace: std::env::temp_dir(),
@@ -582,7 +784,7 @@ mod tests {
             fs::set_permissions(&script_path, perms).expect("set script perms");
         }
 
-        let tool = ExecLocalTool;
+        let tool = full_access_tool();
         let result = tool
             .execute(
                 tool_context(skill_dir.clone()),
@@ -621,7 +823,7 @@ mod tests {
         )
         .expect("write skill py");
 
-        let tool = ExecLocalTool;
+        let tool = full_access_tool();
         let result = tool
             .execute(
                 tool_context(skill_dir.clone()),
@@ -668,7 +870,7 @@ mod tests {
             .join("outside.sh");
         fs::write(&outside_path, "#!/bin/sh\necho escape\n").expect("write outside script");
 
-        let tool = ExecLocalTool;
+        let tool = full_access_tool();
         let result = tool
             .execute(
                 tool_context(skill_dir),
@@ -685,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_exec_local_allows_whitelisted_runners_only() {
-        let tool = ExecLocalTool;
+        let tool = full_access_tool();
 
         assert!(tool
             .validate(&json!({
@@ -710,12 +912,19 @@ mod tests {
             "with open('calls', 'a') as f: f.write('called\\n')\nimport time\ntime.sleep(10)\n",
         )
         .unwrap();
-        let result = ExecLocalTool
+        let result = full_access_tool()
             // 1s was too tight: interpreter startup alone costs ~0.8s on a loaded
             // host, so the child could be killed before its first statement ran and
             // the read below failed with ENOENT. The script sleeps 10s, so 5s still
             // exercises the timeout path (same fix as the cron test timeout).
-            .execute_python_with_fallback(dir.path(), &script, &[], 5, 4096)
+            .execute_python_with_fallback(
+                &tool_context(dir.path().to_path_buf()),
+                dir.path(),
+                &script,
+                &[],
+                5,
+                4096,
+            )
             .await;
         assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
         assert_eq!(
@@ -729,8 +938,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("failure.py");
         std::fs::write(&script, "with open('calls', 'a') as f: f.write('called\\n')\nimport blockcell_nonexistent_p2_dependency\n").unwrap();
-        let value = ExecLocalTool
-            .execute_python_with_fallback(dir.path(), &script, &[], 5, 4096)
+        let value = full_access_tool()
+            .execute_python_with_fallback(
+                &tool_context(dir.path().to_path_buf()),
+                dir.path(),
+                &script,
+                &[],
+                5,
+                4096,
+            )
             .await
             .unwrap();
         assert_ne!(value["exit_code"], 0);

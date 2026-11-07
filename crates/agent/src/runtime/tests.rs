@@ -3485,8 +3485,9 @@ description: prompt demo
 async fn test_prompt_skill_can_use_exec_skill_script_inside_skill_scope() {
     let mut runtime = test_runtime();
     runtime.tool_registry.register(Arc::new(
-        blockcell_tools::exec_skill_script::ExecSkillScriptTool,
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::default(),
     ));
+    approve_test_skill_scripts(&mut runtime);
     let skill_dir = runtime.paths.skills_dir().join("local_demo");
     let scripts_dir = skill_dir.join("scripts");
     std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
@@ -3561,11 +3562,11 @@ description: local demo
 fn test_resolved_skill_tool_names_include_exec_skill_script_for_script_capable_skill() {
     let mut runtime = test_runtime();
     runtime.tool_registry.register(Arc::new(
-        blockcell_tools::exec_skill_script::ExecSkillScriptTool,
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::default(),
     ));
-    runtime
-        .tool_registry
-        .register(Arc::new(blockcell_tools::exec_local::ExecLocalTool));
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::default(),
+    ));
     let skill_dir = runtime.paths.skills_dir().join("script_demo");
     std::fs::create_dir_all(skill_dir.join("scripts")).expect("create scripts dir");
     std::fs::write(
@@ -3628,8 +3629,9 @@ async fn test_check_path_permission_allows_exec_skill_script_skill_paths() {
 async fn test_skill_executor_uses_manual_not_file_type_to_choose_skill_script() {
     let mut runtime = test_runtime();
     runtime.tool_registry.register(Arc::new(
-        blockcell_tools::exec_skill_script::ExecSkillScriptTool,
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::default(),
     ));
+    approve_test_skill_scripts(&mut runtime);
     let skill_dir = runtime.paths.skills_dir().join("legacy_script_demo");
     let scripts_dir = skill_dir.join("scripts");
     std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
@@ -3704,8 +3706,9 @@ description: legacy script demo
 async fn test_cli_style_skill_runs_via_exec_skill_script() {
     let mut runtime = test_runtime();
     runtime.tool_registry.register(Arc::new(
-        blockcell_tools::exec_skill_script::ExecSkillScriptTool,
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::default(),
     ));
+    approve_test_skill_scripts(&mut runtime);
     let skill_dir = runtime.paths.skills_dir().join("cli_demo");
     let bin_dir = skill_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -3758,9 +3761,10 @@ description: cli demo
 #[tokio::test]
 async fn test_prompt_skill_can_still_use_exec_local_inside_skill_scope_for_compat() {
     let mut runtime = test_runtime();
-    runtime
-        .tool_registry
-        .register(Arc::new(blockcell_tools::exec_local::ExecLocalTool));
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::default(),
+    ));
+    approve_test_skill_scripts(&mut runtime);
     let skill_dir = runtime.paths.skills_dir().join("compat_local_demo");
     let scripts_dir = skill_dir.join("scripts");
     std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
@@ -3861,8 +3865,9 @@ async fn test_unified_entry_can_activate_skill_without_forced_skill_metadata() {
     });
     let mut runtime = test_runtime_with_provider(provider.clone());
     runtime.tool_registry.register(Arc::new(
-        blockcell_tools::exec_skill_script::ExecSkillScriptTool,
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::default(),
     ));
+    approve_test_skill_scripts(&mut runtime);
     let skill_dir = runtime.paths.skills_dir().join("local_demo");
     let scripts_dir = skill_dir.join("scripts");
     std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
@@ -4883,6 +4888,26 @@ fn test_runtime_paths(prefix: &str) -> Paths {
     let base = std::path::PathBuf::from("/tmp").join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&base).expect("create temp runtime dir");
     Paths::with_base(base)
+}
+
+fn approve_test_skill_scripts(runtime: &mut AgentRuntime) {
+    let config = blockcell_core::config::ExecConfig {
+        sandbox_policy: Some("full-access".into()),
+        ..Default::default()
+    };
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::from_config(&config),
+    ));
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::from_config(&config),
+    ));
+    let (tx, mut rx) = mpsc::channel::<ConfirmRequest>(8);
+    runtime.confirm_tx = Some(tx);
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let _ = request.response_tx.send(true);
+        }
+    });
 }
 
 fn test_runtime() -> AgentRuntime {
@@ -7490,6 +7515,123 @@ async fn tool_call_audit_records_declared_execution_environment() {
         })
         .expect("tool call audit should carry the declared environment");
     assert_eq!(environment, "local");
+}
+
+#[tokio::test]
+async fn full_access_skill_script_approval_is_session_and_content_bound() {
+    let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "exec_local");
+    allow_test_tool(&mut runtime, "exec_skill_script");
+    let config = blockcell_core::config::ExecConfig {
+        sandbox_policy: Some("full-access".into()),
+        ..Default::default()
+    };
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::from_config(&config),
+    ));
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_skill_script::ExecSkillScriptTool::from_config(&config),
+    ));
+    let skill = runtime.paths.skills_dir().join("approval_demo");
+    std::fs::create_dir_all(&skill).unwrap();
+    let path = skill.join("test.py");
+    std::fs::write(&path, "print('approved')\n").unwrap();
+    let msg = test_main_session_inbound("cli", "script-approval");
+    let call = tool_call(
+        "exec_local",
+        serde_json::json!({"path":"test.py", "runner":"python3", "args":["argument"]}),
+    );
+    let denied = runtime
+        .execute_tool_call(&call, &msg, Some(skill.clone()))
+        .await;
+    assert!(
+        denied.text.contains("interactive confirmation channel"),
+        "{}",
+        denied.text
+    );
+    let (tx, mut rx) = mpsc::channel::<ConfirmRequest>(4);
+    runtime.confirm_tx = Some(tx);
+    let (result, ()) = tokio::join!(
+        runtime.execute_tool_call(&call, &msg, Some(skill.clone())),
+        async {
+            let request = rx.recv().await.unwrap();
+            let detail = request.paths.join(" ");
+            for expected in ["approval_demo", "test.py", "python3", "argument"] {
+                assert!(detail.contains(expected), "{detail}");
+            }
+            request.response_tx.send(true).unwrap();
+        }
+    );
+    assert!(result.text.contains("approved"), "{}", result.text);
+    let cached = runtime
+        .execute_tool_call(&call, &msg, Some(skill.clone()))
+        .await;
+    assert!(cached.text.contains("approved"), "{}", cached.text);
+    assert!(rx.try_recv().is_err());
+    let delegated = tool_call(
+        "exec_skill_script",
+        serde_json::json!({"path":"test.py", "runner":"python3", "args":[]}),
+    );
+    assert!(runtime
+        .execute_tool_call(&delegated, &msg, Some(skill.clone()))
+        .await
+        .text
+        .contains("approved"));
+    std::fs::write(&path, "print('changed')\n").unwrap();
+    let (result, ()) = tokio::join!(
+        runtime.execute_tool_call(&delegated, &msg, Some(skill.clone())),
+        async {
+            rx.recv().await.unwrap().response_tx.send(false).unwrap();
+        }
+    );
+    assert!(result.text.contains("not approved"), "{}", result.text);
+    let other = test_main_session_inbound("cli", "another-session");
+    let (result, ()) = tokio::join!(
+        runtime.execute_tool_call(&call, &other, Some(skill.clone())),
+        async {
+            rx.recv().await.unwrap().response_tx.send(false).unwrap();
+        }
+    );
+    assert!(result.text.contains("not approved"), "{}", result.text);
+    let cron = test_main_session_inbound("cron", "script-cron");
+    let denied = runtime
+        .execute_tool_call(&call, &cron, Some(skill.clone()))
+        .await;
+    assert!(
+        denied.text.contains("non-interactive cron"),
+        "{}",
+        denied.text
+    );
+    let empty = runtime.execute_tool_call(&call, &msg, None).await;
+    assert!(
+        empty.text.contains("active skill directory"),
+        "{}",
+        empty.text
+    );
+    drop(rx);
+    let denied = runtime.execute_tool_call(&call, &msg, Some(skill)).await;
+    assert!(
+        denied.text.contains("channel unavailable"),
+        "{}",
+        denied.text
+    );
+}
+
+#[tokio::test]
+async fn sandboxed_skill_scripts_do_not_request_confirmation() {
+    let mut runtime = test_runtime();
+    allow_test_tool(&mut runtime, "exec_local");
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::default(),
+    ));
+    let skill = runtime.paths.skills_dir().join("sandbox_demo");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("test.py"), "print('sandboxed')\n").unwrap();
+    let msg = test_main_session_inbound("cli", "script-sandbox");
+    let call = tool_call("exec_local", serde_json::json!({"path":"test.py"}));
+    let result = runtime.execute_tool_call(&call, &msg, Some(skill)).await;
+    assert!(!result.text.contains("confirmation"), "{}", result.text);
+    assert!(runtime.skill_script_approvals.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

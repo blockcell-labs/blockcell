@@ -10,6 +10,12 @@ pub async fn build_tool_registry_for_agent_config(
     mcp_manager: Option<&Arc<McpManager>>,
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_defaults();
+    registry.register(Arc::new(crate::exec_local::ExecLocalTool::from_config(
+        &config.tools.exec,
+    )));
+    registry.register(Arc::new(
+        crate::exec_skill_script::ExecSkillScriptTool::from_config(&config.tools.exec),
+    ));
     registry.register(Arc::new(crate::exec::ExecTool::from_config(
         &config.tools.exec,
     )));
@@ -34,6 +40,12 @@ pub async fn build_tool_registry_with_all_mcp(
     mcp_manager: Option<&Arc<McpManager>>,
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_defaults();
+    registry.register(Arc::new(crate::exec_local::ExecLocalTool::from_config(
+        &config.tools.exec,
+    )));
+    registry.register(Arc::new(
+        crate::exec_skill_script::ExecSkillScriptTool::from_config(&config.tools.exec),
+    ));
     registry.register(Arc::new(crate::exec::ExecTool::from_config(
         &config.tools.exec,
     )));

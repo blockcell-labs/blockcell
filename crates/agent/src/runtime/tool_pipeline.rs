@@ -21,6 +21,8 @@ use super::*;
 use blockcell_core::config::ApprovalPolicy;
 use blockcell_core::path_policy::{resolve_for_policy, PathOp, PolicyAction};
 use blockcell_tools::tool_guard::requires_human_confirmation;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 pub(super) fn file_version(path: &Path) -> std::io::Result<Option<FileVersion>> {
     match std::fs::metadata(path) {
@@ -113,6 +115,7 @@ pub(crate) struct ToolInvocation<'a> {
     /// 危险命令批准只证明"用户同意这条命令"，作用域限于本次调用——可以跳过
     /// 后续确认弹窗，但不能把 Confirm 级路径写入会话级授权缓存。
     pub(crate) dangerous_confirmed: bool,
+    active_skill_dir: Option<PathBuf>,
     verification_policy: Option<blockcell_core::task_contract::VerificationPolicy>,
 }
 
@@ -384,6 +387,7 @@ impl AgentRuntime {
             args,
             policy_confirmed: false,
             dangerous_confirmed: false,
+            active_skill_dir: active_skill_dir.clone(),
             verification_policy,
         };
         if let Err(denied) = self.admit_tool_call(&mut inv, pre_execute_done).await {
@@ -865,7 +869,14 @@ impl AgentRuntime {
     /// 工具声明"本次调用需要用户显式确认"（如 `sandbox_policy=full-access` 的 shell）时，
     /// 先确认再执行。判定依据来自工具自身的 [`blockcell_tools::Tool::requires_confirmation`]
     /// 声明，而非执行环境，也不是硬编码工具名——环境是描述性的，只有需要确认才拦截。
-    async fn guard_explicit_confirmation(&mut self, inv: &ToolInvocation<'_>) -> GuardResult {
+    async fn guard_explicit_confirmation(&mut self, inv: &mut ToolInvocation<'_>) -> GuardResult {
+        if matches!(inv.call.name.as_str(), "exec_local" | "exec_skill_script")
+            && self
+                .tool_registry
+                .requires_confirmation(&inv.call.name, &inv.args)
+        {
+            return self.guard_skill_script_confirmation(inv).await;
+        }
         if inv.policy_confirmed || inv.dangerous_confirmed {
             return Ok(());
         }
@@ -916,6 +927,116 @@ impl AgentRuntime {
             })
             .to_string())
         }
+    }
+
+    async fn guard_skill_script_confirmation(
+        &mut self,
+        inv: &mut ToolInvocation<'_>,
+    ) -> GuardResult {
+        if matches!(
+            super::resolve_skill_run_mode(inv.msg),
+            super::SkillRunMode::Cron
+        ) {
+            return Err(
+                "FullAccess skill script execution is denied in non-interactive cron contexts"
+                    .into(),
+            );
+        }
+        let dir = inv
+            .active_skill_dir
+            .as_ref()
+            .ok_or("FullAccess skill script requires an active skill directory")?;
+        let relative = inv
+            .args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("FullAccess skill script requires a script path")?;
+        let path = blockcell_tools::exec_local::resolve_script_path(dir, relative)
+            .map_err(|error| error.to_string())?;
+        let content = std::fs::read(&path)
+            .map_err(|error| format!("Cannot read skill script for approval: {error}"))?;
+        let digest = format!("{:x}", Sha256::digest(&content));
+        let skill = self
+            .context_builder
+            .skill_manager()
+            .and_then(|manager| {
+                manager
+                    .list_available()
+                    .into_iter()
+                    .find(|skill| skill.path == *dir)
+            })
+            .map(|skill| skill.name.clone())
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        let key = (
+            persist_session_key_for(inv.msg),
+            skill.clone(),
+            path.clone(),
+            digest.clone(),
+        );
+        let Some(tx) = self.confirm_tx.clone() else {
+            return Err("FullAccess skill script execution requires an interactive confirmation channel; non-interactive execution is denied".into());
+        };
+        if tx.is_closed() {
+            return Err(
+                "FullAccess skill script confirmation channel unavailable; execution denied".into(),
+            );
+        }
+        let cached = self
+            .skill_script_approvals
+            .lock()
+            .map_err(|_| "Skill script approval cache unavailable")?
+            .contains(&key);
+        if !cached {
+            let runner = blockcell_tools::exec_local::script_runner_description(&inv.args, &path);
+            let args = inv.args.get("args").cloned().unwrap_or_else(|| json!([]));
+            let detail = format!(
+                "[full-access] skill: {skill}; script: {}; runner: {runner}; args: {args}",
+                path.display()
+            );
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let request = ConfirmRequest {
+                tool_name: inv.call.name.clone(),
+                paths: vec![detail],
+                response_tx,
+                agent_id: resolve_routed_agent_id(&inv.msg.metadata)
+                    .or_else(|| self.agent_id.clone()),
+                channel: inv.msg.channel.clone(),
+                account_id: inv.msg.account_id.clone(),
+                sender_id: inv.msg.sender_id.clone(),
+                chat_id: inv.msg.chat_id.clone(),
+                ws_connection_id: inv
+                    .msg
+                    .metadata
+                    .get("ws_connection_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            if tx.send(request).await.is_err() {
+                return Err(
+                    "FullAccess skill script confirmation channel unavailable; execution denied"
+                        .into(),
+                );
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(120), response_rx).await {
+                Ok(Ok(true)) => {
+                    let mut approvals = self
+                        .skill_script_approvals
+                        .lock()
+                        .map_err(|_| "Skill script approval cache unavailable")?;
+                    if approvals.len() < 1024 {
+                        approvals.insert(key);
+                    }
+                }
+                _ => return Err("FullAccess skill script execution was not approved".into()),
+            }
+        }
+        inv.args["_approved_script_sha256"] = Value::String(digest);
+        Ok(())
     }
 
     fn workspace_auto_can_approve(&self, inv: &ToolInvocation<'_>) -> bool {

@@ -13,10 +13,22 @@ use crate::registry::ToolRegistry;
 use crate::tool_guard::NestedToolGuard;
 use crate::{Tool, ToolContext, ToolSchema};
 
-pub struct ExecSkillScriptTool;
+#[derive(Default)]
+pub struct ExecSkillScriptTool {
+    process: ExecLocalTool,
+}
+
+impl ExecSkillScriptTool {
+    pub fn from_config(config: &blockcell_core::config::ExecConfig) -> Self {
+        Self {
+            process: ExecLocalTool::from_config(config),
+        }
+    }
+}
 
 fn nested_tool_registry(config: &blockcell_core::Config) -> ToolRegistry {
     let mut registry = ToolRegistry::with_defaults();
+    registry.register(Arc::new(ExecLocalTool::from_config(&config.tools.exec)));
     registry.register(Arc::new(crate::exec::ExecTool::from_config(
         &config.tools.exec,
     )));
@@ -116,10 +128,24 @@ impl Tool for ExecSkillScriptTool {
     fn command_operation(&self, _params: &Value) -> crate::evidence::CommandOperation {
         crate::evidence::CommandOperation::Opaque
     }
-    /// Rhai 脚本在进程内运行、原生脚本直接拉起进程，均不经沙箱 → 如实声明 `FullAccess`。
-    /// 脚本路径已限制在技能目录内，故不需要逐次确认。
-    fn execution_environment(&self, _params: &Value) -> crate::ExecutionEnvironment {
-        crate::ExecutionEnvironment::FullAccess
+    fn execution_environment(&self, params: &Value) -> crate::ExecutionEnvironment {
+        if params
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| resolve_runtime(path) == ScriptRuntime::Rhai)
+        {
+            crate::ExecutionEnvironment::FullAccess
+        } else {
+            self.process.execution_environment(params)
+        }
+    }
+
+    fn requires_confirmation(&self, params: &Value) -> bool {
+        !params
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| resolve_runtime(path) == ScriptRuntime::Rhai)
+            && self.process.requires_confirmation(params)
     }
 
     fn schema(&self) -> ToolSchema {
@@ -215,7 +241,7 @@ impl Tool for ExecSkillScriptTool {
 
         match resolve_runtime(&path) {
             ScriptRuntime::Process => {
-                let result = ExecLocalTool.execute(ctx, params).await?;
+                let result = self.process.execute(ctx, params).await?;
                 Ok(normalize_process_result(&path, result))
             }
             ScriptRuntime::Rhai => {
@@ -363,7 +389,13 @@ mod tests {
     }
 
     async fn run_exec_skill_script(skill_dir: PathBuf, params: Value) -> Value {
-        let registry = ToolRegistry::with_defaults();
+        let mut registry = ToolRegistry::with_defaults();
+        registry.register(Arc::new(ExecSkillScriptTool::from_config(
+            &blockcell_core::config::ExecConfig {
+                sandbox_policy: Some("full-access".into()),
+                ..Default::default()
+            },
+        )));
         let tool = registry
             .get("exec_skill_script")
             .expect("exec_skill_script should be registered");
@@ -445,7 +477,7 @@ mod tests {
 
         let mut ctx = tool_context(skill_dir);
         ctx.base = base.clone();
-        let result = ExecSkillScriptTool
+        let result = ExecSkillScriptTool::default()
             .execute(ctx, json!({"path": "SKILL.rhai"}))
             .await
             .expect("exec_skill_script should succeed");

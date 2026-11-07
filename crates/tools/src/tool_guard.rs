@@ -292,6 +292,7 @@ fn disabled_toggles(paths: &Paths) -> (HashSet<String>, HashSet<String>) {
 /// 技能脚本嵌套工具调用的准入守卫与审计。
 pub struct NestedToolGuard {
     policy: ToolPolicy,
+    full_access_skill_scripts: bool,
     channel: String,
     session_key: String,
     disabled_tools: HashSet<String>,
@@ -315,6 +316,10 @@ impl NestedToolGuard {
         audit.set_session_id(&ctx.session_key);
         Self {
             policy,
+            full_access_skill_scripts: crate::exec::ExecTool::resolve_config_policy(
+                &ctx.config.tools.exec,
+            )
+            .is_ok_and(|policy| policy == crate::sandbox::SandboxPolicy::FullAccess),
             channel: ctx.channel.clone(),
             session_key: ctx.session_key.clone(),
             disabled_tools,
@@ -339,6 +344,10 @@ impl NestedToolGuard {
     }
 
     fn denial_reason(&self, tool_name: &str, args: &Value) -> Option<String> {
+        if self.full_access_skill_scripts && matches!(tool_name, "exec_local" | "exec_skill_script")
+        {
+            return Some("FullAccess skill script requires interactive confirmation, which is not available inside skill scripts".into());
+        }
         if self.disabled_tools.contains(tool_name) || self.disabled_skills.contains(tool_name) {
             return Some(format!("'{tool_name}' is disabled via toggles"));
         }
