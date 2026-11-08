@@ -989,9 +989,10 @@ impl ContextBuilder {
             )));
         }
         let prompt_md = skill.load_prompt_bundle().ok_or_else(unavailable)?;
+        let skill_dir = std::fs::canonicalize(&skill.path).map_err(|_| unavailable())?;
         Ok(ActiveSkillContext {
             name: skill.name.clone(),
-            skill_dir: skill.path.clone(),
+            skill_dir,
             prompt_md,
             inject_prompt_md: true,
             tools: skill.meta.effective_tools(),
@@ -1793,6 +1794,69 @@ mod tests {
             .resolve_active_skill_by_name("missing", &empty, SkillInvocationSource::Model)
             .is_err());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_skill_directory_is_canonical_for_relative_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = Paths::with_base(root.path().join("base"));
+        fs::create_dir_all(paths.managed_builtin_skills_dir()).unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in std::env::current_dir().unwrap().ancestors().skip(1) {
+            relative.push("..");
+        }
+        relative.push(root.path().strip_prefix("/").unwrap());
+        relative.push("workspace");
+        paths.apply_workspace_config(relative.to_str().unwrap());
+        let dir = paths.skills_dir().join("folder");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: canonical\ndescription: Example\n---\nManual",
+        )
+        .unwrap();
+        let builder = ContextBuilder::new(paths, Config::default());
+        let active = builder
+            .resolve_active_skill_by_name(
+                "canonical",
+                &HashSet::new(),
+                SkillInvocationSource::Model,
+            )
+            .unwrap();
+        assert_eq!(active.skill_dir, dir.canonicalize().unwrap());
+        assert!(active.skill_dir.is_absolute());
+        fs::remove_dir_all(&dir).unwrap();
+        let error = builder
+            .resolve_active_skill_by_name(
+                "canonical",
+                &HashSet::new(),
+                SkillInvocationSource::Model,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("not available"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_skill_directory_resolves_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::with_base(root.path().join("base"));
+        fs::create_dir_all(&paths.base).unwrap();
+        let target_root = root.path().join("target");
+        let target = target_root.join("folder");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: linked\ndescription: Example\n---\nManual",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target_root, paths.managed_builtin_skills_dir()).unwrap();
+        let builder = ContextBuilder::new(paths, Config::default());
+        let active = builder
+            .resolve_active_skill_by_name("linked", &HashSet::new(), SkillInvocationSource::Model)
+            .unwrap();
+        assert_eq!(active.skill_dir, target.canonicalize().unwrap());
     }
 
     #[test]

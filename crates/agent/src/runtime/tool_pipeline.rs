@@ -957,22 +957,21 @@ impl AgentRuntime {
         let content = std::fs::read(&path)
             .map_err(|error| format!("Cannot read skill script for approval: {error}"))?;
         let digest = format!("{:x}", Sha256::digest(&content));
-        let skill = self
-            .context_builder
-            .skill_manager()
-            .and_then(|manager| {
-                manager
-                    .list_available()
-                    .into_iter()
-                    .find(|skill| skill.path == *dir)
-            })
-            .map(|skill| skill.name.clone())
-            .unwrap_or_else(|| {
-                dir.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            });
+        let skill =
+            self.context_builder
+                .skill_manager()
+                .and_then(|manager| {
+                    manager.list_available().into_iter().find(|skill| {
+                        std::fs::canonicalize(&skill.path).is_ok_and(|path| path == *dir)
+                    })
+                })
+                .map(|skill| skill.name.clone())
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
         let key = (
             persist_session_key_for(inv.msg),
             skill.clone(),

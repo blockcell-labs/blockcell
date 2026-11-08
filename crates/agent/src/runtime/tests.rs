@@ -2786,10 +2786,9 @@ async fn dangerous_op_confirm_is_scoped_to_the_call_not_the_session() {
 async fn active_skill_resources_are_readable_without_confirmation_but_not_writable() {
     // 激活技能的资源目录（scripts/、references/、assets/）允许直接读与执行，
     // 不弹确认；写权限仍按原策略判定。没有激活技能时同一路径照旧要确认。
-    let skill_dir = dirs::home_dir().expect("home directory").join(format!(
-        "blockcell-skill-scope-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let skill_dir = dirs::home_dir()
+        .expect("home directory")
+        .join(format!("blockcell-skill-scope-{}", uuid::Uuid::new_v4()));
     let script = skill_dir.join("scripts").join("hello.py");
     let read = serde_json::json!({"path": script.to_string_lossy()});
     let list = serde_json::json!({"path": skill_dir.to_string_lossy()});
@@ -2837,6 +2836,163 @@ async fn active_skill_resources_are_readable_without_confirmation_but_not_writab
             .is_err(),
         "read-only skill resources must not widen write access"
     );
+}
+
+fn standard_skill_runtime_fixture() -> (tempfile::TempDir, AgentRuntime, ActiveSkillContext) {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let paths = Paths::with_base(root.path().join("base"));
+    paths.ensure_dirs().unwrap();
+    let dir = paths.managed_builtin_skills_dir().join("folder");
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::create_dir_all(dir.join("references")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: standard-demo\ndescription: Example\n---\nRun scripts/hello.py; read references/info.md.").unwrap();
+    std::fs::write(dir.join("references/info.md"), "STANDARD_REFERENCE_OK\n").unwrap();
+    std::fs::write(dir.join("scripts/hello.py"), "import errno, pathlib, sys\nprint('HELLO_STANDARD_SKILL')\ntry:\n pathlib.Path('forbidden.txt').write_text('bad')\nexcept OSError as error:\n assert error.errno == errno.EROFS\n print('RESOURCE_READ_ONLY')\nelse:\n raise AssertionError('skill directory was writable')\npathlib.Path(sys.argv[1]).write_text('allowed')\nprint('WORKSPACE_WRITE_OK')\n").unwrap();
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".into();
+    config.agents.defaults.provider = Some("test".into());
+    let mut runtime = test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config);
+    runtime.tool_registry = blockcell_tools::ToolRegistry::with_defaults();
+    let active = runtime
+        .context_builder
+        .resolve_active_skill_by_name(
+            "standard-demo",
+            &HashSet::new(),
+            SkillInvocationSource::Model,
+        )
+        .unwrap();
+    (root, runtime, active)
+}
+
+#[tokio::test]
+async fn standard_skill_activation_has_general_tools_and_resource_context() {
+    let (_root, mut runtime, active) = standard_skill_runtime_fixture();
+    if blockcell_tools::sandbox::native_backend(
+        blockcell_tools::sandbox::SandboxPolicy::WorkspaceWrite,
+    ) == blockcell_tools::sandbox::SandboxBackend::LinuxBubblewrap
+    {
+        assert_eq!(
+            runtime.resolved_skill_tool_names(&active),
+            [
+                "list_dir",
+                "read_file",
+                "shell_close",
+                "shell_poll",
+                "shell_run"
+            ]
+        );
+    }
+    runtime.config.tools.exec.sandbox_policy = Some("full-access".into());
+    assert_eq!(
+        runtime.resolved_skill_tool_names(&active),
+        [
+            "exec",
+            "list_dir",
+            "read_file",
+            "shell_close",
+            "shell_poll",
+            "shell_run"
+        ]
+    );
+    let prompt = runtime
+        .context_builder
+        .build_system_prompt_for_mode_with_channel(
+            InteractionMode::Skill,
+            Some(&active),
+            &HashSet::new(),
+            &HashSet::new(),
+            "cli",
+            "",
+            &[],
+            &[],
+        );
+    assert!(active.skill_dir.is_absolute());
+    assert!(prompt.contains(active.skill_dir.to_str().unwrap()));
+    assert!(prompt.contains("Use the available shell tool"));
+    assert!(prompt.contains("Run scripts/hello.py"));
+}
+
+#[tokio::test]
+async fn standard_skill_runs_shell_in_real_bubblewrap() {
+    use blockcell_tools::sandbox::{native_backend, SandboxBackend, SandboxPolicy};
+    if native_backend(SandboxPolicy::WorkspaceWrite) != SandboxBackend::LinuxBubblewrap {
+        eprintln!("skipping standard skill shell integration test: Bubblewrap unavailable");
+        return;
+    }
+    let (_root, mut runtime, active) = standard_skill_runtime_fixture();
+    let msg = test_main_session_inbound("cli", "standard-skill-real-shell");
+    let output_path = runtime.paths.workspace().join("output.txt");
+    let command = format!(
+        "cd '{}' && python3 scripts/hello.py '{}'",
+        active.skill_dir.display(),
+        output_path.display()
+    );
+    let result = runtime
+        .execute_tool_call(
+            &tool_call_with_id(
+                "standard-run",
+                "shell_run",
+                serde_json::json!({"command":command,"timeout_secs":20}),
+            ),
+            &msg,
+            Some(active.skill_dir.clone()),
+        )
+        .await;
+    assert_eq!(result.outcome, ToolOutcome::Succeeded, "{}", result.text);
+    let output: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(output["exit_code"], 0, "{output}");
+    for marker in [
+        "HELLO_STANDARD_SKILL",
+        "RESOURCE_READ_ONLY",
+        "WORKSPACE_WRITE_OK",
+    ] {
+        assert!(result.text.contains(marker), "{}", result.text);
+    }
+    assert!(!active.skill_dir.join("forbidden.txt").exists());
+    assert_eq!(std::fs::read_to_string(output_path).unwrap(), "allowed");
+    println!("STANDARD_SKILL_REAL_SHELL: {}", result.text);
+    let read = runtime
+        .execute_tool_call(
+            &tool_call_with_id(
+                "standard-read",
+                "read_file",
+                serde_json::json!({"path":active.skill_dir.join("references/info.md")}),
+            ),
+            &msg,
+            Some(active.skill_dir.clone()),
+        )
+        .await;
+    assert_eq!(read.outcome, ToolOutcome::Succeeded, "{}", read.text);
+    assert!(read.text.contains("STANDARD_REFERENCE_OK"));
+    let session = output["session_id"].clone();
+    let inactive = runtime
+        .execute_tool_call(
+            &tool_call_with_id(
+                "standard-inactive",
+                "shell_run",
+                serde_json::json!({"command":"printf no","session_id":session}),
+            ),
+            &msg,
+            None,
+        )
+        .await;
+    assert!(
+        inactive.text.contains("resource scope"),
+        "{}",
+        inactive.text
+    );
+    let closed = runtime
+        .execute_tool_call(
+            &tool_call_with_id(
+                "standard-close",
+                "shell_close",
+                serde_json::json!({"session_id":session}),
+            ),
+            &msg,
+            Some(active.skill_dir.clone()),
+        )
+        .await;
+    assert_eq!(closed.outcome, ToolOutcome::Succeeded, "{}", closed.text);
 }
 
 #[tokio::test]
@@ -7759,6 +7915,64 @@ async fn full_access_skill_script_approval_is_session_and_content_bound() {
         "{}",
         denied.text
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn canonical_active_directory_preserves_skill_identity_in_approval() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let target = root.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let base = root.path().join("alias");
+    std::os::unix::fs::symlink(&target, &base).unwrap();
+    let paths = Paths::with_base(base);
+    paths.ensure_dirs().unwrap();
+    std::fs::create_dir_all(paths.managed_builtin_skills_dir()).unwrap();
+    let dir = paths.skills_dir().join("folder");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("meta.yaml"),
+        "name: canonical-approval\ndescription: Example\ntools: [exec_local]\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Run hello.py").unwrap();
+    std::fs::write(dir.join("hello.py"), "print('hello')").unwrap();
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".into();
+    config.agents.defaults.provider = Some("test".into());
+    config.tools.exec.sandbox_policy = Some("full-access".into());
+    let mut runtime = test_runtime_with_provider_and_paths(paths, Arc::new(TestProvider), config);
+    allow_test_tool(&mut runtime, "exec_local");
+    runtime.tool_registry.register(Arc::new(
+        blockcell_tools::exec_local::ExecLocalTool::from_config(&runtime.config.tools.exec),
+    ));
+    let active = runtime
+        .context_builder
+        .resolve_active_skill_by_name(
+            "canonical-approval",
+            &HashSet::new(),
+            SkillInvocationSource::User,
+        )
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel::<ConfirmRequest>(1);
+    runtime.confirm_tx = Some(tx);
+    let msg = test_main_session_inbound("cli", "canonical-approval");
+    let call = tool_call(
+        "exec_local",
+        serde_json::json!({"path":"hello.py","runner":"python3"}),
+    );
+    let (result, ()) = tokio::join!(
+        runtime.execute_tool_call(&call, &msg, Some(active.skill_dir)),
+        async {
+            let request = rx.recv().await.unwrap();
+            assert!(request
+                .paths
+                .join(" ")
+                .contains("skill: canonical-approval"));
+            request.response_tx.send(false).unwrap();
+        }
+    );
+    assert!(result.text.contains("not approved"), "{}", result.text);
 }
 
 #[tokio::test]
