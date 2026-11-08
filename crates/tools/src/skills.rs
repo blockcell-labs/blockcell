@@ -347,7 +347,14 @@ impl ListSkillsTool {
                     || path.join("SKILL.py").exists();
 
                 if is_skill {
-                    let composite_name = sub_category.clone();
+                    let standard = blockcell_skills::SkillManager::new()
+                        .load_standard_skill(&path)
+                        .ok()
+                        .flatten();
+                    let composite_name = standard
+                        .as_ref()
+                        .map(|skill| skill.name.clone())
+                        .unwrap_or_else(|| sub_category.clone());
 
                     // Skip if already seen (workspace overrides builtin)
                     if !seen.insert(composite_name.clone()) {
@@ -358,7 +365,14 @@ impl ListSkillsTool {
                         continue;
                     }
 
-                    let meta = self.read_skill_meta(&path);
+                    let meta = standard
+                        .map(|skill| {
+                            json!({
+                                "description": skill.meta.description,
+                                "always": skill.meta.always,
+                            })
+                        })
+                        .unwrap_or_else(|| self.read_skill_meta(&path));
                     let assets = self.detect_skill_assets(&path);
 
                     skills.push(json!({
@@ -445,6 +459,58 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn standard_catalog_uses_loader_identity_and_preserves_legacy_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let builtin = root.path().join("builtin");
+        let tool = ListSkillsTool;
+        let mut ctx = tool_context_with_workspace(workspace.clone(), None);
+        ctx.builtin_skills_dir = Some(builtin.clone());
+        assert_eq!(
+            tool.execute(ctx.clone(), json!({})).await.unwrap()["count"],
+            0
+        );
+        for (parent, folder, content, meta) in [
+            (workspace.join("skills"), "csv_stats_dir", "---\nname: csv-stats\ndescription: CSV statistics\n---\nRun scripts/stats.py", None),
+            (builtin.clone(), "csv_stats_dir", "---\nname: builtin-stats\ndescription: Builtin statistics\n---\nInstructions", None),
+            (builtin.clone(), "duplicate", "---\nname: csv-stats\ndescription: Shadowed\n---\nInstructions", None),
+            (workspace.join("skills"), "native-folder", "# Native", Some("name: native-name\ndescription: Native description\n")),
+            (workspace.join("skills"), "openclaw-folder", "---\nname: openclaw-name\ndescription: OpenClaw description\ntriggers: []\n---\nInstructions", None),
+            (workspace.join("skills"), "invalid", "---\nname: invalid-name\ndescription: Invalid\nallowed-tools: 42\n---\nInstructions", None),
+        ] {
+            let dir = parent.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), content).unwrap();
+            if let Some(meta) = meta { std::fs::write(dir.join("meta.yaml"), meta).unwrap(); }
+        }
+        let result = tool.execute(ctx, json!({"query":"all"})).await.unwrap();
+        assert_eq!(result["count"], 5);
+        let entries = result["learned_skills"].as_array().unwrap();
+        for (name, description) in [
+            ("csv-stats", json!("CSV statistics")),
+            ("builtin-stats", json!("Builtin statistics")),
+            ("native-folder", json!("Native description")),
+            ("openclaw-folder", Value::Null),
+            ("invalid", Value::Null),
+        ] {
+            let entry = entries.iter().find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(entry["description"], description, "{name}");
+        }
+        let manager = blockcell_skills::SkillManager::new();
+        for entry in entries
+            .iter()
+            .filter(|entry| entry["name"] == "csv-stats" || entry["name"] == "builtin-stats")
+        {
+            let skill = manager
+                .load_standard_skill(Path::new(entry["path"].as_str().unwrap()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry["name"], skill.name);
+            assert_eq!(entry["description"], skill.meta.description);
+        }
+    }
 
     #[derive(Default)]
     struct CaptureSkillFileStore {

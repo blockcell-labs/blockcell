@@ -1020,6 +1020,14 @@ impl SkillManager {
         Ok(())
     }
 
+    pub fn load_standard_skill(&self, skill_dir: &Path) -> Result<Option<Skill>> {
+        if detect_skill_format(skill_dir) == SkillSource::Standard {
+            self.load_frontmatter_skill(skill_dir, true)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn load_skill(&self, skill_dir: &std::path::Path) -> Result<Option<Skill>> {
         let source = detect_skill_format(skill_dir);
 
