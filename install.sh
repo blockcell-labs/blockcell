@@ -20,29 +20,30 @@ require_cmd() {
 
 install_binary_atomically() {
   source_path="$1"
-  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR" || return 1
 
-  temporary_path=$(mktemp "$INSTALL_DIR/.$BIN_NAME.tmp.XXXXXX")
+  temporary_path=$(mktemp "$INSTALL_DIR/.$BIN_NAME.tmp.XXXXXX") || return 1
   if ! cp "$source_path" "$temporary_path"; then
-    rm -f "$temporary_path"
+    rm -f "$temporary_path" || true
     return 1
   fi
   if ! chmod +x "$temporary_path"; then
-    rm -f "$temporary_path"
+    rm -f "$temporary_path" || true
     return 1
   fi
   if ! mv -f "$temporary_path" "$INSTALL_DIR/$BIN_NAME"; then
-    rm -f "$temporary_path"
+    rm -f "$temporary_path" || true
     return 1
   fi
 }
 
 detect_os() {
-  uname -s | tr '[:upper:]' '[:lower:]'
+  os_name=$(uname -s) || return 1
+  printf '%s\n' "$os_name" | tr '[:upper:]' '[:lower:]'
 }
 
 detect_arch() {
-  a=$(uname -m)
+  a=$(uname -m) || return 1
   case "$a" in
     x86_64|amd64) echo "x86_64" ;;
     arm64|aarch64) echo "aarch64" ;;
@@ -90,15 +91,35 @@ github_release_asset_url() {
     json=$(curl -fsSL "$api/tags/$VERSION") || return 1
   fi
 
-  url=$(echo "$json" \
-    | grep -Eo '"browser_download_url"\s*:\s*"[^"]+"' \
-    | sed -E 's/^"browser_download_url"\s*:\s*"(.*)"$/\1/' \
-    | grep -F "$suffix" \
-    | head -n 1)
-  if [ -z "$url" ]; then
-    return 2
+  # Keep parser stages separate: POSIX sh has no pipefail, so a final head
+  # would otherwise hide grep/sed errors and incorrectly trigger a source build.
+  metadata=$(printf '%s\n' "$json" | tr -d '\r\n') || return 1
+  if ! printf '%s\n' "$metadata" | grep -Eq '^[[:space:]]*\{.*"assets"[[:space:]]*:[[:space:]]*\[.*\].*\}[[:space:]]*$'; then
+    echo "GitHub release metadata does not contain an assets array" 1>&2
+    return 1
   fi
-  printf '%s\n' "$url"
+  fields_status=0
+  url_fields=$(printf '%s\n' "$metadata" \
+    | grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"') || fields_status=$?
+  if [ "$fields_status" -eq 1 ]; then
+    if printf '%s\n' "$metadata" | grep -Eq '"assets"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
+      return 2
+    fi
+    echo "GitHub release metadata contains no valid asset URLs" 1>&2
+    return 1
+  elif [ "$fields_status" -ne 0 ]; then
+    return 1
+  fi
+  urls=$(printf '%s\n' "$url_fields" \
+    | sed -E 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"(.*)"$/\1/') || return 1
+  match_status=0
+  matches=$(printf '%s\n' "$urls" | grep -F -- "$suffix") || match_status=$?
+  if [ "$match_status" -eq 1 ]; then
+    return 2
+  elif [ "$match_status" -ne 0 ]; then
+    return 1
+  fi
+  printf '%s\n' "$matches" | head -n 1
 }
 
 latest_release_tag() {
@@ -107,10 +128,11 @@ latest_release_tag() {
   require_cmd sed
 
   json=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest") || return 1
-  tag=$(echo "$json" \
-    | grep -Eo '"tag_name"\s*:\s*"[^"]+"' \
-    | sed -E 's/^"tag_name"\s*:\s*"(.*)"$/\1/' \
-    | head -n 1)
+  tag_fields=$(printf '%s\n' "$json" \
+    | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"') || return 1
+  tags=$(printf '%s\n' "$tag_fields" \
+    | sed -E 's/^"tag_name"[[:space:]]*:[[:space:]]*"(.*)"$/\1/') || return 1
+  tag=$(printf '%s\n' "$tags" | head -n 1) || return 1
   if [ -z "$tag" ]; then
     echo "Latest GitHub release does not contain a valid tag name" 1>&2
     return 1
@@ -131,7 +153,7 @@ install_from_source() {
     fi
   fi
 
-  TMP_DIR=$(mktemp -d)
+  TMP_DIR=$(mktemp -d) || return 1
   cleanup() {
     rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
   }
@@ -139,18 +161,18 @@ install_from_source() {
 
   echo "Cloning https://github.com/$REPO ..."
   if [ "$VERSION" = "latest" ]; then
-    source_ref=$(latest_release_tag)
+    source_ref=$(latest_release_tag) || return 1
   else
     source_ref="$VERSION"
   fi
-  git clone --depth 1 --branch "$source_ref" "https://github.com/$REPO.git" "$TMP_DIR/blockcell"
+  git clone --depth 1 --branch "$source_ref" "https://github.com/$REPO.git" "$TMP_DIR/blockcell" || return 1
 
   echo "Testing and building WebUI..."
-  (cd "$TMP_DIR/blockcell/webui" && npm ci && npm test && npm run build)
+  (cd "$TMP_DIR/blockcell/webui" && npm ci && npm test && npm run build) || return 1
 
   echo "Building Rust binary (release)..."
-  os=$(detect_os)
-  install_source_deps "$os"
+  os=$(detect_os) || return 1
+  install_source_deps "$os" || return 1
 
   # Limit parallel jobs to avoid OOM on low-memory servers (each rustc job can use 1-2 GB)
   total_mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
@@ -167,21 +189,22 @@ install_from_source() {
     build_jobs=$(nproc 2>/dev/null || echo 4)
   fi
   echo "Building with $build_jobs parallel job(s)..."
-  (cd "$TMP_DIR/blockcell" && cargo build --release --locked -j "$build_jobs")
+  (cd "$TMP_DIR/blockcell" && cargo build --release --locked -j "$build_jobs") || return 1
 
-  install_binary_atomically "$TMP_DIR/blockcell/target/release/$BIN_NAME"
+  install_binary_atomically "$TMP_DIR/blockcell/target/release/$BIN_NAME" || return 1
 }
 
 sha256_file() {
   file="$1"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print $1}'
+    sha_output=$(sha256sum "$file") || return 1
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print $1}'
+    sha_output=$(shasum -a 256 "$file") || return 1
   else
     echo "Error: sha256sum or shasum is required to verify release assets" 1>&2
     return 1
   fi
+  printf '%s\n' "$sha_output" | awk '{print $1}'
 }
 
 verify_release_checksum() {
@@ -199,16 +222,16 @@ verify_release_checksum() {
         exit
       }
     }
-  ' "$checksums")
+  ' "$checksums") || return 1
 
   if ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$'; then
     echo "No valid SHA-256 checksum found for release asset: $asset" 1>&2
     return 1
   fi
 
-  actual=$(sha256_file "$archive")
-  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
-  actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+  actual=$(sha256_file "$archive") || return 1
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]') || return 1
+  actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]') || return 1
   if [ "$actual" != "$expected" ]; then
     echo "SHA-256 checksum mismatch for release asset: $asset" 1>&2
     return 1
@@ -235,18 +258,27 @@ validate_release_archive() {
 $entries
 EOF
 
-  if tar -tvzf "$archive" | grep -Eq '^[[:space:]]*[lh]'; then
-    echo "Release archive contains unsupported links" 1>&2
+  if ! verbose_entries=$(tar -tvzf "$archive"); then
+    echo "Failed to inspect release archive" 1>&2
     return 1
   fi
+  link_status=0
+  printf '%s\n' "$verbose_entries" | grep -Eq '^[[:space:]]*[lh]' || link_status=$?
+  if [ "$link_status" -eq 0 ]; then
+    echo "Release archive contains unsupported links" 1>&2
+    return 1
+  elif [ "$link_status" -ne 1 ]; then
+    return 1
+  fi
+  return 0
 }
 
 install_from_release() {
   require_cmd curl
   require_cmd tar
 
-  os=$(detect_os)
-  arch=$(detect_arch)
+  os=$(detect_os) || return 1
+  arch=$(detect_arch) || return 1
 
   case "$os" in
     darwin|linux) ;;
@@ -271,9 +303,9 @@ install_from_release() {
     return 1
   fi
 
-  asset=$(basename "$url")
+  asset=$(basename "$url") || return 1
 
-  TMP_DIR=$(mktemp -d)
+  TMP_DIR=$(mktemp -d) || return 1
   cleanup() {
     rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
   }
@@ -291,11 +323,14 @@ install_from_release() {
     echo "Failed to download release checksums" 1>&2
     return 1
   fi
-  verify_release_checksum "$TMP_DIR/$asset" "$asset" "$TMP_DIR/checksums.txt"
-  validate_release_archive "$TMP_DIR/$asset"
+  verify_release_checksum "$TMP_DIR/$asset" "$asset" "$TMP_DIR/checksums.txt" || return 1
+  validate_release_archive "$TMP_DIR/$asset" || return 1
 
   echo "Extracting..."
-  tar -xzf "$TMP_DIR/$asset" -C "$TMP_DIR"
+  if ! tar -xzf "$TMP_DIR/$asset" -C "$TMP_DIR"; then
+    echo "Failed to extract release archive" 1>&2
+    return 1
+  fi
 
   if [ ! -f "$TMP_DIR/$BIN_NAME" ]; then
     for candidate in \
@@ -304,7 +339,7 @@ install_from_release() {
       "$TMP_DIR"/bin/"$BIN_NAME" \
       "$TMP_DIR"/"$BIN_NAME"; do
       if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
-        cp "$candidate" "$TMP_DIR/$BIN_NAME"
+        cp "$candidate" "$TMP_DIR/$BIN_NAME" || return 1
         break
       fi
     done
@@ -320,7 +355,7 @@ install_from_release() {
     return 1
   fi
 
-  install_binary_atomically "$TMP_DIR/$BIN_NAME"
+  install_binary_atomically "$TMP_DIR/$BIN_NAME" || return 1
 }
 
 echo "Installing $BIN_NAME..."

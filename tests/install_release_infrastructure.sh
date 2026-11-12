@@ -40,9 +40,8 @@ EOF
 test_source_install_checks_out_requested_version_and_replaces_atomically() {
   case_dir="$TMP_ROOT/source"
   fake_bin="$case_dir/bin"
-  home_dir="$case_dir/home"
   log_dir="$case_dir/log"
-  mkdir -p "$home_dir" "$log_dir"
+  mkdir -p "$log_dir"
   make_common_fakes "$fake_bin"
 
   cat >"$fake_bin/git" <<'EOF'
@@ -81,7 +80,6 @@ EOF
 
   chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/npm" "$fake_bin/cp" "$fake_bin/mv"
 
-  HOME="$home_dir" \
   PATH="$fake_bin:/usr/bin:/bin" \
   TEST_LOG_DIR="$log_dir" \
   BLOCKCELL_INSTALL_METHOD=source \
@@ -110,9 +108,8 @@ EOF
 test_source_install_latest_uses_latest_release_tag() {
   case_dir="$TMP_ROOT/source_latest"
   fake_bin="$case_dir/bin"
-  home_dir="$case_dir/home"
   log_dir="$case_dir/log"
-  mkdir -p "$home_dir" "$log_dir"
+  mkdir -p "$log_dir"
   make_common_fakes "$fake_bin"
 
   cat >"$fake_bin/curl" <<'EOF'
@@ -141,7 +138,6 @@ EOF
 
   chmod +x "$fake_bin/curl" "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/npm"
 
-  HOME="$home_dir" \
   PATH="$fake_bin:/usr/bin:/bin" \
   TEST_LOG_DIR="$log_dir" \
   BLOCKCELL_INSTALL_METHOD=source \
@@ -176,13 +172,13 @@ done
 
 case "$url" in
   */releases/latest)
-    printf '%s\n' '{"browser_download_url":"https://github.com/blockcell-labs/blockcell/releases/download/v9.8.7/blockcell-v9.8.7-linux-amd64.tar.gz"}'
+    printf '%s\n' '{"assets":[{"browser_download_url":"https://github.com/blockcell-labs/blockcell/releases/download/v9.8.7/blockcell-v9.8.7-linux-amd64.tar.gz"}]}'
     ;;
   */blockcell-v9.8.7-linux-amd64.tar.gz)
     printf '%s' 'archive bytes' >"$output"
     ;;
   */checksums.txt)
-    printf '%s  %s\n' "$TEST_RELEASE_SHA" 'blockcell-v9.8.7-linux-amd64.tar.gz'
+    printf '%s  %s\n' "$TEST_RELEASE_SHA" 'blockcell-v9.8.7-linux-amd64.tar.gz' >"$output"
     ;;
   *)
     echo "unexpected curl URL: $url" >&2
@@ -219,17 +215,15 @@ run_release_case() {
   tar_entry="$3"
   case_dir="$TMP_ROOT/$name"
   fake_bin="$case_dir/bin"
-  home_dir="$case_dir/home"
-  mkdir -p "$home_dir"
+  mkdir -p "$case_dir"
   make_release_fakes "$fake_bin"
 
-  HOME="$home_dir" \
   PATH="$fake_bin:/usr/bin:/bin" \
   TEST_RELEASE_SHA="$release_sha" \
   TEST_TAR_ENTRY="$tar_entry" \
   BLOCKCELL_INSTALL_METHOD=release \
   BLOCKCELL_INSTALL_DIR="$case_dir/install" \
-    sh "$ROOT/install.sh" >/dev/null 2>&1
+    sh "$ROOT/install.sh" >"$case_dir/install.log" 2>&1
 }
 
 test_release_rejects_checksum_mismatch() {
@@ -237,6 +231,8 @@ test_release_rejects_checksum_mismatch() {
   if run_release_case checksum_mismatch "$bad_sha" blockcell; then
     fail "release install accepted an asset whose checksum did not match"
   fi
+  grep -F 'SHA-256 checksum mismatch' "$TMP_ROOT/checksum_mismatch/install.log" >/dev/null \
+    || fail "checksum rejection did not reach the checksum verification"
 }
 
 test_release_rejects_unsafe_archive_paths() {
@@ -248,13 +244,26 @@ test_release_rejects_unsafe_archive_paths() {
   if run_release_case unsafe_archive "$archive_sha" '../escaped'; then
     fail "release install accepted a traversing archive entry"
   fi
+  grep -F 'Unsafe path in release archive' "$TMP_ROOT/unsafe_archive/install.log" >/dev/null \
+    || fail "unsafe archive rejection did not reach archive validation"
+}
+
+test_release_installs_verified_asset() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    archive_sha=$(printf '%s' 'archive bytes' | sha256sum | awk '{print $1}')
+  else
+    archive_sha=$(printf '%s' 'archive bytes' | shasum -a 256 | awk '{print $1}')
+  fi
+  run_release_case verified_release "$archive_sha" blockcell \
+    || fail "release install rejected a verified asset"
+  test -x "$TMP_ROOT/verified_release/install/blockcell" \
+    || fail "release install did not commit the verified executable"
 }
 
 test_auto_does_not_fallback_after_integrity_failure() {
   case_dir="$TMP_ROOT/auto_integrity"
   fake_bin="$case_dir/bin"
-  home_dir="$case_dir/home"
-  mkdir -p "$home_dir"
+  mkdir -p "$case_dir"
   make_release_fakes "$fake_bin"
 
   cat >"$fake_bin/git" <<'EOF'
@@ -265,25 +274,29 @@ EOF
   chmod +x "$fake_bin/git"
 
   bad_sha=0000000000000000000000000000000000000000000000000000000000000000
-  if HOME="$home_dir" \
-    PATH="$fake_bin:/usr/bin:/bin" \
+  if PATH="$fake_bin:/usr/bin:/bin" \
     TEST_RELEASE_SHA="$bad_sha" \
     TEST_TAR_ENTRY=blockcell \
     TEST_GIT_MARKER="$case_dir/git-called" \
     BLOCKCELL_INSTALL_METHOD=auto \
     BLOCKCELL_INSTALL_DIR="$case_dir/install" \
-      sh "$ROOT/install.sh" >/dev/null 2>&1; then
+      sh "$ROOT/install.sh" >"$case_dir/install.log" 2>&1; then
     fail "auto install accepted or bypassed a release integrity failure"
   fi
 
   test ! -e "$case_dir/git-called" \
     || fail "auto install fell back to source after a release integrity failure"
+  grep -F 'SHA-256 checksum mismatch' "$case_dir/install.log" >/dev/null \
+    || fail "auto integrity rejection did not reach checksum verification"
 }
 
 test_source_install_checks_out_requested_version_and_replaces_atomically
 test_source_install_latest_uses_latest_release_tag
+test_release_installs_verified_asset
 test_release_rejects_checksum_mismatch
 test_release_rejects_unsafe_archive_paths
 test_auto_does_not_fallback_after_integrity_failure
+
+python3 -B "$ROOT/tests/test_release_entrypoints.py" InstallerEntrypointTests
 
 echo "install release infrastructure tests: ok"

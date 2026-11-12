@@ -367,16 +367,16 @@ jobs:
             path="$(echo "$line" | awk '{print $2}')"
             file="$(basename "$path")"
 
-            if [[ "$file" =~ ^blockcell-${TAG}-darwin-arm64\\.updater$ ]]; then
-              os="macos"; arch="aarch64"
-            elif [[ "$file" =~ ^blockcell-${TAG}-darwin-amd64\\.updater$ ]]; then
-              os="macos"; arch="x86_64"
-            elif [[ "$file" =~ ^blockcell-${TAG}-linux-amd64\\.updater$ ]]; then
-              os="linux"; arch="x86_64"
-            elif [[ "$file" =~ ^blockcell-${TAG}-windows-amd64\\.exe$ ]]; then
-              os="windows"; arch="x86_64"
-            else
-              continue
+            case "$file" in
+              "blockcell-${TAG}-darwin-arm64.updater") os="macos"; arch="aarch64" ;;
+              "blockcell-${TAG}-darwin-amd64.updater") os="macos"; arch="x86_64" ;;
+              "blockcell-${TAG}-linux-amd64.updater") os="linux"; arch="x86_64" ;;
+              "blockcell-${TAG}-windows-amd64.exe") os="windows"; arch="x86_64" ;;
+              *) continue ;;
+            esac
+            if [[ ! "$sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+              echo "Invalid SHA-256 checksum for updater asset: $file" >&2
+              exit 1
             fi
 
             url="https://github.com/${REPO}/releases/download/${TAG}/${file}"
@@ -404,6 +404,15 @@ jobs:
               '. + [({os:$os, arch:$arch, url:$url, sha256:$sha256}
                 + if $sig == "" then {} else {sig:$sig} end)]')
           done < checksums.txt
+
+          if ! printf '%s\n' "$artifacts_json" | jq -e '
+            length == 4 and
+            ((map(.os + "/" + .arch) | sort) ==
+             (["macos/aarch64", "macos/x86_64", "linux/x86_64", "windows/x86_64"] | sort))
+          ' >/dev/null; then
+            echo "Updater manifest requires exactly one artifact for each of the four release targets" >&2
+            exit 1
+          fi
 
           jq -n -c \
             --arg channel "stable" \

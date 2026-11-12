@@ -56,4 +56,6 @@ invalid_uses=$(sed -n 's/^[[:space:]]*-[[:space:]]*uses:[[:space:]]*//p' "$WORKF
 test -z "$invalid_uses" \
   || fail "release workflow contains mutable or invalid Action references: $invalid_uses"
 
+python3 -B "$ROOT/tests/test_release_entrypoints.py" ManifestEntrypointTests
+
 echo "release workflow infrastructure tests: ok"
