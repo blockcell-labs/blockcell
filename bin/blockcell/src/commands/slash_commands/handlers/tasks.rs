@@ -109,11 +109,10 @@ impl TasksCommand {
         task_manager: &blockcell_agent::TaskManager,
         source: &CommandSource,
     ) -> CommandResult {
-        let (queued, running, completed, failed) = task_manager
-            .summary_for_origin(&source.channel, &source.chat_id)
-            .await;
+        let (queued, running, completed, failed) =
+            task_manager.summary_for_origin(&source.task_origin()).await;
         let task_list = task_manager
-            .list_tasks_for_origin(&source.channel, &source.chat_id, None)
+            .list_tasks_for_origin(&source.task_origin(), None)
             .await;
 
         let mut content = String::new();
@@ -158,7 +157,7 @@ impl TasksCommand {
         source: &CommandSource,
     ) -> CommandResult {
         let matches = task_manager
-            .find_task_by_prefix_for_origin(task_id_prefix, &source.channel, &source.chat_id)
+            .find_task_by_prefix_for_origin(task_id_prefix, &source.task_origin())
             .await;
 
         match matches.len() {
@@ -214,8 +213,8 @@ impl TasksCommand {
 
         if task_id_prefix.is_empty() {
             // 列出所有可恢复的 checkpoint
-            let unfinished = checkpoint_manager
-                .find_unfinished_for_origin(&ctx.source.channel, &ctx.source.chat_id);
+            let unfinished =
+                checkpoint_manager.find_unfinished_for_origin(&ctx.source.task_origin());
             if unfinished.is_empty() {
                 return CommandResult::Handled(CommandResponse::markdown(
                     "✅ 没有可恢复的断点任务\n".to_string(),
@@ -243,8 +242,7 @@ impl TasksCommand {
         }
 
         // 查找匹配的 checkpoint
-        let unfinished =
-            checkpoint_manager.find_unfinished_for_origin(&ctx.source.channel, &ctx.source.chat_id);
+        let unfinished = checkpoint_manager.find_unfinished_for_origin(&ctx.source.task_origin());
         let matches: Vec<_> = unfinished
             .iter()
             .filter(|cp| cp.task_id.starts_with(task_id_prefix))
@@ -293,7 +291,7 @@ impl TasksCommand {
         source: &CommandSource,
     ) -> CommandResult {
         let matches = task_manager
-            .find_task_by_prefix_for_origin(task_id_prefix, &source.channel, &source.chat_id)
+            .find_task_by_prefix_for_origin(task_id_prefix, &source.task_origin())
             .await;
 
         match matches.len() {
@@ -345,7 +343,7 @@ impl TasksCommand {
         source: &CommandSource,
     ) -> CommandResult {
         let matches = task_manager
-            .find_task_by_prefix_for_origin(task_id_prefix, &source.channel, &source.chat_id)
+            .find_task_by_prefix_for_origin(task_id_prefix, &source.task_origin())
             .await;
 
         match matches.len() {
@@ -390,7 +388,7 @@ impl TasksCommand {
         source: &CommandSource,
     ) -> CommandResult {
         let task_list = task_manager
-            .list_tasks_for_origin(&source.channel, &source.chat_id, None)
+            .list_tasks_for_origin(&source.task_origin(), None)
             .await;
         let to_remove: Vec<_> = task_list
             .iter()
@@ -426,7 +424,7 @@ impl TasksCommand {
 
         // 清空后再次检查Running状态
         let remaining = task_manager
-            .list_tasks_for_origin(&source.channel, &source.chat_id, None)
+            .list_tasks_for_origin(&source.task_origin(), None)
             .await;
         let running_count = remaining
             .iter()
@@ -453,7 +451,7 @@ impl TasksCommand {
         source: &CommandSource,
     ) -> CommandResult {
         let matches = task_manager
-            .find_task_by_prefix_for_origin(task_id_prefix, &source.channel, &source.chat_id)
+            .find_task_by_prefix_for_origin(task_id_prefix, &source.task_origin())
             .await;
 
         match matches.len() {

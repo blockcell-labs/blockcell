@@ -1,6 +1,6 @@
 use crate::file_lock::{lock_exclusive, write_atomically};
 use blockcell_core::types::ChatMessage;
-use blockcell_core::{session_file_stem, session_id_from_file_stem, Paths, Result};
+use blockcell_core::{session_file_stem, Paths, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{File, OpenOptions};
@@ -297,17 +297,13 @@ impl SessionStore {
     }
 
     fn read_path(&self, session_key: &str) -> std::path::PathBuf {
-        let current = self.paths.session_file(session_key);
-        if current.exists() {
-            current
-        } else {
-            let legacy = self.paths.legacy_session_file(session_key);
-            if legacy.exists() {
-                legacy
-            } else {
-                current
-            }
-        }
+        // Legacy sanitization is lossy: ws:a_b and ws:a:b can share that
+        // filename. Without an independently verified original key, neither a
+        // missing current file nor a clear operation establishes ownership.
+        // Leave ambiguous legacy files intact for an explicit backed-up copy
+        // into the intended key's current path. Canonical legacy-compatible
+        // keys such as ws:default:123 already use their original current path.
+        self.paths.session_file(session_key)
     }
 
     pub fn append(&self, session_key: &str, message: &ChatMessage) -> Result<()> {
@@ -410,16 +406,10 @@ impl SessionStore {
     pub fn clear(&self, session_key: &str) -> Result<bool> {
         let path = self.paths.session_file(session_key);
         let _lock = lock_exclusive(&path)?;
-        let legacy_path = self.paths.legacy_session_file(session_key);
-
         // 同步删除 sidecar marker 文件，避免会话清理后同 key 复用时 marker 残留
-        for marker_path in [
-            path.with_extension("dream_counted"),
-            legacy_path.with_extension("dream_counted"),
-        ] {
-            if marker_path.exists() {
-                let _ = std::fs::remove_file(&marker_path);
-            }
+        let marker_path = path.with_extension("dream_counted");
+        if marker_path.exists() {
+            let _ = std::fs::remove_file(&marker_path);
         }
 
         // 持事件日志自身的锁删除，避免与并发追加交错。
@@ -438,10 +428,6 @@ impl SessionStore {
         if path.exists() {
             std::fs::remove_file(&path)?;
             debug!(session_key = %session_key, path = %path.display(), "Session file deleted");
-            deleted = true;
-        }
-        if legacy_path != path && legacy_path.exists() {
-            std::fs::remove_file(&legacy_path)?;
             deleted = true;
         }
         Ok(deleted)
@@ -514,8 +500,7 @@ impl SessionStore {
     pub fn set_session_name_if_new(&self, session_key: &str, content: &str) -> Option<String> {
         let meta_path = self.paths.sessions_dir().join("_meta.json");
         let _lock = lock_exclusive(&meta_path).ok()?;
-        let full = session_file_stem(session_key);
-        let file_key = session_id_from_file_stem(&full);
+        let file_key = session_file_stem(session_key);
 
         let mut meta: serde_json::Map<String, serde_json::Value> = if meta_path.exists() {
             std::fs::read_to_string(&meta_path)
@@ -589,6 +574,81 @@ mod tests {
     }
 
     #[test]
+    fn load_does_not_guess_legacy_ownership_from_a_colliding_filename() {
+        let (store, _dir) = test_store();
+        store
+            .save("ws:a:b", &[ChatMessage::user("A sentinel")])
+            .unwrap();
+
+        assert!(store.load("ws:a_b").unwrap().is_empty());
+        assert!(store
+            .load_metadata("ws:a_b")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.load_timestamps("ws:a_b").unwrap(), (None, None));
+        assert_eq!(
+            store.load("ws:a:b").unwrap()[0].content,
+            json!("A sentinel")
+        );
+    }
+
+    #[test]
+    fn clear_keeps_other_sessions_history_events_and_dream_marker() {
+        let (store, _dir) = test_store();
+        store
+            .save("ws:a:b", &[ChatMessage::user("A sentinel")])
+            .unwrap();
+        store.save("ws:a_b", &[ChatMessage::user("B")]).unwrap();
+        let a_path = store.paths.session_file("ws:a:b");
+        let a_history = std::fs::read(&a_path).unwrap();
+        let a_events = store.paths.session_events_file("ws:a:b");
+        std::fs::create_dir_all(a_events.parent().unwrap()).unwrap();
+        std::fs::write(&a_events, "A events sentinel").unwrap();
+        let a_marker = a_path.with_extension("dream_counted");
+        std::fs::write(&a_marker, "A marker sentinel").unwrap();
+
+        assert!(store.clear("ws:a_b").unwrap());
+
+        assert_eq!(std::fs::read(&a_path).unwrap(), a_history);
+        assert_eq!(
+            std::fs::read_to_string(&a_events).unwrap(),
+            "A events sentinel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&a_marker).unwrap(),
+            "A marker sentinel"
+        );
+        assert!(store.load("ws:a_b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn automatic_names_use_the_complete_session_stem() {
+        let (store, _dir) = test_store();
+        for (key, title) in [
+            ("ws:a:b", "colon"),
+            ("ws:a_b", "underscore"),
+            ("telegram:a:b", "channel"),
+        ] {
+            assert_eq!(
+                store.set_session_name_if_new(key, title).as_deref(),
+                Some(title)
+            );
+        }
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(store.paths.sessions_dir().join("_meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata[session_file_stem("ws:a:b")]["name"], "colon");
+        assert_eq!(metadata[session_file_stem("ws:a_b")]["name"], "underscore");
+        assert_eq!(
+            metadata[session_file_stem("telegram:a:b")]["name"],
+            "channel"
+        );
+    }
+
+    #[test]
     fn clear_removes_session_event_log_and_keeps_lock_file() {
         use crate::session_event::{
             JsonlSessionEventLog, NewSessionEvent, SessionEventKind, SessionEventWriter,
@@ -622,34 +682,40 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_legacy_sanitized_session_file() {
+    fn load_keeps_unverified_legacy_sanitized_session_file() {
         let (store, dir) = test_store();
         let sessions_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
         let legacy_path = sessions_dir.join("ws_default_123.jsonl");
         let message = ChatMessage::user("legacy message");
         std::fs::write(
-            legacy_path,
+            &legacy_path,
             format!("{}\n", serde_json::to_string(&message).expect("serialize")),
         )
         .expect("write legacy session");
 
         let loaded = store.load("ws:default_123").expect("load legacy session");
 
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].content, serde_json::json!("legacy message"));
+        assert!(loaded.is_empty());
+        assert!(legacy_path.exists());
+        let compatible = store
+            .load("ws:default:123")
+            .expect("canonical compatible key");
+        assert_eq!(compatible[0].content, serde_json::json!("legacy message"));
     }
 
     #[test]
-    fn clear_deletes_legacy_sanitized_session_file() {
+    fn clear_keeps_unverified_legacy_sanitized_session_file() {
         let (store, dir) = test_store();
         let sessions_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
         let legacy_path = sessions_dir.join("ws_default_123.jsonl");
         std::fs::write(&legacy_path, "legacy").expect("write legacy session");
 
-        assert!(store.clear("ws:default_123").expect("clear legacy"));
-        assert!(!legacy_path.exists());
+        assert!(!store
+            .clear("ws:default_123")
+            .expect("clear unverified legacy"));
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), "legacy");
     }
 
     #[test]

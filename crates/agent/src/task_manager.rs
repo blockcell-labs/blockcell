@@ -12,6 +12,36 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::agent_progress::AgentProgress;
 
+/// Immutable authorization identity for a task's source conversation and owner.
+/// History and delivery session keys must not be used in place of the source key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskOrigin {
+    session_key: String,
+    agent_id: String,
+}
+
+impl TaskOrigin {
+    pub fn new(session_key: impl Into<String>, agent_id: Option<&str>) -> Self {
+        Self {
+            session_key: session_key.into(),
+            agent_id: normalized_agent_key(agent_id),
+        }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        !self.session_key.trim().is_empty()
+    }
+}
+
+fn accountless_origin_key(channel: &str, chat_id: &str) -> Option<String> {
+    if channel.trim().is_empty() || chat_id.trim().is_empty() {
+        return None;
+    }
+    Some(blockcell_core::session_key::build_session_key(
+        channel, chat_id,
+    ))
+}
+
 /// Status of a background task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +93,7 @@ pub struct TaskInfo {
     /// Optional channel account that owns this task's origin conversation.
     #[serde(default)]
     pub origin_account_id: Option<String>,
-    /// Canonical immutable session key for origin-scoped event delivery.
+    /// Canonical immutable source session key for authorization and event delivery.
     #[serde(default)]
     pub origin_session_key: Option<String>,
     /// Agent that owns this task. Missing values are treated as the default agent.
@@ -99,8 +129,10 @@ pub struct TaskInfo {
 }
 
 impl TaskInfo {
-    pub fn belongs_to_origin(&self, channel: &str, chat_id: &str) -> bool {
-        self.origin_channel == channel && self.origin_chat_id == chat_id
+    pub fn belongs_to_origin(&self, origin: &TaskOrigin) -> bool {
+        origin.is_valid()
+            && self.origin_session_key.as_deref() == Some(origin.session_key.as_str())
+            && normalized_agent_key(self.agent_id.as_deref()) == origin.agent_id
     }
 
     /// 是否发送系统事件
@@ -578,7 +610,7 @@ impl TaskManager {
             origin_channel: origin_channel.to_string(),
             origin_chat_id: origin_chat_id.to_string(),
             origin_account_id: None,
-            origin_session_key: None,
+            origin_session_key: accountless_origin_key(origin_channel, origin_chat_id),
             agent_id: agent_id.map(str::to_string),
             emit_system_events,
             agent_type: agent_type.map(str::to_string),
@@ -623,7 +655,7 @@ impl TaskManager {
             origin_channel,
             origin_chat_id,
             None,
-            None,
+            accountless_origin_key(origin_channel, origin_chat_id).as_deref(),
             agent_id,
             emit_system_events,
             agent_type,
@@ -896,13 +928,12 @@ impl TaskManager {
     pub async fn find_task_by_prefix_for_origin(
         &self,
         prefix: &str,
-        channel: &str,
-        chat_id: &str,
+        origin: &TaskOrigin,
     ) -> Vec<TaskInfo> {
         self.find_task_by_prefix(prefix)
             .await
             .into_iter()
-            .filter(|task| task.belongs_to_origin(channel, chat_id))
+            .filter(|task| task.belongs_to_origin(origin))
             .collect()
     }
 
@@ -984,24 +1015,19 @@ impl TaskManager {
     /// List tasks restricted to the originating conversation.
     pub async fn list_tasks_for_origin(
         &self,
-        channel: &str,
-        chat_id: &str,
+        origin: &TaskOrigin,
         status_filter: Option<&TaskStatus>,
     ) -> Vec<TaskInfo> {
         self.list_tasks(status_filter)
             .await
             .into_iter()
-            .filter(|task| task.belongs_to_origin(channel, chat_id))
+            .filter(|task| task.belongs_to_origin(origin))
             .collect()
     }
 
     /// Get task counts restricted to the originating conversation.
-    pub async fn summary_for_origin(
-        &self,
-        channel: &str,
-        chat_id: &str,
-    ) -> (usize, usize, usize, usize) {
-        let tasks = self.list_tasks_for_origin(channel, chat_id, None).await;
+    pub async fn summary_for_origin(&self, origin: &TaskOrigin) -> (usize, usize, usize, usize) {
+        let tasks = self.list_tasks_for_origin(origin, None).await;
         let mut counts = (0, 0, 0, 0);
         for task in tasks {
             match task.status {
@@ -1372,24 +1398,19 @@ impl Default for TaskManager {
 #[derive(Clone)]
 pub struct OriginScopedTaskManager {
     inner: TaskManager,
-    channel: String,
-    chat_id: String,
+    origin: TaskOrigin,
 }
 
 impl OriginScopedTaskManager {
-    pub fn new(inner: TaskManager, channel: impl Into<String>, chat_id: impl Into<String>) -> Self {
-        Self {
-            inner,
-            channel: channel.into(),
-            chat_id: chat_id.into(),
-        }
+    pub fn new(inner: TaskManager, origin: TaskOrigin) -> Self {
+        Self { inner, origin }
     }
 
     async fn get_owned_task(&self, task_id: &str) -> Option<TaskInfo> {
         self.inner
             .get_task(task_id)
             .await
-            .filter(|task| task.belongs_to_origin(&self.channel, &self.chat_id))
+            .filter(|task| task.belongs_to_origin(&self.origin))
     }
 }
 
@@ -1444,7 +1465,7 @@ impl TaskManagerOps for OriginScopedTaskManager {
         });
         serde_json::Value::Array(
             self.inner
-                .list_tasks_for_origin(&self.channel, &self.chat_id, filter.as_ref())
+                .list_tasks_for_origin(&self.origin, filter.as_ref())
                 .await
                 .iter()
                 .map(task_summary_json)
@@ -1460,13 +1481,11 @@ impl TaskManagerOps for OriginScopedTaskManager {
     }
 
     async fn summary_json(&self) -> serde_json::Value {
-        let (queued, running, completed, failed) = self
-            .inner
-            .summary_for_origin(&self.channel, &self.chat_id)
-            .await;
+        let (queued, running, completed, failed) =
+            self.inner.summary_for_origin(&self.origin).await;
         let cancelled = self
             .inner
-            .list_tasks_for_origin(&self.channel, &self.chat_id, Some(&TaskStatus::Cancelled))
+            .list_tasks_for_origin(&self.origin, Some(&TaskStatus::Cancelled))
             .await
             .len();
         json!({
@@ -1632,19 +1651,242 @@ mod tests {
         }
 
         let tasks = manager
-            .list_tasks_for_origin("ws", "chat-a", Some(&TaskStatus::Running))
+            .list_tasks_for_origin(
+                &TaskOrigin::new("ws:chat-a", None),
+                Some(&TaskStatus::Running),
+            )
             .await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-local");
 
         assert!(manager
-            .find_task_by_prefix_for_origin("task-other", "ws", "chat-a")
+            .find_task_by_prefix_for_origin("task-other", &TaskOrigin::new("ws:chat-a", None))
             .await
             .is_empty());
         assert_eq!(
-            manager.summary_for_origin("ws", "chat-a").await,
+            manager
+                .summary_for_origin(&TaskOrigin::new("ws:chat-a", None))
+                .await,
             (0, 1, 0, 0)
         );
+    }
+
+    async fn same_chat_origin_fixture() -> TaskManager {
+        let manager = TaskManager::new();
+        for (id, account, session, agent) in [
+            (
+                "task-owned",
+                "account-a",
+                "telegram:account-a:same-chat",
+                None,
+            ),
+            (
+                "task-account-b",
+                "account-b",
+                "telegram:account-b:same-chat",
+                None,
+            ),
+            (
+                "task-agent-b",
+                "account-a",
+                "telegram:account-a:same-chat",
+                Some("ops"),
+            ),
+        ] {
+            manager
+                .create_and_start_task_with_route(
+                    id,
+                    id,
+                    "private origin task",
+                    "telegram",
+                    "same-chat",
+                    Some(account),
+                    Some(session),
+                    agent,
+                    false,
+                    Some("explore"),
+                    false,
+                )
+                .await;
+        }
+        manager
+    }
+
+    #[tokio::test]
+    async fn complete_origin_queries_isolate_accounts_and_agents() {
+        let manager = same_chat_origin_fixture().await;
+        let tasks = manager
+            .list_tasks_for_origin(&TaskOrigin::new("telegram:account-a:same-chat", None), None)
+            .await;
+        assert_eq!(tasks.len(), 1, "foreign account or agent leaked: {tasks:?}");
+        assert_eq!(tasks[0].id, "task-owned");
+        assert!(manager
+            .find_task_by_prefix_for_origin(
+                "task-account",
+                &TaskOrigin::new("telegram:account-a:same-chat", None)
+            )
+            .await
+            .is_empty());
+        assert!(manager
+            .find_task_by_prefix_for_origin(
+                "task-agent",
+                &TaskOrigin::new("telegram:account-a:same-chat", None)
+            )
+            .await
+            .is_empty());
+        assert_eq!(
+            manager
+                .summary_for_origin(&TaskOrigin::new("telegram:account-a:same-chat", None))
+                .await,
+            (0, 1, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_origin_controls_isolate_accounts_and_agents() {
+        let manager = same_chat_origin_fixture().await;
+        let scoped = OriginScopedTaskManager::new(
+            manager.clone(),
+            TaskOrigin::new("telegram:account-a:same-chat", None),
+        );
+        for id in ["task-account-b", "task-agent-b"] {
+            assert!(
+                TaskManagerOps::get_task_json(&scoped, id).await.is_none(),
+                "foreign detail: {id}"
+            );
+            assert!(
+                TaskManagerOps::send_message(&scoped, id, "private command".into())
+                    .await
+                    .is_err()
+            );
+            assert!(TaskManagerOps::cancel_task(&scoped, id).await.is_err());
+            assert_eq!(
+                manager.get_task(id).await.unwrap().status,
+                TaskStatus::Running
+            );
+            assert!(manager.drain_pending_messages(id).is_empty());
+        }
+        assert!(TaskManagerOps::get_task_json(&scoped, "task-owned")
+            .await
+            .is_some());
+        TaskManagerOps::send_message(&scoped, "task-owned", "owned command".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.drain_pending_messages("task-owned"),
+            vec!["owned command"]
+        );
+        TaskManagerOps::cancel_task(&scoped, "task-owned")
+            .await
+            .unwrap();
+        TaskManagerOps::cancel_task(&scoped, "task-owned")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_origin_new_legacy_calls_normalize_default_owner() {
+        let manager = TaskManager::new();
+        manager
+            .create_task(
+                "queued", "queued", "test", "cli", "chat", None, false, None, false,
+            )
+            .await;
+        manager
+            .create_and_start_task(
+                "running",
+                "running",
+                "test",
+                "cli",
+                "chat",
+                Some("default"),
+                false,
+                None,
+                false,
+            )
+            .await;
+        manager
+            .create_and_start_task(
+                "named",
+                "named",
+                "test",
+                "cli",
+                "chat",
+                Some("ops"),
+                false,
+                None,
+                false,
+            )
+            .await;
+
+        for default in [None, Some("default"), Some(""), Some("  ")] {
+            assert_eq!(
+                manager
+                    .list_tasks_for_origin(&TaskOrigin::new("cli:chat", default), None)
+                    .await
+                    .len(),
+                2
+            );
+        }
+        let named = manager
+            .list_tasks_for_origin(&TaskOrigin::new("cli:chat", Some("ops")), None)
+            .await;
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].id, "named");
+        assert!(manager
+            .list_tasks_for_origin(&TaskOrigin::new("", None), None)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_origin_missing_persisted_identity_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = TaskManager::with_workspace(dir.path());
+        manager
+            .create_and_start_task(
+                "legacy", "legacy", "private", "cli", "chat", None, false, None, false,
+            )
+            .await;
+        let path = TaskManager::tasks_dir(dir.path()).join("legacy.json");
+        let mut record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        record.as_object_mut().unwrap().remove("origin_session_key");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let restored = TaskManager::with_workspace(dir.path());
+        assert_eq!(restored.restore_from_disk(dir.path()).await, 1);
+        assert!(restored.get_task("legacy").await.is_some());
+        let scoped = OriginScopedTaskManager::new(restored, TaskOrigin::new("cli:chat", None));
+        assert!(TaskManagerOps::get_task_json(&scoped, "legacy")
+            .await
+            .is_none());
+        assert!(TaskManagerOps::cancel_task(&scoped, "legacy")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_origin_account_route_without_source_does_not_gain_legacy_scope() {
+        let manager = TaskManager::new();
+        manager
+            .create_and_start_task_with_route(
+                "missing-source",
+                "task",
+                "private",
+                "telegram",
+                "chat",
+                Some("account-a"),
+                None,
+                None,
+                false,
+                None,
+                false,
+            )
+            .await;
+        assert!(manager
+            .list_tasks_for_origin(&TaskOrigin::new("telegram:chat", None), None)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1665,7 +1907,7 @@ mod tests {
                 )
                 .await;
         }
-        let scoped = OriginScopedTaskManager::new(manager, "ws", "chat-a");
+        let scoped = OriginScopedTaskManager::new(manager, TaskOrigin::new("ws:chat-a", None));
 
         let listed = TaskManagerOps::list_tasks_json(&scoped, None).await;
         assert_eq!(listed.as_array().unwrap().len(), 1);
@@ -1697,7 +1939,8 @@ mod tests {
                 )
                 .await;
         }
-        let scoped = OriginScopedTaskManager::new(manager.clone(), "ws", "chat-a");
+        let scoped =
+            OriginScopedTaskManager::new(manager.clone(), TaskOrigin::new("ws:chat-a", None));
 
         let denied = TaskManagerOps::cancel_task(&scoped, "task-foreign").await;
         assert!(denied.is_err(), "foreign task must not be cancellable");

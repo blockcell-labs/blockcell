@@ -45,6 +45,8 @@ pub(super) struct CronCreateRequest {
     deliver_channel: Option<String>,
     #[serde(default)]
     deliver_to: Option<String>,
+    #[serde(default)]
+    deliver_account_id: Option<String>,
     /// For every_seconds jobs: execute immediately on first tick instead of waiting one cycle.
     #[serde(default)]
     run_immediately: bool,
@@ -145,6 +147,12 @@ fn build_manual_cron_inbound(job: &CronJob, agent_id: &str) -> InboundMessage {
         ),
     };
     if let Some(obj) = metadata.as_object_mut() {
+        if let Some(account_id) = &job.payload.account_id {
+            obj.insert(
+                "deliver_account_id".to_string(),
+                serde_json::json!(account_id),
+            );
+        }
         obj.entry("route_agent_id".to_string())
             .or_insert_with(|| serde_json::json!(agent_id));
     }
@@ -152,7 +160,7 @@ fn build_manual_cron_inbound(job: &CronJob, agent_id: &str) -> InboundMessage {
     with_route_agent_id(
         InboundMessage {
             channel: "cron".to_string(),
-            account_id: None,
+            account_id: job.payload.account_id.clone(),
             sender_id: "cron".to_string(),
             chat_id: job.id.clone(),
             content,
@@ -229,6 +237,7 @@ pub(super) async fn handle_cron_create(
             deliver: req.deliver,
             channel: req.deliver_channel,
             to: req.deliver_to,
+            account_id: req.deliver_account_id,
             script_kind: script_kind.map(|value| value.to_string()),
             skill_name: req.skill_name,
         },
@@ -298,6 +307,18 @@ pub(super) async fn handle_cron_run(
 mod tests {
     use super::*;
 
+    #[test]
+    fn r2_manual_cron_trigger_preserves_delivery_account() {
+        for kind in ["reminder", "agent", "script"] {
+            let mut value = serde_json::to_value(test_job(kind)).unwrap();
+            value["payload"]["accountId"] = serde_json::json!("bot-b");
+            let job = serde_json::from_value(value).unwrap();
+            let inbound = build_manual_cron_inbound(&job, "ops");
+            assert_eq!(inbound.account_id.as_deref(), Some("bot-b"));
+            assert_eq!(inbound.metadata["deliver_account_id"], "bot-b");
+        }
+    }
+
     fn test_job(kind: &str) -> CronJob {
         let now_ms = chrono::Utc::now().timestamp_millis();
         CronJob {
@@ -318,6 +339,7 @@ mod tests {
                 deliver: true,
                 channel: Some("ws".to_string()),
                 to: Some("manual:test".to_string()),
+                account_id: None,
                 script_kind: Some("markdown".to_string()),
                 skill_name: Some("weather".to_string()),
             },

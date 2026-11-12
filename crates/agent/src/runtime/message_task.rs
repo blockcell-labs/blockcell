@@ -116,6 +116,7 @@ pub(crate) async fn run_message_task(
     let checkpoint_manager = crate::checkpoint::CheckpointManager::new(&runtime.paths.workspace());
     let task_manager = runtime.task_manager.clone();
     let agent_id = runtime.agent_id.clone();
+    let task_origin = TaskOrigin::new(msg.session_key(), agent_id.as_deref());
     let event_tx = runtime.event_tx.clone();
     let outbound_tx = runtime.outbound_tx.clone();
     let resumed_task_id = msg
@@ -149,11 +150,13 @@ pub(crate) async fn run_message_task(
             // The periodic cleanup loop will evict them after the grace period.
             // This way users can see recently completed tasks via /tasks.
             task_manager.set_completed(&task_id, &response).await;
-            if let Err(e) = checkpoint_manager.mark_completed(&task_id) {
+            if let Err(e) = checkpoint_manager.mark_completed_for_origin(&task_id, &task_origin) {
                 warn!(task_id = %task_id, error = %e, "Failed to mark message checkpoint completed");
             }
             if let Some(resumed_task_id) = resumed_task_id.as_deref() {
-                if let Err(e) = checkpoint_manager.mark_completed(resumed_task_id) {
+                if let Err(e) =
+                    checkpoint_manager.mark_completed_for_origin(resumed_task_id, &task_origin)
+                {
                     warn!(task_id = %resumed_task_id, error = %e, "Failed to mark resumed checkpoint completed");
                 }
             }

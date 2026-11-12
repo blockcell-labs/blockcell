@@ -64,7 +64,7 @@ use crate::system_event_orchestrator::{
     HeartbeatDecision, NotificationRequest, SystemEventOrchestrator,
 };
 use crate::system_event_store::{InMemorySystemEventStore, SystemEventStoreOps};
-use crate::task_manager::{OriginScopedTaskManager, TaskManager, TaskStatus};
+use crate::task_manager::{OriginScopedTaskManager, TaskManager, TaskOrigin, TaskStatus};
 use crate::token::estimate_messages_tokens;
 use pre_step::PreStepDecision;
 
@@ -869,8 +869,11 @@ fn append_ephemeral_user_context(messages: &mut Vec<ChatMessage>, section: &str)
 async fn inject_running_tasks_into_system_prompt(
     messages: &mut Vec<ChatMessage>,
     task_manager: &TaskManager,
+    origin: &TaskOrigin,
 ) -> Vec<String> {
-    let task_list = task_manager.list_tasks(Some(&TaskStatus::Running)).await;
+    let task_list = task_manager
+        .list_tasks_for_origin(origin, Some(&TaskStatus::Running))
+        .await;
 
     // 只保留 typed agent 任务（有 agent_type 的），排除 msg_ 会话任务
     // 限制最多注入 10 个运行中任务，防止 system prompt 过长导致 LLM API 调用失败
@@ -884,7 +887,9 @@ async fn inject_running_tasks_into_system_prompt(
         task_list.iter().filter(|t| t.agent_type.is_some()).count() > MAX_INJECT_TASKS;
 
     // 查找已完成但结果尚未注入到LLM对话的子agent任务
-    let completed_tasks = task_manager.list_tasks(Some(&TaskStatus::Completed)).await;
+    let completed_tasks = task_manager
+        .list_tasks_for_origin(origin, Some(&TaskStatus::Completed))
+        .await;
     let uninject_completed: Vec<_> = completed_tasks
         .iter()
         .filter(|t| t.agent_type.is_some() && !t.result_injected && t.result.is_some())
@@ -2292,7 +2297,12 @@ pub(crate) struct InteractionDecision {
 /// 历史、事件日志与 hooks 都以它作为会话标识，保证同一回合的数据落在同一会话。
 pub(crate) fn persist_session_key_for(msg: &InboundMessage) -> String {
     match resolve_cron_deliver_target(msg) {
-        Some((channel, to)) => blockcell_core::build_session_key(&channel, &to),
+        Some((channel, to)) => {
+            let mut target = msg.clone();
+            target.channel = channel;
+            target.chat_id = to;
+            target.session_key()
+        }
         None => msg.session_key(),
     }
 }

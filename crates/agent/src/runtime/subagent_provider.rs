@@ -18,6 +18,9 @@ const TYPED_SUBAGENT_RESULT_TIMEOUT: std::time::Duration = std::time::Duration::
 #[derive(Clone)]
 pub struct InProcessSubagentProvider {
     invocation_target: Option<MainSessionTarget>,
+    /// Authorization source; the target session may instead store delivery history.
+    /// A provider without an invocation must not infer this from the shared target.
+    invocation_source_key: Option<String>,
     invocation_budget: Option<BudgetTrackerHandle>,
     model_prices: Vec<blockcell_core::config::ModelEntry>,
     provider_pool: Arc<ProviderPool>,
@@ -42,6 +45,7 @@ impl InProcessSubagentProvider {
     pub fn from_runtime(runtime: &AgentRuntime) -> Self {
         Self {
             invocation_target: None,
+            invocation_source_key: None,
             invocation_budget: None,
             model_prices: runtime.config.agents.defaults.model_pool.clone(),
             provider_pool: runtime.provider_pool.clone(),
@@ -63,6 +67,7 @@ impl InProcessSubagentProvider {
     }
 
     pub(crate) fn for_invocation(mut self, runtime: &AgentRuntime, msg: &InboundMessage) -> Self {
+        self.invocation_source_key = Some(msg.session_key());
         self.invocation_budget =
             Some(runtime.budget_tracker_for_session(&persist_session_key_for(msg)));
         self.invocation_target = Some(MainSessionTarget {
@@ -321,13 +326,17 @@ impl InProcessSubagentProvider {
 
         // 原子性地创建并标记为 Running（消除竞态条件）
         self.task_manager
-            .create_and_start_task(
+            .create_and_start_task_with_route(
                 &task_id,
                 description.as_deref().unwrap_or(agent_type),
                 &prompt,
                 &channel,
                 &chat_id,
-                Some(&task_id),
+                target
+                    .as_ref()
+                    .and_then(|target| target.account_id.as_deref()),
+                self.invocation_source_key.as_deref(),
+                self.agent_id.as_deref(),
                 false,
                 Some(agent_type),
                 def.one_shot,

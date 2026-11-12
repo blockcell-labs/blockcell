@@ -135,7 +135,7 @@ pub use session_memory::{
     SessionMemoryState, DEFAULT_SESSION_MEMORY_TEMPLATE,
 };
 pub use skill_file_store::{SkillFileMutation, SkillFileStore};
-pub use task_manager::{TaskManager, TaskStatus};
+pub use task_manager::{TaskManager, TaskOrigin, TaskStatus};
 pub use unified_security_scanner::{
     scan_learned_memory_content, scan_learned_skill_content, scan_learned_skill_dir,
     UnifiedSecurityScanner,

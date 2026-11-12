@@ -721,8 +721,13 @@ impl AgentRuntime {
 
         // 注入当前后台任务状态到 system prompt
         // 让 LLM 知道哪些 typed agent 任务正在运行，避免基于过时对话历史误判
-        let prompt_injected_completed_task_ids =
-            inject_running_tasks_into_system_prompt(&mut messages, &self.task_manager).await;
+        let task_origin = TaskOrigin::new(msg.session_key(), self.agent_id.as_deref());
+        let prompt_injected_completed_task_ids = inject_running_tasks_into_system_prompt(
+            &mut messages,
+            &self.task_manager,
+            &task_origin,
+        )
+        .await;
 
         // Now add user message to history for session persistence
         history.push(ChatMessage::user(&msg.content));
@@ -734,13 +739,14 @@ impl AgentRuntime {
             .map(str::to_string);
         let mut checkpoint_turn = 0_u32;
         if let Some(task_id) = runtime_task_id.as_deref() {
-            let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_origin(
+            let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_task_origin(
                 task_id,
                 history.clone(),
                 checkpoint_turn,
                 &msg.channel,
                 &msg.chat_id,
                 &persist_session_key,
+                task_origin.clone(),
             );
             if let Err(e) =
                 crate::checkpoint::CheckpointManager::new(&self.paths.workspace()).save(&checkpoint)
@@ -1988,13 +1994,14 @@ impl AgentRuntime {
 
                 checkpoint_turn = checkpoint_turn.saturating_add(1);
                 if let Some(task_id) = runtime_task_id.as_deref() {
-                    let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_origin(
+                    let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_task_origin(
                         task_id,
                         history.clone(),
                         checkpoint_turn,
                         &msg.channel,
                         &msg.chat_id,
                         &persist_session_key,
+                        task_origin.clone(),
                     );
                     if let Err(e) =
                         crate::checkpoint::CheckpointManager::new(&self.paths.workspace())
@@ -2245,7 +2252,7 @@ impl AgentRuntime {
         {
             let running_tasks = self
                 .task_manager
-                .list_tasks_for_origin(&msg.channel, &msg.chat_id, Some(&TaskStatus::Running))
+                .list_tasks_for_origin(&task_origin, Some(&TaskStatus::Running))
                 .await;
             let typed_running: Vec<_> = running_tasks
                 .iter()
@@ -2301,7 +2308,7 @@ impl AgentRuntime {
                 // 收集已完成的结果，做一次汇总LLM调用
                 let completed_tasks = self
                     .task_manager
-                    .list_tasks_for_origin(&msg.channel, &msg.chat_id, Some(&TaskStatus::Completed))
+                    .list_tasks_for_origin(&task_origin, Some(&TaskStatus::Completed))
                     .await;
                 let uninject_completed: Vec<_> = completed_tasks
                     .iter()

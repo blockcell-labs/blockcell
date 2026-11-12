@@ -30,9 +30,8 @@ impl SlashCommand for ClearCommand {
     async fn execute(&self, _args: &str, ctx: &CommandContext) -> CommandResult {
         let mut results: Vec<String> = Vec::new();
 
-        // session_key 格式: {channel}:{chat_id}
-        // 例如: cli:default, ws:abc123, telegram:123456789
-        let session_key = format!("{}:{}", ctx.source.channel, ctx.source.chat_id);
+        // 与 InboundMessage 使用同一账号感知的会话身份。
+        let session_key = ctx.source.session_key();
 
         // 1. 调用清除回调（如果存在）
         if let Some(ref callback) = ctx.session_clear_callback {

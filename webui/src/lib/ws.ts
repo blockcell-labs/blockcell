@@ -22,7 +22,10 @@ export type WsEventType =
 
 export interface WsEvent {
   type: WsEventType;
+  channel?: string;
   agent_id?: string;
+  account_id?: string;
+  session_id?: string;
   chat_id?: string;
   client_chat_id?: string;
   background_delivery?: boolean;

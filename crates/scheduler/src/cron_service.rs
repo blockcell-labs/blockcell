@@ -676,6 +676,9 @@ impl CronService {
         let (msg_channel, msg_chat_id) = ("cron".to_string(), job.id.clone());
 
         let mut metadata = metadata;
+        if let Some(account_id) = &job.payload.account_id {
+            metadata["deliver_account_id"] = serde_json::json!(account_id);
+        }
         apply_route_agent_id(&mut metadata, agent_id.as_deref());
         let (receipt_id, receipt_rx) = register_message_receipt();
         if let Some(metadata) = metadata.as_object_mut() {
@@ -687,7 +690,7 @@ impl CronService {
 
         let msg = InboundMessage {
             channel: msg_channel,
-            account_id: None,
+            account_id: job.payload.account_id.clone(),
             sender_id: "cron".to_string(),
             chat_id: msg_chat_id,
             content,
@@ -888,6 +891,72 @@ impl CronService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn r2_cron_accounts_survive_reload_and_every_payload_dispatch() {
+        struct TestDirectory(std::path::PathBuf);
+        impl Drop for TestDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TestDirectory(
+            std::env::temp_dir().join(format!("blockcell-cron-accounts-{}", uuid::Uuid::new_v4())),
+        );
+        let paths = Paths::with_base(dir.0.clone());
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut expected = std::collections::HashMap::new();
+        {
+            let service = CronService::new(paths.clone(), tx.clone());
+            for kind in ["reminder", "agent", "script"] {
+                for account in [Some("bot-a"), Some("bot-b"), None] {
+                    let id = format!("{kind}-{}", account.unwrap_or("legacy"));
+                    let mut value = serde_json::to_value(test_job()).unwrap();
+                    value["id"] = serde_json::json!(id);
+                    value["payload"]["kind"] = serde_json::json!(kind);
+                    value["payload"]["channel"] = serde_json::json!("telegram");
+                    value["payload"]["to"] = serde_json::json!("same-chat");
+                    if let Some(account) = account {
+                        value["payload"]["accountId"] = serde_json::json!(account);
+                    }
+                    service
+                        .add_job(serde_json::from_value(value).unwrap())
+                        .await
+                        .unwrap();
+                    expected.insert(id, account);
+                }
+            }
+        }
+        let reloaded = CronService::new(paths, tx.clone());
+        reloaded.load().await.unwrap();
+        let jobs = reloaded.list_jobs().await;
+        assert_eq!(jobs.len(), 9);
+        for job in jobs {
+            let account = expected[&job.id];
+            let persisted = serde_json::to_value(&job).unwrap();
+            assert_eq!(
+                persisted["payload"]
+                    .get("accountId")
+                    .and_then(|v| v.as_str()),
+                account
+            );
+            let execute = CronService::execute_job_internal(
+                &job,
+                tx.clone(),
+                Arc::new(StdMutex::new(None)),
+                None,
+            );
+            let receive = async {
+                let message = rx.recv().await.unwrap();
+                complete_cron_message(&message, Ok(()));
+                message
+            };
+            let (result, message) = tokio::join!(execute, receive);
+            assert!(result.is_ok());
+            assert_eq!(message.account_id.as_deref(), account);
+            assert_eq!(message.metadata["deliver_account_id"].as_str(), account);
+        }
+    }
     use chrono::{Datelike, TimeZone, Timelike, Utc};
 
     #[derive(Clone, Default)]
@@ -948,6 +1017,7 @@ mod tests {
                 deliver: false,
                 channel: None,
                 to: None,
+                account_id: None,
                 script_kind: None,
                 skill_name: None,
             },
@@ -978,6 +1048,7 @@ mod tests {
                 deliver: true,
                 channel: Some("telegram".to_string()),
                 to: Some("12345".to_string()),
+                account_id: None,
                 script_kind: None,
                 skill_name: None,
             },
@@ -1008,6 +1079,7 @@ mod tests {
                 deliver: true,
                 channel: Some("ws".to_string()),
                 to: Some("ws:test-reminder".to_string()),
+                account_id: None,
                 script_kind: None,
                 skill_name: None,
             },
@@ -1371,6 +1443,7 @@ mod tests {
                 deliver: false,
                 channel: None,
                 to: None,
+                account_id: None,
                 script_kind: None,
                 skill_name: None,
             },

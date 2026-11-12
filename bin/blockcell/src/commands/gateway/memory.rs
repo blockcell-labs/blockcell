@@ -276,7 +276,6 @@ mod tests {
         GatewayState {
             inbound_tx,
             task_manager: TaskManager::new(),
-            checkpoint_manager: CheckpointManager::new(&paths.workspace()),
             config,
             config_write_lock: Arc::new(Mutex::new(())),
             paths,

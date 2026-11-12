@@ -1413,6 +1413,30 @@ pub async fn unsubscribe_stream(workspace: &Path, stream_id: &str) -> Result<Val
     .await
 }
 
+/// Stop a stream within workspaces authorized by the management caller.
+/// The caller must derive this set from its own management authorization;
+/// agent tools continue to use the single-workspace owner check.
+pub async fn unsubscribe_stream_in_workspaces(
+    workspaces: &[PathBuf],
+    stream_id: &str,
+) -> Result<Value> {
+    let allowed: HashSet<_> = workspaces
+        .iter()
+        .map(|workspace| normalized_workspace(workspace))
+        .collect();
+    let owner = STREAM_MANAGER
+        .lock()
+        .await
+        .subscriptions
+        .get(stream_id)
+        .filter(|subscription| allowed.contains(&subscription.owner_workspace))
+        .map(|subscription| subscription.owner_workspace.clone())
+        .ok_or_else(|| Error::Tool(format!("Stream '{}' not found", stream_id)))?;
+    // Reuse the owner check at mutation time too. A concurrent replacement may
+    // cause a safe not-found result; it cannot grant access to another owner.
+    unsubscribe_stream(&owner, stream_id).await
+}
+
 /// List all active stream subscriptions (for gateway /v1/streams endpoint).
 pub async fn list_streams() -> Value {
     let mgr = STREAM_MANAGER.lock().await;
@@ -1454,6 +1478,93 @@ pub async fn get_stream_data(stream_id: &str, limit: usize) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn r2_management_stop_resolves_authorized_owner_and_persists_that_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("default");
+        let ops = dir.path().join("ops");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::create_dir_all(&ops).unwrap();
+        let default = normalized_workspace(&default);
+        let ops = normalized_workspace(&ops);
+        let default_id = format!("default-{}", uuid::Uuid::new_v4());
+        let ops_id = format!("ops-{}", uuid::Uuid::new_v4());
+        let (default_cancel, default_rx) = tokio::sync::watch::channel(false);
+        let (ops_cancel, ops_rx) = tokio::sync::watch::channel(false);
+        {
+            let mut mgr = STREAM_MANAGER.lock().await;
+            for (id, owner, cancel) in [
+                (&default_id, &default, default_cancel),
+                (&ops_id, &ops, ops_cancel),
+            ] {
+                let mut sub = test_subscription(id, owner);
+                sub.auto_restore = true;
+                mgr.subscriptions.insert(id.clone(), sub);
+                mgr.cancel_handles.insert(id.clone(), cancel);
+                mgr.save_rules(owner).unwrap();
+            }
+        }
+
+        assert!(unsubscribe_stream(&default, &ops_id).await.is_err());
+        assert!(
+            unsubscribe_stream_in_workspaces(std::slice::from_ref(&default), &ops_id)
+                .await
+                .is_err()
+        );
+        assert!(!*ops_rx.borrow());
+        assert_eq!(StreamManager::load_rules(&ops).unwrap().len(), 1);
+
+        let stopped =
+            unsubscribe_stream_in_workspaces(&[default.clone(), ops.clone()], &ops_id).await;
+        // Clean up the test's own entries even if the old default-owner route fails.
+        let was_stopped = stopped
+            .as_ref()
+            .is_ok_and(|result| result["removed"] == true);
+        if !was_stopped {
+            let _ = unsubscribe_stream(&ops, &ops_id).await;
+            let _ = unsubscribe_stream(&default, &default_id).await;
+        }
+        assert!(
+            was_stopped,
+            "authorized ops stream was not stopped: {stopped:?}"
+        );
+        assert!(*ops_rx.borrow());
+        assert!(!*default_rx.borrow());
+        assert!(StreamManager::load_rules(&ops).unwrap().is_empty());
+        assert_eq!(
+            StreamManager::load_rules(&default).unwrap()[0].id,
+            default_id
+        );
+
+        unsubscribe_stream_in_workspaces(&[default.clone(), ops], &default_id)
+            .await
+            .unwrap();
+        assert!(*default_rx.borrow());
+        assert!(StreamManager::load_rules(&default).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn r2_management_stop_propagates_owner_persistence_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = normalized_workspace(dir.path());
+        std::fs::write(owner.join("streams"), b"keep this file").unwrap();
+        let id = format!("io-error-{}", uuid::Uuid::new_v4());
+        {
+            let mut mgr = STREAM_MANAGER.lock().await;
+            let mut sub = test_subscription(&id, &owner);
+            sub.auto_restore = true;
+            mgr.subscriptions.insert(id.clone(), sub);
+        }
+        let error = unsubscribe_stream_in_workspaces(&[owner.clone()], &id)
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("not found"), "{error}");
+        assert_eq!(
+            std::fs::read(owner.join("streams")).unwrap(),
+            b"keep this file"
+        );
+    }
 
     fn test_subscription(id: &str, workspace: &std::path::Path) -> StreamSubscription {
         StreamSubscription {

@@ -971,6 +971,7 @@ impl AgentRuntime {
                     ) {
                         if let Some(tx) = &self.outbound_tx {
                             let mut outbound = OutboundMessage::new(channel, to, &final_response);
+                            outbound.account_id = msg.account_id.clone();
                             outbound.reasoning_content = reasoning_content.clone();
                             let _ = tx.send(outbound).await;
                         }

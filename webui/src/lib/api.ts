@@ -729,6 +729,11 @@ export function installExternalSkill(url: string) {
 
 export interface SessionInfo {
   id: string;
+  channel?: string;
+  chat_id?: string;
+  account_id?: string;
+  agent_id?: string;
+  legacy_id?: string;
   name: string;
   updated_at: string;
   message_count: number;

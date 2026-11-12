@@ -3,6 +3,7 @@
 
 use super::process_message_inner::merge_verification_answer;
 use super::*;
+mod cron_accounts;
 use blockcell_core::types::LLMResponse;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -5662,7 +5663,7 @@ async fn run_loop_cancels_active_message_when_inbound_closes() {
         .expect("run loop did not stop")
         .expect("run loop panicked");
     assert!(task_manager
-        .list_tasks_for_origin("ws", "close-chat", None)
+        .list_tasks_for_origin(&TaskOrigin::new("ws:close-chat", Some("default")), None)
         .await
         .is_empty());
 }
@@ -7148,7 +7149,12 @@ async fn test_completed_agent_prompt_injection_does_not_mark_before_response() {
         ChatMessage::system("base prompt"),
         ChatMessage::user("summarize the agent result"),
     ];
-    let injected_ids = inject_running_tasks_into_system_prompt(&mut messages, &task_manager).await;
+    let injected_ids = inject_running_tasks_into_system_prompt(
+        &mut messages,
+        &task_manager,
+        &TaskOrigin::new("cli:chat-1", None),
+    )
+    .await;
 
     assert_eq!(injected_ids, vec!["task-inject-1".to_string()]);
     assert!(
@@ -7171,6 +7177,416 @@ async fn test_completed_agent_prompt_injection_does_not_mark_before_response() {
 }
 
 #[tokio::test]
+async fn complete_origin_prompt_injection_excludes_foreign_results() {
+    let manager = TaskManager::new();
+    for (id, session, agent, marker) in [
+        ("task-owned", "cli:owned", None, "owned marker"),
+        (
+            "task-other-session",
+            "cli:other",
+            None,
+            "other session marker",
+        ),
+        (
+            "task-other-agent",
+            "cli:owned",
+            Some("ops"),
+            "other agent marker",
+        ),
+    ] {
+        manager
+            .create_and_start_task_with_route(
+                id,
+                id,
+                "private result",
+                "cli",
+                "owned",
+                None,
+                Some(session),
+                agent,
+                false,
+                Some("explore"),
+                false,
+            )
+            .await;
+        manager.set_completed(id, marker).await;
+    }
+    let mut messages = vec![ChatMessage::system("base"), ChatMessage::user("continue")];
+    let ids = inject_running_tasks_into_system_prompt(
+        &mut messages,
+        &manager,
+        &TaskOrigin::new("cli:owned", None),
+    )
+    .await;
+    assert_eq!(ids, vec!["task-owned"]);
+    let text = serde_json::to_string(&messages).unwrap();
+    assert!(text.contains("owned marker"));
+    assert!(!text.contains("other session marker"));
+    assert!(!text.contains("other agent marker"));
+}
+
+#[tokio::test]
+async fn complete_origin_typed_provider_keeps_source_and_owner() {
+    use blockcell_tools::subagent::{SubagentKind, SubagentPermissions, SubagentRequest};
+
+    let mut runtime =
+        test_runtime_with_provider(Arc::new(MockInterAgentProvider::new("owned typed result")));
+    runtime.set_agent_id(Some("ops".into()));
+    let mut msg = test_main_session_inbound("cron", "same-job");
+    msg.account_id = Some("account-a".into());
+    msg.metadata = serde_json::json!({
+        "skill_run_mode": "cron", "deliver": true,
+        "deliver_channel": "cli", "deliver_to": "history-target",
+    });
+    let source_key = msg.session_key();
+    let history_key = persist_session_key_for(&msg);
+    assert_ne!(source_key, history_key);
+    let context = runtime.build_tool_context(&msg, None);
+    let provider = context.runtime_handle.as_ref().unwrap().subagents();
+    let handle = provider
+        .spawn(SubagentRequest {
+            kind: SubagentKind::Typed {
+                agent_type: "explore".into(),
+            },
+            prompt: "Return a short result".into(),
+            description: None,
+            permissions: SubagentPermissions::read_only(),
+        })
+        .await
+        .expect("spawn actual typed provider");
+    let id = handle.id();
+    assert_ne!(id, "ops");
+    assert_eq!(handle.lineage().parent_session_id, history_key);
+    let task = runtime.task_manager.get_task(id).await.unwrap();
+    assert_eq!(task.agent_id.as_deref(), Some("ops"));
+    assert_eq!(task.origin_account_id.as_deref(), Some("account-a"));
+    assert_eq!(
+        task.origin_session_key.as_deref(),
+        Some(source_key.as_str())
+    );
+    assert!(context
+        .task_manager
+        .as_ref()
+        .unwrap()
+        .get_task_json(id)
+        .await
+        .is_some());
+
+    let mut other_account = msg.clone();
+    other_account.account_id = Some("account-b".into());
+    let foreign = runtime.build_tool_context(&other_account, None);
+    assert!(foreign
+        .task_manager
+        .as_ref()
+        .unwrap()
+        .get_task_json(id)
+        .await
+        .is_none());
+    for origin in [
+        TaskOrigin::new(source_key.clone(), None),
+        TaskOrigin::new(history_key, Some("ops")),
+    ] {
+        assert!(runtime
+            .task_manager
+            .list_tasks_for_origin(&origin, None)
+            .await
+            .is_empty());
+    }
+    assert!(handle
+        .result()
+        .await
+        .unwrap()
+        .contains("owned typed result"));
+}
+
+#[tokio::test]
+async fn complete_origin_runtime_checkpoint_keeps_source_and_history_separate() {
+    let mut runtime = test_runtime_with_provider(Arc::new(MockInterAgentProvider::new("done")));
+    runtime.set_agent_id(Some("ops".into()));
+    let mut msg = test_main_session_inbound("cron", "checkpoint-job");
+    msg.account_id = Some("account-a".into());
+    msg.metadata = serde_json::json!({
+        "runtime_task_id": "origin-checkpoint",
+        "skill_run_mode": "cron", "deliver": true,
+        "deliver_channel": "cli", "deliver_to": "checkpoint-history",
+    });
+    let source = TaskOrigin::new(msg.session_key(), Some("ops"));
+    let history_key = persist_session_key_for(&msg);
+    runtime.process_message(msg.clone()).await.unwrap();
+    let manager = crate::checkpoint::CheckpointManager::new(&runtime.paths.workspace());
+    let checkpoint = manager
+        .load_for_origin("origin-checkpoint", &source)
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.session_key, history_key);
+    assert!(manager
+        .load_for_origin(
+            "origin-checkpoint",
+            &TaskOrigin::new(history_key, Some("ops"))
+        )
+        .unwrap()
+        .is_none());
+    msg.account_id = Some("account-b".into());
+    assert!(manager
+        .load_for_origin(
+            "origin-checkpoint",
+            &TaskOrigin::new(msg.session_key(), Some("ops"))
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn complete_origin_resume_completion_metadata_cannot_complete_foreign_checkpoint() {
+    let runtime = test_runtime_with_provider(Arc::new(MockInterAgentProvider::new("done")));
+    let paths = runtime.paths.clone();
+    let manager = crate::checkpoint::CheckpointManager::new(&paths.workspace());
+    let mut msg = test_main_session_inbound("telegram", "same-chat");
+    msg.account_id = Some("account-a".into());
+    msg.metadata = serde_json::json!({"resumed_task_id": "private-checkpoint"});
+    let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_task_origin(
+        "private-checkpoint",
+        vec![ChatMessage::user("private checkpoint")],
+        1,
+        &msg.channel,
+        &msg.chat_id,
+        msg.session_key(),
+        TaskOrigin::new(msg.session_key(), Some("ops")),
+    );
+    manager.save(&checkpoint).unwrap();
+    let mut config = Config::default();
+    config.agents.defaults.model = "test/mock".into();
+    config.agents.defaults.provider = Some("test".into());
+    for (account, agent, expected_completed) in [
+        ("account-b", "ops", false),
+        ("account-a", "default", false),
+        ("account-a", "ops", true),
+    ] {
+        let mut runtime = test_runtime_with_provider_and_paths(
+            paths.clone(),
+            Arc::new(MockInterAgentProvider::new("done")),
+            config.clone(),
+        );
+        runtime.set_agent_id(Some(agent.into()));
+        msg.account_id = Some(account.into());
+        super::message_task::run_message_task(
+            runtime,
+            msg.clone(),
+            format!("message-{account}-{agent}"),
+        )
+        .await;
+        assert_eq!(
+            manager
+                .load("private-checkpoint")
+                .unwrap()
+                .unwrap()
+                .completed,
+            expected_completed,
+            "completion mutation for {account}/{agent}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn complete_origin_resume_writes_history_read_by_resumed_turn() {
+    let provider = Arc::new(RecallCaptureProvider {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.set_agent_id(Some("ops".into()));
+    let sessions = SessionStore::new(runtime.paths.clone());
+    let mut msg = test_main_session_inbound("cron", "resume-job");
+    msg.account_id = Some("account-a".into());
+    msg.content = "[resume_task:task_id=resume-origin]".into();
+    msg.metadata = serde_json::json!({
+        "source": "slash_command", "skill_run_mode": "cron", "deliver": true,
+        "deliver_channel": "cli", "deliver_to": "resumed-history",
+    });
+    let source_key = msg.session_key();
+    let history_key = persist_session_key_for(&msg);
+    let checkpoint = crate::checkpoint::TaskCheckpoint::new_for_task_origin(
+        "resume-origin",
+        vec![
+            ChatMessage::user("continue task"),
+            ChatMessage::assistant("resume-assistant-marker"),
+        ],
+        2,
+        &msg.channel,
+        &msg.chat_id,
+        &history_key,
+        TaskOrigin::new(source_key.clone(), Some("ops")),
+    );
+    crate::checkpoint::CheckpointManager::new(&runtime.paths.workspace())
+        .save(&checkpoint)
+        .unwrap();
+    let (tx, rx) = mpsc::channel(1);
+    let run = tokio::spawn(async move { runtime.run_loop(rx, None).await });
+    tx.send(msg).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !provider.calls.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("resume should reach provider");
+    let calls = provider.calls.lock().unwrap().clone();
+    assert!(calls
+        .iter()
+        .flatten()
+        .any(|message| message.content.as_str() == Some("resume-assistant-marker")));
+    assert!(sessions
+        .load(&history_key)
+        .unwrap()
+        .iter()
+        .any(|message| message.content.as_str() == Some("resume-assistant-marker")));
+    assert!(sessions.load(&source_key).unwrap().is_empty());
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn complete_origin_run_loop_records_account_and_runtime_owner() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(HangingStreamProvider {
+        started: started.clone(),
+        senders: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(provider);
+    runtime.set_agent_id(Some("ops".into()));
+    let manager = runtime.task_manager.clone();
+    let mut msg = test_main_session_inbound("telegram", "same-chat");
+    msg.account_id = Some("account-a".into());
+    let source_key = msg.session_key();
+    let (tx, rx) = mpsc::channel(1);
+    let run = tokio::spawn(async move { runtime.run_loop(rx, None).await });
+    tx.send(msg.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+
+    let tasks = manager
+        .list_tasks_for_origin(&TaskOrigin::new(source_key, Some("ops")), None)
+        .await;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].origin_account_id.as_deref(), Some("account-a"));
+    assert_eq!(tasks[0].agent_id.as_deref(), Some("ops"));
+    msg.account_id = Some("account-b".into());
+    assert!(manager
+        .list_tasks_for_origin(&TaskOrigin::new(msg.session_key(), Some("ops")), None)
+        .await
+        .is_empty());
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn complete_origin_runtime_cancel_rejects_foreign_source_and_is_idempotent() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(HangingStreamProvider {
+        started: started.clone(),
+        senders: Mutex::new(Vec::new()),
+    });
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    runtime.set_agent_id(Some("ops".into()));
+    let manager = runtime.task_manager.clone();
+    let mut owned = test_main_session_inbound("telegram", "same-chat");
+    owned.account_id = Some("account-a".into());
+    let (tx, rx) = mpsc::channel(4);
+    let run = tokio::spawn(async move { runtime.run_loop(rx, None).await });
+    tx.send(owned.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    let owned_id = manager
+        .list_tasks_for_origin(&TaskOrigin::new(owned.session_key(), Some("ops")), None)
+        .await[0]
+        .id
+        .clone();
+    let owned_sender = provider.senders.lock().unwrap()[0].clone();
+
+    let mut other_account = owned.clone();
+    other_account.account_id = Some("account-b".into());
+    let mut foreign_cancel = other_account.clone();
+    foreign_cancel.content = format!("[cancel:task_id={owned_id}]");
+    foreign_cancel.metadata = serde_json::json!({"source": "slash_command"});
+    tx.send(foreign_cancel).await.unwrap();
+    // A subsequent turn reaching the provider proves the preceding directive
+    // was consumed before we finish the original task.
+    tx.send(other_account.clone()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    let send_result = owned_sender
+        .send(StreamChunk::Done {
+            response: LLMResponse {
+                content: Some("original task survived".into()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                finish_reason: "stop".into(),
+                usage: serde_json::Value::Null,
+            },
+        })
+        .await;
+    assert!(
+        send_result.is_ok(),
+        "foreign slash source closed another account's task stream"
+    );
+    let final_status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let task = manager.get_task(&owned_id).await.unwrap();
+            if task.status != TaskStatus::Running {
+                break task.status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        final_status,
+        TaskStatus::Completed,
+        "foreign slash source aborted another account's task"
+    );
+
+    let other_id = manager
+        .list_tasks_for_origin(
+            &TaskOrigin::new(other_account.session_key(), Some("ops")),
+            None,
+        )
+        .await[0]
+        .id
+        .clone();
+    let other_sender = provider.senders.lock().unwrap()[1].clone();
+    // The real slash handler marks its owned task cancelled before forwarding.
+    manager.cancel_task(&other_id).await.unwrap();
+    other_account.content = format!("[cancel:task_id={other_id}]");
+    other_account.metadata = serde_json::json!({"source": "slash_command"});
+    tx.send(other_account.clone()).await.unwrap();
+    tx.send(other_account).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), other_sender.closed())
+        .await
+        .expect("owned runtime task should stop");
+    assert_eq!(
+        manager.get_task(&other_id).await.unwrap().status,
+        TaskStatus::Cancelled
+    );
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_no_background_tasks_adds_no_prompt_noise() {
     let task_manager = TaskManager::new();
     let mut messages = vec![
@@ -7178,7 +7594,12 @@ async fn test_no_background_tasks_adds_no_prompt_noise() {
         ChatMessage::user("continue"),
     ];
 
-    let injected_ids = inject_running_tasks_into_system_prompt(&mut messages, &task_manager).await;
+    let injected_ids = inject_running_tasks_into_system_prompt(
+        &mut messages,
+        &task_manager,
+        &TaskOrigin::new("cli:chat-1", None),
+    )
+    .await;
 
     assert!(injected_ids.is_empty());
     assert_eq!(messages.len(), 2);

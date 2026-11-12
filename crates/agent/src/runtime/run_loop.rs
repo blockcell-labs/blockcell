@@ -152,6 +152,13 @@ impl AgentRuntime {
                                     .and_then(|s| s.strip_suffix("]"))
                                     .unwrap_or("");
                                 if !task_id.is_empty() {
+                                    let origin = TaskOrigin::new(msg.session_key(), self.agent_id.as_deref());
+                                    if !self.task_manager.get_task(task_id).await
+                                        .is_some_and(|task| task.belongs_to_origin(&origin))
+                                    {
+                                        warn!(task_id = %task_id, "Ignoring cancel directive outside its source origin");
+                                        continue;
+                                    }
                                     // 1. 触发 AbortToken 取消（链式取消子任务）
                                     if let Some(token) = active_abort_tokens.remove(task_id) {
                                         token.cancel();
@@ -204,12 +211,11 @@ impl AgentRuntime {
                                     let checkpoint_manager = crate::checkpoint::CheckpointManager::new(&self.paths.workspace());
                                     match checkpoint_manager.load_for_origin(
                                         &task_id,
-                                        &msg.channel,
-                                        &msg.chat_id,
+                                        &TaskOrigin::new(msg.session_key(), self.agent_id.as_deref()),
                                     ) {
                                         Ok(Some(cp)) => {
                                             // 将 checkpoint 的对话历史注入到 session store
-                                            let session_key = msg.session_key();
+                                            let session_key = persist_session_key_for(&msg);
                                             // 使用 save 替换整个会话历史为 checkpoint 内容
                                             if let Err(e) = self.session_store.save(&session_key, &cp.messages) {
                                                 warn!(error = %e, "Failed to save resumed checkpoint to session store");
@@ -367,12 +373,14 @@ impl AgentRuntime {
                                 .map(str::to_string);
 
                             // 原子性地注册任务并标记为 Running（消除竞态窗口）
-                            task_manager.create_and_start_task(
+                            task_manager.create_and_start_task_with_route(
                                 &task_id,
                                 &label,
                                 &msg.content,
                                 &msg.channel,
                                 &msg.chat_id,
+                                msg.account_id.as_deref(),
+                                Some(&msg.session_key()),
                                 self.agent_id.as_deref(),
                                 false,
                                 None,   // agent_type

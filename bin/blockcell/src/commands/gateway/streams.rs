@@ -25,17 +25,31 @@ pub(super) async fn handle_stream_delete(
     State(state): State<GatewayState>,
     AxumPath(stream_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    match blockcell_tools::stream_subscribe::unsubscribe_stream(
-        &state.paths.workspace(),
+    let workspaces: Vec<_> = state
+        .config
+        .known_agent_ids()
+        .iter()
+        .map(|agent_id| state.paths.for_agent(agent_id).workspace())
+        .collect();
+    match blockcell_tools::stream_subscribe::unsubscribe_stream_in_workspaces(
+        &workspaces,
         &stream_id,
     )
     .await
     {
         Ok(data) => (StatusCode::OK, Json(data)),
-        Err(error) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": error.to_string()})),
-        ),
+        Err(error) => {
+            let status = match error {
+                blockcell_core::Error::Io(_) | blockcell_core::Error::Json(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+                _ => StatusCode::NOT_FOUND,
+            };
+            (
+                status,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 //! 定义斜杠命令执行所需的上下文信息。
 
 use blockcell_agent::{CheckpointManager, TaskManager};
-use blockcell_core::Paths;
+use blockcell_core::{InboundMessage, OutboundMessage, Paths};
 use std::sync::Arc;
 
 /// 命令来源
@@ -13,18 +13,34 @@ pub struct CommandSource {
     pub channel: String,
     /// 会话 ID
     pub chat_id: String,
+    pub account_id: Option<String>,
+    pub agent_id: Option<String>,
     /// 用户 ID (可选)
     #[allow(dead_code)] // TODO: 用于未来的权限检查
     pub sender_id: Option<String>,
 }
 
 impl CommandSource {
+    pub fn session_key(&self) -> String {
+        let mut message = InboundMessage::cli("");
+        message.channel = self.channel.clone();
+        message.chat_id = self.chat_id.clone();
+        message.account_id = self.account_id.clone();
+        message.session_key()
+    }
+
+    pub fn task_origin(&self) -> blockcell_agent::TaskOrigin {
+        blockcell_agent::TaskOrigin::new(self.session_key(), self.agent_id.as_deref())
+    }
+
     /// 创建 CLI 来源
     pub fn cli(chat_id: String) -> Self {
         Self {
             channel: "cli".to_string(),
             chat_id,
             sender_id: Some("user".to_string()),
+            account_id: None,
+            agent_id: None,
         }
     }
 
@@ -34,6 +50,8 @@ impl CommandSource {
             channel: "ws".to_string(),
             chat_id,
             sender_id: Some("user".to_string()),
+            account_id: None,
+            agent_id: None,
         }
     }
 
@@ -43,6 +61,8 @@ impl CommandSource {
             channel,
             chat_id,
             sender_id,
+            account_id: None,
+            agent_id: None,
         }
     }
 }
@@ -74,9 +94,32 @@ impl CommandContext {
                 channel: "cli".to_string(),
                 chat_id: "test-chat".to_string(),
                 sender_id: Some("test-user".to_string()),
+                ..Default::default()
             },
             ..Default::default()
         }
+    }
+
+    /// Build a gateway command context from its original incoming message.
+    pub fn for_gateway(
+        paths: Paths,
+        task_manager: TaskManager,
+        message: &InboundMessage,
+        agent_id: &str,
+    ) -> Self {
+        let paths = paths.for_agent(agent_id);
+        let checkpoint_manager = CheckpointManager::new(&paths.workspace());
+        let mut context = Self::for_channel(
+            paths,
+            task_manager,
+            checkpoint_manager,
+            message.channel.clone(),
+            message.chat_id.clone(),
+            Some(message.sender_id.clone()),
+        );
+        context.source.account_id = message.account_id.clone();
+        context.source.agent_id = Some(agent_id.to_string());
+        context
     }
 
     /// 创建 CLI 上下文
@@ -85,12 +128,15 @@ impl CommandContext {
         task_manager: TaskManager,
         checkpoint_manager: CheckpointManager,
         chat_id: String,
+        agent_id: String,
     ) -> Self {
+        let mut source = CommandSource::cli(chat_id);
+        source.agent_id = Some(agent_id);
         Self {
             paths,
             task_manager: Some(task_manager),
             checkpoint_manager: Some(checkpoint_manager),
-            source: CommandSource::cli(chat_id),
+            source,
             session_clear_callback: None,
         }
     }
@@ -99,16 +145,13 @@ impl CommandContext {
     pub fn for_websocket(
         paths: Paths,
         task_manager: TaskManager,
-        checkpoint_manager: CheckpointManager,
         chat_id: String,
+        agent_id: &str,
     ) -> Self {
-        Self {
-            paths,
-            task_manager: Some(task_manager),
-            checkpoint_manager: Some(checkpoint_manager),
-            source: CommandSource::websocket(chat_id),
-            session_clear_callback: None,
-        }
+        let mut message = InboundMessage::cli("");
+        message.channel = "ws".to_string();
+        message.chat_id = chat_id;
+        Self::for_gateway(paths, task_manager, &message, agent_id)
     }
 
     /// 创建 Channel 上下文
@@ -202,6 +245,144 @@ impl CommandResponse {
         Self {
             content,
             is_markdown: true,
+        }
+    }
+}
+
+/// Construct every immediate channel command response through the same route.
+pub fn reply_to_source(message: &InboundMessage, content: &str) -> OutboundMessage {
+    let mut reply = OutboundMessage::new(&message.channel, &message.chat_id, content);
+    reply.account_id = message.account_id.clone();
+    reply
+}
+
+#[cfg(test)]
+mod origin_regression_tests {
+    use super::*;
+    use crate::commands::slash_commands::{handlers::ClearCommand, SlashCommand};
+    use blockcell_storage::SessionStore;
+
+    #[tokio::test]
+    async fn gateway_clear_preserves_other_agents_and_accounts() {
+        struct TemporaryDirectory(std::path::PathBuf);
+        impl Drop for TemporaryDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = TemporaryDirectory(
+            std::env::temp_dir().join(format!("blockcell-slash-origin-{}", uuid::Uuid::new_v4())),
+        );
+        let paths = Paths::with_base(temp.0.clone());
+        for (channel, account) in [("ws", None), ("telegram", Some("bot-b"))] {
+            let mut message = InboundMessage::cli("/clear");
+            message.channel = channel.into();
+            message.chat_id = "review-clear".into();
+            message.account_id = account.map(str::to_owned);
+            let key = message.session_key();
+            let default_store = SessionStore::new(paths.clone());
+            let selected_store = SessionStore::new(paths.for_agent("ops"));
+            default_store
+                .append(
+                    &key,
+                    &blockcell_core::types::ChatMessage::user("default sentinel"),
+                )
+                .unwrap();
+            selected_store
+                .append(
+                    &key,
+                    &blockcell_core::types::ChatMessage::user("selected history"),
+                )
+                .unwrap();
+            let mut other = message.clone();
+            other.account_id = Some("bot-a".into());
+            let other_key = other.session_key();
+            selected_store
+                .append(
+                    &other_key,
+                    &blockcell_core::types::ChatMessage::user("other account"),
+                )
+                .unwrap();
+            for scoped in [paths.clone(), paths.for_agent("ops")] {
+                let session_dir = scoped
+                    .workspace()
+                    .join("sessions")
+                    .join(blockcell_core::session_file_stem(&key));
+                std::fs::create_dir_all(session_dir.join("tool-results")).unwrap();
+                std::fs::write(session_dir.join("memory.md"), "memory sentinel").unwrap();
+                std::fs::write(session_dir.join("tool-results/result.txt"), "tool sentinel")
+                    .unwrap();
+                let events = scoped.session_events_file(&key);
+                std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+                std::fs::write(events, "event sentinel").unwrap();
+            }
+            let ctx =
+                CommandContext::for_gateway(paths.clone(), TaskManager::new(), &message, "ops");
+            ClearCommand.execute("", &ctx).await;
+            assert_eq!(
+                default_store.load(&key).unwrap().len(),
+                1,
+                "other agent history must survive"
+            );
+            assert!(
+                selected_store.load(&key).unwrap().is_empty(),
+                "selected history must be cleared"
+            );
+            assert_eq!(
+                selected_store.load(&other_key).unwrap().len(),
+                1,
+                "other account must survive"
+            );
+            for (scoped, preserved) in [(paths.clone(), true), (paths.for_agent("ops"), false)] {
+                let session_dir = scoped
+                    .workspace()
+                    .join("sessions")
+                    .join(blockcell_core::session_file_stem(&key));
+                assert_eq!(session_dir.join("memory.md").exists(), preserved);
+                assert_eq!(
+                    session_dir.join("tool-results/result.txt").exists(),
+                    preserved
+                );
+                assert_eq!(scoped.session_events_file(&key).exists(), preserved);
+            }
+        }
+    }
+
+    #[test]
+    fn cli_command_origin_keeps_agent_and_complete_chat_id() {
+        let base =
+            std::env::temp_dir().join(format!("blockcell-cli-origin-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_base(base.clone()).for_agent("ops");
+        let checkpoint = CheckpointManager::new(&paths.workspace());
+        let context = CommandContext::for_cli(
+            paths,
+            TaskManager::new(),
+            checkpoint,
+            "a:b".into(),
+            "ops".into(),
+        );
+        assert_eq!(
+            context.source.task_origin(),
+            blockcell_agent::TaskOrigin::new("cli:a:b", Some("ops"))
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn immediate_command_replies_keep_the_incoming_account() {
+        let mut message = InboundMessage::cli("/help");
+        message.channel = "telegram".into();
+        message.account_id = Some("bot-b".into());
+        for content in [
+            "help",
+            "permission denied",
+            "command error",
+            "unsupported command",
+        ] {
+            let reply = reply_to_source(&message, content);
+            assert_eq!(reply.account_id, message.account_id);
+            assert_eq!(reply.channel, message.channel);
+            assert_eq!(reply.chat_id, message.chat_id);
         }
     }
 }

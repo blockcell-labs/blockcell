@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tracing;
 
+use crate::task_manager::TaskOrigin;
+
 const CHECKPOINT_LOCK_STRIPES: usize = 64;
 static CHECKPOINT_LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();
 
@@ -48,9 +50,16 @@ pub struct TaskCheckpoint {
     /// Exact session key whose history is stored in this checkpoint.
     #[serde(default)]
     pub session_key: String,
+    /// Complete source identity. Legacy checkpoints without it are not resumable
+    /// through conversation-scoped APIs.
+    #[serde(default)]
+    pub origin: Option<TaskOrigin>,
 }
 
 impl TaskCheckpoint {
+    /// Creates a new checkpoint for the default agent on an accountless source.
+    /// `session_key` identifies history storage. Account or named-agent callers
+    /// must use `new_for_task_origin` with the complete source identity.
     pub fn new_for_origin(
         task_id: impl Into<String>,
         messages: Vec<ChatMessage>,
@@ -59,23 +68,53 @@ impl TaskCheckpoint {
         origin_chat_id: impl Into<String>,
         session_key: impl Into<String>,
     ) -> Self {
+        let origin_channel = origin_channel.into();
+        let origin_chat_id = origin_chat_id.into();
+        let origin = if origin_channel.trim().is_empty() || origin_chat_id.trim().is_empty() {
+            None
+        } else {
+            Some(TaskOrigin::new(
+                blockcell_core::session_key::build_session_key(&origin_channel, &origin_chat_id),
+                None,
+            ))
+        };
         Self {
             task_id: task_id.into(),
             messages,
             turn,
             created_at: Utc::now(),
             completed: false,
-            origin_channel: origin_channel.into(),
-            origin_chat_id: origin_chat_id.into(),
+            origin_channel,
+            origin_chat_id,
             session_key: session_key.into(),
+            origin,
         }
     }
 
-    pub fn belongs_to_origin(&self, channel: &str, chat_id: &str) -> bool {
-        !self.origin_channel.is_empty()
-            && !self.origin_chat_id.is_empty()
-            && self.origin_channel == channel
-            && self.origin_chat_id == chat_id
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_task_origin(
+        task_id: impl Into<String>,
+        messages: Vec<ChatMessage>,
+        turn: u32,
+        origin_channel: impl Into<String>,
+        origin_chat_id: impl Into<String>,
+        history_session_key: impl Into<String>,
+        origin: TaskOrigin,
+    ) -> Self {
+        let mut checkpoint = Self::new_for_origin(
+            task_id,
+            messages,
+            turn,
+            origin_channel,
+            origin_chat_id,
+            history_session_key,
+        );
+        checkpoint.origin = Some(origin);
+        checkpoint
+    }
+
+    pub fn belongs_to_origin(&self, origin: &TaskOrigin) -> bool {
+        origin.is_valid() && self.origin.as_ref() == Some(origin)
     }
 }
 
@@ -181,17 +220,23 @@ impl CheckpointManager {
     pub fn load_for_origin(
         &self,
         task_id: &str,
-        channel: &str,
-        chat_id: &str,
+        origin: &TaskOrigin,
     ) -> Result<Option<TaskCheckpoint>, String> {
         Ok(self
             .load(task_id)?
-            .filter(|checkpoint| checkpoint.belongs_to_origin(channel, chat_id)))
+            .filter(|checkpoint| checkpoint.belongs_to_origin(origin)))
     }
 
     /// 查找所有未完成的 checkpoint（可恢复的任务）
     /// 最多返回 MAX_FIND_UNFINISHED 条，防止磁盘上有大量文件时 OOM
     pub fn find_unfinished(&self) -> Vec<TaskCheckpoint> {
+        self.find_unfinished_matching(|_| true)
+    }
+
+    fn find_unfinished_matching(
+        &self,
+        matches: impl Fn(&TaskCheckpoint) -> bool,
+    ) -> Vec<TaskCheckpoint> {
         const MAX_FIND_UNFINISHED: usize = 100;
         if !self.checkpoint_dir.exists() {
             return Vec::new();
@@ -212,7 +257,7 @@ impl CheckpointManager {
 
             match fs::read_to_string(&path) {
                 Ok(json) => match serde_json::from_str::<TaskCheckpoint>(&json) {
-                    Ok(cp) if !cp.completed => {
+                    Ok(cp) if !cp.completed && matches(&cp) => {
                         result.push(cp);
                         // 不在循环内排序截断，循环结束后统一处理
                     }
@@ -241,15 +286,30 @@ impl CheckpointManager {
         result
     }
 
-    pub fn find_unfinished_for_origin(&self, channel: &str, chat_id: &str) -> Vec<TaskCheckpoint> {
-        self.find_unfinished()
-            .into_iter()
-            .filter(|checkpoint| checkpoint.belongs_to_origin(channel, chat_id))
-            .collect()
+    pub fn find_unfinished_for_origin(&self, origin: &TaskOrigin) -> Vec<TaskCheckpoint> {
+        self.find_unfinished_matching(|checkpoint| checkpoint.belongs_to_origin(origin))
     }
 
     /// 标记 checkpoint 为已完成
     pub fn mark_completed(&self, task_id: &str) -> Result<(), String> {
+        self.mark_completed_matching(task_id, |_| true).map(|_| ())
+    }
+
+    /// Mark a checkpoint complete only if its immutable source identity matches.
+    /// The check and mutation share the same file lock.
+    pub fn mark_completed_for_origin(
+        &self,
+        task_id: &str,
+        origin: &TaskOrigin,
+    ) -> Result<bool, String> {
+        self.mark_completed_matching(task_id, |checkpoint| checkpoint.belongs_to_origin(origin))
+    }
+
+    fn mark_completed_matching(
+        &self,
+        task_id: &str,
+        matches: impl Fn(&TaskCheckpoint) -> bool,
+    ) -> Result<bool, String> {
         Self::validate_task_id(task_id)?;
         let file_path = self.checkpoint_dir.join(format!("{}.json", task_id));
         let file_lock = checkpoint_lock(&file_path);
@@ -257,14 +317,18 @@ impl CheckpointManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(mut checkpoint) = Self::load_file(&file_path)? {
+            if !matches(&checkpoint) {
+                return Ok(false);
+            }
             checkpoint.completed = true;
             let json = serde_json::to_string_pretty(&checkpoint)
                 .map_err(|e| format!("序列化 checkpoint 失败: {}", e))?;
             crate::fs_util::atomic_write(&file_path, json.as_bytes()).map_err(|e| {
                 format!("原子写入 checkpoint 失败 ({}): {}", file_path.display(), e)
             })?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// 删除指定任务的 checkpoint
@@ -346,6 +410,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
 
         manager.save(&checkpoint).unwrap();
@@ -372,6 +437,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
         let cp2 = TaskCheckpoint {
             task_id: "task-2".to_string(),
@@ -382,6 +448,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
 
         manager.save(&cp1).unwrap();
@@ -408,6 +475,7 @@ mod tests {
                 origin_channel: String::new(),
                 origin_chat_id: String::new(),
                 session_key: String::new(),
+                origin: None,
             };
             manager.save(&checkpoint).unwrap();
         }
@@ -432,6 +500,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
 
         manager.save(&checkpoint).unwrap();
@@ -459,6 +528,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
         let cp2 = TaskCheckpoint {
             task_id: "active-1".to_string(),
@@ -469,6 +539,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
 
         manager.save(&cp1).unwrap();
@@ -512,6 +583,7 @@ mod tests {
             origin_channel: String::new(),
             origin_chat_id: String::new(),
             session_key: String::new(),
+            origin: None,
         };
 
         manager.save(&checkpoint).unwrap();
@@ -542,13 +614,121 @@ mod tests {
         manager.save(&checkpoint).unwrap();
 
         assert!(manager
-            .load_for_origin("task-owned", "ws", "chat-b")
+            .load_for_origin("task-owned", &TaskOrigin::new("ws:chat-b", None))
             .unwrap()
             .is_none());
-        assert_eq!(manager.find_unfinished_for_origin("ws", "chat-a").len(), 1);
+        assert_eq!(
+            manager
+                .find_unfinished_for_origin(&TaskOrigin::new("ws:chat-a", None))
+                .len(),
+            1
+        );
         assert!(manager
-            .find_unfinished_for_origin("ws", "chat-b")
+            .find_unfinished_for_origin(&TaskOrigin::new("ws:chat-b", None))
             .is_empty());
+    }
+
+    #[test]
+    fn complete_origin_checkpoint_scope_rejects_same_chat_other_account() {
+        let dir = TempDir::new().unwrap();
+        let manager = CheckpointManager::new(dir.path());
+        let checkpoint = TaskCheckpoint::new_for_task_origin(
+            "task-account-a",
+            vec![make_message("user", "private marker")],
+            1,
+            "telegram",
+            "same-chat",
+            "cli:history-target",
+            TaskOrigin::new("telegram:account-a:same-chat", None),
+        );
+        manager.save(&checkpoint).unwrap();
+        assert!(manager
+            .load_for_origin(
+                "task-account-a",
+                &TaskOrigin::new("telegram:account-b:same-chat", None)
+            )
+            .unwrap()
+            .is_none());
+        assert!(manager
+            .load_for_origin(
+                "task-account-a",
+                &TaskOrigin::new("telegram:account-a:same-chat", Some("ops"))
+            )
+            .unwrap()
+            .is_none());
+        assert!(manager
+            .load_for_origin(
+                "task-account-a",
+                &TaskOrigin::new("cli:history-target", None)
+            )
+            .unwrap()
+            .is_none());
+        let owned = manager
+            .load_for_origin(
+                "task-account-a",
+                &TaskOrigin::new("telegram:account-a:same-chat", Some("default")),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(owned.session_key, "cli:history-target");
+        assert_eq!(
+            manager
+                .find_unfinished_for_origin(&TaskOrigin::new("telegram:account-a:same-chat", None))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn complete_origin_legacy_checkpoint_does_not_inherit_channel_scope() {
+        let dir = TempDir::new().unwrap();
+        let manager = CheckpointManager::new(dir.path());
+        let checkpoint = TaskCheckpoint::new_for_origin(
+            "legacy",
+            vec![make_message("user", "private")],
+            1,
+            "cli",
+            "chat",
+            "cli:chat",
+        );
+        manager.save(&checkpoint).unwrap();
+        let path = manager.checkpoint_dir.join("legacy.json");
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        value.as_object_mut().unwrap().remove("origin");
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(manager.load("legacy").unwrap().is_some());
+        let origin = TaskOrigin::new("cli:chat", None);
+        assert!(manager
+            .load_for_origin("legacy", &origin)
+            .unwrap()
+            .is_none());
+        assert!(manager.find_unfinished_for_origin(&origin).is_empty());
+        assert!(manager
+            .load_for_origin("legacy", &TaskOrigin::new("", None))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn complete_origin_checkpoint_limit_applies_after_scope_filter() {
+        let dir = TempDir::new().unwrap();
+        let manager = CheckpointManager::new(dir.path());
+        let owned = TaskCheckpoint::new_for_origin("owned", vec![], 1, "cli", "owned", "cli:owned");
+        manager.save(&owned).unwrap();
+        for i in 0..101 {
+            let foreign = TaskCheckpoint::new_for_origin(
+                format!("foreign-{i}"),
+                vec![],
+                1,
+                "cli",
+                "foreign",
+                "cli:foreign",
+            );
+            manager.save(&foreign).unwrap();
+        }
+        let scoped = manager.find_unfinished_for_origin(&TaskOrigin::new("cli:owned", None));
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].task_id, "owned");
     }
 
     #[test]

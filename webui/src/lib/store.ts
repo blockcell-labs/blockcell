@@ -3,10 +3,6 @@ import type { SessionInfo, ChatMsg } from './api';
 import type { WsEvent, ConnectionState, DisconnectReason } from './ws';
 import { notifyAlertTriggered, notifySystemEvent } from './notifications';
 
-function normalizeSessionId(id: string) {
-  return id.replace(/:/g, '_');
-}
-
 function looksLikeReminderMessage(content?: string) {
   if (!content) return false;
   return content.startsWith('⏰') || content.includes('提醒') || content.includes('该起床了');
@@ -87,7 +83,7 @@ function deriveSessionNameFromMessages(messages: UiMessage[]) {
 
 function isFallbackSessionName(name: string | undefined, sessionIds: string[]) {
   if (!name) return true;
-  return sessionIds.some((sessionId) => sessionId && normalizeSessionId(name) === normalizeSessionId(sessionId));
+  return sessionIds.some((sessionId) => sessionId && name === sessionId);
 }
 
 function ensureSessionExists(state: ChatState, sessionId: string): SessionInfo[] {
@@ -106,15 +102,16 @@ function ensureSessionExists(state: ChatState, sessionId: string): SessionInfo[]
   ];
 }
 
-function promoteSession(state: ChatState, sessionId: string, name?: string): SessionInfo[] {
+function promoteSession(state: ChatState, sessionId: string, name?: string, identity?: Partial<SessionInfo>): SessionInfo[] {
   const existing = state.sessions.find((s) => s.id === sessionId);
   const next: SessionInfo = existing
-    ? { ...existing, name: name || existing.name, updated_at: new Date().toISOString() }
+    ? { ...existing, ...identity, name: name || existing.name, updated_at: new Date().toISOString() }
     : {
         id: sessionId,
         name: name || sessionId,
         message_count: 0,
         updated_at: new Date().toISOString(),
+        ...identity,
       };
 
   return [next, ...state.sessions.filter((s) => s.id !== sessionId)];
@@ -159,6 +156,7 @@ export interface ReminderAlertItem {
 interface ChatState {
   sessions: SessionInfo[];
   currentSessionId: string;
+  currentSessionScope?: SessionInfo;
   messages: UiMessage[];
   isConnected: boolean;
   isLoading: boolean;
@@ -167,6 +165,7 @@ interface ChatState {
 
   setSessions: (sessions: SessionInfo[]) => void;
   setCurrentSession: (id: string) => void;
+  getCurrentChatId: () => string | undefined;
   setMessages: (messages: UiMessage[]) => void;
   addMessage: (msg: UiMessage) => void;
   updateLastAssistantMessage: (fn: (msg: UiMessage) => UiMessage) => void;
@@ -189,6 +188,30 @@ function resolveInitialSessionId(agentId: string): string {
   return saved || '';
 }
 
+function selectedAgentId(): string {
+  return typeof window === 'undefined' ? 'default' : (localStorage.getItem('blockcell_selected_agent') || 'default');
+}
+
+function currentEventChatId(state: ChatState): string | undefined {
+  return currentSessionScope(state)?.chat_id
+    ?? (state.currentSessionId.startsWith('sid~') ? undefined : state.currentSessionId);
+}
+
+function currentSessionScope(state: ChatState): SessionInfo | undefined {
+  return state.sessions.find((session) => session.id === state.currentSessionId)
+    ?? (state.currentSessionScope?.id === state.currentSessionId ? state.currentSessionScope : undefined);
+}
+
+function eventMatchesCurrentSession(state: ChatState, event: WsEvent, agentId: string): boolean {
+  const session = currentSessionScope(state);
+  return !!event.chat_id
+    && event.chat_id === currentEventChatId(state)
+    && (event.agent_id || 'default') === agentId
+    && (!session?.agent_id || session.agent_id === agentId)
+    && (event.channel || 'ws') === (session?.channel || 'ws')
+    && event.account_id === session?.account_id;
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionId: resolveInitialSessionId(
@@ -200,7 +223,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingFocusSessionId: undefined,
   pendingFocusText: undefined,
 
-  setSessions: (sessions) => set({ sessions }),
+  setSessions: (sessions) => set((state) => {
+    const current = sessions.find((session) => session.id === state.currentSessionId);
+    if (!state.currentSessionId || current) {
+      return { sessions, currentSessionScope: current };
+    }
+    const compatible = sessions.filter((session) => session.legacy_id === state.currentSessionId);
+    if (compatible.length !== 1) return { sessions };
+    const id = compatible[0].id;
+    if (typeof window !== 'undefined') localStorage.setItem(sessionStorageKey(selectedAgentId()), id);
+    return { sessions, currentSessionId: id, currentSessionScope: compatible[0] };
+  }),
   setCurrentSession: (id) => {
     if (typeof window !== 'undefined') {
       const agentId = localStorage.getItem('blockcell_selected_agent') || 'default';
@@ -210,7 +243,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         localStorage.removeItem(sessionStorageKey(agentId));
       }
     }
-    set({ currentSessionId: id, messages: [] });
+    set({ currentSessionId: id, currentSessionScope: get().sessions.find((session) => session.id === id), messages: [], isLoading: false });
+  },
+  getCurrentChatId: () => {
+    const state = get();
+    const session = currentSessionScope(state);
+    if (!session || session.channel !== 'ws' || session.account_id
+        || (session.agent_id && session.agent_id !== selectedAgentId())) return undefined;
+    return session.chat_id;
   },
   setMessages: (messages) => set({ messages }),
   addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
@@ -232,23 +272,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleWsEvent: (event) => {
     const state = get();
-    const selectedAgentId = typeof window === 'undefined'
-      ? 'default'
-      : (localStorage.getItem('blockcell_selected_agent') || 'default');
+    const agentId = selectedAgentId();
 
     if (event.type === 'message_done' && event.chat_id) {
-      if (event.agent_id && event.agent_id !== selectedAgentId) {
+      if ((event.agent_id || 'default') !== agentId || (event.channel || 'ws') !== 'ws') {
         return;
       }
 
-      const normalizedEventChatId = normalizeSessionId(event.chat_id);
-      const normalizedCurrentSessionId = normalizeSessionId(state.currentSessionId);
-      if (normalizedEventChatId !== normalizedCurrentSessionId) {
+      if (!eventMatchesCurrentSession(state, event, agentId)) {
         if ((isCronBackgroundDelivery(event) || looksLikeBackgroundDeliveryMessage(event.content)) && isValidReminderSessionId(event.chat_id)) {
+          const sessionId = event.session_id || state.sessions.find((session) =>
+            session.chat_id === event.chat_id && session.channel === 'ws'
+            && (!session.agent_id || session.agent_id === agentId)
+            && session.account_id === event.account_id)?.id;
+          if (!sessionId) return;
+          set((innerState) => ({ sessions: promoteSession(innerState, sessionId, undefined, {
+            channel: 'ws', chat_id: event.chat_id, agent_id: agentId, account_id: event.account_id,
+          }) }));
           useReminderAlertsStore.getState().pushAlert({
             id: `reminder-${event.chat_id}-${Date.now()}`,
-            sessionId: normalizedEventChatId,
-            agentId: selectedAgentId,
+            sessionId,
+            agentId,
             preview: buildReminderPreview(event.content),
             content: event.content || '点击查看提醒',
             timestamp: Date.now(),
@@ -260,57 +304,64 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Filter chat-specific events by both agent_id and chat_id to prevent
     // cross-agent and cross-session leaking.
-    const chatEventTypes: string[] = ['message_done', 'token', 'tool_call_start', 'tool_call_result', 'thinking'];
-    if (chatEventTypes.includes(event.type) && event.chat_id) {
-      if (event.agent_id && event.agent_id !== selectedAgentId) {
-        return;
-      }
-      if (normalizeSessionId(event.chat_id) !== normalizeSessionId(state.currentSessionId)) {
-        return; // Event belongs to a different chat session — ignore
-      }
+    const chatEventTypes: string[] = ['message_done', 'token', 'tool_call_start', 'tool_call_result', 'thinking', 'stream_reset', 'error'];
+    if (event.type === 'error' && !event.chat_id) {
+      useSystemEventsStore.getState().addEvent({
+        id: nextMsgId(), kind: 'notification', priority: 'Normal',
+        title: 'Connection error', body: event.message || '', timestamp: Date.now(), agentId: event.agent_id,
+      });
+      return;
+    }
+    if (chatEventTypes.includes(event.type) && !eventMatchesCurrentSession(state, event, agentId)) {
+      return;
     }
 
     switch (event.type) {
       case 'session_bound': {
-        if (!event.chat_id) {
+        if (!event.chat_id || !event.session_id) {
           break;
         }
-        if (event.agent_id && event.agent_id !== selectedAgentId) {
+        if ((event.agent_id || 'default') !== agentId || (event.channel || 'ws') !== 'ws' || event.account_id) {
           break;
         }
 
-        const normalizedRealId = normalizeSessionId(event.chat_id);
-        const normalizedClientId = normalizeSessionId(event.client_chat_id || '');
+        const realId = event.session_id;
+        const clientChatId = event.client_chat_id || '';
 
         set((innerState) => {
-          const existingClientSession = normalizedClientId
-            ? innerState.sessions.find((s) => s.id === normalizedClientId)
+          const existingClientSession = clientChatId
+            ? innerState.sessions.find((s) => s.chat_id === clientChatId && s.channel === 'ws'
+              && !s.account_id && (!s.agent_id || s.agent_id === agentId))
             : undefined;
-          const existingRealSession = innerState.sessions.find((s) => s.id === normalizedRealId);
+          const existingRealSession = innerState.sessions.find((s) => s.id === realId);
+          const currentScope = currentSessionScope(innerState);
+          const shouldSwitchCurrent = currentEventChatId(innerState) === clientChatId
+            && (currentScope?.channel || 'ws') === 'ws'
+            && !currentScope?.account_id
+            && (!currentScope?.agent_id || currentScope.agent_id === agentId);
           const preferredName = (() => {
             const existingName = existingClientSession?.name || existingRealSession?.name;
-            if (!isFallbackSessionName(existingName, [normalizedClientId, normalizedRealId])) {
+            if (!isFallbackSessionName(existingName, [clientChatId, realId, event.chat_id!])) {
               return existingName;
             }
-            return deriveSessionNameFromMessages(innerState.messages);
+            return shouldSwitchCurrent ? deriveSessionNameFromMessages(innerState.messages) : undefined;
           })();
-          const sessionsWithoutClient = normalizedClientId
-            ? innerState.sessions.filter((s) => s.id !== normalizedClientId && s.id !== normalizedRealId)
-            : innerState.sessions.filter((s) => s.id !== normalizedRealId);
+          const sessionsWithoutClient = innerState.sessions.filter((s) => s.id !== existingClientSession?.id && s.id !== realId);
 
           const promoted = promoteSession(
             { ...innerState, sessions: sessionsWithoutClient },
-            normalizedRealId,
+            realId,
             preferredName,
+            { channel: 'ws', chat_id: event.chat_id, agent_id: agentId },
           );
-          const shouldSwitchCurrent =
-            !innerState.currentSessionId
-            || !normalizedClientId
-            || normalizeSessionId(innerState.currentSessionId) === normalizedClientId;
+          if (shouldSwitchCurrent && typeof window !== 'undefined') {
+            localStorage.setItem(sessionStorageKey(agentId), realId);
+          }
 
           return {
             sessions: promoted,
-            currentSessionId: shouldSwitchCurrent ? normalizedRealId : innerState.currentSessionId,
+            currentSessionId: shouldSwitchCurrent ? realId : innerState.currentSessionId,
+            currentSessionScope: shouldSwitchCurrent ? promoted[0] : innerState.currentSessionScope,
           };
         });
         break;
@@ -318,14 +369,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case 'session_renamed': {
         if (event.chat_id && event.name) {
-          if (event.agent_id && event.agent_id !== selectedAgentId) {
+          if ((event.agent_id || 'default') !== agentId || (event.channel || 'ws') !== 'ws') {
             break;
           }
-          const normalizedId = normalizeSessionId(event.chat_id);
-          
+          const sessionId = event.session_id || state.sessions.find((session) =>
+            session.chat_id === event.chat_id && session.channel === 'ws'
+            && (!session.agent_id || session.agent_id === agentId)
+            && session.account_id === event.account_id)?.id;
+          if (!sessionId) break;
           set((state) => {
             return {
-              sessions: promoteSession(state, normalizedId, event.name!),
+              sessions: promoteSession(state, sessionId, event.name!),
             };
           });
         }

@@ -260,6 +260,22 @@ fn token_from_websocket_protocol(header: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn with_ws_session_handle(event: String) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event) else {
+        return event;
+    };
+    if value.get("channel").and_then(serde_json::Value::as_str) != Some("ws") {
+        return event;
+    }
+    let Some(chat_id) = value.get("chat_id").and_then(serde_json::Value::as_str) else {
+        return event;
+    };
+    let key = blockcell_core::session_key::build_session_key("ws", chat_id);
+    value["session_id"] =
+        blockcell_core::session_id_from_file_stem(&blockcell_core::session_file_stem(&key)).into();
+    value.to_string()
+}
+
 pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState) {
     info!("WebSocket client connected");
 
@@ -284,7 +300,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                         direct_open = false;
                         continue;
                     };
-                    if ws_sender.send(WsMessage::Text(msg)).await.is_err() {
+                    if ws_sender.send(WsMessage::Text(with_ws_session_handle(msg))).await.is_err() {
                         break;
                     }
                 }
@@ -299,7 +315,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                     if !visible {
                         continue;
                     }
-                    if ws_sender.send(WsMessage::Text(msg)).await.is_err() {
+                    if ws_sender.send(WsMessage::Text(with_ws_session_handle(msg))).await.is_err() {
                         break;
                     }
                 }
@@ -420,8 +436,8 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                 let ctx = CommandContext::for_websocket(
                                     state.paths.clone(),
                                     state.task_manager.clone(),
-                                    state.checkpoint_manager.clone(),
                                     chat_id.clone(),
+                                    &resolved_agent_id,
                                 )
                                 .with_clear_callback(
                                     super::create_session_clear_callback(
@@ -548,7 +564,12 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
 
                             if let Err(e) = inbound_tx.send(inbound).await {
                                 let _ = ws_broadcast.send(
-                                    WsEvent::error(chat_id.clone(), format!("{}", e)).to_json(),
+                                    WsEvent::error(
+                                        resolved_agent_id.clone(),
+                                        chat_id.clone(),
+                                        format!("{}", e),
+                                    )
+                                    .to_json(),
                                 );
                                 break;
                             }
@@ -630,9 +651,13 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                 None => inbound,
                             };
 
+                            let event_agent_id = resolve_runtime_agent_id(&state.config, &inbound)
+                                .unwrap_or_else(|| "default".to_string());
                             if let Err(e) = inbound_tx.send(inbound).await {
-                                let _ = ws_broadcast
-                                    .send(WsEvent::error(chat_id, format!("{}", e)).to_json());
+                                let _ = ws_broadcast.send(
+                                    WsEvent::error(event_agent_id, chat_id, format!("{}", e))
+                                        .to_json(),
+                                );
                             }
                         }
                         _ => {
@@ -694,6 +719,37 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn websocket_errors_preserve_the_requested_agent_scope() {
+        let event = super::WsEvent::error("ops", "chat-1", "runtime unavailable").to_json();
+        let subscriptions = std::collections::HashSet::from([super::WsSessionScope {
+            agent_id: "ops".into(),
+            chat_id: "chat-1".into(),
+        }]);
+        assert!(super::ws_event_visible_to_connection(
+            &subscriptions,
+            "connection",
+            &event
+        ));
+        let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(event["agent_id"], "ops");
+    }
+
+    #[test]
+    fn ws_session_events_include_a_lossless_api_handle() {
+        let event = super::with_ws_session_handle(
+            serde_json::json!({
+                "type": "message_done", "channel": "ws", "chat_id": "a_b", "agent_id": "ops"
+            })
+            .to_string(),
+        );
+        let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(event["chat_id"], "a_b");
+        let expected =
+            blockcell_core::session_id_from_file_stem(&blockcell_core::session_file_stem("ws:a_b"));
+        assert_eq!(event["session_id"], expected);
+    }
+
     use super::*;
 
     #[test]

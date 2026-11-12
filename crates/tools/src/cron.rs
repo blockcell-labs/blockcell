@@ -37,6 +37,7 @@ fn execute_cron_action_with_paths(
     origin_channel: &str,
     origin_chat_id: &str,
     default_timezone: Option<&str>,
+    origin_account_id: Option<&str>,
 ) -> Result<Value> {
     let _store_lock = if matches!(action, "add" | "remove") {
         Some(ExclusiveFileLock::acquire(&paths.cron_jobs_lock_file())?)
@@ -184,6 +185,9 @@ fn execute_cron_action_with_paths(
                 "channel": origin_channel,
                 "to": origin_chat_id
             });
+            if let Some(account_id) = origin_account_id {
+                payload["accountId"] = json!(account_id);
+            }
             if let Some(kind) = script_kind {
                 payload["scriptKind"] = json!(kind);
             }
@@ -475,6 +479,7 @@ impl Tool for CronTool {
             .to_string();
         let origin_channel = ctx.channel.clone();
         let origin_chat_id = ctx.chat_id.clone();
+        let origin_account_id = ctx.account_id.clone();
         let default_timezone = ctx.config.default_timezone.clone();
         // 使用 base + workspace 重建 Paths，保留 workspace override。
         // 若只用 with_base，自定义 workspace 时 skills_dir() 会指向错误的默认路径，
@@ -488,6 +493,7 @@ impl Tool for CronTool {
                 &origin_channel,
                 &origin_chat_id,
                 default_timezone.as_deref(),
+                origin_account_id.as_deref(),
             )
         })
         .await
@@ -499,6 +505,62 @@ impl Tool for CronTool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn r2_cron_tool_persists_source_account_for_same_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::with_base(dir.path().to_path_buf());
+        for account in [Some("bot-a"), Some("bot-b"), None] {
+            let ctx = ToolContext {
+                workspace: paths.workspace(),
+                sandbox_writable_roots: None,
+                base: paths.base.clone(),
+                builtin_skills_dir: None,
+                active_skill_dir: None,
+                session_key: "test".into(),
+                channel: "telegram".into(),
+                account_id: account.map(str::to_string),
+                sender_id: Some("user".into()),
+                sender_role: None,
+                chat_id: "same-chat".into(),
+                config: blockcell_core::Config::default(),
+                permissions: blockcell_core::types::PermissionSet::new(),
+                task_manager: None,
+                memory_store: None,
+                memory_file_store: None,
+                ghost_memory_lifecycle: None,
+                skill_file_store: None,
+                session_search: None,
+                outbound_tx: None,
+                spawn_handle: None,
+                capability_registry: None,
+                core_evolution: None,
+                event_emitter: None,
+                channel_contacts_file: None,
+                response_cache: None,
+                runtime_handle: None,
+                agent_identity: None,
+                skill_mutex: None,
+                agent_type_registry: None,
+                evolution_workflow_store: None,
+            };
+            CronTool
+                .execute(
+                    ctx,
+                    json!({
+                        "action": "add", "name": "reminder", "message": "hello",
+                        "delay_seconds": 60, "account_id": "untrusted-param"
+                    }),
+                )
+                .await
+                .unwrap();
+            let reloaded = load_store(&paths).unwrap();
+            let payload = &reloaded.jobs.last().unwrap()["payload"];
+            assert_eq!(payload["channel"], "telegram");
+            assert_eq!(payload["to"], "same-chat");
+            assert_eq!(payload.get("accountId").and_then(Value::as_str), account);
+        }
+    }
+
     #[test]
     fn p3_rejects_overflowing_interval() {
         let paths = temp_paths("interval_overflow");
@@ -508,6 +570,7 @@ mod tests {
             &json!({"name":"test","message":"hi","every_seconds":i64::MAX}),
             "test",
             "chat",
+            None,
             None,
         );
         assert!(result.is_err());
@@ -559,6 +622,7 @@ mod tests {
             "telegram",
             "12345",
             None,
+            None,
         );
         assert!(r.is_ok(), "unexpected error: {:?}", r.err());
         let _ = std::fs::remove_dir_all(paths.base);
@@ -598,6 +662,7 @@ mod tests {
             }),
             "telegram",
             "12345",
+            None,
             None,
         );
         assert!(r.is_ok(), "unexpected error: {:?}", r.err());
@@ -667,6 +732,7 @@ mod tests {
             "telegram",
             "12345",
             Some("Invalid/Timezone"),
+            None,
         );
         assert!(r.is_err(), "Should reject invalid timezone");
         let err = r.unwrap_err().to_string();
@@ -692,6 +758,7 @@ mod tests {
             "telegram",
             "12345",
             Some("Asia/Shanghai"), // default_timezone
+            None,
         );
         assert!(
             r.is_ok(),
@@ -727,6 +794,7 @@ mod tests {
             "telegram",
             "12345",
             None,
+            None,
         );
         assert!(r.is_err(), "Should reject invalid cron expression");
         let err = r.unwrap_err().to_string();
@@ -750,6 +818,7 @@ mod tests {
             }),
             "telegram",
             "12345",
+            None,
             None,
         );
         assert!(r.is_err(), "Should reject negative every_seconds");
@@ -775,6 +844,7 @@ mod tests {
             "telegram",
             "12345",
             None,
+            None,
         );
         assert!(r.is_err(), "Should reject zero every_seconds");
         let _ = std::fs::remove_dir_all(paths.base);
@@ -794,6 +864,7 @@ mod tests {
             "telegram",
             "12345",
             Some("Asia/Shanghai"),
+            None,
         );
         assert!(r.is_ok(), "Should accept default_timezone: {:?}", r.err());
         let result = r.unwrap();
@@ -826,6 +897,7 @@ mod tests {
             }),
             "telegram",
             "12345",
+            None,
             None,
         );
         assert!(r.is_ok(), "Should accept run_immediately: {:?}", r.err());
@@ -869,6 +941,7 @@ mod tests {
                 "test",
                 "chat",
                 None,
+                None,
             );
             assert!(result.is_err(), "delay {delay} must be rejected");
         }
@@ -884,6 +957,7 @@ mod tests {
             &json!({"name":"test","message":"hi","delay_seconds":i64::MAX}),
             "test",
             "chat",
+            None,
             None,
         );
         assert!(result.is_err());

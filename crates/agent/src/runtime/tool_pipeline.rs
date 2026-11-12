@@ -1196,8 +1196,7 @@ impl AgentRuntime {
         // Build TaskManager handle for tools
         let tm_handle: TaskManagerHandle = Arc::new(OriginScopedTaskManager::new(
             self.task_manager.clone(),
-            &msg.channel,
-            &msg.chat_id,
+            TaskOrigin::new(msg.session_key(), self.agent_id.as_deref()),
         ));
 
         // Build spawn handle for tools
@@ -1208,7 +1207,7 @@ impl AgentRuntime {
             task_manager: self.task_manager.clone(),
             outbound_tx: self.outbound_tx.clone(),
             provider_pool: Arc::clone(&self.provider_pool),
-            agent_id: resolve_routed_agent_id(&msg.metadata).or_else(|| self.agent_id.clone()),
+            agent_id: self.agent_id.clone(),
             event_tx: self.event_tx.clone(),
             origin_account_id: msg.account_id.clone(),
             origin_session_key: msg.session_key(),

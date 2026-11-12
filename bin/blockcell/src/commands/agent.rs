@@ -1032,6 +1032,7 @@ pub async fn run(
         // After each read_line, we check if a confirmation is pending and route accordingly.
         // Clone paths for the stdin thread (needed for skill management commands)
         let stdin_paths = paths.clone();
+        let stdin_agent_id = agent_id.clone();
 
         let stdin_tx = inbound_tx.clone();
         let session_clone = session.clone();
@@ -1098,10 +1099,11 @@ pub async fn run(
                         stdin_task_manager.clone(),
                         stdin_checkpoint_manager.clone(),
                         session_clone
-                            .split(':')
-                            .nth(1)
+                            .split_once(':')
+                            .map(|(_, chat_id)| chat_id)
                             .unwrap_or("default")
                             .to_string(),
+                        stdin_agent_id.clone(),
                     )
                     .with_clear_callback(Arc::new({
                         let flag = session_clear_flag_clone.clone();

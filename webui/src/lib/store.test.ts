@@ -73,6 +73,7 @@ function resetStore(currentSessionId = 'chat-1') {
   useChatStore.setState({
     sessions: [],
     currentSessionId,
+    currentSessionScope: undefined,
     messages: [],
     isConnected: false,
     isLoading: false,
@@ -105,6 +106,34 @@ test('stream_reset drops the current streaming assistant message', () => {
 
   const { messages } = useChatStore.getState();
   assert.equal(messages.length, 0);
+});
+
+test('literal underscores do not receive colon session tokens', () => {
+  resetStore('a_b');
+  useChatStore.getState().handleWsEvent({ type: 'token', agent_id: 'default', chat_id: 'a:b', delta: 'foreign' });
+  assert.equal(useChatStore.getState().messages.length, 0);
+});
+
+test('old subscriptions cannot reset or error the current session', () => {
+  resetStore('chat-B');
+  const store = useChatStore.getState();
+  store.handleWsEvent({ type: 'token', agent_id: 'default', chat_id: 'chat-B', delta: 'keep' });
+  store.setLoading(true);
+  for (const agent_id of ['default', 'ops']) {
+    store.handleWsEvent({ type: 'stream_reset', agent_id, chat_id: 'chat-A' });
+    store.handleWsEvent({ type: 'error', agent_id, chat_id: 'chat-A', message: 'foreign error' });
+  }
+  assert.equal(useChatStore.getState().messages.length, 1);
+  assert.equal(useChatStore.getState().messages[0].content, 'keep');
+  assert.equal(useChatStore.getState().isLoading, true);
+});
+
+test('unscoped connection errors do not change a chat', () => {
+  resetStore('chat-B');
+  useChatStore.getState().setLoading(true);
+  useChatStore.getState().handleWsEvent({ type: 'error', message: 'connection failure' });
+  assert.equal(useChatStore.getState().messages.length, 0);
+  assert.equal(useChatStore.getState().isLoading, true);
 });
 
 test('message_done still appends a new assistant reply when content changes', () => {
@@ -181,16 +210,109 @@ test('session_bound names a new session from the first user message before refre
 
   useChatStore.getState().handleWsEvent({
     type: 'session_bound',
+    session_id: 'sid~ws_default_1777350000000',
     chat_id: 'default:1777350000000',
     client_chat_id: '',
     agent_id: 'default',
   });
 
   const { sessions, currentSessionId } = useChatStore.getState();
-  assert.equal(currentSessionId, 'default_1777350000000');
+  assert.equal(currentSessionId, 'sid~ws_default_1777350000000');
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].id, 'default_1777350000000');
+  assert.equal(sessions[0].id, 'sid~ws_default_1777350000000');
   assert.equal(sessions[0].name, '查看深圳明天天气');
+  assert.equal(useChatStore.getState().getCurrentChatId(), 'default:1777350000000');
+});
+
+test('session handles send and cancel using the original chat ID without conversion', async () => {
+  const { wsManager } = await import('./ws.js');
+  const transport = wsManager as unknown as { ws: { readyState: number; send: (value: string) => void } | null };
+  const previousSocket = transport.ws;
+  const previousWebSocket = globalThis.WebSocket;
+  Object.assign(globalThis, { WebSocket: { OPEN: 1 } });
+  const sent: Array<{ type: string; chat_id: string }> = [];
+  transport.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+  try {
+    for (const [id, chat_id] of [['sid~ws_a_b', 'a:b'], ['sid~s~ws~3Aa_b', 'a_b'], ['sid~ws_default_123', 'default:123']]) {
+      resetStore(id);
+      useChatStore.getState().setSessions([{ id, chat_id, channel: 'ws', agent_id: 'default', name: chat_id, message_count: 0, updated_at: '' }]);
+      const originalChatId = useChatStore.getState().getCurrentChatId();
+      assert.equal(originalChatId, chat_id);
+      assert.equal(wsManager.sendChat('hello', originalChatId, [], 'default'), true);
+      assert.equal(wsManager.sendCancel(originalChatId, 'default'), true);
+      assert.deepEqual(sent.splice(0).map((message) => message.chat_id), [chat_id, chat_id]);
+      useChatStore.getState().handleWsEvent({ type: 'token', agent_id: 'default', chat_id, delta: 'own' });
+      assert.equal(useChatStore.getState().messages[0].content, 'own');
+    }
+  } finally {
+    transport.ws = previousSocket;
+    Object.assign(globalThis, { WebSocket: previousWebSocket });
+  }
+});
+
+test('a delayed binding cannot switch an unrelated active session', () => {
+  resetStore('a_b');
+  useChatStore.getState().addMessage({ id: 'user_other', role: 'user', content: 'unrelated title', timestamp: 1 });
+  useChatStore.getState().handleWsEvent({ type: 'session_bound', session_id: 'sid~ws_a_b', agent_id: 'default', chat_id: 'a:b', client_chat_id: '' });
+  const state = useChatStore.getState();
+  assert.equal(state.currentSessionId, 'a_b');
+  assert.equal(state.messages[0].content, 'unrelated title');
+  assert.notEqual(state.sessions[0].name, 'unrelated title');
+});
+
+test('a list refresh before first persistence preserves the bound conversation scope', () => {
+  resetStore('');
+  const store = useChatStore.getState();
+  store.handleWsEvent({ type: 'session_bound', session_id: 'sid~s~ws~3Aa_b', channel: 'ws', agent_id: 'default', chat_id: 'a_b', client_chat_id: '' });
+  useChatStore.getState().setSessions([]);
+  assert.equal(useChatStore.getState().getCurrentChatId(), 'a_b');
+  useChatStore.getState().handleWsEvent({ type: 'token', channel: 'ws', agent_id: 'default', chat_id: 'a_b', delta: 'first reply' });
+  assert.equal(useChatStore.getState().messages[0]?.content, 'first reply');
+});
+
+test('a delayed WebSocket binding cannot switch the same chat ID in another channel or account', () => {
+  for (const scope of [{ id: 'sid~s~telegram~3Aa_b', channel: 'telegram', account_id: undefined }, { id: 'sid~s~ws~3Aaccount~3A4~3Aworka_b', channel: 'ws', account_id: 'work' }]) {
+    resetStore(scope.id);
+    useChatStore.getState().setSessions([{ ...scope, chat_id: 'a_b', agent_id: 'default', name: 'other scope', message_count: 0, updated_at: '' }]);
+    useChatStore.getState().handleWsEvent({ type: 'session_bound', session_id: 'sid~s~ws~3Aa_b', channel: 'ws', agent_id: 'default', chat_id: 'a_b', client_chat_id: 'a_b' });
+    assert.equal(useChatStore.getState().currentSessionId, scope.id);
+  }
+});
+
+test('background reminders keep server-provided scope for later sending', () => {
+  resetStore('sid~ws_other');
+  useChatStore.getState().handleWsEvent({ type: 'message_done', channel: 'ws', agent_id: 'default', session_id: 'sid~s~ws~3Aremind_123', chat_id: 'remind_123', content: '⏰ reminder', background_delivery: true, delivery_kind: 'cron' });
+  useChatStore.getState().setCurrentSession('sid~s~ws~3Aremind_123');
+  assert.equal(useChatStore.getState().getCurrentChatId(), 'remind_123');
+});
+
+test('only server-provided unique legacy aliases migrate cached session IDs', () => {
+  resetStore('default_123');
+  const session = { id: 'sid~ws_default_123', chat_id: 'default:123', legacy_id: 'default_123', channel: 'ws', agent_id: 'default', name: 'default', message_count: 0, updated_at: '' };
+  useChatStore.getState().setSessions([session]);
+  assert.equal(useChatStore.getState().currentSessionId, session.id);
+  assert.equal(useChatStore.getState().getCurrentChatId(), 'default:123');
+  resetStore('a_b');
+  useChatStore.getState().setSessions([{ ...session, id: 'sid~ws_a_b', legacy_id: 'a_b' }, { ...session, id: 'sid~s~ws~3Aa_b', legacy_id: 'a_b' }]);
+  assert.equal(useChatStore.getState().currentSessionId, 'a_b');
+  assert.equal(useChatStore.getState().getCurrentChatId(), undefined);
+});
+
+test('reset and error require the current channel and Agent, and own errors stop loading', () => {
+  resetStore('sid~s~ws~3Aa_b');
+  useChatStore.getState().setSessions([{ id: 'sid~s~ws~3Aa_b', chat_id: 'a_b', channel: 'ws', agent_id: 'default', name: 'B', message_count: 0, updated_at: '' }]);
+  const store = useChatStore.getState();
+  store.handleWsEvent({ type: 'token', channel: 'ws', agent_id: 'default', chat_id: 'a_b', delta: 'keep' });
+  store.setLoading(true);
+  for (const scope of [{ channel: 'telegram', agent_id: 'default' }, { channel: 'ws', agent_id: 'ops' }]) {
+    store.handleWsEvent({ type: 'stream_reset', chat_id: 'a_b', ...scope });
+    store.handleWsEvent({ type: 'error', chat_id: 'a_b', message: 'foreign', ...scope });
+  }
+  assert.equal(useChatStore.getState().messages.length, 1);
+  assert.equal(useChatStore.getState().isLoading, true);
+  store.handleWsEvent({ type: 'error', channel: 'ws', agent_id: 'default', chat_id: 'a_b', message: 'own failure' });
+  assert.equal(useChatStore.getState().messages[1].content, '❌ Error: own failure');
+  assert.equal(useChatStore.getState().isLoading, false);
 });
 
 // ── Thinking-first streaming tests ──

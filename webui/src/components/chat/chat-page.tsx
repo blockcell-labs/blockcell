@@ -315,6 +315,8 @@ export function ChatPage() {
   async function handleSend() {
     const text = input.trim();
     if ((!text && pendingFiles.length === 0) || isLoading || uploading) return;
+    const chatId = useChatStore.getState().getCurrentChatId();
+    if (currentSessionId && !chatId) return;
 
     let mediaPaths: string[] = [];
 
@@ -348,9 +350,6 @@ export function ChatPage() {
 
     const content = text || (mediaPaths.length > 0 ? `[Attached ${mediaPaths.length} file(s)]` : '');
 
-    const hasPersistedSession = !!currentSessionId && sessions.some((s) => s.id === currentSessionId);
-    const chatId = hasPersistedSession ? currentSessionId.replace(/_/g, ':') : undefined;
-
     // Send via WebSocket
     if (!wsManager.sendChat(content, chatId, mediaPaths, selectedAgentId)) {
       return;
@@ -369,7 +368,8 @@ export function ChatPage() {
   function handleCancel() {
     if (!isLoading || isCancelling) return;
     if (!currentSessionId) return;
-    const chatId = currentSessionId.replace(/_/g, ':');
+    const chatId = useChatStore.getState().getCurrentChatId();
+    if (!chatId) return;
     wsManager.sendCancel(chatId, selectedAgentId);
     setIsCancelling(true);
   }

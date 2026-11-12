@@ -59,6 +59,9 @@ pub struct JobPayload {
     pub channel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// Source channel account used for delivery; absent for legacy jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// For kind="script": detected skill file kind metadata ("rhai" | "python" | "markdown").
     /// Currently stored for bookkeeping/UI only; runtime dispatch still routes through
     /// the unified skill entry instead of branching on this field.
