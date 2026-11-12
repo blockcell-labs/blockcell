@@ -19,15 +19,36 @@ struct FlightLease {
     flights: Flights,
     id: String,
     generation: String,
+    receipt_id: Option<String>,
+    settled: Arc<tokio::sync::Notify>,
 }
 impl Drop for FlightLease {
     fn drop(&mut self) {
-        let mut flights = self.flights.lock().unwrap();
-        if flights
-            .get(&self.id)
-            .is_some_and(|(g, _)| g == &self.generation)
-        {
-            flights.remove(&self.id);
+        // Revoke before returning from Drop, so queued work cannot be claimed.
+        let cancellation = self
+            .receipt_id
+            .as_deref()
+            .and_then(blockcell_core::message_receipt::cancel_message_receipt_with_ack);
+        let flights = self.flights.clone();
+        let id = self.id.clone();
+        let generation = self.generation.clone();
+        let settled = self.settled.clone();
+        let release = move || {
+            let mut flights = flights.lock().unwrap();
+            if flights.get(&id).is_some_and(|(g, _)| g == &generation) {
+                flights.remove(&id);
+            }
+            settled.notify_waiters();
+        };
+        if let Some(cancellation) = cancellation.filter(|ack| !ack.is_finished()) {
+            // The runtime still owns the turn. Keep this job reserved while it
+            // observes cancellation, even if the tick future was aborted.
+            tokio::spawn(async move {
+                cancellation.wait().await;
+                release();
+            });
+        } else {
+            release();
         }
     }
 }
@@ -75,6 +96,7 @@ pub struct CronService {
     /// Serializes each in-process read/modify/write transaction.
     operation_lock: Arc<Mutex<()>>,
     in_flight: Flights,
+    flight_settled: Arc<tokio::sync::Notify>,
     /// Tick interval in seconds for checking due jobs.
     tick_interval_secs: u64,
     /// Default timezone for jobs without a specified timezone or with invalid timezone.
@@ -157,6 +179,7 @@ impl CronService {
             pending_deleted_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             operation_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(StdMutex::new(std::collections::HashMap::new())),
+            flight_settled: Arc::new(tokio::sync::Notify::new()),
             tick_interval_secs: tick_interval_secs.unwrap_or(1),
             default_timezone: default_tz,
         }
@@ -528,6 +551,8 @@ impl CronService {
                             flights: self.in_flight.clone(),
                             id: job.id.clone(),
                             generation,
+                            receipt_id: None,
+                            settled: self.flight_settled.clone(),
                         },
                         receiver,
                     ));
@@ -550,13 +575,20 @@ impl CronService {
         let event_emitter = self.event_emitter.clone();
         let agent_id = self.agent_id.clone();
         let mut pending = FuturesUnordered::new();
-        for (job, lease, cancel) in jobs_to_run {
+        for (job, mut lease, cancel) in jobs_to_run {
             let tx = inbound_tx.clone();
             let emitter = event_emitter.clone();
             let agent = agent_id.clone();
             pending.push(async move {
-                let result =
-                    Self::execute_job_cancellable(&job, tx, emitter, agent, Some(cancel)).await;
+                let result = Self::execute_job_cancellable(
+                    &job,
+                    tx,
+                    emitter,
+                    agent,
+                    Some(cancel),
+                    Some(&mut lease),
+                )
+                .await;
                 (job, result, lease)
             });
         }
@@ -653,7 +685,7 @@ impl CronService {
         event_emitter: Arc<StdMutex<Option<EventEmitterHandle>>>,
         agent_id: Option<String>,
     ) -> std::result::Result<(), String> {
-        Self::execute_job_cancellable(job, inbound_tx, event_emitter, agent_id, None).await
+        Self::execute_job_cancellable(job, inbound_tx, event_emitter, agent_id, None, None).await
     }
 
     async fn execute_job_cancellable(
@@ -662,6 +694,7 @@ impl CronService {
         event_emitter: Arc<StdMutex<Option<EventEmitterHandle>>>,
         agent_id: Option<String>,
         mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
+        lease: Option<&mut FlightLease>,
     ) -> std::result::Result<(), String> {
         debug!(job_id = %job.id, job_name = %job.name, kind = %job.payload.kind, "Executing cron job");
 
@@ -741,6 +774,9 @@ impl CronService {
         }
         apply_route_agent_id(&mut metadata, agent_id.as_deref());
         let (receipt_id, receipt_rx) = register_message_receipt();
+        if let Some(lease) = lease {
+            lease.receipt_id = Some(receipt_id.clone());
+        }
         let _receipt_guard =
             blockcell_core::message_receipt::MessageReceiptGuard(receipt_id.clone());
         if let Some(metadata) = metadata.as_object_mut() {
@@ -946,6 +982,13 @@ impl CronService {
                     info!("CronService shutting down");
                     ticks.abort_all();
                     while ticks.join_next().await.is_some() {}
+                    // Aborted ticks may have handed active receipts to lease
+                    // cleanup tasks. Shutdown acknowledges their exit as well.
+                    loop {
+                        let settled = self.flight_settled.notified();
+                        if self.in_flight.lock().unwrap().is_empty() { break; }
+                        settled.await;
+                    }
 
                     // Save any unsaved state before shutting down
                     if *self.has_unsaved_changes.read().await {
