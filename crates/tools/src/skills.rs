@@ -76,7 +76,7 @@ impl Tool for SkillViewTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Workspace skill name, or category/name for categorized skills."}
+                    "name": {"type": "string", "description": "Workspace skill id from list_skills (preferred), or an unambiguous standard name."}
                 },
                 "required": ["name"]
             }),
@@ -108,7 +108,7 @@ impl Tool for SkillManageTool {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["create", "edit", "patch", "delete", "write_file", "remove_file", "undo_latest"]},
-                    "name": {"type": "string", "description": "Workspace skill name, or category/name for categorized skills."},
+                    "name": {"type": "string", "description": "Workspace skill id from list_skills (preferred), or an unambiguous standard name."},
                     "description": {"type": "string", "description": "Required for create."},
                     "content": {"type": "string", "description": "Skill body, full SKILL.md rewrite, replacement text, or file content."},
                     "old_text": {"type": "string", "description": "Unique text to replace for patch."},
@@ -315,12 +315,13 @@ impl ListSkillsTool {
             return;
         }
 
-        const EXCLUDED_DIRS: &[&str] = &[".git", ".github", ".hub", "__pycache__", "node_modules"];
-
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_dir() {
+                if entry
+                    .file_type()
+                    .map_or(true, |kind| kind.is_symlink() || !kind.is_dir())
+                {
                     continue;
                 }
                 let dir_name = path
@@ -329,7 +330,7 @@ impl ListSkillsTool {
                     .unwrap_or("unknown")
                     .to_string();
 
-                if EXCLUDED_DIRS.contains(&dir_name.as_str()) {
+                if blockcell_skills::manager::is_internal_skill_directory_name(&dir_name) {
                     continue;
                 }
 
@@ -377,6 +378,7 @@ impl ListSkillsTool {
 
                     skills.push(json!({
                         "name": composite_name,
+                        "id": sub_category,
                         "category": category,
                         "description": meta.get("description").unwrap_or(&Value::Null),
                         "always": meta.get("always").unwrap_or(&json!(false)),
@@ -459,6 +461,41 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn skill_catalog_hides_internal_snapshots_and_exposes_management_id() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let skills = workspace.join("skills");
+        for relative in [
+            "group/real_dir",
+            ".snapshots/deleted_old",
+            ".temporary/hidden",
+        ] {
+            let dir = skills.join(relative);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {}\ndescription: test\n---\nInstructions",
+                    if relative == "group/real_dir" {
+                        "standard-name"
+                    } else {
+                        "deleted"
+                    }
+                ),
+            )
+            .unwrap();
+        }
+        let ctx = tool_context_with_workspace(workspace, None);
+        let result = ListSkillsTool.execute(ctx, json!({})).await.unwrap();
+        assert_eq!(
+            result["count"], 1,
+            "internal snapshots are not installed skills"
+        );
+        assert_eq!(result["learned_skills"][0]["name"], "standard-name");
+        assert_eq!(result["learned_skills"][0]["id"], "group/real_dir");
+    }
 
     #[tokio::test]
     async fn standard_catalog_uses_loader_identity_and_preserves_legacy_entries() {

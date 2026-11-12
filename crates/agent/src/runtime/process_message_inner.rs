@@ -1,6 +1,6 @@
 use super::*;
 
-const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints: never run prohibited or deferred checks. Only recognized runners or configured trusted commands with exit code 0 establish evidence, not PASS text or declared kinds. Built-in checks may pipe output to numeric tail/head filters with executor-confirmed pipefail; other pipes, redirections and status wrappers are rejected. Use one relevant check, not unrelated checks. Return a single complete final answer preserving the task findings and deliverables, with an honest verification scope; correct findings if checks reveal errors.";
+pub(super) const CODING_VERIFICATION_HINT: &str = "Files may have changed without current verification evidence. Respect the user's constraints: never run prohibited or deferred checks. Only recognized runners or configured trusted commands with exit code 0 establish evidence, not PASS text or declared kinds. Built-in checks may pipe output to numeric tail/head filters with executor-confirmed pipefail; other pipes, redirections and status wrappers are rejected. Use one relevant check, not unrelated checks. Return a single complete final answer preserving the task findings and deliverables, with an honest verification scope; correct findings if checks reveal errors.";
 
 pub(super) fn merge_verification_answer(
     original: &str,

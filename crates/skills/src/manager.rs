@@ -499,6 +499,12 @@ pub struct SkillPromptSnapshotEntry {
     tools: Vec<String>,
 }
 
+/// Internal storage and implementation directories never contain installed skills.
+/// Shared by runtime discovery, the catalog, and workspace management lookup.
+pub fn is_internal_skill_directory_name(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "__pycache__" | "node_modules")
+}
+
 const SKILLS_PROMPT_SNAPSHOT_FILE: &str = ".skills_prompt_snapshot.json";
 
 #[derive(Debug, Clone)]
@@ -963,7 +969,10 @@ impl SkillManager {
             let path = entry.path();
             let file_type = entry.file_type()?;
 
-            if file_type.is_symlink() || !file_type.is_dir() {
+            if file_type.is_symlink()
+                || !file_type.is_dir()
+                || is_internal_skill_directory_name(&entry.file_name().to_string_lossy())
+            {
                 continue;
             }
 

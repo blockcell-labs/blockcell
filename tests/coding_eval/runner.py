@@ -164,7 +164,12 @@ def run_task(
             agent_output = completed.stdout[-20_000:]
         except subprocess.TimeoutExpired as error:
             timed_out = True
-            agent_output = (error.stdout or "")[-20_000:]
+            # TimeoutExpired captures raw bytes even when run(text=True).
+            # Decode before truncation so every report field stays JSON-safe.
+            output = error.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            agent_output = output[-20_000:]
         except OSError as error:
             agent_exit_code = -1
             agent_output = f"OSError launching agent command: {error}"

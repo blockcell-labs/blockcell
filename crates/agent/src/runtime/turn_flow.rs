@@ -397,6 +397,8 @@ impl AgentRuntime {
         let mut current_messages = messages;
         let mut trace_messages = Vec::new();
         let mut tool_outcomes = Vec::new();
+        let mut verification_nudged = false;
+        let mut deliverable_nudged = false;
 
         let final_response = loop {
             let step = self.begin_step();
@@ -419,6 +421,38 @@ impl AgentRuntime {
             let tool_call_count = response.tool_calls.len();
 
             if response.tool_calls.is_empty() {
+                let continuation = if !verification_nudged
+                    && task_progress.needs_verification()
+                    && self.config.agents.defaults.verification.should_gate(
+                        self.one_shot_cli_auto_coding,
+                        task_progress.contract.verification
+                            == blockcell_core::task_contract::VerificationPolicy::Required,
+                    ) {
+                    verification_nudged = true;
+                    Some(format!(
+                        "{} {}",
+                        super::process_message_inner::CODING_VERIFICATION_HINT,
+                        task_progress.verification_hint()
+                    ))
+                } else if !deliverable_nudged {
+                    task_progress.first_incomplete_output(&self.paths.workspace()).map(|missing| {
+                        deliverable_nudged = true;
+                        format!("声明要求的产物 `{missing}` 尚未满足。请完成并写入；如果无法完成，请明确说明原因与卡点。")
+                    })
+                } else {
+                    None
+                };
+                if let Some(hint) = continuation {
+                    let answer = ChatMessage::assistant_with_reasoning(
+                        response.content.as_deref().unwrap_or_default(),
+                        response.reasoning_content.clone(),
+                    );
+                    current_messages.push(answer.clone());
+                    trace_messages.push(answer);
+                    current_messages.push(ChatMessage::user(&hint));
+                    self.end_step(msg, &session_id, step, 0).await;
+                    continue;
+                }
                 self.dispatch_event(
                     msg,
                     &session_id,
@@ -507,6 +541,17 @@ impl AgentRuntime {
                 if let Some(contract) = &tool_output.evidence.annotations.task_contract {
                     task_progress.register_contract(contract, &self.paths.workspace());
                 }
+                task_progress.observe(
+                    &tool_output.evidence,
+                    matches!(tool_output.outcome, ToolOutcome::Succeeded),
+                );
+                self.last_verification_command = task_progress
+                    .last_verification
+                    .as_ref()
+                    .filter(|_| !task_progress.needs_verification())
+                    .map(|(_, command)| command.clone());
+                self.last_verification_reason =
+                    Some(task_progress.verification_reason().to_string());
                 tool_outcomes.push((tool_call.name.clone(), format!("{:?}", tool_output.outcome)));
                 if loop_guard.record(&tool_call, tool_call_failed(&tool_output)) {
                     over_iteration = true;

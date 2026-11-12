@@ -1852,3 +1852,16 @@ fn p3_schema_dedup_migration_runs_once_and_records_version() {
     drop(store);
     MemoryStore::open(&db_path).unwrap();
 }
+
+#[test]
+fn missing_memory_id_is_none_but_database_errors_propagate() {
+    let (store, _dir) = test_store();
+    assert!(store.get_by_id("absent-review-id").unwrap().is_none());
+    store
+        .inner
+        .lock()
+        .unwrap()
+        .execute("DROP TABLE memory_items", [])
+        .unwrap();
+    assert!(store.get_by_id("absent-review-id").is_err());
+}

@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl MemoryStore {
     /// Upsert a memory item. If dedup_key is set and a matching non-deleted item exists,
@@ -205,14 +206,13 @@ impl MemoryStore {
             .inner
             .lock()
             .map_err(|e| blockcell_core::Error::Storage(format!("Lock error: {}", e)))?;
-        match self.get_by_id_inner(&conn, id) {
-            Ok(item) => Ok(Some(item)),
-            // 仅当记录不存在时返回 None，其他数据库错误向上传播
-            Err(blockcell_core::Error::Storage(ref msg)) if msg.contains("QueryReturnedNoRows") => {
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        }
+        conn.query_row(
+            "SELECT * FROM memory_items WHERE id = ?1",
+            params![id],
+            Self::memory_item_from_row,
+        )
+        .optional()
+        .map_err(|e| blockcell_core::Error::Storage(format!("Get by id error: {}", e)))
     }
 
     pub(crate) fn get_by_id_inner(&self, conn: &Connection, id: &str) -> Result<MemoryItem> {

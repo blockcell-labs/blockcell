@@ -830,13 +830,23 @@ fn find_skill_dirs_named(root: &Path, name: &str, matches: &mut Vec<PathBuf>) ->
         }
 
         let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if EXCLUDED_DIRS.contains(&dir_name) || dir_name.starts_with('.') {
+        if EXCLUDED_DIRS.contains(&dir_name)
+            || blockcell_skills::manager::is_internal_skill_directory_name(dir_name)
+        {
             continue;
         }
 
         let path_is_skill = is_skill_dir(&path);
-        if dir_name == name && path_is_skill {
-            matches.push(path.clone());
+        if path_is_skill {
+            let matches_identity = dir_name == name
+                || blockcell_skills::SkillManager::new()
+                    .load_standard_skill(&path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|skill| skill.name == name);
+            if matches_identity {
+                matches.push(path.clone());
+            }
         }
 
         if path_is_skill && !path.join("manifest.json").exists() {
@@ -1143,6 +1153,61 @@ mod tests {
             first < second,
             "snapshot names must preserve creation order"
         );
+    }
+
+    #[test]
+    fn skill_catalog_frontmatter_identity_can_view_edit_and_delete() {
+        let paths = test_paths("catalog-identity");
+        let dir = paths.skills_dir().join("group/physical_dir");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: visible-name\ndescription: Example\n---\nInstructions",
+        )
+        .unwrap();
+        let store = SkillFileStore::open(&paths).unwrap();
+        assert!(store.view("visible-name").unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("Instructions"));
+        store
+            .write_file("visible-name", "references/note.md", "note")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("references/note.md")).unwrap(),
+            "note"
+        );
+        let deleted = store.delete("visible-name").unwrap();
+        assert!(!dir.exists());
+        assert!(deleted.snapshot_ref.is_some());
+        assert!(
+            store.view("visible-name").is_err(),
+            "snapshot must not be resolved as active"
+        );
+        store.restore_latest("group/physical_dir").unwrap();
+        assert!(store.view("visible-name").is_ok());
+    }
+
+    #[test]
+    fn skill_catalog_duplicate_frontmatter_identity_is_ambiguous() {
+        let paths = test_paths("catalog-duplicate");
+        for relative in ["one/dir_a", "two/dir_b"] {
+            let dir = paths.skills_dir().join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("SKILL.md"),
+                "---\nname: duplicate-name\ndescription: Example\n---\nInstructions",
+            )
+            .unwrap();
+        }
+        let store = SkillFileStore::open(&paths).unwrap();
+        assert!(store
+            .view("duplicate-name")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        assert!(store.view("one/dir_a").is_ok());
+        assert!(store.view("two/dir_b").is_ok());
     }
 
     #[test]

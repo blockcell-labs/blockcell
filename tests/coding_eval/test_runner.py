@@ -1,5 +1,6 @@
 import json
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,30 @@ TRIVIAL_TEST = (
 
 
 class CodingEvalRunnerTests(unittest.TestCase):
+    def test_output_before_timeout_still_writes_complete_batch_report(self):
+        tasks = runner.load_manifest(ROOT / "manifest.json")[:2]
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = pathlib.Path(tmp)
+            agent = temp / "agent.py"
+            agent.write_text(
+                "import os, time\n"
+                "print('timeout-marker 中文', flush=True)\n"
+                f"if os.environ['BLOCKCELL_EVAL_TASK_ID'] == {tasks[1]['id']!r}: time.sleep(20)\n",
+                encoding="utf-8",
+            )
+            report = temp / "report.json"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "runner.py"), "--task", tasks[0]["id"], "--task", tasks[1]["id"],
+                 "--agent-command", shlex.join([sys.executable, str(agent)]), "--timeout", "10", "--output", str(report)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertTrue(report.exists(), result.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(len(data["results"]), 2)
+            self.assertEqual(data["results"][0]["agent_exit_code"], 0)
+            self.assertIsNone(data["results"][1]["agent_exit_code"])
+            self.assertIn("timeout-marker 中文", data["results"][1]["agent_output_tail"])
+
     def test_manifest_has_required_twenty_task_distribution(self):
         tasks = runner.load_manifest(ROOT / "manifest.json")
 

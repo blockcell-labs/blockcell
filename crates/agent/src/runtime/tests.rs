@@ -12557,3 +12557,40 @@ async fn content_filter_retries_past_two_rejections_and_recovers() {
     assert_eq!(reply, "recovered");
     assert_eq!(provider.0.load(Ordering::SeqCst), 3);
 }
+
+#[tokio::test]
+async fn prompt_skill_missing_output_gets_one_finite_continuation() {
+    let provider = Arc::new(ScopeSchemaProvider::default());
+    let mut runtime = test_runtime_with_provider(provider.clone());
+    let mut msg = test_main_session_inbound("cli", "skill-output-contract");
+    msg.metadata["task_contract"] = serde_json::json!({"deliverables":[{"path":"required.json"}]});
+    runtime
+        .run_prompt_skill_loop(&msg, vec![ChatMessage::user("finish")], vec![], &[], None)
+        .await
+        .unwrap();
+    assert_eq!(provider.schemas.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn prompt_skill_observes_revision_and_respects_verification_policy() {
+    use blockcell_core::config::VerificationMode;
+    for (mode, required, expected) in [
+        (VerificationMode::Auto, true, 1),
+        (VerificationMode::Off, true, 0),
+        (VerificationMode::Auto, false, 0),
+    ] {
+        let (mut runtime, provider, _) = verification_gate_runtime(false);
+        runtime.config.agents.defaults.verification.mode = mode;
+        let mut msg = test_main_session_inbound("cli", "skill-verification");
+        if required {
+            msg.metadata["task_contract"] = serde_json::json!({"verification":"required"});
+        }
+        let tools = vec!["read_file".to_string(), "edit_file".to_string()];
+        runtime
+            .run_prompt_skill_loop(&msg, vec![ChatMessage::user("edit")], vec![], &tools, None)
+            .await
+            .unwrap();
+        assert_eq!(provider.hint_calls.load(Ordering::SeqCst), expected);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3 + expected);
+    }
+}
