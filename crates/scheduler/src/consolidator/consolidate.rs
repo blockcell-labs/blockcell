@@ -48,7 +48,10 @@ impl DreamConsolidator {
             .fork_label("auto_dream")
             .max_turns(DREAM_FORKED_AGENT_MAX_TURNS)
             .skip_transcript(true)
-            .tool_schemas(build_forked_tool_schemas(&["exec".to_string()]))
+            .tool_schemas(build_forked_tool_schemas(&[
+                "exec".to_string(),
+                "shell".to_string(),
+            ]))
             .build()
             .map_err(|e| {
                 DreamError::ConsolidationFailed(format!("Failed to build params: {}", e))

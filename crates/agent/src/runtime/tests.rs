@@ -5395,6 +5395,88 @@ fn test_runtime_with_default_tools() -> AgentRuntime {
     runtime
 }
 
+#[tokio::test]
+async fn rhai_nested_paths_use_host_persisted_session_approval() {
+    let fixture = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let outside = fixture.path().join("outside.txt");
+    std::fs::write(&outside, "approved session marker").unwrap();
+    let mut runtime = test_runtime_with_default_tools();
+    allow_test_tool(&mut runtime, "exec_skill_script");
+    let policy_file = runtime.paths.path_access_file();
+    std::fs::write(&policy_file, r#"{"builtin_protected_paths": false}"#).unwrap();
+    runtime.path_policy = blockcell_core::path_policy::PathPolicy::load(&policy_file);
+    let skill_dir = runtime.paths.workspace().join("skills/file-access");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("meta.yaml"),
+        "name: file-access\ndescription: test\ntools: [read_file]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.rhai"),
+        "let result = call_tool(\"read_file\", #{path: target}); set_output(result);",
+    )
+    .unwrap();
+    let args = serde_json::json!({"path": outside});
+    let call = tool_call(
+        "exec_skill_script",
+        serde_json::json!({
+            "path": "SKILL.rhai", "context": {"target": outside},
+        }),
+    );
+    let mut msg = test_main_session_inbound("cron", "file-access-job");
+    msg.metadata = serde_json::json!({
+        "skill_run_mode": "cron", "deliver": true,
+        "deliver_channel": "cli", "deliver_to": "approved-session",
+    });
+    let persisted_session = persist_session_key_for(&msg);
+    assert_ne!(persisted_session, msg.session_key());
+    assert!(
+        !runtime
+            .check_path_permission("read_file", &args, &msg)
+            .await
+    );
+    let rejected = runtime
+        .execute_tool_call(&call, &msg, Some(skill_dir.clone()))
+        .await;
+    let rejected: serde_json::Value = serde_json::from_str(&rejected.text).unwrap();
+    assert_eq!(rejected["tool_calls"][0]["success"], false, "{rejected}");
+
+    runtime.authorize_directory(
+        &outside,
+        blockcell_core::path_policy::PathOp::Read,
+        &persisted_session,
+    );
+    assert!(
+        runtime
+            .check_path_permission("read_file", &args, &msg)
+            .await
+    );
+    let approved = runtime
+        .execute_tool_call(&call, &msg, Some(skill_dir.clone()))
+        .await;
+    let approved: serde_json::Value = serde_json::from_str(&approved.text).unwrap();
+    assert_eq!(approved["tool_calls"][0]["success"], true, "{approved}");
+    assert!(approved["output"]
+        .to_string()
+        .contains("approved session marker"));
+
+    let other = test_main_session_inbound("cli", "other-session");
+    assert!(
+        !runtime
+            .check_path_permission("read_file", &args, &other)
+            .await
+    );
+    let rejected = runtime
+        .execute_tool_call(&call, &other, Some(skill_dir))
+        .await;
+    let rejected: serde_json::Value = serde_json::from_str(&rejected.text).unwrap();
+    assert_eq!(rejected["tool_calls"][0]["success"], false, "{rejected}");
+    let base = runtime.paths.base.clone();
+    drop(runtime);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[test]
 fn steering_drain_injects_user_messages_into_current_and_history() {
     let mut runtime = test_runtime();

@@ -442,7 +442,6 @@ impl Tool for HttpRequestTool {
                 crate::bounded_io::stream_response_to_file(response, &path, MAX_DOWNLOAD_BYTES)
                     .await?;
             if truncated {
-                let _ = tokio::fs::remove_file(&path).await;
                 return Err(Error::Tool(format!(
                     "Download exceeded the {} byte safety limit",
                     MAX_DOWNLOAD_BYTES

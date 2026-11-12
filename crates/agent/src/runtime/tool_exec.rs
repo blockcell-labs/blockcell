@@ -7,20 +7,22 @@ impl AgentRuntime {
         tool_name: &str,
         ctx: blockcell_tools::ToolContext,
         arguments: serde_json::Value,
+        session_key: &str,
     ) -> Result<serde_json::Value> {
         if !self.tool_within_capability(tool_name, &arguments) {
             return Err(blockcell_core::Error::Tool(scoped_tool_denied_result(
                 tool_name,
             )));
         }
-        let fut = async {
+        let admission = self.nested_tool_path_admission(&ctx, session_key);
+        let fut = blockcell_tools::tool_guard::with_nested_tool_admission(admission, async {
             if let Some(manager) = self.ghost_memory_lifecycle.as_ref() {
                 if manager.has_tool(tool_name) {
                     return manager.handle_tool_call(tool_name, arguments);
                 }
             }
             self.tool_registry.execute(tool_name, ctx, arguments).await
-        };
+        });
         // A panicking tool must not unwind the whole turn; convert it into a
         // tool error so the model can see and recover from it.
         std::panic::AssertUnwindSafe(fut)

@@ -10,7 +10,7 @@ use crate::exec_local::{
     resolve_script_path, validate_relative_skill_path, validate_runner, ExecLocalTool,
 };
 use crate::registry::ToolRegistry;
-use crate::tool_guard::NestedToolGuard;
+use crate::tool_guard::{current_nested_tool_admission, NestedToolGuard};
 use crate::{Tool, ToolContext, ToolSchema};
 
 #[derive(Default)]
@@ -268,6 +268,7 @@ impl Tool for ExecSkillScriptTool {
                 let handle = tokio::runtime::Handle::current();
                 let rhai_ctx = ctx.clone();
                 let declared_tools = load_declared_skill_tools(&skill_dir)?;
+                let admission = current_nested_tool_admission();
                 let dispatcher = SkillDispatcher::new();
                 let result = tokio::task::spawn_blocking(move || {
                     // Nested exec must use the same configured shell policy as
@@ -275,7 +276,7 @@ impl Tool for ExecSkillScriptTool {
                     // silently fall back to workspace-write here.
                     let registry = nested_tool_registry(&rhai_ctx.config);
                     // 嵌套调用不经过 Runtime 的 Guarded Tool Pipeline，由守卫执行同一套准入检查与审计
-                    let guard = NestedToolGuard::new(&rhai_ctx);
+                    let guard = NestedToolGuard::with_admission(&rhai_ctx, admission);
                     dispatcher.execute_sync(
                         &script,
                         &user_input,
@@ -512,6 +513,176 @@ mod tests {
         let result = run_exec_skill_script(skill_dir, json!({"path": "SKILL.rhai"})).await;
         assert_eq!(result["runtime"], "rhai");
         assert_eq!(result["success"], true);
+    }
+
+    fn nested_file_fixture() -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().expect("temporary fixture");
+        let workspace = dir.path().join("workspace");
+        let skill_dir = workspace.join("skills/file-access");
+        let base = dir.path().join("base");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            skill_dir.join("meta.yaml"),
+            "name: file-access\ndescription: test\ntools: [read_file, write_file, list_dir]\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.rhai"),
+            "let result = call_tool(tool_name, call_params); set_output(result);",
+        )
+        .unwrap();
+        let mut ctx = tool_context(skill_dir);
+        ctx.workspace = workspace;
+        ctx.base = base;
+        ctx.config.security.path_access.policy_file = String::new();
+        write_file_path_policy(&ctx, json!([]));
+        (dir, ctx)
+    }
+
+    fn write_file_path_policy(ctx: &ToolContext, rules: Value) {
+        fs::write(
+            ctx.base.join("path_access.json5"),
+            json!({
+                "version": 1,
+                "default_policy": "confirm",
+                "builtin_protected_paths": false,
+                "rules": rules,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    async fn run_nested_file_call(ctx: &ToolContext, name: &str, params: Value) -> Value {
+        ExecSkillScriptTool::default()
+            .execute(
+                ctx.clone(),
+                json!({
+                    "path": "SKILL.rhai",
+                    "context": {"tool_name": name, "call_params": params},
+                }),
+            )
+            .await
+            .expect("Rhai dispatcher should record the nested result")
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_allows_workspace_file() {
+        let (_dir, ctx) = nested_file_fixture();
+        fs::write(ctx.workspace.join("allowed.txt"), "allowed marker").unwrap();
+        let result = run_nested_file_call(&ctx, "read_file", json!({"path": "allowed.txt"})).await;
+        assert_eq!(result["tool_calls"][0]["success"], true, "{result}");
+        assert!(result["output"].to_string().contains("allowed marker"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_denies_workspace_policy_block() {
+        let (_dir, ctx) = nested_file_fixture();
+        let blocked = ctx.workspace.join("blocked.txt");
+        fs::write(&blocked, "blocked marker").unwrap();
+        write_file_path_policy(
+            &ctx,
+            json!([{"name": "blocked", "action": "deny", "ops": ["read"], "paths": [blocked]}]),
+        );
+        let result = run_nested_file_call(&ctx, "read_file", json!({"path": "blocked.txt"})).await;
+        assert_eq!(result["tool_calls"][0]["success"], false, "{result}");
+        assert!(!result["output"].to_string().contains("blocked marker"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_rejects_unapproved_external_file() {
+        let (dir, ctx) = nested_file_fixture();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "outside marker").unwrap();
+        let result = run_nested_file_call(&ctx, "read_file", json!({"path": outside})).await;
+        assert_eq!(result["tool_calls"][0]["success"], false, "{result}");
+        assert!(!result["output"].to_string().contains("outside marker"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_allows_explicit_external_rule() {
+        let (dir, ctx) = nested_file_fixture();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "approved marker").unwrap();
+        write_file_path_policy(
+            &ctx,
+            json!([{"name": "approved", "action": "allow", "ops": ["read"], "paths": [outside]}]),
+        );
+        let result = run_nested_file_call(&ctx, "read_file", json!({"path": outside})).await;
+        assert_eq!(result["tool_calls"][0]["success"], true, "{result}");
+        assert!(result["output"].to_string().contains("approved marker"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_rejects_batch_before_writing_any_file() {
+        let (_dir, ctx) = nested_file_fixture();
+        let blocked = ctx.workspace.join("blocked.txt");
+        fs::write(&blocked, "original marker").unwrap();
+        write_file_path_policy(
+            &ctx,
+            json!([{"name": "blocked", "action": "deny", "ops": ["write"], "paths": [blocked]}]),
+        );
+        let result = run_nested_file_call(
+            &ctx,
+            "write_file",
+            json!({"files": [
+                {"path": "allowed.txt", "content": "first"},
+                {"path": "blocked.txt", "content": "second"},
+            ]}),
+        )
+        .await;
+        assert_eq!(result["tool_calls"][0]["success"], false, "{result}");
+        assert!(!ctx.workspace.join("allowed.txt").exists());
+        assert_eq!(fs::read_to_string(blocked).unwrap(), "original marker");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rhai_nested_path_rejects_symlink_to_unapproved_file() {
+        let (dir, ctx) = nested_file_fixture();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "outside marker").unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.workspace.join("link.txt")).unwrap();
+        let result = run_nested_file_call(&ctx, "read_file", json!({"path": "link.txt"})).await;
+        assert_eq!(result["tool_calls"][0]["success"], false, "{result}");
+        assert!(!result["output"].to_string().contains("outside marker"));
+    }
+
+    #[tokio::test]
+    async fn test_rhai_nested_path_scopes_host_admission_across_blocking_dispatch() {
+        use crate::tool_guard::{with_nested_tool_admission, NestedToolAdmission};
+
+        let (dir, ctx) = nested_file_fixture();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "approved by host").unwrap();
+        let approved_path = outside.clone();
+        let allow: NestedToolAdmission = Arc::new(move |name, args| {
+            if name == "read_file" && args["path"] == json!(approved_path) {
+                Ok(())
+            } else {
+                Err(Error::PermissionDenied("not approved by host".into()))
+            }
+        });
+        let deny: NestedToolAdmission = Arc::new(|_, _| {
+            Err(Error::PermissionDenied(
+                "denied by other host invocation".into(),
+            ))
+        });
+        let (approved, denied) = tokio::join!(
+            with_nested_tool_admission(
+                allow,
+                run_nested_file_call(&ctx, "read_file", json!({"path": outside})),
+            ),
+            with_nested_tool_admission(
+                deny,
+                run_nested_file_call(&ctx, "read_file", json!({"path": outside})),
+            ),
+        );
+        assert_eq!(approved["tool_calls"][0]["success"], true, "{approved}");
+        assert_eq!(denied["tool_calls"][0]["success"], false, "{denied}");
+        let unscoped = run_nested_file_call(&ctx, "read_file", json!({"path": outside})).await;
+        assert_eq!(unscoped["tool_calls"][0]["success"], false, "{unscoped}");
     }
 
     #[cfg(not(target_os = "windows"))]

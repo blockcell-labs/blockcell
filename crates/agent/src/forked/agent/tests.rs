@@ -641,3 +641,88 @@ fn test_resolve_forked_path_rejects_absolute_path_outside_worktree() {
         .to_string()
         .contains("outside isolated working directory"));
 }
+
+#[tokio::test]
+async fn memory_shell_is_denied_before_executor_and_file_tools_remain_usable() {
+    struct RecordingShell(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl blockcell_tools::shell_executor::ShellExecutor for RecordingShell {
+        async fn execute(
+            &self,
+            _: blockcell_tools::shell_executor::ShellRequest,
+        ) -> blockcell_core::Result<blockcell_tools::shell_executor::ShellResult> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(blockcell_tools::shell_executor::ShellResult {
+                pipefail: false,
+                exit_code: Some(0),
+                stdout: b"outside sentinel".to_vec(),
+                stderr: vec![],
+                truncated: false,
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let working_dir = Some(temp.path().to_path_buf());
+    let executor = Arc::new(RecordingShell(std::sync::atomic::AtomicUsize::new(0)));
+    for policy in [
+        crate::forked::create_auto_mem_can_use_tool(temp.path()),
+        crate::forked::create_dream_can_use_tool(temp.path()),
+    ] {
+        let result = super::tool_exec::with_forked_shell_executor(
+            executor.clone(),
+            execute_forked_tool(
+                "shell",
+                &json!({"command": "cat link", "working_dir": temp.path()}),
+                &policy,
+                &[],
+                &None,
+                &None,
+                &None,
+                &None,
+                &[],
+                &None,
+                &working_dir,
+                &[],
+            ),
+        )
+        .await;
+        assert!(result
+            .expect_err("memory shell must be denied")
+            .to_string()
+            .contains("denied"));
+        let result = execute_forked_tool(
+            "write_file",
+            &json!({"file_path": "user.md", "content": "local memory"}),
+            &policy,
+            &[],
+            &None,
+            &None,
+            &None,
+            &None,
+            &[],
+            &None,
+            &working_dir,
+            &[],
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        let result = execute_forked_tool(
+            "read_file",
+            &json!({"file_path": "user.md"}),
+            &policy,
+            &[],
+            &None,
+            &None,
+            &None,
+            &None,
+            &[],
+            &None,
+            &working_dir,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(result.contains("local memory"));
+    }
+    assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -110,10 +110,11 @@ impl AgentRuntime {
 
         let futures = eligible.into_iter().map(|(id, name, args)| {
             let ctx = self.build_tool_context(msg, None);
+            let session_key = &session_key;
             async move {
                 let start = std::time::Instant::now();
                 let result = self
-                    .execute_runtime_tool_call(&name, ctx, args.clone())
+                    .execute_runtime_tool_call(&name, ctx, args.clone(), session_key)
                     .await;
                 let duration_ms = start.elapsed().as_millis() as u64;
                 (

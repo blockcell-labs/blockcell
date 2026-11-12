@@ -3,11 +3,17 @@
 //! - [`dangerous_operation_items`]：需要用户显式确认的危险操作判定，Runtime 的 Guarded Tool
 //!   Pipeline 与技能脚本嵌套调用共用同一份规则；
 //! - [`NestedToolGuard`]：技能脚本（Rhai）内部的嵌套工具调用不经过 Runtime 管线，在此复用
-//!   开关禁用、Tool Policy 与危险操作检查，并写入审计日志。嵌套上下文无法向用户确认，
+//!   开关禁用、Tool Policy、宿主路径授权与危险操作检查，并写入审计日志。嵌套上下文无法向用户确认，
 //!   Policy 的 `ask` 与需要确认的操作一律拒绝。
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
+
+mod nested_paths;
+pub use nested_paths::{
+    current_nested_tool_admission, extract_file_tool_paths, with_nested_tool_admission,
+    NestedToolAdmission, ToolPathAccess,
+};
 
 use blockcell_core::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision};
 use blockcell_core::{Error, Paths, Result};
@@ -292,6 +298,7 @@ fn disabled_toggles(paths: &Paths) -> (HashSet<String>, HashSet<String>) {
 /// 技能脚本嵌套工具调用的准入守卫与审计。
 pub struct NestedToolGuard {
     policy: ToolPolicy,
+    path_admission: NestedToolAdmission,
     full_access_skill_scripts: bool,
     channel: String,
     session_key: String,
@@ -302,12 +309,20 @@ pub struct NestedToolGuard {
 
 impl NestedToolGuard {
     pub fn new(ctx: &ToolContext) -> Self {
+        Self::with_admission(ctx, current_nested_tool_admission())
+    }
+
+    pub fn with_admission(ctx: &ToolContext, admission: Option<NestedToolAdmission>) -> Self {
         let paths = Paths::with_base_and_workspace(ctx.base.clone(), ctx.workspace.clone());
-        Self::with_policy(
+        let mut guard = Self::with_policy(
             ctx,
             ToolPolicy::load(&paths.base.join("tool_policy.yaml")),
             paths,
-        )
+        );
+        if let Some(admission) = admission {
+            guard.path_admission = admission;
+        }
+        guard
     }
 
     fn with_policy(ctx: &ToolContext, policy: ToolPolicy, paths: Paths) -> Self {
@@ -316,6 +331,7 @@ impl NestedToolGuard {
         audit.set_session_id(&ctx.session_key);
         Self {
             policy,
+            path_admission: nested_paths::standalone_path_admission(ctx),
             full_access_skill_scripts: crate::exec::ExecTool::resolve_config_policy(
                 &ctx.config.tools.exec,
             )
@@ -390,7 +406,9 @@ impl NestedToolGuard {
                 "'{tool_name}' requires explicit user confirmation, which is not available inside skill scripts"
             ));
         }
-        None
+        (self.path_admission)(tool_name, args)
+            .err()
+            .map(|error| error.to_string())
     }
 
     /// 记录一次嵌套调用的审计日志（`outcome` 为 `ToolOutcome` 名称）；审计失败不影响调用本身。
@@ -428,6 +446,13 @@ mod tests {
     use serde_json::json;
 
     fn tool_context(base: &std::path::Path) -> ToolContext {
+        let mut config = blockcell_core::Config::default();
+        config.security.path_access.policy_file = String::new();
+        std::fs::write(
+            base.join("path_access.json5"),
+            r#"{"builtin_protected_paths": false}"#,
+        )
+        .unwrap();
         ToolContext {
             workspace: base.to_path_buf(),
             sandbox_writable_roots: None,
@@ -440,7 +465,7 @@ mod tests {
             sender_id: None,
             sender_role: None,
             chat_id: "nested".to_string(),
-            config: blockcell_core::Config::default(),
+            config,
             permissions: crate::PermissionSet::new(),
             task_manager: None,
             memory_store: None,
@@ -647,5 +672,17 @@ mod tests {
 
         assert!(guard.admit("exec", &json!({"command": "ls"})).is_err());
         assert!(guard.admit("list_dir", &json!({"path": "."})).is_ok());
+    }
+
+    #[test]
+    fn nested_guard_requires_host_for_unknown_file_effects() {
+        let (dir, guard) = guard_with(ToolPolicy::permissive());
+        let error = guard
+            .admit(
+                "unmodeled_tool",
+                &json!({"path": dir.path().join("output")}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("requires host path admission"));
     }
 }

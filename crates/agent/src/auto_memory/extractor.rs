@@ -262,7 +262,10 @@ impl AutoMemoryExtractor {
             .fork_label(memory_type.name())
             .max_turns(1)
             .skip_transcript(true)
-            .tool_schemas(build_forked_tool_schemas(&["exec".to_string()]))
+            .tool_schemas(build_forked_tool_schemas(&[
+                "exec".to_string(),
+                "shell".to_string(),
+            ]))
             .build();
 
         // 如果 builder 失败（理论上不会，因为已经设置 provider_pool）
@@ -693,7 +696,10 @@ pub async fn extract_auto_memory(
         .fork_label(memory_type.name())
         .max_turns(1)
         .skip_transcript(true)
-        .tool_schemas(build_forked_tool_schemas(&["exec".to_string()]))
+        .tool_schemas(build_forked_tool_schemas(&[
+            "exec".to_string(),
+            "shell".to_string(),
+        ]))
         .build()
     {
         Ok(p) => p,

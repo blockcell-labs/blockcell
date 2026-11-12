@@ -100,7 +100,7 @@ pub fn create_memory_file_can_use_tool(memory_path: &Path) -> CanUseToolFn {
 ///
 /// 允许：
 /// - Read/Grep/Glob/ListDir（只读，且仅限记忆目录内的显式路径）
-/// - Shell/Exec 只读命令（必须指定记忆目录内的工作目录，且命令参数不能逃逸）
+/// - 不提供 Shell/Exec；目录限定的读取应使用专用文件工具
 /// - Edit/Write 仅限 memory 目录内
 pub fn create_auto_mem_can_use_tool(memory_dir: &Path) -> CanUseToolFn {
     let memory_dir = memory_dir.to_path_buf();
@@ -108,11 +108,6 @@ pub fn create_auto_mem_can_use_tool(memory_dir: &Path) -> CanUseToolFn {
         // 只读文件工具也必须限制在记忆目录内，避免后台 agent 读取任意本地路径。
         if matches!(tool_name, "read_file" | "grep" | "glob" | "list_dir") {
             return allow_read_only_path(tool_name, input, &memory_dir);
-        }
-
-        // shell/exec 难以完整解析参数，必须额外要求工作目录和命令参数都不逃逸记忆目录。
-        if matches!(tool_name, "shell" | "bash" | "exec") {
-            return allow_restricted_shell(input, &memory_dir);
         }
 
         // Edit/Write 仅限记忆目录内
@@ -144,11 +139,6 @@ pub fn create_dream_can_use_tool(memory_root: &Path) -> CanUseToolFn {
         // 只读工具必须显式访问记忆根目录内的路径，避免 dream agent 泄露本地敏感文件。
         if matches!(tool_name, "read_file" | "grep" | "glob" | "ls" | "list_dir") {
             return allow_read_only_path(tool_name, input, &memory_root);
-        }
-
-        // shell/exec 只在工作目录和参数都受限时允许。
-        if matches!(tool_name, "shell" | "bash" | "exec") {
-            return allow_restricted_shell(input, &memory_root);
         }
 
         // Edit/Write 仅限记忆目录
@@ -804,199 +794,9 @@ fn allow_write_path(
     }
 }
 
-fn allow_restricted_shell(input: &serde_json::Value, allowed_dir: &Path) -> ToolPermission {
-    let Some(cmd) = input.get("command").and_then(|v| v.as_str()) else {
-        return ToolPermission::Deny {
-            message: "shell/exec 必须提供 command".to_string(),
-        };
-    };
-
-    if !is_read_only_command(cmd) {
-        return ToolPermission::Deny {
-            message: "shell/exec 仅允许只读命令".to_string(),
-        };
-    }
-
-    let Some(working_dir) = input.get("working_dir").and_then(|v| v.as_str()) else {
-        return ToolPermission::Deny {
-            message: "shell/exec 必须显式指定记忆目录内的 working_dir".to_string(),
-        };
-    };
-
-    if !is_path_within_directory(working_dir, allowed_dir) {
-        return ToolPermission::Deny {
-            message: format!(
-                "shell/exec 的 working_dir 只能位于记忆目录内: {}",
-                allowed_dir.display()
-            ),
-        };
-    }
-
-    // 只读命令本身还不能携带绝对路径、环境变量或父目录跳转，
-    // 否则即使 current_dir 受限，也可能读取到记忆目录外的文件。
-    if !shell_command_paths_are_confined(cmd) {
-        return ToolPermission::Deny {
-            message: "shell/exec 命令参数不能包含绝对路径、环境变量或父目录跳转".to_string(),
-        };
-    }
-
-    ToolPermission::Allow
-}
-
-fn shell_command_paths_are_confined(cmd: &str) -> bool {
-    cmd.split_whitespace().all(|raw_token| {
-        let token = raw_token.trim_matches(|c: char| {
-            matches!(
-                c,
-                '"' | '\'' | ',' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
-            )
-        });
-        if token.is_empty() {
-            return true;
-        }
-
-        let path_like = token
-            .split_once('=')
-            .map(|(_, value)| value)
-            .unwrap_or(token);
-
-        if path_like.is_empty() || (token.starts_with('-') && !token.contains('=')) {
-            return true;
-        }
-
-        if path_like.starts_with('~')
-            || path_like.starts_with('/')
-            || path_like.starts_with('\\')
-            || path_like.contains("..")
-            || path_like.contains('$')
-            || path_like.contains('%')
-            || Path::new(path_like).is_absolute()
-        {
-            return false;
-        }
-
-        true
-    })
-}
-
-/// 检查是否只读命令
-///
-/// 安全检查：
-/// 1. 命令必须以只读前缀开头
-/// 2. 不能包含输出重定向符号 (>, >>)
-/// 3. 不能包含管道符号 (|)
-/// 4. 不能包含命令替换 ($(), ``)
-/// 5. 不能包含输入重定向 (<)
-/// 6. 不能包含换行符（防止命令注入）
-/// 7. 不能包含 null 字节
-///
-/// 注意：`env` 和 `printenv` 已从允许列表中移除，因为可能泄露敏感环境变量。
-fn is_read_only_command(cmd: &str) -> bool {
-    // 快速拒绝：检查控制字符和危险字符
-    if cmd.contains('\0') || cmd.contains('\n') || cmd.contains('\r') {
-        return false;
-    }
-
-    let read_only_prefixes = [
-        "ls",
-        "find",
-        "grep",
-        "cat",
-        "stat",
-        "wc",
-        "head",
-        "tail",
-        "git status",
-        "git log",
-        "git diff",
-        "git show",
-        "git branch",
-        "echo",
-        "pwd",
-        "which",
-        "whoami",
-        "type",
-        "file",
-        "du",
-        "tree",
-    ];
-
-    let cmd_trimmed = cmd.trim();
-    let cmd_lower = cmd_trimmed.to_lowercase();
-
-    // 安全检查：检测危险符号
-    // 1. 管道 (|) - 可能将数据传递给写入命令
-    // 2. 命令替换 ($(), ``) - 可能执行任意命令
-    // 3. 分号 (;) 和逻辑运算符 (&&, ||) - 可能链接多个命令
-    // 4. 后台执行 (&) - 可能在后台执行危险操作
-    // 5. 输入重定向 (<) - 可能绕过路径限制读取外部文件
-    // 6. 换行转义 (\n, \r) - 可能注入新命令
-    let dangerous_patterns = [
-        "|", "$(", "`", ";", "&&", "||", "&", "<", "\\n", "\\r", "\n", "\r",
-    ];
-
-    for pattern in &dangerous_patterns {
-        if cmd_lower.contains(pattern) {
-            return false;
-        }
-    }
-
-    // 输出重定向 (>, >>) - 需要更精确的检测
-    // 排除 >= (比较运算符) 和 => (箭头函数)
-    // 简单策略: 如果 > 后面紧跟 =, 或前面紧跟 =, 则不是重定向
-    if cmd_lower.contains('>') {
-        // >> 追加重定向
-        if cmd_lower.contains(">>") {
-            return false;
-        }
-        // 检查每个 > 是否是重定向
-        let bytes = cmd_lower.as_bytes();
-        let len = bytes.len();
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'>' {
-                let next_is_eq = i + 1 < len && bytes[i + 1] == b'=';
-                let prev_is_eq = i > 0 && bytes[i - 1] == b'=';
-                // >= 或 => 不是重定向
-                if next_is_eq || prev_is_eq {
-                    continue;
-                }
-                // 其他 > 视为重定向
-                return false;
-            }
-        }
-    }
-
-    // `find` is on the read-only prefix list, but several of its action flags
-    // mutate the filesystem (`-delete`, `-exec ...`, `-fprint FILE`, ...).
-    // Flag tokens are skipped by the path confinement checks below, so they
-    // must be rejected here or a "read-only" shell could delete files inside
-    // the memory directory.
-    const FIND_MUTATING_FLAGS: &[&str] = &[
-        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf",
-        "-fwrite",
-    ];
-    if cmd_lower
-        .split_whitespace()
-        .any(|token| FIND_MUTATING_FLAGS.contains(&token))
-    {
-        return false;
-    }
-
-    // 检查是否以只读前缀开头
-    // 使用更严格的匹配：命令必须紧随空格或结束
-    read_only_prefixes.iter().any(|&prefix| {
-        if cmd_lower == prefix {
-            return true;
-        }
-        if cmd_lower.starts_with(prefix) {
-            // 检查前缀后是否是空格或参数结束
-            let after_prefix = &cmd_trimmed[prefix.len()..];
-            after_prefix.starts_with(' ') || after_prefix.is_empty()
-        } else {
-            false
-        }
-    })
-}
+// Memory-only forks deliberately have no shell capability. A working directory
+// and token checks cannot confine reads through links, recursive commands or
+// shell expansion. Use the path-checked file tools above instead.
 
 /// 检查是否在记忆目录内
 ///
@@ -1041,11 +841,6 @@ fn is_auto_mem_path(path: &str, memory_dir: &Path) -> bool {
     // 注意：移除了基于文件名的 fallback 检查，因为它允许访问任意位置的文件
     // 这是安全漏洞：攻击者可构造 /etc/user.md 等路径绕过目录限制
     false
-}
-
-/// 检查路径是否在指定目录内（安全版本，解析符号链接）
-fn is_path_within_directory(path: &str, directory: &Path) -> bool {
-    is_path_within_directory_path(Path::new(path), directory)
 }
 
 fn is_path_within_directory_path(path: &Path, directory: &Path) -> bool {
@@ -1205,53 +1000,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_only_commands() {
-        assert!(!is_read_only_command("find . -delete"));
-        assert!(!is_read_only_command("find . -fprint output"));
-        assert!(is_read_only_command("ls -la"));
-        assert!(is_read_only_command("grep pattern file.txt"));
-        assert!(is_read_only_command("git status"));
-        assert!(is_read_only_command("cat file.txt"));
-        assert!(!is_read_only_command("rm file.txt"));
-        assert!(!is_read_only_command("npm install"));
-    }
-
-    #[test]
-    fn test_read_only_command_redirect_detection() {
-        // 输出重定向 - 应该被拒绝
-        assert!(!is_read_only_command("echo hello > file.txt"));
-        assert!(!is_read_only_command("echo hello >> file.txt"));
-        assert!(!is_read_only_command("cat file > output.txt"));
-        assert!(!is_read_only_command("ls -la > listing.txt"));
-
-        // 管道 - 应该被拒绝
-        assert!(!is_read_only_command("ls | grep foo"));
-        assert!(!is_read_only_command("cat file | grep pattern"));
-
-        // 命令替换 - 应该被拒绝
-        assert!(!is_read_only_command("echo $(cat secret)"));
-        assert!(!is_read_only_command("echo `whoami`"));
-
-        // 输入重定向 - 应该被拒绝，避免绕过路径限制读取外部文件
-        assert!(!is_read_only_command("cat < /etc/passwd"));
-
-        // 分号和逻辑运算符 - 应该被拒绝
-        assert!(!is_read_only_command("ls; rm file"));
-        assert!(!is_read_only_command("ls && rm file"));
-        assert!(!is_read_only_command("ls || rm file"));
-
-        // 后台执行 - 应该被拒绝
-        assert!(!is_read_only_command("ls &"));
-
-        // 纯只读命令 - 应该通过
-        assert!(is_read_only_command("ls -la"));
-        assert!(is_read_only_command("echo hello"));
-        assert!(is_read_only_command("cat file.txt"));
-        assert!(is_read_only_command("grep -r pattern"));
-        assert!(is_read_only_command("git status"));
-    }
-
-    #[test]
     fn test_memory_file_permission() {
         let memory_path = Path::new("/path/to/memory.md");
         let can_use = create_memory_file_can_use_tool(memory_path);
@@ -1267,6 +1015,46 @@ mod tests {
         // 拒绝其他工具
         let result = can_use("read_file", &json!({"file_path": "/path/to/memory.md"}));
         assert!(matches!(result, ToolPermission::Deny { .. }));
+    }
+
+    #[test]
+    fn memory_forks_reject_shell_even_for_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let memory = root.path().join("memory");
+        std::fs::create_dir(&memory).unwrap();
+        std::fs::write(root.path().join("outside.txt"), "outside sentinel").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path().join("outside.txt"), memory.join("link")).unwrap();
+        for check in [
+            create_auto_mem_can_use_tool(&memory),
+            create_dream_can_use_tool(&memory),
+        ] {
+            for tool in ["shell", "bash", "exec"] {
+                for command in ["cat link", "grep -r sentinel .", "find . -type f", "ls -la"] {
+                    assert!(
+                        matches!(
+                            check(tool, &json!({"command": command, "working_dir": memory})),
+                            ToolPermission::Deny { .. }
+                        ),
+                        "{tool}: {command}"
+                    );
+                }
+            }
+            std::fs::write(memory.join("reference.md"), "local memory").unwrap();
+            assert!(matches!(
+                check("read_file", &json!({"file_path": "reference.md"})),
+                ToolPermission::Allow
+            ));
+            assert!(matches!(
+                check("file_write", &json!({"file_path": "user.md"})),
+                ToolPermission::Allow
+            ));
+            #[cfg(unix)]
+            assert!(matches!(
+                check("read_file", &json!({"file_path": "link"})),
+                ToolPermission::Deny { .. }
+            ));
+        }
     }
 
     #[test]
@@ -1297,14 +1085,14 @@ mod tests {
             ToolPermission::Deny { .. }
         ));
 
-        // 允许受限的只读 shell 命令
+        // 即使是只读 shell 也拒绝；使用 list_dir 代替
         let memory_dir_str = temp_dir.to_string_lossy();
         assert!(matches!(
             can_use(
                 "shell",
                 &json!({"command": "ls -la", "working_dir": memory_dir_str.as_ref()})
             ),
-            ToolPermission::Allow
+            ToolPermission::Deny { .. }
         ));
 
         // 拒绝未指定受限工作目录的 shell 命令

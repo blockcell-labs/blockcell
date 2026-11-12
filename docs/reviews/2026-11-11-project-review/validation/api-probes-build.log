@@ -1,0 +1,33 @@
+   Compiling blockcell-core v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/core)
+   Compiling blockcell-storage v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/storage)
+   Compiling blockcell-channels v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/channels)
+   Compiling blockcell-skills v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/skills)
+   Compiling blockcell-providers v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/providers)
+   Compiling blockcell-tools v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/tools)
+   Compiling blockcell-agent v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/agent)
+warning: methods `execute_tool_call` and `execute_tool_call_prefetched` are never used
+   --> /Users/apple/rustdev/magicbot/blockcell/crates/agent/src/runtime/tool_pipeline.rs:275:25
+    |
+274 | impl AgentRuntime {
+    | ----------------- methods in this implementation
+275 |     pub(crate) async fn execute_tool_call(
+    |                         ^^^^^^^^^^^^^^^^^
+...
+287 |     pub(crate) async fn execute_tool_call_prefetched(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `record_llm_budget` is never used
+   --> /Users/apple/rustdev/magicbot/blockcell/crates/agent/src/runtime/turn_flow.rs:160:19
+    |
+  7 | impl AgentRuntime {
+    | ----------------- method in this implementation
+...
+160 |     pub(crate) fn record_llm_budget(
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: `blockcell-agent` (lib) generated 2 warnings
+   Compiling blockcell-review-api-probe v0.0.0 (/private/tmp/blockcell-review-api-ysp1lmib)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 37s
+     Running `target/debug/blockcell-review-api-probe /private/tmp/blockcell-review-api-ysp1lmib/data`

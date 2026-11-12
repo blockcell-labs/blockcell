@@ -1306,7 +1306,12 @@ impl AgentRuntime {
         }
         let start = std::time::Instant::now();
         let mut result = self
-            .execute_runtime_tool_call(tool_name, ctx.clone(), inv.args.clone())
+            .execute_runtime_tool_call(
+                tool_name,
+                ctx.clone(),
+                inv.args.clone(),
+                &persist_session_key_for(inv.msg),
+            )
             .await;
         if tool_name == "shell" && shell_action_is_run(&inv.args) {
             if let Some(reason) = shell_sandbox_escalation_reason(&result) {
@@ -1327,7 +1332,12 @@ impl AgentRuntime {
                 if approved {
                     inv.args = full_access_retry_args(&inv.args);
                     result = self
-                        .execute_runtime_tool_call(tool_name, ctx, inv.args.clone())
+                        .execute_runtime_tool_call(
+                            tool_name,
+                            ctx,
+                            inv.args.clone(),
+                            &persist_session_key_for(inv.msg),
+                        )
                         .await;
                 } else {
                     result = Err(blockcell_core::Error::PermissionDenied(format!(

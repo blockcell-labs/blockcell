@@ -3,19 +3,111 @@
 //! 包含路径提取、安全校验、用户授权和危险操作确认。
 
 use super::{is_path_within_base, persist_session_key_for, ConfirmRequest};
-use blockcell_core::path_policy::{resolve_for_policy, PathOp, PolicyAction};
+use blockcell_core::path_policy::{resolve_for_policy, PathOp, PathPolicy, PolicyAction};
 use blockcell_core::InboundMessage;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 /// Maximum time to wait for a user confirmation before denying the operation.
 /// Without a bound, a UI that never answers the oneshot leaves the turn pending forever.
 const CONFIRM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PathAccess {
-    pub(super) path: String,
-    pub(super) op: PathOp,
+pub(super) type PathAccess = blockcell_tools::tool_guard::ToolPathAccess;
+
+type SessionPathAuthorizations = Arc<Mutex<HashSet<(String, PathBuf, PathOp)>>>;
+
+fn path_is_safe_for_workspace(workspace: &Path, resolved: &Path) -> bool {
+    if is_path_within_base(workspace, resolved) {
+        return true;
+    }
+    let canonical = resolved
+        .canonicalize()
+        .unwrap_or_else(|_| resolved.to_path_buf());
+    let temp_dir = std::env::temp_dir();
+    let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
+    if is_path_within_base(&temp_dir, &canonical) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        let tmp = Path::new("/tmp");
+        tmp.exists() && is_path_within_base(tmp, &canonical)
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+fn path_has_session_grant(
+    resolved: &Path,
+    op: PathOp,
+    session_key: &str,
+    authorized_dirs: &HashSet<(String, PathBuf, PathOp)>,
+) -> bool {
+    let resolved = resolve_for_policy(resolved);
+    resolved
+        .ancestors()
+        .any(|path| authorized_dirs.contains(&(session_key.to_string(), path.to_path_buf(), op)))
+}
+
+fn build_nested_path_admission(
+    policy: PathPolicy,
+    workspace: PathBuf,
+    active_skill_dir: Option<PathBuf>,
+    authorized_dirs: SessionPathAuthorizations,
+    session_key: String,
+    tool_session_key: String,
+) -> blockcell_tools::tool_guard::NestedToolAdmission {
+    Arc::new(move |tool_name, args| {
+        let mut args = args.clone();
+        if tool_name == "shell"
+            && args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+                == "run"
+            && args
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            args["session_id"] = format!("default-{tool_session_key}").into();
+        }
+        for access in extract_path_accesses(tool_name, &args) {
+            let resolved = blockcell_tools::expand_path(&access.path, &workspace);
+            let action = policy.evaluate(&resolved, access.op);
+            if action == PolicyAction::Deny {
+                return Err(blockcell_core::Error::PermissionDenied(format!(
+                    "path access denied by policy: {}",
+                    resolved.display()
+                )));
+            }
+            let skill_resource = active_skill_dir.as_ref().is_some_and(|dir| {
+                is_path_within_base(dir, &resolved)
+                    && (matches!(tool_name, "read_file" | "list_dir")
+                        && matches!(access.op, PathOp::Read | PathOp::List)
+                        || matches!(tool_name, "exec" | "shell")
+                            && matches!(access.op, PathOp::Read | PathOp::Exec))
+            });
+            if skill_resource || path_is_safe_for_workspace(&workspace, &resolved) {
+                continue;
+            }
+            let grants = authorized_dirs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if path_has_session_grant(&resolved, access.op, &session_key, &grants)
+                || action == PolicyAction::Allow
+            {
+                continue;
+            }
+            return Err(blockcell_core::Error::PermissionDenied(format!(
+                "path requires user confirmation, unavailable inside skill scripts: {}",
+                resolved.display()
+            )));
+        }
+        Ok(())
+    })
 }
 
 fn push_path(accesses: &mut Vec<PathAccess>, args: &serde_json::Value, field: &str, op: PathOp) {
@@ -24,17 +116,6 @@ fn push_path(accesses: &mut Vec<PathAccess>, args: &serde_json::Value, field: &s
             path: path.to_string(),
             op,
         });
-    }
-}
-
-fn push_paths(accesses: &mut Vec<PathAccess>, args: &serde_json::Value, field: &str, op: PathOp) {
-    if let Some(paths) = args.get(field).and_then(|value| value.as_array()) {
-        for path in paths.iter().filter_map(|value| value.as_str()) {
-            accesses.push(PathAccess {
-                path: path.to_string(),
-                op,
-            });
-        }
     }
 }
 
@@ -174,6 +255,21 @@ fn sandboxed_shell_expansion(
 }
 
 impl super::AgentRuntime {
+    pub(super) fn nested_tool_path_admission(
+        &self,
+        ctx: &blockcell_tools::ToolContext,
+        session_key: &str,
+    ) -> blockcell_tools::tool_guard::NestedToolAdmission {
+        build_nested_path_admission(
+            self.path_policy.clone(),
+            self.paths.workspace(),
+            ctx.active_skill_dir.clone(),
+            Arc::clone(&self.authorized_dirs),
+            session_key.to_string(),
+            ctx.session_key.clone(),
+        )
+    }
+
     /// Extract filesystem paths from tool call parameters.
     pub(super) fn extract_path_accesses(
         &self,
@@ -249,96 +345,12 @@ impl super::AgentRuntime {
 /// (P3-022): a missed branch here silently exempts a tool's paths from the
 /// path policy, which is exactly the class of bug the table exists to prevent.
 pub(super) fn extract_path_accesses(tool_name: &str, args: &serde_json::Value) -> Vec<PathAccess> {
+    if let Some(accesses) = blockcell_tools::tool_guard::extract_file_tool_paths(tool_name, args) {
+        return accesses;
+    }
     let mut accesses = Vec::new();
-    let action = args
-        .get("action")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
 
     match tool_name {
-        "read_file" => {
-            push_path(&mut accesses, args, "path", PathOp::Read);
-            push_paths(&mut accesses, args, "paths", PathOp::Read);
-        }
-        "write_file" => {
-            push_path(&mut accesses, args, "path", PathOp::Write);
-            if let Some(files) = args.get("files").and_then(|value| value.as_array()) {
-                for file in files {
-                    push_path(&mut accesses, file, "path", PathOp::Write);
-                }
-            }
-        }
-        "edit_file" => push_path(&mut accesses, args, "path", PathOp::Write),
-        "list_dir" => push_path(&mut accesses, args, "path", PathOp::List),
-        "file_ops" => {
-            let source_op = match action {
-                "delete" | "rename" | "move" => PathOp::Write,
-                _ => PathOp::Read,
-            };
-            push_path(&mut accesses, args, "path", source_op);
-            push_paths(&mut accesses, args, "paths", PathOp::Read);
-            push_path(&mut accesses, args, "destination", PathOp::Write);
-        }
-        "data_process" => {
-            let path_op = if action == "write_csv" {
-                PathOp::Write
-            } else {
-                PathOp::Read
-            };
-            push_path(&mut accesses, args, "path", path_op);
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "audio_transcribe" | "ocr" | "encrypt" => {
-            push_path(&mut accesses, args, "path", PathOp::Read);
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "chart_generate" | "office_write" | "camera" | "tts" | "knowledge_graph" => {
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "video_process" => {
-            push_path(&mut accesses, args, "input", PathOp::Read);
-            push_paths(&mut accesses, args, "inputs", PathOp::Read);
-            push_path(&mut accesses, args, "subtitle_file", PathOp::Read);
-            push_path(&mut accesses, args, "watermark_image", PathOp::Read);
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "image_understand" => {
-            push_path(&mut accesses, args, "path", PathOp::Read);
-            push_paths(&mut accesses, args, "paths", PathOp::Read);
-        }
-        "termux_api" => {
-            let file_op = match action {
-                "share" | "media_scan" | "wallpaper" => PathOp::Read,
-                _ => PathOp::Write,
-            };
-            push_path(&mut accesses, args, "file_path", file_op);
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "email" => {
-            push_paths(&mut accesses, args, "attachments", PathOp::Read);
-            push_path(&mut accesses, args, "save_attachments_to", PathOp::Write);
-        }
-        "health_api" => {
-            push_path(&mut accesses, args, "path", PathOp::Read);
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-        }
-        "http_request" => {
-            // `save_to` writes the response body to disk. The runtime only
-            // recognises this name here, so omitting the branch meant the
-            // write never reached the path policy.
-            push_path(&mut accesses, args, "save_to", PathOp::Write);
-        }
-        "app_control" => {
-            push_path(&mut accesses, args, "screenshot_path", PathOp::Write);
-        }
-        "message" => {
-            push_paths(&mut accesses, args, "media", PathOp::Read);
-        }
-        "browse" => {
-            push_path(&mut accesses, args, "output_path", PathOp::Write);
-            push_path(&mut accesses, args, "file_path", PathOp::Read);
-            push_paths(&mut accesses, args, "files", PathOp::Read);
-        }
         "exec" => {
             push_path(&mut accesses, args, "working_dir", PathOp::Exec);
             // Also subject filesystem paths referenced inside the command
@@ -432,24 +444,7 @@ impl super::AgentRuntime {
 
     /// Check if a resolved path is inside the safe workspace directory.
     pub(super) fn is_path_safe(&self, resolved: &std::path::Path) -> bool {
-        if is_path_within_base(&self.paths.workspace(), resolved) {
-            return true;
-        }
-        let canonical = resolved
-            .canonicalize()
-            .unwrap_or_else(|_| resolved.to_path_buf());
-        let temp_dir = std::env::temp_dir();
-        let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
-        if is_path_within_base(&temp_dir, &canonical) {
-            return true;
-        }
-        #[cfg(unix)]
-        {
-            let tmp = std::path::Path::new("/tmp");
-            tmp.exists() && is_path_within_base(tmp, &canonical)
-        }
-        #[cfg(not(unix))]
-        false
+        path_is_safe_for_workspace(&self.paths.workspace(), resolved)
     }
 
     /// Check whether a resolved path falls within a directory authorized in
@@ -468,21 +463,7 @@ impl super::AgentRuntime {
             .authorized_dirs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if authorized_dirs.is_empty() {
-            return false;
-        }
-        let session_key = session_key.to_string();
-        let rp = resolve_for_policy(resolved);
-        let mut current = rp.as_path();
-        loop {
-            if authorized_dirs.contains(&(session_key.clone(), current.to_path_buf(), op)) {
-                return true;
-            }
-            match current.parent() {
-                Some(parent) if parent != current => current = parent,
-                _ => return false,
-            }
-        }
+        path_has_session_grant(resolved, op, session_key, &authorized_dirs)
     }
 
     /// Record a directory as authorized for `session_key` so future accesses
@@ -1465,13 +1446,169 @@ fn is_safe_relative_skill_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_mutates_cwd, denied_paths_payload, extract_command_paths,
-        extract_literal_shell_read_paths, extract_path_accesses, is_safe_relative_skill_path,
-        resolve_shell_access_path, PathAccess,
+        build_nested_path_admission, command_mutates_cwd, denied_paths_payload,
+        extract_command_paths, extract_literal_shell_read_paths, extract_path_accesses,
+        is_safe_relative_skill_path, resolve_shell_access_path, PathAccess,
     };
     use blockcell_core::path_policy::PathOp;
     use serde_json::json;
     use std::path::PathBuf;
+
+    fn nested_policy(
+        dir: &std::path::Path,
+        rules: serde_json::Value,
+    ) -> blockcell_core::path_policy::PathPolicy {
+        let file = dir.join("path_access.json5");
+        std::fs::write(
+            &file,
+            json!({"builtin_protected_paths": false, "rules": rules}).to_string(),
+        )
+        .unwrap();
+        blockcell_core::path_policy::PathPolicy::load(&file)
+    }
+
+    #[test]
+    fn nested_path_admission_keeps_session_and_operation_grants_separate() {
+        use blockcell_core::path_policy::resolve_for_policy;
+        use std::sync::{Arc, Mutex};
+
+        // Outside both the workspace and the runtime's automatically safe temp roots.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let grants = Arc::new(Mutex::new(std::collections::HashSet::from([(
+            "session-a".to_string(),
+            resolve_for_policy(&outside),
+            PathOp::Read,
+        )])));
+        let policy = nested_policy(dir.path(), json!([]));
+        let admission = |session: &str| {
+            build_nested_path_admission(
+                policy.clone(),
+                workspace.clone(),
+                None,
+                grants.clone(),
+                session.into(),
+                session.into(),
+            )
+        };
+        let args = json!({"path": outside.join("marker.txt")});
+        assert!(admission("session-a")("read_file", &args).is_ok());
+        assert!(admission("session-b")("read_file", &args).is_err());
+        assert!(admission("session-a")("write_file", &args).is_err());
+        let scoped = admission("session-a");
+        grants.lock().unwrap().clear();
+        assert!(scoped("read_file", &args).is_err());
+    }
+
+    #[test]
+    fn nested_path_admission_hard_deny_wins_over_workspace_and_grants() {
+        use blockcell_core::path_policy::resolve_for_policy;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let blocked = workspace.join("blocked.txt");
+        let policy = nested_policy(
+            dir.path(),
+            json!([
+                {"name": "blocked", "action": "deny", "ops": ["read"], "paths": [blocked]},
+            ]),
+        );
+        let grants = Arc::new(Mutex::new(std::collections::HashSet::from([(
+            "session".to_string(),
+            resolve_for_policy(&workspace),
+            PathOp::Read,
+        )])));
+        let admission = build_nested_path_admission(
+            policy,
+            workspace,
+            None,
+            grants,
+            "session".into(),
+            "source-session".into(),
+        );
+        let error = admission("read_file", &json!({"path": "blocked.txt"})).unwrap_err();
+        assert!(error.to_string().contains("path access denied by policy"));
+    }
+
+    #[test]
+    fn nested_path_admission_checks_implicit_decompression_write() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let archive = outside.join("archive.zip");
+        let policy = nested_policy(
+            dir.path(),
+            json!([
+                {"name": "source", "action": "allow", "ops": ["read"], "paths": [archive]},
+                {"name": "target", "action": "deny", "ops": ["write"], "paths": [outside]},
+            ]),
+        );
+        let admission = build_nested_path_admission(
+            policy,
+            workspace,
+            None,
+            Arc::new(Mutex::new(Default::default())),
+            "session".into(),
+            "session".into(),
+        );
+        assert!(admission(
+            "file_ops",
+            &json!({"action": "decompress", "path": archive})
+        )
+        .is_err());
+        assert!(admission(
+            "file_ops",
+            &json!({"action": "decompress", "path": archive, "destination": "out"})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn decompress_default_destination_requires_write_access() {
+        for (archive, parent) in [
+            ("/external/archive.zip", "/external"),
+            ("nested/archive.tar", "nested"),
+            ("archive.zip", "."),
+        ] {
+            let accesses = extract_path_accesses(
+                "file_ops",
+                &json!({"action": "decompress", "path": archive}),
+            );
+            assert!(
+                accesses.contains(&PathAccess {
+                    path: parent.to_string(),
+                    op: PathOp::Write
+                }),
+                "missing write for {archive}: {accesses:?}"
+            );
+        }
+        let explicit = extract_path_accesses(
+            "file_ops",
+            &json!({"action": "decompress", "path": "/external/archive.zip", "destination": "out"}),
+        );
+        assert_eq!(
+            explicit,
+            vec![
+                PathAccess {
+                    path: "/external/archive.zip".into(),
+                    op: PathOp::Read
+                },
+                PathAccess {
+                    path: "out".into(),
+                    op: PathOp::Write
+                }
+            ]
+        );
+    }
 
     /// Table-driven coverage for the tool → path-field mapping (P3-022).
     ///
