@@ -7,6 +7,8 @@ use super::*;
 pub struct LightweightRuntimeHandle {
     subagents: Arc<InProcessSubagentProvider>,
     config: Config,
+    /// The runtime's authoritative ledger, shared without eviction so context
+    /// inspection cannot create a different budget from an active parent/child.
     budget_trackers: Arc<Mutex<HashMap<String, BudgetTrackerHandle>>>,
     /// 父会话预算，用于新建的 session tracker 归并（与 AgentRuntime 保持一致）。
     parent_budget: Option<BudgetTrackerHandle>,

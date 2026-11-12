@@ -1,5 +1,5 @@
 use super::*;
-use blockcell_core::config::{parse_json5_value_preserving_env, write_json5_pretty};
+use blockcell_core::config::{parse_json5_value_preserving_env, stringify_json5_pretty, write_raw_validated_config_json5};
 
 const SUPPORTED_OWNER_CHANNELS: [&str; 11] = [
     "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",
@@ -388,7 +388,7 @@ pub(super) async fn handle_channel_update(
         let ch_key = channel_id.as_str();
         apply_channel_fields(&mut root, ch_key, &req.fields, req.enabled)?;
 
-        write_json5_pretty(&config_path, &root)?;
+        write_raw_validated_config_json5(&config_path, &stringify_json5_pretty(&root)?)?;
         Ok(serde_json::json!({ "status": "ok", "channel": ch_key }))
     }
     .await;

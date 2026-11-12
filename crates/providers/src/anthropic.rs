@@ -388,6 +388,27 @@ impl AnthropicProvider {
         })
     }
 
+    /// Each SSE usage event contains cumulative values for only the fields it
+    /// updates. Missing values must not erase earlier input or cache metrics.
+    fn merge_stream_usage(usage: &mut Value, update: &AnthropicUsage) {
+        if usage.is_null() {
+            *usage = Self::normalize_usage(None);
+        }
+        for (field, tokens) in [
+            ("prompt_tokens", update.input_tokens),
+            ("completion_tokens", update.output_tokens),
+            (
+                "cache_creation_input_tokens",
+                update.cache_creation_input_tokens,
+            ),
+            ("cache_read_input_tokens", update.cache_read_input_tokens),
+        ] {
+            if let Some(tokens) = tokens {
+                usage[field] = Value::from(tokens);
+            }
+        }
+    }
+
     /// Strip the "anthropic/" or "claude-" prefix from model names for the API.
     /// Config may store "anthropic/claude-opus-4-8" but the API expects "claude-opus-4-8".
     fn normalize_model(model: &str) -> &str {
@@ -711,13 +732,13 @@ impl Provider for AnthropicProvider {
                                             // 内容块结束
                                         }
                                         "message_start" => {
-                                            if let Some(u) = &event.usage {
-                                                usage = serde_json::json!({
-                                                    "prompt_tokens": u.input_tokens,
-                                                    "completion_tokens": u.output_tokens,
-                                                    "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                                                    "cache_read_input_tokens": u.cache_read_input_tokens,
-                                                });
+                                            let start_usage = event
+                                                .message
+                                                .as_ref()
+                                                .and_then(|message| message.usage.as_ref())
+                                                .or(event.usage.as_ref());
+                                            if let Some(u) = start_usage {
+                                                Self::merge_stream_usage(&mut usage, u);
                                             }
                                         }
                                         "message_delta" => {
@@ -732,12 +753,7 @@ impl Provider for AnthropicProvider {
                                                 }
                                             }
                                             if let Some(u) = &event.usage {
-                                                usage = serde_json::json!({
-                                                    "prompt_tokens": u.input_tokens,
-                                                    "completion_tokens": u.output_tokens,
-                                                    "cache_creation_input_tokens": u.cache_creation_input_tokens,
-                                                    "cache_read_input_tokens": u.cache_read_input_tokens,
-                                                });
+                                                Self::merge_stream_usage(&mut usage, u);
                                             }
                                         }
                                         "message_stop" => {
@@ -868,7 +884,9 @@ struct AnthropicStreamEvent {
     #[serde(default)]
     content_block: Option<AnthropicStreamContentBlock>,
     #[serde(default)]
-    usage: Option<AnthropicStreamUsage>,
+    usage: Option<AnthropicUsage>,
+    #[serde(default)]
+    message: Option<AnthropicStreamMessage>,
     #[serde(default)]
     error: Option<AnthropicStreamError>,
 }
@@ -896,11 +914,9 @@ struct AnthropicStreamContentBlock {
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicStreamUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
+struct AnthropicStreamMessage {
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]

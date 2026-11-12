@@ -30,6 +30,7 @@ pub mod tools;
 pub use tools::*;
 pub mod upgrade;
 pub use upgrade::*;
+mod roundtrip;
 
 /// 多个配置类型共用的布尔默认值助手（保留在父模块，子模块经 `super::` 引用）。
 pub(crate) use crate::default_true;
@@ -65,10 +66,7 @@ pub struct Config {
     pub gateway: GatewayConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
-    #[serde(
-        default = "intent::default_intent_router_option",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default = "intent::default_intent_router_option")]
     pub intent_router: Option<IntentRouterConfig>,
     #[serde(default)]
     pub auto_upgrade: AutoUpgradeConfig,
@@ -426,50 +424,6 @@ pub fn parse_json5_value_preserving_env(content: &str) -> Result<Value> {
     json5::from_str(content).map_err(|e| format_json5_parse_error(None, "JSON5", &e))
 }
 
-fn preserve_unchanged_env_placeholders(previous: &Value, next: &mut Value) {
-    match (previous, next) {
-        (Value::Object(previous), Value::Object(next)) => {
-            for (key, next_value) in next {
-                if let Some(previous_value) = previous.get(key) {
-                    preserve_unchanged_env_placeholders(previous_value, next_value);
-                }
-            }
-        }
-        (Value::Array(previous), Value::Array(next)) => {
-            for (previous_value, next_value) in previous.iter().zip(next.iter_mut()) {
-                preserve_unchanged_env_placeholders(previous_value, next_value);
-            }
-        }
-        (Value::String(previous), Value::String(next))
-            if previous.contains("${")
-                && serde_json::to_string(previous)
-                    .ok()
-                    .and_then(|quoted| parse_json5_str::<String>(&quoted).ok())
-                    .is_some_and(|expanded| expanded == *next) =>
-        {
-            *next = previous.clone();
-        }
-        _ => {}
-    }
-}
-
-/// Deep-merge keys that exist in the on-disk config but are unknown to the
-/// `Config` schema back into the serialized output, so a whole-file `save`
-/// does not silently drop user-defined fields (JSON5 comments are still lost —
-/// the serializer does not preserve them).
-fn merge_unknown_keys(previous: &Value, next: &mut Value) {
-    if let (Value::Object(previous), Value::Object(next)) = (previous, next) {
-        for (key, previous_value) in previous {
-            match next.get_mut(key) {
-                Some(next_value) => merge_unknown_keys(previous_value, next_value),
-                None => {
-                    next.insert(key.clone(), previous_value.clone());
-                }
-            }
-        }
-    }
-}
-
 /// Keep operator comments when normalizing configuration. Comments are emitted
 /// as a preamble in their original order; quoted URL/string content is untouched.
 fn preserved_json5_comments(raw: &str) -> String {
@@ -587,40 +541,102 @@ pub fn mask_secret_values(value: &mut Value) {
     }
 }
 
+/// Mask credential strings in editable configuration without changing numeric
+/// limits (such as maxTokens), booleans, or container types.
+pub fn mask_config_secret_values(value: &mut Value) {
+    fn mask(value: &mut Value, credential: bool) {
+        match value {
+            Value::String(_) if credential => *value = Value::String(SECRET_MASK.to_string()),
+            Value::Object(map) => {
+                for (key, entry) in map {
+                    mask(entry, credential || is_secret_key(key));
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| mask(item, credential)),
+            _ => {}
+        }
+    }
+    mask(value, false)
+}
+
 /// Put stored secrets back where `incoming` still carries [`SECRET_MASK`].
 ///
 /// Read endpoints mask credentials; when a client echoes that payload back, every
 /// masked leaf means "unchanged" and must be replaced with the value on disk instead
 /// of being persisted as the literal mask.
-pub fn restore_masked_secrets(current: &Value, incoming: &mut Value) {
-    // Checked before destructuring so the mutable borrow of `incoming` is free when
-    // the stored value is written back.
-    if incoming.as_str() == Some(SECRET_MASK) {
-        *incoming = current.clone();
-        return;
+pub fn restore_masked_secrets(current: &Value, incoming: &mut Value) -> Result<()> {
+    fn has_mask(value: &Value, credential: bool) -> bool {
+        match value {
+            Value::String(value) => credential && value == SECRET_MASK,
+            Value::Object(values) => values
+                .iter()
+                .any(|(key, value)| has_mask(value, credential || is_secret_key(key))),
+            Value::Array(values) => values.iter().any(|value| has_mask(value, credential)),
+            _ => false,
+        }
     }
 
-    match incoming {
-        Value::Object(map) => {
-            let Value::Object(current_map) = current else {
-                return;
-            };
-            for (key, value) in map.iter_mut() {
-                if let Some(stored) = current_map.get(key) {
-                    restore_masked_secrets(stored, value);
+    fn restore(current: Option<&Value>, incoming: &mut Value, credential: bool) -> Result<()> {
+        if credential && incoming.as_str() == Some(SECRET_MASK) {
+            let stored = current.and_then(Value::as_str).ok_or_else(|| {
+                crate::Error::Config(
+                    "Cannot restore masked credential without an existing string value".into(),
+                )
+            })?;
+            *incoming = Value::String(stored.to_string());
+            return Ok(());
+        }
+        match incoming {
+            Value::Object(values) => {
+                for (key, value) in values {
+                    restore(
+                        current.and_then(|current| current.get(key)),
+                        value,
+                        credential || is_secret_key(key),
+                    )?;
                 }
             }
-        }
-        Value::Array(items) => {
-            let Value::Array(current_items) = current else {
-                return;
-            };
-            for (stored, value) in current_items.iter().zip(items.iter_mut()) {
-                restore_masked_secrets(stored, value);
+            Value::Array(values) => {
+                let stored = current.and_then(Value::as_array);
+                // Only arrays carrying masks need an identity. Ordinary numeric,
+                // string or duplicate model lists remain valid editable input.
+                for index in 0..values.len() {
+                    if !has_mask(&values[index], credential) {
+                        continue;
+                    }
+                    let identity = roundtrip::identity(&values[index]).ok_or_else(|| {
+                        crate::Error::Config(
+                            "Masked credentials in arrays require a stable id".into(),
+                        )
+                    })?;
+                    if values
+                        .iter()
+                        .filter(|value| roundtrip::identity(value).as_ref() == Some(&identity))
+                        .count()
+                        != 1
+                    {
+                        return Err(crate::Error::Config(
+                            "Cannot restore masked credentials for duplicate array ids".into(),
+                        ));
+                    }
+                    let matches: Vec<&Value> = stored
+                        .into_iter()
+                        .flatten()
+                        .filter(|value| roundtrip::identity(value).as_ref() == Some(&identity))
+                        .collect();
+                    if matches.len() != 1 {
+                        return Err(crate::Error::Config(
+                            "Cannot uniquely locate array id for masked credentials".into(),
+                        ));
+                    }
+                    restore(Some(matches[0]), &mut values[index], credential)?;
+                }
             }
+            _ => {}
         }
-        _ => {}
+        Ok(())
     }
+    restore(Some(current), incoming, false)
 }
 
 #[cfg(test)]
@@ -666,10 +682,48 @@ mod secret_masking_tests {
         let mut incoming =
             json!({"providers": {"openai": {"apiKey": SECRET_MASK, "model": "gpt-5"}}});
 
-        restore_masked_secrets(&current, &mut incoming);
+        restore_masked_secrets(&current, &mut incoming).unwrap();
 
         assert_eq!(incoming["providers"]["openai"]["apiKey"], json!("sk-real"));
         assert_eq!(incoming["providers"]["openai"]["model"], json!("gpt-5"));
+    }
+
+    #[test]
+    fn r4_config_mask_keeps_types_and_protects_credential_containers() {
+        let mut value = json!({"maxTokens": 123, "tokenLimit": null,
+            "credentials": {"primary": "secret", "enabled": true, "count": 2},
+            "apiKeys": ["first", "second"], "model": "public"});
+        mask_config_secret_values(&mut value);
+        assert_eq!(value["maxTokens"], 123);
+        assert!(value["tokenLimit"].is_null());
+        assert_eq!(value["credentials"]["primary"], SECRET_MASK);
+        assert_eq!(value["credentials"]["enabled"], true);
+        assert_eq!(value["credentials"]["count"], 2);
+        assert_eq!(value["apiKeys"], json!([SECRET_MASK, SECRET_MASK]));
+        assert_eq!(value["model"], "public");
+    }
+
+    #[test]
+    fn r4_mask_restore_reorders_ids_and_rejects_unresolved_masks() {
+        let current = json!({"list": [{"id":"a","apiKey":"first"},{"id":"b","apiKey":"second"}]});
+        let mut reordered =
+            json!({"list": [{"id":"b","apiKey":SECRET_MASK},{"id":"a","apiKey":SECRET_MASK}]});
+        restore_masked_secrets(&current, &mut reordered).unwrap();
+        assert_eq!(reordered["list"][0]["apiKey"], "second");
+        assert_eq!(reordered["list"][1]["apiKey"], "first");
+        for mut invalid in [
+            json!({"new": {"apiKey":SECRET_MASK}}),
+            json!({"list": [{"id":"missing","apiKey":SECRET_MASK}]}),
+            json!({"list": [{"id":"a","apiKey":SECRET_MASK},{"id":"a","apiKey":"new"}]}),
+            json!({"list": [{"apiKey":SECRET_MASK}]}),
+        ] {
+            assert!(restore_masked_secrets(&current, &mut invalid).is_err());
+        }
+        let mut replaced =
+            json!({"list": [{"id":"a","apiKey":""},{"id":"a","apiKey":"replacement"}]});
+        restore_masked_secrets(&current, &mut replaced).unwrap();
+        assert_eq!(replaced["list"][0]["apiKey"], "");
+        assert_eq!(replaced["list"][1]["apiKey"], "replacement");
     }
 }
 
@@ -754,11 +808,15 @@ fn write_text_atomic_durable(path: &Path, content: &str) -> Result<()> {
 }
 
 pub fn validate_config_json5_str(content: &str) -> Result<Config> {
-    parse_config_with_legacy_channels(content, None)
+    let config = parse_config_with_legacy_channels(content, None)?;
+    config.validate()?;
+    Ok(config)
 }
 
 pub fn validate_config_json5_file(path: &Path, content: &str) -> Result<Config> {
-    parse_config_with_legacy_channels(content, Some(path))
+    let config = parse_config_with_legacy_channels(content, Some(path))?;
+    config.validate()?;
+    Ok(config)
 }
 
 fn parse_config_with_legacy_channels(content: &str, path: Option<&Path>) -> Result<Config> {
@@ -794,7 +852,7 @@ fn parse_config_with_legacy_channels(content: &str, path: Option<&Path>) -> Resu
 }
 
 pub fn write_raw_validated_config_json5(path: &Path, content: &str) -> Result<Config> {
-    let config = validate_config_json5_str(content)?;
+    let config = validate_config_json5_file(path, content)?;
     write_text_atomic_durable(path, content)?;
     Ok(config)
 }
@@ -827,8 +885,7 @@ fn detect_system_timezone() -> Option<String> {
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = validate_config_json5_file(path, &content)?;
-        config.validate()
+        validate_config_json5_file(path, &content)
     }
 
     /// Load config from file, or create default if not exists.
@@ -932,9 +989,25 @@ impl Config {
         Ok(config)
     }
 
-    /// Validate config values and return self if valid.
-    fn validate(self) -> Result<Self> {
+    /// Apply the same semantic checks to startup and every configuration write.
+    pub fn validate(&self) -> Result<()> {
         tools::ApprovalPolicy::parse(self.tools.exec.approval_policy.as_deref())?;
+
+        for (scope, pool) in std::iter::once(("defaults", &self.agents.defaults.model_pool)).chain(
+            self.agents
+                .list
+                .iter()
+                .map(|agent| (agent.id.as_str(), &agent.model_pool)),
+        ) {
+            for entry in pool {
+                if entry.max_tokens == Some(0) {
+                    return Err(crate::Error::Config(format!(
+                        "modelPool maxTokens must be positive for agent {} model {}/{}",
+                        scope, entry.provider, entry.model
+                    )));
+                }
+            }
+        }
 
         // Validate cron_tick_interval_secs
         if self.cron_tick_interval_secs < MIN_CRON_TICK_INTERVAL_SECS {
@@ -970,20 +1043,22 @@ impl Config {
             }
         }
 
-        Ok(self)
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate()?;
         let mut next = serde_json::to_value(self)?;
         let mut comments = String::new();
         if let Ok(raw) = std::fs::read_to_string(path) {
             if let Ok(previous) = parse_json5_value_preserving_env(&raw) {
-                preserve_unchanged_env_placeholders(&previous, &mut next);
-                merge_unknown_keys(&previous, &mut next);
+                let expanded = parse_json5_value(&raw)?;
+                roundtrip::preserve(&previous, &expanded, &mut next)?;
                 comments = preserved_json5_comments(&raw);
             }
         }
         comments.push_str(&stringify_json5_pretty(&next)?);
+        validate_config_json5_file(path, &comments)?;
         write_text_atomic_durable(path, &comments)
     }
 
@@ -1583,6 +1658,132 @@ mod tests {
             saved.contains("unknownTopLevel") && saved.contains("42"),
             "unknown top-level key must survive a full-file save: {saved}"
         );
+    }
+
+    #[test]
+    fn r4_save_keeps_deleted_map_entries_deleted_and_retains_extensions() {
+        let path = temp_config_path("r4-deleted-maps.json5");
+        fs::write(&path, r#"{
+          providers: {keep: {apiKey: 'k', extension: 'keep'}, remove: {apiKey: 'r', extension: 'remove'}},
+          channels: {telegram: {accounts: {keep: {token: 'k', extension: true}, remove: {token: 'r', extension: true}}}},
+          channelOwners: {telegram: 'default'},
+          channelAccountOwners: {telegram: {keep: 'default', remove: 'default'}},
+          customRoot: {enabled: true}
+        }"#).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.providers.remove("remove");
+        config.channels.telegram.accounts.remove("remove");
+        config.channel_owners.clear();
+        config
+            .channel_account_owners
+            .get_mut("telegram")
+            .unwrap()
+            .remove("remove");
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert!(!loaded.providers.contains_key("remove"));
+        assert!(!loaded.channels.telegram.accounts.contains_key("remove"));
+        assert!(loaded.channel_owners.is_empty());
+        assert!(!loaded.channel_account_owners["telegram"].contains_key("remove"));
+        let raw = parse_json5_value_preserving_env(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["customRoot"]["enabled"], true);
+        assert_eq!(raw["providers"]["keep"]["extension"], "keep");
+        assert_eq!(
+            raw["channels"]["telegram"]["accounts"]["keep"]["extension"],
+            true
+        );
+    }
+
+    #[test]
+    fn r4_save_resets_omitted_protocol_and_exec_policies() {
+        let path = temp_config_path("r4-default-reset.json5");
+        fs::write(&path, r#"{providers: {p: {apiType: 'anthropic'}}, tools: {exec: {approvalPolicy: 'workspace-auto', sandboxPolicy: 'workspace-write'}}}"#).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.providers.get_mut("p").unwrap().api_type = "openai".into();
+        config.tools.exec.approval_policy = None;
+        config.tools.exec.sandbox_policy = None;
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.providers["p"].api_type, "openai");
+        assert!(loaded.tools.exec.approval_policy.is_none());
+        assert!(loaded.tools.exec.sandbox_policy.is_none());
+    }
+
+    #[test]
+    fn r4_save_does_not_treat_known_skipped_defaults_as_extensions() {
+        let path = temp_config_path("r4-known-defaults.json5");
+        fs::write(
+            &path,
+            r#"{
+            providers: {p: {apiType: 'openai', extension: true}},
+            agents: {defaults: {routingStrategy: 'manual', reasoningEffort: null}},
+            tools: {exec: {approvalPolicy: null}}
+        }"#,
+        )
+        .unwrap();
+        Config::load(&path).unwrap().save(&path).unwrap();
+        let raw = parse_json5_value_preserving_env(&fs::read_to_string(path).unwrap()).unwrap();
+        assert!(raw["providers"]["p"].get("apiType").is_none());
+        assert!(raw["agents"]["defaults"].get("routingStrategy").is_none());
+        assert!(raw["agents"]["defaults"].get("reasoningEffort").is_none());
+        assert!(raw["tools"]["exec"].get("approvalPolicy").is_none());
+        assert_eq!(raw["providers"]["p"]["extension"], true);
+    }
+
+    #[test]
+    fn r4_explicit_null_disables_optional_parent_without_restoring_extensions() {
+        let path = temp_config_path("r4-optional-parent.json5");
+        fs::write(&path, r#"{intentRouter: {customExtension: 'old'}}"#).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.intent_router = None;
+        config.save(&path).unwrap();
+        let raw = parse_json5_value_preserving_env(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw.get("intentRouter"), Some(&Value::Null));
+        assert!(Config::load(&path).unwrap().intent_router.is_none());
+    }
+
+    #[test]
+    fn r4_invalid_semantics_never_overwrite_a_valid_file() {
+        for invalid in [
+            r#"{"cronTickIntervalSecs":0}"#,
+            r#"{"cronTickIntervalSecs":3601}"#,
+            r#"{"defaultTimezone":"Mars/Olympus"}"#,
+            r#"{"tools":{"exec":{"approvalPolicy":"invalid"}}}"#,
+        ] {
+            let path = temp_config_path("r4-invalid-save.json5");
+            Config::default().save(&path).unwrap();
+            let sentinel = fs::read(&path).unwrap();
+            let config: Config = serde_json::from_str(invalid).unwrap();
+            assert!(config.save(&path).is_err(), "typed save accepted {invalid}");
+            assert_eq!(fs::read(&path).unwrap(), sentinel);
+            assert!(
+                write_raw_validated_config_json5(&path, invalid).is_err(),
+                "raw save accepted {invalid}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), sentinel);
+            assert!(validate_config_json5_str(invalid).is_err());
+            assert!(validate_config_json5_file(&path, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn r4_model_pool_zero_max_tokens_is_rejected_for_defaults_and_agents() {
+        for raw in [
+            r#"{agents:{defaults:{modelPool:[{model:'m',provider:'p',maxTokens:0}]}}}"#,
+            r#"{agents:{list:[{id:'ops',modelPool:[{model:'m',provider:'p',maxTokens:0}]}]}}"#,
+        ] {
+            assert!(validate_config_json5_str(raw).is_err(), "accepted {raw}");
+        }
+    }
+
+    #[test]
+    fn r4_secret_restore_tracks_array_ids_after_deletion() {
+        let current = serde_json::json!({"agents":{"list":[{"id":"ops","apiKey":"ops-secret"},{"id":"dev","apiKey":"dev-secret"}]}});
+        let mut incoming = current.clone();
+        mask_secret_values(&mut incoming);
+        incoming["agents"]["list"].as_array_mut().unwrap().remove(0);
+        restore_masked_secrets(&current, &mut incoming).unwrap();
+        assert_eq!(incoming["agents"]["list"][0]["apiKey"], "dev-secret");
     }
 
     #[test]

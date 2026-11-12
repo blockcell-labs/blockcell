@@ -2933,7 +2933,12 @@ pub struct AgentRuntime {
     agent_type_registry: crate::agent_types::AgentTypeRegistry,
     /// Unified write guard for coordinated write protection across memory + skill files
     write_guard: Arc<crate::write_guard::WriteGuard>,
-    /// Token and cost budget trackers keyed by persisted session key.
+    /// Authoritative token/cost ledger keyed by canonical persisted history
+    /// session key, including channel/account and cron delivery target.
+    /// Message forks and tool handles share one tracker Arc per key until the
+    /// final registry owner drops; compaction/history clearing never resets it.
+    /// Retention costs one small tracker plus map/key allocations per historical
+    /// session. Rebuilding the runtime starts a new, non-persistent budget period.
     budget_trackers: Arc<Mutex<HashMap<String, BudgetTrackerHandle>>>,
     /// 子 Agent 运行时挂载的父会话预算；`None` 表示顶层会话。挂载后子消耗归并到父。
     parent_budget: Option<BudgetTrackerHandle>,

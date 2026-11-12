@@ -21,7 +21,7 @@ fn load_config_value_or_state(state: &GatewayState) -> serde_json::Value {
 /// Always reads from disk so edits via PUT are immediately reflected.
 pub(super) async fn handle_config_get(State(state): State<GatewayState>) -> impl IntoResponse {
     let mut value = load_config_value_or_state(&state);
-    blockcell_core::config::mask_secret_values(&mut value);
+    blockcell_core::config::mask_config_secret_values(&mut value);
     Json(value)
 }
 
@@ -64,7 +64,9 @@ pub(super) async fn handle_config_update(
     // "keep the stored value", so restore them from disk before applying.
     let current = load_config_value_or_state(&state);
     let mut incoming = req.config;
-    blockcell_core::config::restore_masked_secrets(&current, &mut incoming);
+    if let Err(e) = blockcell_core::config::restore_masked_secrets(&current, &mut incoming) {
+        return Json(serde_json::json!({"status":"error", "message": e.to_string()}));
+    }
 
     match serde_json::from_value::<Config>(incoming) {
         Ok(new_config) => match new_config.save(&config_path) {
@@ -406,4 +408,234 @@ pub(super) async fn handle_ghost_model_options_get(
         "providers": providers,
         "default_model": default_model,
     }))
+}
+
+#[cfg(test)]
+mod r4_config_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    struct ConfigFixture {
+        state: GatewayState,
+        directory: std::path::PathBuf,
+    }
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("blockcell-session-api-{}", uuid::Uuid::new_v4()));
+            let paths = Paths::with_base(directory.clone());
+            let config = Config::default();
+            let (inbound_tx, _) = mpsc::channel(4);
+            let (ws_broadcast, _) = broadcast::channel(4);
+            let channel_manager = Arc::new(blockcell_channels::ChannelManager::new(
+                config.clone(),
+                paths.clone(),
+                inbound_tx.clone(),
+            ));
+            let evolution_service = Arc::new(Mutex::new(EvolutionService::new(
+                paths.skills_dir(),
+                EvolutionServiceConfig::default(),
+            )));
+            let state = GatewayState {
+                inbound_tx,
+                task_manager: TaskManager::new(),
+                config,
+                config_write_lock: Arc::new(Mutex::new(())),
+                paths,
+                api_token: None,
+                ws_broadcast,
+                pending_confirms: Arc::new(Mutex::new(HashMap::new())),
+                pending_channel_confirms: Arc::new(Mutex::new(HashMap::new())),
+                memory_store: None,
+                memory_stores: Arc::new(HashMap::new()),
+                cron_services: Arc::new(HashMap::new()),
+                tool_registry: Arc::new(ToolRegistry::with_defaults()),
+                web_password: "test".into(),
+                login_rate_limiter: Arc::new(Mutex::new(LoginRateLimiter::default())),
+                channel_manager,
+                evolution_service,
+                response_caches: Arc::new(RwLock::new(HashMap::new())),
+                active_steering: Arc::new(Mutex::new(HashMap::new())),
+            };
+            Self { state, directory }
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    async fn json(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
+        let response = response.into_response();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn write_config(fixture: &ConfigFixture, value: &serde_json::Value) -> Vec<u8> {
+        std::fs::create_dir_all(&fixture.directory).unwrap();
+        let bytes = serde_json::to_vec_pretty(value).unwrap();
+        std::fs::write(fixture.state.paths.config_file(), &bytes).unwrap();
+        bytes
+    }
+
+    #[tokio::test]
+    async fn r4_config_get_preserves_numeric_limits_and_masks_strings() {
+        let fixture = ConfigFixture::new();
+        write_config(
+            &fixture,
+            &serde_json::json!({
+                "providers": {"p": {"apiKey": "provider-secret"}},
+                "agents": {"list": [{"id":"ops", "maxTokens":1024, "maxContextTokens":4096}, {"id":"dev", "maxTokens":8192, "maxContextTokens":32768}]}
+            }),
+        );
+        let (_, body) = json(handle_config_get(State(fixture.state.clone())).await).await;
+        assert_eq!(body["agents"]["list"][0]["maxTokens"], 1024);
+        assert_eq!(body["agents"]["list"][1]["maxContextTokens"], 32768);
+        assert_eq!(
+            body["providers"]["p"]["apiKey"],
+            blockcell_core::config::SECRET_MASK
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_structured_edit_preserves_remaining_agent_limits_and_extension_secret() {
+        let fixture = ConfigFixture::new();
+        write_config(
+            &fixture,
+            &serde_json::json!({"agents":{"list":[
+                {"id":"ops", "maxTokens":1024, "maxContextTokens":4096, "apiKey":"ops-secret"},
+                {"id":"dev", "maxTokens":8192, "maxContextTokens":32768, "apiKey":"dev-secret"}
+            ]}}),
+        );
+        let (_, mut incoming) = json(handle_config_get(State(fixture.state.clone())).await).await;
+        incoming["agents"]["list"].as_array_mut().unwrap().remove(0);
+        let (_, response) = json(
+            handle_config_update(
+                State(fixture.state.clone()),
+                Json(ConfigUpdateRequest { config: incoming }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(response["status"], "ok");
+        let saved = blockcell_core::config::parse_json5_value(
+            &std::fs::read_to_string(fixture.state.paths.config_file()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["agents"]["list"][0]["id"], "dev");
+        assert_eq!(saved["agents"]["list"][0]["maxTokens"], 8192);
+        assert_eq!(saved["agents"]["list"][0]["maxContextTokens"], 32768);
+        assert_eq!(saved["agents"]["list"][0]["apiKey"], "dev-secret");
+    }
+
+    #[tokio::test]
+    async fn r4_unresolvable_or_ambiguous_secret_masks_are_rejected_before_writing() {
+        let fixture = ConfigFixture::new();
+        for incoming in [
+            serde_json::json!({"providers":{"new":{"apiKey": blockcell_core::config::SECRET_MASK}}}),
+            serde_json::json!({"agents":{"list":[{"id":"new", "apiKey":blockcell_core::config::SECRET_MASK}]}}),
+            serde_json::json!({"agents":{"list":[{"id":"ops", "apiKey":blockcell_core::config::SECRET_MASK}, {"id":"ops", "apiKey":blockcell_core::config::SECRET_MASK}]}}),
+        ] {
+            let sentinel = write_config(
+                &fixture,
+                &serde_json::json!({"providers":{"p":{"apiKey":"provider-secret"}}, "agents":{"list":[{"id":"ops", "apiKey":"ops-secret"}]}}),
+            );
+            let (_, response) = json(
+                handle_config_update(
+                    State(fixture.state.clone()),
+                    Json(ConfigUpdateRequest { config: incoming }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(response["status"], "error");
+            assert_eq!(
+                std::fs::read(fixture.state.paths.config_file()).unwrap(),
+                sentinel
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r4_structured_raw_and_reload_share_startup_semantic_validation() {
+        let fixture = ConfigFixture::new();
+        for invalid in [
+            serde_json::json!({"cronTickIntervalSecs":0}),
+            serde_json::json!({"cronTickIntervalSecs":3601}),
+            serde_json::json!({"defaultTimezone":"Mars/Olympus"}),
+            serde_json::json!({"tools":{"exec":{"approvalPolicy":"invalid"}}}),
+        ] {
+            let sentinel = write_config(
+                &fixture,
+                &serde_json::json!({"cronTickIntervalSecs":1, "defaultTimezone":"UTC"}),
+            );
+            let (_, response) = json(
+                handle_config_update(
+                    State(fixture.state.clone()),
+                    Json(ConfigUpdateRequest {
+                        config: invalid.clone(),
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(response["status"], "error", "structured accepted {invalid}");
+            assert_eq!(
+                std::fs::read(fixture.state.paths.config_file()).unwrap(),
+                sentinel
+            );
+            let (_, response) = json(
+                handle_config_raw_put(
+                    State(fixture.state.clone()),
+                    Json(ConfigRawUpdateRequest {
+                        content: invalid.to_string(),
+                    }),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(response["status"], "error", "raw accepted {invalid}");
+            assert_eq!(
+                std::fs::read(fixture.state.paths.config_file()).unwrap(),
+                sentinel
+            );
+            let invalid_bytes = write_config(&fixture, &invalid);
+            let (_, response) =
+                json(handle_config_reload(State(fixture.state.clone())).await).await;
+            assert_eq!(response["status"], "error", "reload accepted {invalid}");
+            assert_eq!(
+                std::fs::read(fixture.state.paths.config_file()).unwrap(),
+                invalid_bytes
+            );
+            assert!(Config::load(&fixture.state.paths.config_file()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn r4_channel_partial_update_validates_the_whole_config() {
+        let fixture = ConfigFixture::new();
+        let sentinel = write_config(
+            &fixture,
+            &serde_json::json!({"cronTickIntervalSecs":0, "channels":{"telegram":{"token":"old"}}}),
+        );
+        let request: super::super::channels::ChannelUpdateRequest =
+            serde_json::from_value(serde_json::json!({"fields":{"token":"new"}})).unwrap();
+        let (_, response) = json(
+            super::super::channels::handle_channel_update(
+                State(fixture.state.clone()),
+                AxumPath("telegram".into()),
+                Json(request),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(response["status"], "error");
+        assert_eq!(
+            std::fs::read(fixture.state.paths.config_file()).unwrap(),
+            sentinel
+        );
+    }
 }

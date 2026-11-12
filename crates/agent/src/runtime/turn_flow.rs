@@ -1,9 +1,5 @@
 use super::*;
 
-/// Cap on the shared per-session BudgetTracker map, mirroring
-/// `MAX_SESSION_MEMORY_SYSTEMS` in runtime.rs.
-const MAX_BUDGET_TRACKERS: usize = 64;
-
 impl AgentRuntime {
     pub(crate) async fn audit_provider_attempt(
         &self,
@@ -116,19 +112,14 @@ impl AgentRuntime {
         self.provider_pool.served_by(pool_idx).unwrap_or_default()
     }
 
+    /// Retrieve this accounting period's authoritative tracker. Keeping its Arc
+    /// in the shared registry preserves both cumulative spend and the identity
+    /// held by in-flight calls or child budgets; it is not an evictable cache.
     pub(crate) fn budget_tracker_for_session(&self, session_key: &str) -> BudgetTrackerHandle {
         let mut trackers = self.budget_trackers.lock().unwrap_or_else(|poisoned| {
             warn!("Budget tracker map mutex poisoned, recovering");
             poisoned.into_inner()
         });
-        // Trackers are reconstructible (losing one only resets that session's
-        // accounting), so evict an arbitrary entry rather than growing unbounded
-        // with every session a long-lived gateway has served.
-        if !trackers.contains_key(session_key) && trackers.len() >= MAX_BUDGET_TRACKERS {
-            if let Some(evicted) = trackers.keys().next().cloned() {
-                trackers.remove(&evicted);
-            }
-        }
         trackers
             .entry(session_key.to_string())
             .or_insert_with(|| {

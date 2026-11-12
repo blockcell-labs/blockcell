@@ -164,7 +164,25 @@ pub fn create_provider_with_tool_mode(
     tool_call_mode: Option<ToolCallMode>,
     temperature_override: Option<f32>,
 ) -> anyhow::Result<Box<dyn Provider>> {
-    let max_tokens = config.agents.defaults.max_tokens;
+    create_provider_with_overrides(
+        config,
+        model,
+        explicit_provider,
+        tool_call_mode,
+        temperature_override,
+        None,
+    )
+}
+
+/// Pool callers pass their own resolved limit so duplicate entries retain their settings.
+pub(crate) fn create_provider_with_overrides(
+    config: &Config,
+    model: &str,
+    explicit_provider: Option<&str>,
+    tool_call_mode: Option<ToolCallMode>,
+    temperature_override: Option<f32>,
+    max_tokens_override: Option<u32>,
+) -> anyhow::Result<Box<dyn Provider>> {
     let temperature = temperature_override.unwrap_or(config.agents.defaults.temperature);
     let reasoning_effort = config.agents.defaults.reasoning_effort.as_deref();
 
@@ -183,6 +201,35 @@ pub fn create_provider_with_tool_mode(
              (e.g. 'anthropic/claude-...', 'gpt-6.1-sol', 'gemini-...'), or add an API key to providers section."
         ));
     };
+
+    // Direct/main/evolution/probe construction uses the first matching entry in
+    // config order. Match the resolved provider as model names can be shared by
+    // independent endpoints. Empty-provider entries use normal inference.
+    let max_tokens = max_tokens_override
+        .or_else(|| {
+            config
+                .agents
+                .defaults
+                .model_pool
+                .iter()
+                .find(|entry| {
+                    entry.model == model
+                        && (entry.provider == effective_provider
+                            || (entry.provider.is_empty()
+                                && infer_provider_from_model(model)
+                                    .or_else(|| fallback_provider_name(config))
+                                    == Some(effective_provider)))
+                })
+                .and_then(|entry| entry.max_tokens)
+        })
+        .unwrap_or(config.agents.defaults.max_tokens);
+    if max_tokens == 0 {
+        return Err(anyhow::anyhow!(
+            "maxTokens must be a positive integer for model '{}' and provider '{}'",
+            model,
+            effective_provider
+        ));
+    }
 
     // 获取 provider 配置
     let provider_cfg = config.providers.get(effective_provider);

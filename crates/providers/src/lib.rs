@@ -74,3 +74,7 @@ pub use pool::{
 
 #[cfg(test)]
 mod test_http;
+#[cfg(test)]
+mod anthropic_usage_tests;
+#[cfg(test)]
+mod model_tokens_tests;

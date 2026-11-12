@@ -1,0 +1,14 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_usage","type":"message","role":"assistant","content":[],"model":"claude-test","usage":{"input_tokens":10000,"output_tokens":1,"cache_creation_input_tokens":128,"cache_read_input_tokens":2000}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{},"usage":{"output_tokens":4}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}

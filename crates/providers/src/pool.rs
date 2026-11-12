@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use rand::Rng;
 
-use crate::factory::create_provider_with_tool_mode;
+use crate::factory::create_provider_with_overrides;
 use crate::Provider;
 
 /// 单个池条目的运行时健康状态
@@ -155,28 +155,36 @@ impl ProviderPool {
         let defaults = &config.agents.defaults;
 
         // 收集 ModelEntry 列表（兼容旧配置）
-        let entries_cfg: Vec<(String, String, u32, u32, ToolCallMode, Option<f32>)> =
-            if !defaults.model_pool.is_empty() {
-                defaults
-                    .model_pool
-                    .iter()
-                    .map(|e| {
-                        (
-                            e.model.clone(),
-                            e.provider.clone(),
-                            e.weight,
-                            e.priority,
-                            e.tool_call_mode,
-                            e.temperature,
-                        )
-                    })
-                    .collect()
-            } else {
-                // 旧配置：单条目
-                let model = defaults.model.clone();
-                let provider_name = defaults.provider.clone().unwrap_or_default();
-                vec![(model, provider_name, 1, 1, ToolCallMode::Native, None)]
-            };
+        let entries_cfg: Vec<(
+            String,
+            String,
+            u32,
+            u32,
+            ToolCallMode,
+            Option<f32>,
+            Option<u32>,
+        )> = if !defaults.model_pool.is_empty() {
+            defaults
+                .model_pool
+                .iter()
+                .map(|e| {
+                    (
+                        e.model.clone(),
+                        e.provider.clone(),
+                        e.weight,
+                        e.priority,
+                        e.tool_call_mode,
+                        e.temperature,
+                        e.max_tokens,
+                    )
+                })
+                .collect()
+        } else {
+            // 旧配置：单条目
+            let model = defaults.model.clone();
+            let provider_name = defaults.provider.clone().unwrap_or_default();
+            vec![(model, provider_name, 1, 1, ToolCallMode::Native, None, None)]
+        };
 
         if entries_cfg.is_empty() {
             return Err(anyhow::anyhow!(
@@ -188,8 +196,10 @@ impl ProviderPool {
         let mut health_map = HashMap::new();
         let stats_map = HashMap::new();
 
-        for (idx, (model, provider_name, weight, priority, tool_call_mode, temperature)) in
-            entries_cfg.into_iter().enumerate()
+        for (
+            idx,
+            (model, provider_name, weight, priority, tool_call_mode, temperature, max_tokens),
+        ) in entries_cfg.into_iter().enumerate()
         {
             let explicit = if provider_name.is_empty() {
                 None
@@ -197,12 +207,13 @@ impl ProviderPool {
                 Some(provider_name.as_str())
             };
             let temperature = temperature.unwrap_or(defaults.temperature);
-            match create_provider_with_tool_mode(
+            match create_provider_with_overrides(
                 config,
                 &model,
                 explicit,
                 Some(tool_call_mode),
                 Some(temperature),
+                Some(max_tokens.unwrap_or(defaults.max_tokens)),
             ) {
                 Ok(p) => {
                     info!(
@@ -768,6 +779,7 @@ mod tests {
             input_price: None,
             output_price: None,
             temperature: None,
+            max_tokens: None,
             tool_call_mode: blockcell_core::config::ToolCallMode::Native,
         }];
         let result = ProviderPool::from_config(&config);
@@ -794,6 +806,7 @@ mod tests {
                 input_price: None,
                 output_price: None,
                 temperature: None,
+                max_tokens: None,
                 tool_call_mode: blockcell_core::config::ToolCallMode::Native,
             },
             blockcell_core::config::ModelEntry {
@@ -804,6 +817,7 @@ mod tests {
                 input_price: None,
                 output_price: None,
                 temperature: None,
+                max_tokens: None,
                 tool_call_mode: blockcell_core::config::ToolCallMode::Native,
             },
         ];
@@ -826,6 +840,7 @@ mod tests {
             input_price: None,
             output_price: None,
             temperature: None,
+            max_tokens: None,
             tool_call_mode: blockcell_core::config::ToolCallMode::Native,
         }];
         let pool = ProviderPool::from_config(&config).unwrap();
@@ -851,6 +866,7 @@ mod tests {
             input_price: None,
             output_price: None,
             temperature: None,
+            max_tokens: None,
             tool_call_mode: blockcell_core::config::ToolCallMode::Native,
         }];
         let pool = ProviderPool::from_config(&config).unwrap();

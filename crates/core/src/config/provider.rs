@@ -109,6 +109,9 @@ pub struct ModelEntry {
     /// 若未配置，则沿用全局 `agents.defaults.temperature`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// 模型专用输出 token 上限（正整数）。未配置时沿用当前 Agent 的默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// 工具调用模式：
     /// - native: 使用 API 原生 tools/tool_calls
     /// - text: 不发送 tools，改为文本协议 <tool_call> ... </tool_call>

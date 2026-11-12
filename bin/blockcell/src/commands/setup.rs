@@ -185,6 +185,7 @@ fn configure_provider(
         input_price: None,
         output_price: None,
         temperature: None,
+        max_tokens: None,
         tool_call_mode: ToolCallMode::Native,
     }];
     config.agents.defaults.provider = Some(provider.to_string());
