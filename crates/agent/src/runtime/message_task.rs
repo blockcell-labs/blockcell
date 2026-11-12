@@ -143,7 +143,28 @@ pub(crate) async fn run_message_task(
 
     let error_msg = msg.clone();
 
-    match runtime.process_message(msg).await {
+    let claim = if let Some(id) = completion_receipt_id.as_deref() {
+        match blockcell_core::message_receipt::claim_message_receipt(id) {
+            Some(claim) => Some(claim),
+            None => {
+                task_manager.remove_task(&task_id).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let receipt_abort = runtime.abort_token.clone();
+    let result = tokio::select! {
+        result = runtime.process_message(msg) => result,
+        _ = async {
+            match &claim {
+                Some(claim) => claim.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => { receipt_abort.cancel(); task_manager.remove_task(&task_id).await; return; }
+    };
+    match result {
         Ok(response) => {
             debug!(task_id = %task_id, response_len = response.len(), "Message task completed");
             // Mark message tasks as completed so they appear in /tasks.

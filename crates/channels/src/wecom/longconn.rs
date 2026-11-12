@@ -98,7 +98,7 @@ impl WeComChannel {
                 }
                 outbound = outbound_rx.recv() => {
                     match outbound {
-                        Some(LongConnOutbound::Text { chat_id, content }) => {
+                        Some(LongConnOutbound::Text { chat_id, content, result_tx }) => {
                             let req_id = {
                                 let reg = CHAT_REQID_REGISTRY.lock().unwrap();
                                 reg.get(&chat_id)
@@ -117,9 +117,9 @@ impl WeComChannel {
                             });
                             let msg_str = msg.to_string();
                             debug!(req_id = %req_id, payload_len = msg_str.len(), "WeCom longconn: outbound WS payload ready");
-                            if let Err(e) = write.send(WsMessage::Text(msg_str)).await {
-                                warn!(error = %e, "WeCom longconn: failed to send outbound reply");
-                            }
+                            let result = write.send(WsMessage::Text(msg_str)).await
+                                .map_err(|e| Error::Channel(format!("WeCom longconn: failed to send text: {}", e)));
+                            let _ = result_tx.send(result);
                             LoopAction::Continue
                         }
                         Some(LongConnOutbound::Media { chat_id, file_path, media_type, title, result_tx }) => {

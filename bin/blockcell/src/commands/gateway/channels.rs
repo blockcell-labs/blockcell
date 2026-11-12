@@ -1,5 +1,7 @@
 use super::*;
-use blockcell_core::config::{parse_json5_value_preserving_env, stringify_json5_pretty, write_raw_validated_config_json5};
+use blockcell_core::config::{
+    parse_json5_value_preserving_env, stringify_json5_pretty, write_raw_validated_config_json5,
+};
 
 const SUPPORTED_OWNER_CHANNELS: [&str; 11] = [
     "telegram", "whatsapp", "feishu", "slack", "discord", "dingtalk", "wecom", "lark", "qq",

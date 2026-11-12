@@ -586,6 +586,7 @@ pub(super) async fn handle_ws_connection(socket: WebSocket, state: GatewayState)
                                 .unwrap_or(false);
                             if !request_id.is_empty() {
                                 let mut map = state.pending_confirms.lock().await;
+                                map.retain(|_, p| !p.response_tx.is_closed());
                                 let allowed = if let Some(pending) = map.get(&request_id) {
                                     let subscriptions = subscriptions.lock().await;
                                     ws_confirm_response_allowed(

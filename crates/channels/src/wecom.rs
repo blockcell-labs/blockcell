@@ -42,7 +42,11 @@ static SEEN_MSG_IDS: std::sync::LazyLock<Mutex<HashSet<String>>> =
 /// Outbound message for the long connection WebSocket channel.
 enum LongConnOutbound {
     /// Plain text reply (stream msgtype).
-    Text { chat_id: String, content: String },
+    Text {
+        chat_id: String,
+        content: String,
+        result_tx: tokio::sync::oneshot::Sender<Result<()>>,
+    },
     /// Media message: upload file via chunked WS protocol, then send via aibot_send_msg.
     Media {
         chat_id: String,

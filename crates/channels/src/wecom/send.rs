@@ -7,20 +7,23 @@ pub async fn send_message(config: &Config, chat_id: &str, text: &str) -> Result<
     let mode = config.channels.wecom.mode.trim().to_lowercase();
     if mode == "long_connection" || mode == "long-connection" || mode == "stream" {
         let bot_id = config.channels.wecom.bot_id.trim().to_string();
-        let registry = LONGCONN_REGISTRY.lock().unwrap();
-        if let Some(tx) = registry.get(&bot_id) {
-            let chunks = split_message(text, WECOM_MSG_LIMIT);
-            for chunk in chunks {
-                let msg = LongConnOutbound::Text {
-                    chat_id: chat_id.to_string(),
-                    content: chunk,
-                };
-                if let Err(e) = tx.try_send(msg) {
-                    warn!(error = %e, bot_id = %bot_id, "WeCom longconn: failed to queue outbound message");
-                }
-            }
-        } else {
-            warn!(bot_id = %bot_id, "WeCom long connection not active; outbound message dropped");
+        let tx = LONGCONN_REGISTRY
+            .lock()
+            .unwrap()
+            .get(&bot_id)
+            .cloned()
+            .ok_or_else(|| Error::Channel("WeCom long connection not active".into()))?;
+        for chunk in split_message(text, WECOM_MSG_LIMIT) {
+            let (result_tx, result_rx) = oneshot::channel();
+            tx.try_send(LongConnOutbound::Text {
+                chat_id: chat_id.to_string(),
+                content: chunk,
+                result_tx,
+            })
+            .map_err(|e| Error::Channel(format!("WeCom longconn: failed to queue text: {}", e)))?;
+            result_rx.await.map_err(|_| {
+                Error::Channel("WeCom longconn: text delivery channel dropped".into())
+            })??;
         }
         return Ok(());
     }

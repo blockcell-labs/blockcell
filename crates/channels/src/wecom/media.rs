@@ -474,11 +474,11 @@ where
     let send_resp = longconn_wait_response(write, read, &send_req_id).await?;
     let send_err = send_resp["errcode"].as_i64().unwrap_or(-1);
     if send_err != 0 {
-        warn!(
-            errcode = send_err,
-            errmsg = %send_resp["errmsg"].as_str().unwrap_or("unknown"),
-            "WeCom longconn: aibot_send_msg error (media may still have been delivered)"
-        );
+        return Err(Error::Channel(format!(
+            "WeCom longconn: aibot_send_msg error {}: {}",
+            send_err,
+            send_resp["errmsg"].as_str().unwrap_or("unknown")
+        )));
     }
 
     info!(media_id = %media_id, media_type = %media_type, chat_id = %chat_id, "WeCom longconn: media message sent");
@@ -676,7 +676,7 @@ pub async fn send_media_message(
     config: &Config,
     chat_id: &str,
     file_path: &str,
-    _caption: &str,
+    caption: &str,
 ) -> Result<()> {
     // Long connection mode: upload via WS chunked protocol, then send via aibot_send_msg.
     let mode = config.channels.wecom.mode.trim().to_lowercase();
@@ -722,7 +722,12 @@ pub async fn send_media_message(
                 )));
             }
             match result_rx.await {
-                Ok(Ok(_media_id)) => return Ok(()),
+                Ok(Ok(_media_id)) => {
+                    if !caption.is_empty() {
+                        send_message(config, chat_id, caption).await?;
+                    }
+                    return Ok(());
+                }
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
                     return Err(Error::Channel(
@@ -731,8 +736,9 @@ pub async fn send_media_message(
                 }
             }
         } else {
-            warn!(bot_id = %bot_id, "WeCom long connection not active; media message dropped");
-            return Ok(());
+            return Err(Error::Channel(
+                "WeCom long connection not active; media was not delivered".into(),
+            ));
         }
     }
 

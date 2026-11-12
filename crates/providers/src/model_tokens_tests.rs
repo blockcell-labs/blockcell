@@ -323,3 +323,49 @@ fn r4_model_tokens_reject_zero_when_constructed_without_config_validation() {
     assert!(result.err().unwrap().to_string().contains("maxTokens"));
     assert!(ProviderPool::from_config(&config).is_err());
 }
+
+#[tokio::test]
+async fn streaming_utf8_byte_chunks_preserve_unicode_in_all_adapters() {
+    for protocol in ["openai", "anthropic", "gemini", "ollama"] {
+        let body = match protocol {
+            "openai" => format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"delta":{"content":"中文🙂"},"finish_reason":"stop"}]})
+            ),
+            "anthropic" => format!(
+                "data: {}\n\ndata: {}\n\n",
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"中文🙂"}}),
+                json!({"type":"message_stop"})
+            ),
+            "gemini" => format!(
+                "data: {}\n\n",
+                json!({"candidates":[{"content":{"parts":[{"text":"中文🙂"}]},"finishReason":"STOP"}]})
+            ),
+            _ => format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"中文🙂"},"done":true})
+            ),
+        };
+        let (url, request) = crate::test_http::serve_capture(body).await;
+        let cfg = config(protocol, protocol, &url, json!([]));
+        let provider = create_main_provider(&cfg).unwrap();
+        let mut stream = provider
+            .chat_stream(&[ChatMessage::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut done = false;
+        while let Some(chunk) = stream.recv().await {
+            match chunk {
+                StreamChunk::Done { response } => {
+                    assert_eq!(response.content.as_deref(), Some("中文🙂"), "{protocol}");
+                    done = true;
+                    break;
+                }
+                StreamChunk::Error { message } => panic!("{protocol}: {message}"),
+                _ => {}
+            }
+        }
+        assert!(done, "{protocol}");
+        request.await.unwrap();
+    }
+}

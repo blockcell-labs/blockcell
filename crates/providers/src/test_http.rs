@@ -38,8 +38,11 @@ pub(crate) async fn serve_capture(
                 assert!(request.len() < 64 * 1024, "fixture request too large");
             };
             let request: serde_json::Value = serde_json::from_slice(&request[body_start..]).unwrap();
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
-            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+            for byte in body.bytes() {
+                socket.write_all(&[b'1', b'\r', b'\n', byte, b'\r', b'\n']).await.unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
             request
         }).await.expect("mock HTTP server timed out")
     });

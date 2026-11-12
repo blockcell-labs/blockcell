@@ -289,6 +289,32 @@ struct PendingChannelConfirm {
     response_tx: tokio::sync::oneshot::Sender<bool>,
 }
 
+fn register_channel_confirm(
+    map: &mut HashMap<PendingChannelConfirmScope, PendingChannelConfirm>,
+    scope: PendingChannelConfirmScope,
+    pending: PendingChannelConfirm,
+) -> bool {
+    map.retain(|_, pending| !pending.response_tx.is_closed());
+    if pending.response_tx.is_closed() {
+        return false;
+    }
+    if map.contains_key(&scope) {
+        let _ = pending.response_tx.send(false);
+        return false;
+    }
+    map.insert(scope, pending);
+    true
+}
+
+fn deliver_channel_confirm(pending: PendingChannelConfirm, content: &str) -> bool {
+    // The runtime owns the deadline. send() atomically detects a receiver
+    // dropped by timeout/cancellation, including races after map removal.
+    pending
+        .response_tx
+        .send(is_channel_confirm_approved(content))
+        .is_ok()
+}
+
 fn is_channel_confirm_approved(text: &str) -> bool {
     matches!(
         text.trim().to_lowercase().as_str(),
@@ -1054,6 +1080,8 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     let ws_broadcast_for_confirm = ws_broadcast_tx.clone();
     let mut confirm_handler_shutdown_rx = shutdown_tx.subscribe();
     let confirm_handler_handle = tokio::spawn(async move {
+        let mut cleanup = tokio::time::interval(std::time::Duration::from_secs(1));
+        cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let req = tokio::select! {
                 req = confirm_rx.recv() => match req {
@@ -1061,7 +1089,17 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                     None => break,
                 },
                 _ = confirm_handler_shutdown_rx.recv() => break,
+                _ = cleanup.tick() => {
+                    // Receiver liveness is the authoritative runtime timeout/
+                    // cancellation state; no independently drifting deadline.
+                    pending_ws_for_handler.lock().await.retain(|_, p| !p.response_tx.is_closed());
+                    pending_ch_for_handler.lock().await.retain(|_, p| !p.response_tx.is_closed());
+                    continue;
+                }
             };
+            if req.response_tx.is_closed() {
+                continue;
+            }
 
             if req.channel == "ws" {
                 let request_id = new_confirm_request_id();
@@ -1080,6 +1118,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 };
                 {
                     let mut map = pending_ws_for_handler.lock().await;
+                    map.retain(|_, p| !p.response_tx.is_closed());
                     map.insert(
                         request_id.clone(),
                         PendingWsConfirm {
@@ -1113,21 +1152,20 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 let request_id = new_confirm_request_id();
                 {
                     let mut map = pending_ch_for_handler.lock().await;
-                    if map.contains_key(&confirm_scope) {
-                        warn!(
-                            ?confirm_scope,
-                            "Rejecting overlapping channel confirmation request"
-                        );
-                        let _ = req.response_tx.send(false);
-                        continue;
-                    }
-                    map.insert(
+                    if !register_channel_confirm(
+                        &mut map,
                         confirm_scope.clone(),
                         PendingChannelConfirm {
                             request_id: request_id.clone(),
                             response_tx: req.response_tx,
                         },
-                    );
+                    ) {
+                        warn!(
+                            ?confirm_scope,
+                            "Rejecting overlapping channel confirmation request"
+                        );
+                        continue;
+                    }
                 }
                 let prompt = format!(
                     "⚠️ 工具 {} 需要访问以下路径：
@@ -1147,14 +1185,22 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 });
                 if outbound_tx_for_confirm.send(outbound).await.is_err() {
                     let mut map = pending_ch_for_handler.lock().await;
-                    if let Some(pending) = map.remove(&confirm_scope) {
-                        let _ = pending.response_tx.send(false);
+                    // An old failed prompt must never remove a replacement.
+                    if map
+                        .get(&confirm_scope)
+                        .is_some_and(|p| p.request_id == request_id)
+                    {
+                        if let Some(pending) = map.remove(&confirm_scope) {
+                            let _ = pending.response_tx.send(false);
+                        }
                     }
                 } else {
                     info!(?confirm_scope, %request_id, tool = %req.tool_name, "Sent confirm_request to channel");
                 }
             }
         }
+        pending_ws_for_handler.lock().await.clear();
+        pending_ch_for_handler.lock().await.clear();
     });
 
     // ── Create one runtime per resolved agent ──
@@ -1352,6 +1398,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                 );
                 let maybe_pending = {
                     let mut map = pending_ch_for_interceptor.lock().await;
+                    map.retain(|_, p| !p.response_tx.is_closed());
                     map.remove(&confirm_scope)
                 };
                 if let Some(pending) = maybe_pending {
@@ -1364,8 +1411,9 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
                         reply = %msg.content.trim(),
                         "Channel confirm reply intercepted"
                     );
-                    let _ = pending.response_tx.send(approved);
-                    continue; // Don't forward this message to the runtime
+                    if deliver_channel_confirm(pending, &msg.content) {
+                        continue; // A live confirmation consumed this message.
+                    }
                 }
             }
 
@@ -2102,6 +2150,72 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
 mod tests {
     use super::*;
     use blockcell_agent::task_manager::TaskStatus;
+
+    #[test]
+    fn expired_confirmation_does_not_consume_next_message() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx); // The runtime timeout/cancellation drops this receiver.
+        assert!(!deliver_channel_confirm(
+            PendingChannelConfirm {
+                request_id: "expired".into(),
+                response_tx: tx,
+            },
+            "ordinary next message"
+        ));
+    }
+
+    #[test]
+    fn expired_confirmation_allows_replacement_but_live_overlap_is_rejected() {
+        let scope = PendingChannelConfirmScope::new("telegram", Some("a"), "chat", "user");
+        let mut map = HashMap::new();
+        let (old_tx, old_rx) = tokio::sync::oneshot::channel();
+        assert!(register_channel_confirm(
+            &mut map,
+            scope.clone(),
+            PendingChannelConfirm {
+                request_id: "old".into(),
+                response_tx: old_tx,
+            }
+        ));
+        drop(old_rx);
+        let (new_tx, mut new_rx) = tokio::sync::oneshot::channel();
+        assert!(register_channel_confirm(
+            &mut map,
+            scope.clone(),
+            PendingChannelConfirm {
+                request_id: "new".into(),
+                response_tx: new_tx,
+            }
+        ));
+        let (overlap_tx, mut overlap_rx) = tokio::sync::oneshot::channel();
+        assert!(!register_channel_confirm(
+            &mut map,
+            scope.clone(),
+            PendingChannelConfirm {
+                request_id: "overlap".into(),
+                response_tx: overlap_tx,
+            }
+        ));
+        assert_eq!(overlap_rx.try_recv(), Ok(false));
+        let pending = map.remove(&scope).unwrap();
+        assert_eq!(pending.request_id, "new");
+        assert!(deliver_channel_confirm(pending, "yes"));
+        assert_eq!(new_rx.try_recv(), Ok(true));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn live_confirmation_denial_is_delivered_once() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        assert!(deliver_channel_confirm(
+            PendingChannelConfirm {
+                request_id: "live".into(),
+                response_tx: tx,
+            },
+            "no"
+        ));
+        assert_eq!(rx.try_recv(), Ok(false));
+    }
 
     #[test]
     fn test_confirm_request_id_is_random_uuid_not_timestamp() {

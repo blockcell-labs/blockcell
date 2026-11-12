@@ -292,7 +292,8 @@ impl AgentRuntime {
                             }
 
                             let source = msg.metadata.get("source").and_then(|v| v.as_str());
-                            let may_route_to_steering = msg.media.is_empty()
+                            let may_route_to_steering = msg.metadata.get(blockcell_core::message_receipt::MESSAGE_RECEIPT_ID).is_none()
+                                && msg.media.is_empty()
                                 && !matches!(
                                     source,
                                     Some("slash_command") | Some("resume_auto_continue")

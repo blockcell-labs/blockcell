@@ -842,6 +842,7 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
+            let mut utf8 = crate::utf8_stream::Utf8Stream::default();
             let mut buffer = String::new();
             let mut tool_calls: HashMap<usize, ToolCallAccumulator> = HashMap::new();
             // raw_content 保留完整内容（含 <tool_call> 标记），用于文本工具调用解析
@@ -868,7 +869,17 @@ impl Provider for OpenAIProvider {
                                 .await;
                             return;
                         }
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        match utf8.push(&bytes) {
+                            Ok(text) => buffer.push_str(&text),
+                            Err(error) => {
+                                let _ = tx
+                                    .send(StreamChunk::Error {
+                                        message: format!("Invalid UTF-8 stream: {}", error),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        }
 
                         // 处理 SSE 行
                         while let Some(pos) = buffer.find('\n') {

@@ -7,11 +7,30 @@ use blockcell_core::system_event::{DeliveryPolicy, EventPriority, SystemEvent};
 use blockcell_core::{InboundMessage, Paths, Result};
 use blockcell_tools::EventEmitterHandle;
 use chrono_tz::Tz;
+use futures::{stream::FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info};
+type Flights =
+    Arc<StdMutex<std::collections::HashMap<String, (String, tokio::sync::watch::Sender<bool>)>>>;
+struct FlightLease {
+    flights: Flights,
+    id: String,
+    generation: String,
+}
+impl Drop for FlightLease {
+    fn drop(&mut self) {
+        let mut flights = self.flights.lock().unwrap();
+        if flights
+            .get(&self.id)
+            .is_some_and(|(g, _)| g == &self.generation)
+        {
+            flights.remove(&self.id);
+        }
+    }
+}
 
 #[cfg(not(test))]
 const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -20,6 +39,9 @@ const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 // out before the test completes the receipt (flaky on loaded machines).
 #[cfg(test)]
 const CRON_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobStore {
@@ -52,6 +74,7 @@ pub struct CronService {
     pending_deleted_ids: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Serializes each in-process read/modify/write transaction.
     operation_lock: Arc<Mutex<()>>,
+    in_flight: Flights,
     /// Tick interval in seconds for checking due jobs.
     tick_interval_secs: u64,
     /// Default timezone for jobs without a specified timezone or with invalid timezone.
@@ -133,6 +156,7 @@ impl CronService {
             pending_added_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             pending_deleted_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             operation_lock: Arc::new(Mutex::new(())),
+            in_flight: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             tick_interval_secs: tick_interval_secs.unwrap_or(1),
             default_timezone: default_tz,
         }
@@ -258,6 +282,7 @@ impl CronService {
 
     pub async fn add_job(&self, job: CronJob) -> Result<()> {
         let _operation_guard = self.operation_lock.lock().await;
+        self.cancel_in_flight(&job.id);
         let added_id = job.id.clone();
         let mut jobs = self.jobs.write().await;
         // Check for duplicate ID
@@ -279,6 +304,7 @@ impl CronService {
     pub async fn remove_job(&self, id: &str) -> Result<bool> {
         let _operation_guard = self.operation_lock.lock().await;
         let mut jobs = self.jobs.write().await;
+        self.cancel_in_flight(id);
         let len_before = jobs.len();
         jobs.retain(|j| j.id != id);
         let removed = jobs.len() < len_before;
@@ -319,6 +345,9 @@ impl CronService {
             0 => Ok(None),
             1 => {
                 let job = &mut jobs[matching[0]];
+                if !enabled {
+                    self.cancel_in_flight(&job.id);
+                }
                 job.enabled = enabled;
                 job.updated_at_ms = chrono::Utc::now().timestamp_millis();
                 let name = job.name.clone();
@@ -417,6 +446,12 @@ impl CronService {
         Ok(true)
     }
 
+    fn cancel_in_flight(&self, id: &str) {
+        if let Some((_, cancel)) = self.in_flight.lock().unwrap().get(id) {
+            let _ = cancel.send(true);
+        }
+    }
+
     pub async fn run_tick(&self) -> Result<()> {
         // The operation lock only guards the short schedule/commit critical sections
         // below — NOT job delivery. `execute_job_internal` waits for the runtime
@@ -440,6 +475,7 @@ impl CronService {
         let mut jobs_to_run = Vec::new();
         let mut state_changed = false;
 
+        jobs.sort_by_key(|job| job.state.next_run_at_ms.unwrap_or(i64::MAX));
         for job in jobs.iter_mut() {
             if !job.enabled {
                 continue;
@@ -481,7 +517,21 @@ impl CronService {
             }
 
             if should_run {
-                jobs_to_run.push(job.clone());
+                let mut flights = self.in_flight.lock().unwrap();
+                if flights.len() < 8 && !flights.contains_key(&job.id) {
+                    let generation = uuid::Uuid::new_v4().to_string();
+                    let (cancel, receiver) = tokio::sync::watch::channel(false);
+                    flights.insert(job.id.clone(), (generation.clone(), cancel));
+                    jobs_to_run.push((
+                        job.clone(),
+                        FlightLease {
+                            flights: self.in_flight.clone(),
+                            id: job.id.clone(),
+                            generation,
+                        },
+                        receiver,
+                    ));
+                }
             }
         }
         drop(jobs);
@@ -499,31 +549,31 @@ impl CronService {
         let inbound_tx = self.inbound_tx.clone();
         let event_emitter = self.event_emitter.clone();
         let agent_id = self.agent_id.clone();
-        let mut delivery_results = Vec::with_capacity(jobs_to_run.len());
-        for job in &jobs_to_run {
-            let result = Self::execute_job_internal(
-                job,
-                inbound_tx.clone(),
-                event_emitter.clone(),
-                agent_id.clone(),
-            )
-            .await;
-            delivery_results.push((job.id.clone(), result));
+        let mut pending = FuturesUnordered::new();
+        for (job, lease, cancel) in jobs_to_run {
+            let tx = inbound_tx.clone();
+            let emitter = event_emitter.clone();
+            let agent = agent_id.clone();
+            pending.push(async move {
+                let result =
+                    Self::execute_job_cancellable(&job, tx, emitter, agent, Some(cancel)).await;
+                (job, result, lease)
+            });
         }
-
-        if delivery_results.is_empty() {
-            return Ok(());
-        }
-
-        // Re-acquire the operation lock only for the short commit section so the
-        // result merge stays serialized against concurrent add/remove/save.
-        let _operation_guard = self.operation_lock.lock().await;
-        let mut jobs = self.jobs.write().await;
-        let mut delete_ids = Vec::new();
-        for (job_id, delivery) in delivery_results {
-            let Some(job) = jobs.iter_mut().find(|job| job.id == job_id) else {
+        // Commit each acknowledged job immediately; a slow sibling must not
+        // retain completed leases or delay its persisted completion.
+        while let Some((original, delivery, _lease)) = pending.next().await {
+            let _operation_guard = self.operation_lock.lock().await;
+            let mut jobs = self.jobs.write().await;
+            let mut delete_ids = Vec::new();
+            let Some(job) = jobs.iter_mut().find(|job| job.id == original.id) else {
                 continue;
             };
+            if !job.enabled
+                || serde_json::to_value(&*job).ok() != serde_json::to_value(&original).ok()
+            {
+                continue;
+            }
             match delivery {
                 Ok(()) => {
                     job.state.last_run_at_ms = Some(now_ms);
@@ -584,15 +634,15 @@ impl CronService {
                     }
                 }
             }
+            if !delete_ids.is_empty() {
+                jobs.retain(|job| !delete_ids.contains(&job.id));
+                info!(count = delete_ids.len(), "Deleted completed cron jobs");
+            }
+            drop(jobs);
+            self.pending_deleted_ids.write().await.extend(delete_ids);
+            *self.has_unsaved_changes.write().await = true;
+            self.save_unlocked().await?;
         }
-        if !delete_ids.is_empty() {
-            jobs.retain(|job| !delete_ids.contains(&job.id));
-            info!(count = delete_ids.len(), "Deleted completed cron jobs");
-        }
-        drop(jobs);
-        self.pending_deleted_ids.write().await.extend(delete_ids);
-        *self.has_unsaved_changes.write().await = true;
-        self.save_unlocked().await?;
         Ok(())
     }
 
@@ -602,6 +652,16 @@ impl CronService {
         inbound_tx: mpsc::Sender<InboundMessage>,
         event_emitter: Arc<StdMutex<Option<EventEmitterHandle>>>,
         agent_id: Option<String>,
+    ) -> std::result::Result<(), String> {
+        Self::execute_job_cancellable(job, inbound_tx, event_emitter, agent_id, None).await
+    }
+
+    async fn execute_job_cancellable(
+        job: &CronJob,
+        inbound_tx: mpsc::Sender<InboundMessage>,
+        event_emitter: Arc<StdMutex<Option<EventEmitterHandle>>>,
+        agent_id: Option<String>,
+        mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> std::result::Result<(), String> {
         debug!(job_id = %job.id, job_name = %job.name, kind = %job.payload.kind, "Executing cron job");
 
@@ -681,6 +741,8 @@ impl CronService {
         }
         apply_route_agent_id(&mut metadata, agent_id.as_deref());
         let (receipt_id, receipt_rx) = register_message_receipt();
+        let _receipt_guard =
+            blockcell_core::message_receipt::MessageReceiptGuard(receipt_id.clone());
         if let Some(metadata) = metadata.as_object_mut() {
             metadata.insert(
                 MESSAGE_RECEIPT_ID.to_string(),
@@ -723,15 +785,22 @@ impl CronService {
             return Err(e.to_string());
         }
 
-        let completion = match tokio::time::timeout(CRON_EXECUTION_TIMEOUT, receipt_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("agent runtime dropped the cron completion receipt".to_string()),
-            Err(_) => {
-                cancel_message_receipt(&receipt_id);
-                Err(format!(
-                    "agent runtime did not complete cron job within {} seconds",
-                    CRON_EXECUTION_TIMEOUT.as_secs_f64()
-                ))
+        let completion = tokio::select! {
+            completion = tokio::time::timeout(CRON_EXECUTION_TIMEOUT, receipt_rx) => match completion {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("agent runtime dropped the cron completion receipt".into()),
+                Err(_) => {
+                    blockcell_core::message_receipt::cancel_message_receipt_and_wait(&receipt_id).await;
+                    Err(format!("agent runtime did not complete cron job within {} seconds", CRON_EXECUTION_TIMEOUT.as_secs_f64()))
+                }
+            },
+            _ = async {
+                if let Some(cancel) = &mut cancel {
+                    if !*cancel.borrow() { let _ = cancel.changed().await; }
+                } else { std::future::pending::<()>().await; }
+            } => {
+                blockcell_core::message_receipt::cancel_message_receipt_and_wait(&receipt_id).await;
+                Err("cron execution cancelled".into())
             }
         };
 
@@ -865,15 +934,18 @@ impl CronService {
         // Skip the first immediate tick (tokio interval returns immediately on first tick)
         interval.tick().await;
 
+        let mut ticks = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                _ = ticks.join_next(), if !ticks.is_empty() => {},
                 _ = interval.tick() => {
-                    if let Err(e) = self.run_tick().await {
-                        error!(error = %e.to_string(), "Cron tick failed");
-                    }
+                    let service = self.clone();
+                    ticks.spawn(async move { service.run_tick().await });
                 }
                 _ = shutdown.recv() => {
                     info!("CronService shutting down");
+                    ticks.abort_all();
+                    while ticks.join_next().await.is_some() {}
 
                     // Save any unsaved state before shutting down
                     if *self.has_unsaved_changes.read().await {

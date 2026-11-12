@@ -521,6 +521,7 @@ impl Provider for GeminiProvider {
 
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
+            let mut utf8 = crate::utf8_stream::Utf8Stream::default();
             let mut buffer = String::new();
             let mut accumulated_content = String::new();
             let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
@@ -541,7 +542,17 @@ impl Provider for GeminiProvider {
                                 .await;
                             return;
                         }
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        match utf8.push(&bytes) {
+                            Ok(text) => buffer.push_str(&text),
+                            Err(error) => {
+                                let _ = tx
+                                    .send(StreamChunk::Error {
+                                        message: format!("Invalid UTF-8 stream: {}", error),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        }
 
                         // 处理 SSE 行
                         while let Some(pos) = buffer.find('\n') {

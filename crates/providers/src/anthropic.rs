@@ -607,6 +607,7 @@ impl Provider for AnthropicProvider {
 
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
+            let mut utf8 = crate::utf8_stream::Utf8Stream::default();
             let mut buffer = String::new();
             let mut tool_calls: HashMap<String, ToolCallAccumulator> = HashMap::new();
             // index -> tool_id 映射，用于正确路由 delta 事件
@@ -629,7 +630,17 @@ impl Provider for AnthropicProvider {
                                 .await;
                             return;
                         }
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        match utf8.push(&bytes) {
+                            Ok(text) => buffer.push_str(&text),
+                            Err(error) => {
+                                let _ = tx
+                                    .send(StreamChunk::Error {
+                                        message: format!("Invalid UTF-8 stream: {}", error),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        }
 
                         // 处理 SSE 行
                         while let Some(pos) = buffer.find('\n') {

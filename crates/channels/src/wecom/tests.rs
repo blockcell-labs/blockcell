@@ -256,3 +256,113 @@ async fn test_build_inbound_from_long_connection_allowlist() {
     let inbound = ch.build_inbound_from_long_connection(&body).await.unwrap();
     assert!(inbound.is_none());
 }
+
+#[tokio::test]
+async fn media_delivery_without_active_connection_fails() {
+    let mut config = Config::default();
+    config.channels.wecom.mode = "long_connection".into();
+    config.channels.wecom.bot_id = "r5-no-active-connection".into();
+    assert!(
+        send_media_message(&config, "chat", "/missing.png", "caption")
+            .await
+            .is_err()
+    );
+    assert!(send_message(&config, "chat", "text").await.is_err());
+}
+
+#[tokio::test]
+async fn media_delivery_preserves_caption_on_real_long_connection() {
+    check_media_delivery(false, false).await;
+}
+
+#[tokio::test]
+async fn media_delivery_server_rejection_is_not_success() {
+    check_media_delivery(true, false).await;
+}
+
+#[tokio::test]
+async fn media_delivery_failed_attachment_still_sends_text() {
+    check_media_delivery(false, true).await;
+}
+
+async fn check_media_delivery(reject_media: bool, missing_file: bool) {
+    use futures::{SinkExt, StreamExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = Config::default();
+    config.channels.wecom.enabled = true;
+    config.channels.wecom.mode = "long_connection".into();
+    config.channels.wecom.bot_id = format!("r5-caption-{}", listener.local_addr().unwrap().port());
+    config.channels.wecom.bot_secret = "test".into();
+    config.channels.wecom.ws_url = format!("ws://{}", listener.local_addr().unwrap());
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (caption_tx, caption_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut ready_tx = Some(ready_tx);
+        let mut caption_tx = Some(caption_tx);
+        while let Some(Ok(WsMessage::Text(text))) = ws.next().await {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let command = value["cmd"].as_str().unwrap();
+            if command == "aibot_subscribe" {
+                ready_tx.take().unwrap().send(()).unwrap();
+            }
+            if command == "aibot_respond_msg" {
+                caption_tx
+                    .take()
+                    .unwrap()
+                    .send(
+                        value["body"]["stream"]["content"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    )
+                    .unwrap();
+            }
+            if command.starts_with("aibot_upload_") || command == "aibot_send_msg" {
+                ws.send(WsMessage::Text(serde_json::json!({
+                    "headers": value["headers"],
+                    "errcode": if reject_media && command == "aibot_send_msg" { 40001 } else { 0 },
+                    "errmsg": "test response",
+                    "body": {"upload_id": "upload", "media_id": "media"}
+                }).to_string())).await.unwrap();
+            }
+        }
+    });
+    let channel = WeComChannel::new(config.clone(), mpsc::channel(1).0);
+    let connection = tokio::spawn(async move { channel.connect_and_run_long_connection().await });
+    tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let file = std::env::temp_dir().join(format!("{}.png", config.channels.wecom.bot_id));
+    if !missing_file {
+        std::fs::write(&file, b"test image bytes").unwrap();
+    }
+    let manager = crate::manager::ChannelManager::new(
+        config.clone(),
+        blockcell_core::Paths::with_base(std::env::temp_dir()),
+        mpsc::channel(1).0,
+    );
+    let mut msg = blockcell_core::OutboundMessage::new("wecom", "chat", "中文 caption");
+    msg.media.push(file.to_string_lossy().into_owned());
+    let sent =
+        tokio::time::timeout(Duration::from_secs(2), manager.dispatch_outbound_msg(&msg)).await;
+    let caption = tokio::time::timeout(Duration::from_secs(2), caption_rx).await;
+    connection.abort();
+    server.abort();
+    LONGCONN_REGISTRY
+        .lock()
+        .unwrap()
+        .remove(&config.channels.wecom.bot_id);
+    if !missing_file {
+        std::fs::remove_file(file).unwrap();
+    }
+    assert_eq!(sent.unwrap().is_err(), reject_media || missing_file);
+    assert_eq!(
+        caption
+            .expect("media success must also deliver the text")
+            .unwrap(),
+        "中文 caption"
+    );
+}
