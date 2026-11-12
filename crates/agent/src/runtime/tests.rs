@@ -12594,3 +12594,121 @@ async fn prompt_skill_observes_revision_and_respects_verification_policy() {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 3 + expected);
     }
 }
+
+async fn check_prompt_skill_empty_verification_continuation(action: &'static str) {
+    struct ContinuationProvider {
+        inner: Arc<VerificationGateProvider>,
+        action: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl Provider for ContinuationProvider {
+        async fn chat(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[serde_json::Value],
+        ) -> Result<LLMResponse> {
+            let index = self.inner.calls.load(Ordering::SeqCst);
+            let mut response = self.inner.chat(messages, tools).await?;
+            if index >= 3 {
+                response.content = None;
+                if index == 3 && self.action != "unchanged" {
+                    response.tool_calls = vec![ToolCallRequest {
+                        id: "followup-change".into(),
+                        name: if self.action == "changed" {
+                            "edit_file"
+                        } else {
+                            "shell"
+                        }
+                        .into(),
+                        arguments: if self.action == "changed" {
+                            serde_json::json!({"path":self.inner.path,"old_text":"after","new_text":"changed again"})
+                        } else {
+                            serde_json::json!({"command":"cargo test"})
+                        },
+                        thought_signature: None,
+                    }];
+                }
+            }
+            Ok(response)
+        }
+    }
+    struct FailedCheck;
+    #[async_trait::async_trait]
+    impl blockcell_tools::Tool for FailedCheck {
+        fn schema(&self) -> blockcell_tools::ToolSchema {
+            VerificationGateShell.schema()
+        }
+        fn validate(&self, _: &serde_json::Value) -> Result<()> {
+            Ok(())
+        }
+        fn supports_verification(&self) -> bool {
+            true
+        }
+        fn accepts_execution_annotations(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _: blockcell_tools::ToolContext,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({"output":"check failed","exit_code":1}))
+        }
+    }
+    {
+        let (fixture, provider, path) = verification_gate_runtime(false);
+        let mut runtime = test_runtime_with_provider_and_paths(
+            fixture.paths.clone(),
+            Arc::new(ContinuationProvider {
+                inner: provider.clone(),
+                action,
+            }),
+            fixture.config.clone(),
+        );
+        runtime.tool_registry = ToolRegistry::with_defaults();
+        runtime.tool_registry.register(Arc::new(FailedCheck));
+        let msg = test_main_session_inbound("cli", "skill-empty-check");
+        let tools = vec!["read_file".into(), "edit_file".into(), "shell".into()];
+        let result = runtime
+            .run_prompt_skill_loop(&msg, vec![ChatMessage::user("edit")], vec![], &tools, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            if action == "unchanged" { 4 } else { 5 }
+        );
+        if action == "changed" {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "changed again");
+        }
+        assert!(
+            !result.final_response.trim().is_empty(),
+            "empty skill reply for {action}"
+        );
+        assert_eq!(
+            result
+                .final_response
+                .contains("The requested work is done."),
+            action == "unchanged",
+            "stale conclusion for {action}: {}",
+            result.final_response
+        );
+        assert!(
+            result.final_response.contains("Verification scope:"),
+            "missing verification limitation for {action}: {}",
+            result.final_response
+        );
+    }
+}
+
+#[tokio::test]
+async fn prompt_skill_empty_verification_continuation_preserves_valid_answer() {
+    check_prompt_skill_empty_verification_continuation("unchanged").await;
+}
+#[tokio::test]
+async fn prompt_skill_empty_verification_continuation_drops_changed_answer() {
+    check_prompt_skill_empty_verification_continuation("changed").await;
+}
+#[tokio::test]
+async fn prompt_skill_empty_verification_continuation_drops_failed_answer() {
+    check_prompt_skill_empty_verification_continuation("failed").await;
+}

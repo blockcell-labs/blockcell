@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running tests/remediation_wecom_review.rs (target/debug/deps/remediation_wecom_review-4159d9f637f34102)
+
+running 1 test
+test rejected_text_must_not_report_success ... FAILED
+
+failures:
+
+---- rejected_text_must_not_report_success stdout ----
+
+thread 'rejected_text_must_not_report_success' (26688292) panicked at crates/channels/tests/remediation_wecom_review.rs:46:5:
+WeCom text returned Ok despite service errcode 40001
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rejected_text_must_not_report_success
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p blockcell-channels --test remediation_wecom_review`

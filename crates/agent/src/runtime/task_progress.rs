@@ -15,6 +15,7 @@ pub(crate) struct ToolEvidence {
     pub process: Option<String>,
     pub running: bool,
     pub completed: bool,
+    pub failed: bool,
     pub rejection: Option<&'static str>,
     pub check_candidate: bool,
 }
@@ -29,6 +30,7 @@ impl Default for ToolEvidence {
             process: None,
             running: false,
             completed: false,
+            failed: false,
             rejection: None,
             check_candidate: false,
         }
@@ -100,6 +102,10 @@ impl ToolEvidence {
             process,
             running: result["running"] == true || result["status"] == "running",
             completed: blockcell_tools::evidence::completed_successfully(result),
+            // A tool can successfully return a failed process result as JSON.
+            // Transport-level success must not hide a failed verification.
+            failed: result["exit_code"].as_i64().is_some_and(|code| code != 0)
+                || result["timed_out"] == true,
             rejection,
             check_candidate,
         }
@@ -356,7 +362,7 @@ impl TaskProgress {
                 .and_then(|process| self.pending.remove(process)),
             _ => None,
         };
-        if verification.is_some() && !evidence.running && !succeeded {
+        if verification.is_some() && !evidence.running && (!succeeded || evidence.failed) {
             self.verification_failed = true;
         }
         if succeeded && evidence.completed && self.contract.verification.permits_execution() {

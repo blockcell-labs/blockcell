@@ -1,0 +1,45 @@
+warning: methods `execute_tool_call` and `execute_tool_call_prefetched` are never used
+   --> crates/agent/src/runtime/tool_pipeline.rs:275:25
+    |
+274 | impl AgentRuntime {
+    | ----------------- methods in this implementation
+275 |     pub(crate) async fn execute_tool_call(
+    |                         ^^^^^^^^^^^^^^^^^
+...
+287 |     pub(crate) async fn execute_tool_call_prefetched(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `record_llm_budget` is never used
+   --> crates/agent/src/runtime/turn_flow.rs:151:19
+    |
+  3 | impl AgentRuntime {
+    | ----------------- method in this implementation
+...
+151 |     pub(crate) fn record_llm_budget(
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: `blockcell-agent` (lib) generated 2 warnings
+   Compiling blockcell-agent v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.94s
+     Running tests/remediation_skill_review.rs (target/debug/deps/remediation_skill_review-1bbfd3796674ecba)
+
+running 1 test
+test forced_skill_empty_continuation_must_deliver_an_explanation ... FAILED
+
+failures:
+
+---- forced_skill_empty_continuation_must_deliver_an_explanation stdout ----
+
+thread 'forced_skill_empty_continuation_must_deliver_an_explanation' (26686884) panicked at crates/agent/tests/remediation_skill_review.rs:48:5:
+forced skill discarded its original answer and returned an empty final response
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    forced_skill_empty_continuation_must_deliver_an_explanation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+error: test failed, to rerun pass `-p blockcell-agent --test remediation_skill_review`

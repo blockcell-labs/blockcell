@@ -1,0 +1,73 @@
+   Compiling blockcell-channels v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/channels)
+   Compiling blockcell-tools v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/tools)
+   Compiling blockcell-agent v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/agent)
+warning: methods `execute_tool_call` and `execute_tool_call_prefetched` are never used
+   --> crates/agent/src/runtime/tool_pipeline.rs:275:25
+    |
+274 | impl AgentRuntime {
+    | ----------------- methods in this implementation
+275 |     pub(crate) async fn execute_tool_call(
+    |                         ^^^^^^^^^^^^^^^^^
+...
+287 |     pub(crate) async fn execute_tool_call_prefetched(
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `record_llm_budget` is never used
+   --> crates/agent/src/runtime/turn_flow.rs:151:19
+    |
+  3 | impl AgentRuntime {
+    | ----------------- method in this implementation
+...
+151 |     pub(crate) fn record_llm_budget(
+    |                   ^^^^^^^^^^^^^^^^^
+
+   Compiling blockcell-scheduler v0.1.8 (/Users/apple/rustdev/magicbot/blockcell/crates/scheduler)
+warning: `blockcell-agent` (lib) generated 2 warnings
+warning: field `paths` is never read
+  --> crates/scheduler/tests/remediation_review.rs:12:5
+   |
+10 | struct TestPaths {
+   |        --------- field in this struct
+11 |     base: std::path::PathBuf,
+12 |     paths: Paths,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `complete` is never used
+  --> crates/scheduler/tests/remediation_review.rs:84:4
+   |
+84 | fn complete(message: &InboundMessage) {
+   |    ^^^^^^^^
+
+warning: `blockcell-scheduler` (test "remediation_review") generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 28s
+     Running tests/remediation_review.rs (target/debug/deps/remediation_review-f72ca1ab79f6bf9d)
+
+running 2 tests
+test review_dropped_tick_must_keep_claimed_job_leased_until_ack ... FAILED
+test review_receiver_reclaim_must_cancel_the_active_claim ... FAILED
+
+failures:
+
+---- review_dropped_tick_must_keep_claimed_job_leased_until_ack stdout ----
+
+thread 'review_dropped_tick_must_keep_claimed_job_leased_until_ack' (26683438) panicked at crates/scheduler/tests/remediation_review.rs:104:5:
+same job re-dispatched before the old runtime claim acknowledged cancellation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- review_receiver_reclaim_must_cancel_the_active_claim stdout ----
+
+thread 'review_receiver_reclaim_must_cancel_the_active_claim' (26683439) panicked at crates/scheduler/tests/remediation_review.rs:116:5:
+receiver cleanup removed the only cancellation handle while runtime work remains active
+
+
+failures:
+    review_dropped_tick_must_keep_claimed_job_leased_until_ack
+    review_receiver_reclaim_must_cancel_the_active_claim
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p blockcell-scheduler --test remediation_review`

@@ -399,6 +399,7 @@ impl AgentRuntime {
         let mut tool_outcomes = Vec::new();
         let mut verification_nudged = false;
         let mut deliverable_nudged = false;
+        let mut answer_before_continuation: Option<(String, usize)> = None;
 
         let final_response = loop {
             let step = self.begin_step();
@@ -443,6 +444,17 @@ impl AgentRuntime {
                     None
                 };
                 if let Some(hint) = continuation {
+                    // Keep the last non-empty conclusion with its workspace
+                    // revision. A later empty continuation must not erase it,
+                    // nor resurrect it after another edit or a failed check.
+                    let content = response.content.as_deref().unwrap_or_default();
+                    if !content.trim().is_empty() {
+                        answer_before_continuation =
+                            Some((content.to_string(), task_progress.revision()));
+                    } else if answer_before_continuation.is_none() {
+                        answer_before_continuation =
+                            Some((String::new(), task_progress.revision()));
+                    }
                     let answer = ChatMessage::assistant_with_reasoning(
                         response.content.as_deref().unwrap_or_default(),
                         response.reasoning_content.clone(),
@@ -589,6 +601,25 @@ impl AgentRuntime {
             }
         };
 
+        let final_response = match answer_before_continuation {
+            Some((original, revision)) => {
+                let mut reason = task_progress.verification_reason().to_string();
+                if let Some(missing) =
+                    task_progress.first_incomplete_output(&self.paths.workspace())
+                {
+                    reason.push_str(&format!(
+                        "; required output `{missing}` is missing or unchanged"
+                    ));
+                }
+                super::process_message_inner::merge_verification_answer(
+                    &original,
+                    &final_response,
+                    revision == task_progress.revision() && !task_progress.verification_failed(),
+                    &reason,
+                )
+            }
+            None => final_response,
+        };
         let final_response = strip_fake_tool_calls(final_response.trim());
         Ok(PromptSkillLoopOutput {
             task_contract: task_progress.contract_for_continuation(&self.paths.workspace()),

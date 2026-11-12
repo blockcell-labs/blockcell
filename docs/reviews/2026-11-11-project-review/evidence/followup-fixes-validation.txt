@@ -1,0 +1,17 @@
+Rust 1.96, offline + locked. 2026-11-12
+Command: cargo test -p blockcell-core -p blockcell-scheduler -p blockcell-agent -p blockcell --offline --locked --lib --test remediation_review --test remediation_skill_review --test cron_receipt_lifecycle
+
+     Running unittests src/lib.rs (target/debug/deps/blockcell_agent-2919745317d4c38e)
+test result: ok. 1003 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.20s
+     Running tests/cron_receipt_lifecycle.rs (target/debug/deps/cron_receipt_lifecycle-45b41ae836004f89)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+     Running tests/remediation_skill_review.rs (target/debug/deps/remediation_skill_review-1bbfd3796674ecba)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+     Running unittests src/lib.rs (target/debug/deps/blockcell_core-975daf37757e5b45)
+test result: ok. 149 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+     Running unittests src/lib.rs (target/debug/deps/blockcell_scheduler-5d383dd4b523808e)
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.90s
+     Running tests/remediation_review.rs (target/debug/deps/remediation_review-f72ca1ab79f6bf9d)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+Exit code: 0. Total passed: 1237.
