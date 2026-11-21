@@ -6,12 +6,17 @@ import shutil
 import socket
 import socketserver
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 
 class BudgetExceeded(RuntimeError):
+    pass
+
+
+class ProviderUnavailable(RuntimeError):
     pass
 
 
@@ -25,8 +30,11 @@ class Meter:
         self.cost = 0.0
         self.lock = threading.Lock()
         self.on_update = on_update
+        self.upstream_status = None
 
     def check(self):
+        if self.upstream_status == 402:
+            raise ProviderUnavailable('upstream HTTP 402 Payment Required; restore provider access, then resume')
         if self.cost >= self.limit or self.input_tokens + self.output_tokens >= self.token_limit:
             raise BudgetExceeded("LLM budget exhausted")
 
@@ -40,7 +48,7 @@ class Meter:
 
 
 class Proxy:
-    def __init__(self, upstream, key, meter, socket_path=None):
+    def __init__(self, upstream, key, meter, socket_path=None, allowed_model=None):
         self.upstream = upstream.rstrip("/")
         self.key = key
         self.meter = meter
@@ -52,6 +60,12 @@ class Proxy:
 
             def log_message(self, *args):
                 pass
+
+            def send_error(self, *args, **kwargs):
+                try:
+                    super().send_error(*args, **kwargs)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def do_POST(self):
                 with owner.request_lock:
@@ -67,6 +81,9 @@ class Proxy:
                         return
                     body = self.rfile.read(length)
                     payload = json.loads(body)
+                    if allowed_model and payload.get('model') != allowed_model:
+                        self.send_error(403, 'model not allowed')
+                        return
                     if payload.get("stream"):
                         payload["stream_options"] = {"include_usage": True}
                         body = json.dumps(payload).encode()
@@ -77,16 +94,33 @@ class Proxy:
                     suffix = path.removeprefix("/v1")
                     req = urllib.request.Request(owner.upstream + suffix, data=body, headers={
                         "Content-Type": "application/json", "Authorization": "Bearer " + owner.key})
-                    with urllib.request.urlopen(req, timeout=120) as response:
+                    for attempt in range(5):
+                        try:
+                            response = urllib.request.urlopen(req, timeout=120)
+                            break
+                        except urllib.error.HTTPError as exc:
+                            if exc.code != 429 or attempt == 4:
+                                raise
+                            exc.close()
+                            time.sleep(min(2 ** attempt, 16))
+                    with response:
                         content_type = response.headers.get("Content-Type", "application/json")
-                        self.send_response(response.status)
-                        self.send_header("Content-Type", content_type)
-                        self.end_headers()
+                        disconnected = False
+                        try:
+                            self.send_response(response.status)
+                            self.send_header("Content-Type", content_type)
+                            self.end_headers()
+                        except (BrokenPipeError, ConnectionResetError):
+                            disconnected = True
                         usage = None
                         if "text/event-stream" in content_type:
                             for line in response:
-                                self.wfile.write(line)
-                                self.wfile.flush()
+                                if not disconnected:
+                                    try:
+                                        self.wfile.write(line)
+                                        self.wfile.flush()
+                                    except (BrokenPipeError, ConnectionResetError):
+                                        disconnected = True
                                 if line.startswith(b"data:"):
                                     try:
                                         usage = json.loads(line[5:].strip()).get("usage") or usage
@@ -94,16 +128,29 @@ class Proxy:
                                         pass
                         else:
                             data = response.read()
-                            self.wfile.write(data)
                             usage = json.loads(data).get("usage")
+                            owner.meter.charge(usage or {"prompt_tokens": owner.meter.token_limit})
+                            try:
+                                self.wfile.write(data)
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass
+                            return
                         # Missing usage is fail-closed for all subsequent requests.
                         if usage is None:
                             usage = {"prompt_tokens": owner.meter.token_limit}
                         owner.meter.charge(usage)
                 except BudgetExceeded as exc:
                     self.send_error(429, str(exc))
+                except ProviderUnavailable as exc:
+                    self.send_error(402, str(exc))
                 except urllib.error.HTTPError as exc:
+                    if exc.code == 402:
+                        owner.meter.upstream_status = 402
+                        if owner.meter.on_update:
+                            owner.meter.on_update(owner.meter)
                     self.send_error(exc.code, "upstream request failed")
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 except (OSError, ValueError):
                     self.send_error(502, "proxy request failed")
 
@@ -125,6 +172,8 @@ class Proxy:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
+        if self.meter.upstream_status == 402:
+            self.meter.check()
 
 
 def clean_env(home, key_env):
@@ -143,6 +192,7 @@ def prepare_home(home, workspace, config, proxy_url):
     data = {"providers": {agent["provider"]: {"apiBase": proxy_url, "apiKey": "genesis-proxy-only", "apiType": "openai", "proxy": ""}},
             "agents": {"defaults": {"workspace": str(workspace), "model": agent["model"], "provider": agent["provider"], "modelPool": []}, "ghost": {"enabled": False}},
             "channels": {}, "autoUpgrade": {"enabled": False},
+            "selfImprove": {"nudge": {"enabled": False}, "review": {"enabled": False}},
             "tools": {"exec": {"restrictToWorkspace": True, "allowUnsandboxedShell": False}}}
     (directory / "config.json5").write_text(json.dumps(data, ensure_ascii=False, indent=2))
     return clean_env(home, agent["key_env"])

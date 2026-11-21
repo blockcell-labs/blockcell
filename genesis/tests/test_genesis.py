@@ -20,9 +20,9 @@ from unittest.mock import patch
 from genesis import diagnosis, gates
 from genesis.archive import Archive
 from genesis.agent_adapter import AgentAdapter
-from genesis.adapters import bfcl, cargo
+from genesis.adapters import bfcl, cargo, eab60
 from genesis.config import load
-from genesis.isolation import Meter, Proxy, build_sandbox, clean_env
+from genesis.isolation import Meter, Proxy, ProviderUnavailable, build_sandbox, clean_env
 from genesis.selector import Selector
 from genesis.source import Source, command
 from genesis.supervisor import Supervisor
@@ -130,9 +130,21 @@ class RepositoryCase(unittest.TestCase):
 
     def test_timeout(self):
         self.fault.write_text('timeout')
-        self.config['agent']['timeout']=.1
+        self.config['agent']['timeout']=1
         self.supervisor.run(1)
         self.assertTrue(all(a['status']=='REJECTED' and 'timed out' in a['reason'] for a in self.candidates()))
+
+    def test_provider_failure_preserves_stage_for_resume(self):
+        with patch.object(self.supervisor.evaluator,'full',side_effect=ProviderUnavailable('HTTP 402')):
+            with self.assertRaises(ProviderUnavailable):
+                self.supervisor.run(1)
+        stage,payload=self.supervisor.archive.state()
+        self.assertEqual(stage,'PARENT_EVAL')
+        self.assertEqual(payload['blocked_reason'],'HTTP 402')
+        self.assertEqual(self.candidates(),[])
+        self.supervisor.run(resume=True)
+        self.assertEqual(self.supervisor.archive.state()[0],'IDLE')
+        self.assertTrue(all(a['status']=='PARENT' for a in self.candidates()))
 
     def test_highrisk_max_archive(self):
         self.fault.write_text('highrisk')
@@ -141,6 +153,7 @@ class RepositoryCase(unittest.TestCase):
 
     def test_required_skipped_inconclusive(self):
         self.config['benchmarks']['L3']['eab60'].pop('command')
+        self.config['benchmarks']['L3']['eab60']['kit']=''
         self.supervisor.run(1)
         self.assertEqual([a['status'] for a in self.candidates()],['INCONCLUSIVE']*2)
 
@@ -220,6 +233,33 @@ class SmallTests(unittest.TestCase):
         self.assertEqual(result,[])
         self.assertEqual(len(errors),3)
         self.assertEqual(adapter.call.call_count,3)
+
+    def test_eab_report_metrics_reasons_and_provider_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'reports').mkdir()
+            evidence=root/'evidence/A01'
+            evidence.mkdir(parents=True)
+            records=[{'id':'A01','grade':{'status':'PARTIAL','checks':[{'name':'clarifies','ok':False,'detail':'no clarification'}]},'final_text':'reply','duration_s':1.5}]
+            (root/'reports/results.json').write_text(json.dumps(records))
+            events=[{'kind':'model/response','payload':{'usage':{'input_tokens':7,'output_tokens':3}}}]
+            (evidence/'events.json').write_text(json.dumps(events))
+            result=eab60.parse_report(root,['A01'])
+            row=result['results'][0]
+            self.assertEqual(result['status'],'ok')
+            self.assertEqual((row['input_tokens'],row['output_tokens']),(7,3))
+            self.assertIn('clarifies: no clarification',row['failure_reason'])
+            self.assertEqual(row['agent_output_tail'],'reply')
+            events.append({'kind':'model/request-error','payload':{'error':'HTTP_STATUS=402'}})
+            (evidence/'events.json').write_text(json.dumps(events))
+            result=eab60.parse_report(root,['A01'])
+            self.assertEqual(result['status'],'inconclusive')
+            self.assertIn('402',result['results'][0]['failure_reason'])
+            with self.assertRaisesRegex(ValueError,'missing requested'):
+                eab60.parse_report(root,['A01','A02'])
+            (root/'reports/results.json').write_text('[]')
+            with self.assertRaisesRegex(ValueError,'missing requested'):
+                eab60.parse_report(root,['A01'])
 
     def test_audit_compares_parent_and_fails_closed(self):
         config=load(); config['agent']['require_bwrap']=False
@@ -334,6 +374,92 @@ class SmallTests(unittest.TestCase):
                     urllib.request.urlopen(req)
                 self.assertEqual(raised.exception.code,429)
             self.assertEqual(received,['Bearer upstream-only']*2)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_proxy_retries_429_and_restricts_model(self):
+        calls=[]
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                calls.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                self.send_response(429 if len(calls)<3 else 200)
+                self.end_headers()
+                self.wfile.write(json.dumps({'usage':{'prompt_tokens':7,'completion_tokens':3}}).encode())
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            meter=Meter(1)
+            with Proxy(f'http://127.0.0.1:{server.server_port}/v1','test-only',meter,allowed_model='allowed') as proxy:
+                def request(model):
+                    return urllib.request.Request(proxy.url+'/chat/completions',data=json.dumps({'model':model}).encode())
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request('forbidden'))
+                self.assertEqual(raised.exception.code,403)
+                self.assertEqual(calls,[])
+                with patch('genesis.isolation.time.sleep') as sleep:
+                    with urllib.request.urlopen(request('allowed')) as response:
+                        self.assertIn(b'usage',response.read())
+                self.assertEqual([c.args[0] for c in sleep.call_args_list],[1,2])
+                self.assertEqual(len(calls),3)
+                self.assertEqual((meter.input_tokens,meter.output_tokens),(7,3))
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_proxy_disconnected_client_still_charged(self):
+        import socket
+        released=threading.Event()
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                released.wait(5)
+                self.send_response(200)
+                self.send_header('Content-Type','text/event-stream')
+                self.end_headers()
+                self.wfile.write(b'data: {"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\ndata: [DONE]\n\n')
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            meter=Meter(1,on_update=lambda m: charged.set())
+            charged=threading.Event()
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                with Proxy(f'http://127.0.0.1:{server.server_port}/v1','test-only',meter) as proxy:
+                    client=socket.create_connection(('127.0.0.1',proxy.server.server_port))
+                    client.sendall(b'POST /v1/chat/completions HTTP/1.0\r\nContent-Length: 15\r\n\r\n{"stream":true}')
+                    client.close()
+                    released.set()
+                    self.assertTrue(charged.wait(5))
+                self.assertEqual(errors.getvalue(),'')
+            self.assertEqual((meter.input_tokens,meter.output_tokens),(7,3))
+        finally:
+            released.set()
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_proxy_payment_failure_stops_further_upstream_requests(self):
+        calls=[]
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                calls.append(1)
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.send_error(402,'Payment Required')
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            meter=Meter(1)
+            with self.assertRaises(ProviderUnavailable):
+                with Proxy(f'http://127.0.0.1:{server.server_port}/v1','test-only',meter) as proxy:
+                    for _ in range(2):
+                        request=urllib.request.Request(proxy.url+'/chat/completions',data=b'{}')
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            urllib.request.urlopen(request)
+                        self.assertEqual(raised.exception.code,402)
+            self.assertEqual(calls,[1])
+            self.assertEqual((meter.input_tokens,meter.output_tokens),(0,0))
         finally:
             server.shutdown(); server.server_close(); thread.join()
 

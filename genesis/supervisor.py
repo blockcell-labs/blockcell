@@ -8,7 +8,7 @@ from .adapters import cargo
 from .agent_adapter import AgentAdapter
 from .archive import Archive
 from .evaluator import Evaluator
-from .isolation import BudgetExceeded, Meter
+from .isolation import BudgetExceeded, Meter, ProviderUnavailable
 from .selector import Selector
 from .source import Source, command
 
@@ -23,7 +23,7 @@ class Supervisor:
         self.usage_path = self.root / "usage.json"
         usage = json.loads(self.usage_path.read_text()) if self.usage_path.exists() else {}
         agent = config["agent"]
-        self.meter = Meter(config["genesis"]["budget"]["total_usd"], agent["input_usd_per_million"], agent["output_usd_per_million"], on_update=self.save_usage)
+        self.meter = Meter(config["genesis"]["budget"]["total_usd"], agent["input_usd_per_million"], agent["output_usd_per_million"], token_limit=agent.get('token_limit', 20000000), on_update=self.save_usage)
         self.meter.input_tokens = usage.get("input_tokens", 0)
         self.meter.output_tokens = usage.get("output_tokens", 0)
         self.meter.cost = usage.get("cost", 0)
@@ -32,7 +32,7 @@ class Supervisor:
 
     def save_usage(self, meter):
         temp = self.usage_path.with_suffix(".new")
-        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost}))
+        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost, "upstream_status": meter.upstream_status}))
         temp.replace(self.usage_path)
 
     def init(self):
@@ -65,6 +65,10 @@ class Supervisor:
         if not self.archive.agent("genesis-0"):
             raise RuntimeError("run init first")
         stage, p = self.archive.state()
+        if resume and p.get('blocked_at'):
+            p['cycle_started'] += time.time() - p.pop('blocked_at')
+            p.pop('blocked_reason', None)
+            self.transition(stage, p)
         if stage == "BUILD_GENESIS0":
             self.init()
             stage, p = self.archive.state()
@@ -256,6 +260,11 @@ class Supervisor:
                         raise BudgetExceeded("cycle time limit")
                     if self.meter.cost - p["cycle_cost"] >= self.config["genesis"]["budget"]["per_cycle_usd"]:
                         raise BudgetExceeded("cycle budget exhausted")
+            except ProviderUnavailable as exc:
+                p['blocked_reason'] = str(exc)
+                p['blocked_at'] = time.time()
+                self.transition(stage, p)
+                raise
             except BudgetExceeded as exc:
                 p["stop_reason"] = str(exc)
                 self.transition("STOPPED", p)

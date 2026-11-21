@@ -11,3 +11,6 @@ if __name__ == "__main__":
     meter = Meter(**context["meter"])
     adapter = AgentAdapter(context["config"], context["run_root"], meter)
     print(adapter.call(context["binary"], sys.argv[2], Path(sys.argv[3]), "eval", sys.argv[4]))
+    metrics_path = Path(sys.argv[3]) / '.blockcell-eval-metrics.json'
+    metrics_path.unlink(missing_ok=True)
+    metrics_path.write_text(json.dumps(adapter.last_metrics))

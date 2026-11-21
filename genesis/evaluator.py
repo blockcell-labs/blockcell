@@ -44,7 +44,7 @@ class Evaluator:
             context_path = folder / "context.json"
             wrapper = folder / "agent_wrapper.py"
             wrapper.write_text("import runpy,sys\nsys.argv.insert(1," + repr(str(context_path)) + ")\nrunpy.run_path(" + repr(str(Path(__file__).with_name("eval_bridge.py"))) + ",run_name='__main__')\n")
-            with Proxy(settings["upstream"], os.environ.get(settings["key_env"], ""), self.adapter.meter) as proxy:
+            with Proxy(settings["upstream"], os.environ.get(settings["key_env"], ""), self.adapter.meter, allowed_model=settings['model']) as proxy:
                 isolated_config["agent"]["upstream"] = proxy.url
                 context_path.write_text(json.dumps(context))
                 result = coding_eval.evaluate(self.frozen, agent["binary"], output, self.config, wrapper,

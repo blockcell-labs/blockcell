@@ -73,7 +73,8 @@ class Archive:
     def cached(self, agent, benchmark, idx, config):
         row = self.db.execute("SELECT e.report_json FROM evaluations e JOIN agents a ON e.agent_id=a.agent_id WHERE a.agent_id=? AND e.commit_sha=? AND benchmark=? AND dataset_version=? AND model_id=? AND config_hash=? AND run_idx=?", (
             agent["agent_id"], agent["commit_sha"], benchmark, config["benchmarks"]["dataset_version"], config["agent"]["model"], config["_hash"], idx)).fetchone()
-        return json.loads(row[0]) if row else None
+        result = json.loads(row[0]) if row else None
+        return None if result and result.get('status') in ('inconclusive', 'error') else result
 
     def failures(self, parent_id):
         lineage = set()
