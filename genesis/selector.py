@@ -8,6 +8,8 @@ class Selector:
 
     def select(self, agents, force_archive=False):
         pool = [a for a in agents if a["status"] in ("PARENT", "ARCHIVE")]
+        if not self.config['promotion'].get('commit_enabled', True):
+            pool = [a for a in pool if a['status'] == 'PARENT']
         if force_archive:
             archives = [a for a in pool if a["status"] == "ARCHIVE"]
             if archives:

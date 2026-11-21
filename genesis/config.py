@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import re
 from pathlib import Path
@@ -11,7 +12,9 @@ def expand(template, **values):
 def load(path=None):
     path = Path(path or Path(__file__).with_name("genesis.json"))
     config = json.loads(path.read_text())
-    config["_hash"] = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    evaluation_config = copy.deepcopy(config)
+    evaluation_config['promotion'].pop('commit_enabled', None)
+    config["_hash"] = hashlib.sha256(json.dumps(evaluation_config, sort_keys=True).encode()).hexdigest()
     config["_root"] = str(Path(config["genesis"]["workspace_root"]).resolve())
     if config["genesis"]["candidates_per_cycle"] != 2:
         raise ValueError("Genesis v0.1 requires two candidates per cycle")

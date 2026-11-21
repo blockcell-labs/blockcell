@@ -22,6 +22,7 @@ from genesis.archive import Archive
 from genesis.agent_adapter import AgentAdapter
 from genesis.adapters import bfcl, cargo, eab60
 from genesis.config import load
+from genesis.evaluator import Evaluator
 from genesis.isolation import Meter, Proxy, ProviderUnavailable, build_sandbox, clean_env
 from genesis.selector import Selector
 from genesis.source import Source, command
@@ -77,6 +78,7 @@ class RepositoryCase(unittest.TestCase):
         evaluate = self.base / 'eval.py'
         evaluate.write_text("import json,sys,subprocess\nfrom pathlib import Path\nv=int(subprocess.check_output([sys.argv[1],'--score']))\nfault=Path("+repr(str(self.fault))+").read_text()\nrows=[{'task_id':f't{i}','passed':i<2+v*2,'input_tokens':10,'output_tokens':10,'duration_ms':10,'tool_calls':1} for i in range(12)]\nif fault=='regression' and v: \n for r in rows: r['passed']=False\nPath(sys.argv[2]).write_text(json.dumps({'status':'ok','results':rows}))\n")
         self.config = load()
+        self.config['promotion']['commit_enabled'] = True
         self.config['_root'] = str(self.base / 'state')
         self.config['genesis'].update(repository=str(self.repo), base_sha=sha, genesis0_sha=sha)
         self.config['agent'].update(command=['{binary}','{prompt}'], require_bwrap=False, timeout=3)
@@ -111,6 +113,22 @@ class RepositoryCase(unittest.TestCase):
         self.supervisor.run(1)
         self.assertEqual([a['status'] for a in self.candidates()],['REJECTED']*2)
         self.assertTrue(all('L0' in a['reason'] for a in self.candidates()))
+
+    def test_no_commit_policy_archives_without_writing_history(self):
+        self.config['promotion']['commit_enabled']=False
+        with patch.object(self.supervisor.source,'snapshot',side_effect=AssertionError('unexpected commit')), patch.object(self.supervisor.source,'promote',side_effect=AssertionError('unexpected promotion')):
+            self.supervisor.run(1)
+        self.assertEqual([a['status'] for a in self.candidates()],['ARCHIVE','ARCHIVE'])
+        self.assertTrue(all('no-commit policy' in a['reason'] for a in self.candidates()))
+        self.assertEqual(self.supervisor.selector.select(self.supervisor.archive.agents(),True)['agent_id'],'genesis-0')
+
+    def test_legacy_placeholders_receive_real_hypotheses(self):
+        for index in range(2):
+            self.supervisor.archive.add(f'agent-0001-{index}','old','genesis-0',status='INCONCLUSIVE')
+        self.supervisor.run(1)
+        hypotheses=[json.loads(a['hypothesis_json']) for a in self.candidates()]
+        self.assertEqual({h['id'] for h in hypotheses},{'a','b'})
+        self.assertTrue(all(h['suspected_files']==['crates/level.txt'] for h in hypotheses))
 
     def test_protected_path(self):
         self.fault.write_text('protected')
@@ -233,6 +251,22 @@ class SmallTests(unittest.TestCase):
         self.assertEqual(result,[])
         self.assertEqual(len(errors),3)
         self.assertEqual(adapter.call.call_count,3)
+        prompt=adapter.call.call_args.args[1]
+        self.assertIn('"verification": []',prompt)
+        self.assertIn('"not_duplicate_of": []',prompt)
+        self.assertIn('tests/eab60/',prompt)
+
+    def test_negative_experience_excludes_empty_placeholders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive=Archive(Path(directory))
+            try:
+                archive.add('p','sha')
+                archive.add('placeholder','sha','p',status='INCONCLUSIVE')
+                self.assertEqual(archive.failures('p'),[])
+                archive.add('real','sha','p',{'id':'h'},status='REJECTED')
+                self.assertEqual([f['hypothesis'] for f in archive.failures('p')],[{'id':'h'}])
+            finally:
+                archive.db.close()
 
     def test_eab_report_metrics_reasons_and_provider_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -255,11 +289,51 @@ class SmallTests(unittest.TestCase):
             result=eab60.parse_report(root,['A01'])
             self.assertEqual(result['status'],'inconclusive')
             self.assertIn('402',result['results'][0]['failure_reason'])
+            for error in ('HTTP_STATUS=503', 'Stream header timeout after 60 seconds'):
+                events[-1]['payload']['error']=error
+                (evidence/'events.json').write_text(json.dumps(events))
+                result=eab60.parse_report(root,['A01'])
+                self.assertEqual(result['status'],'inconclusive')
+                self.assertTrue(result['results'][0]['infrastructure_error'])
+                self.assertIn(error,result['results'][0]['failure_reason'])
+            events.append({'kind':'model/response','payload':{'usage':{}}})
+            (evidence/'events.json').write_text(json.dumps(events))
+            self.assertEqual(eab60.parse_report(root,['A01'])['status'],'ok')
+            events[-2]['payload']['error']='HTTP_STATUS=402'
+            (evidence/'events.json').write_text(json.dumps(events))
+            self.assertEqual(eab60.parse_report(root,['A01'])['status'],'inconclusive')
             with self.assertRaisesRegex(ValueError,'missing requested'):
                 eab60.parse_report(root,['A01','A02'])
             (root/'reports/results.json').write_text('[]')
             with self.assertRaisesRegex(ValueError,'missing requested'):
                 eab60.parse_report(root,['A01'])
+
+    def test_eab_retries_use_independent_runtime_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            config=load();config['_root']=str(root);config['agent']['require_bwrap']=False
+            config['benchmarks']['L3']['eab60'].update(kit=str(root),dev=['A01'])
+            homes=[]
+            def run(argv,cwd,timeout,env):
+                homes.append(env['HOME'])
+                self.assertNotIn('SF_KEY',env)
+                (cwd/'reports').mkdir()
+                (cwd/'reports/results.json').write_text(json.dumps([{'id':'A01','grade':{'status':'PASS'}}]))
+            with patch('genesis.adapters.eab60.command',side_effect=run):
+                for _ in range(2):
+                    self.assertEqual(eab60.evaluate(root,'unused',root/'evaluation',config,'dev',Meter(1))['status'],'ok')
+            self.assertEqual(len(set(homes)),2)
+
+    def test_diagnosis_excludes_infrastructure_failures(self):
+        evaluator=Evaluator(load(),None,None)
+        self.assertEqual(evaluator.evidence({}),[])
+        results={'eab60_dev':[{'results':[
+            {'task_id':'A01','passed':False,'infrastructure_error':True},
+            {'task_id':'A02','passed':False,'failure_reason':'incorrect tool'},
+            {'task_id':'A03','passed':True}]}]}
+        evidence=evaluator.evidence(results)
+        self.assertEqual([e['task_id'] for e in evidence],['eab60_dev/A02'])
+        self.assertEqual(evidence[0]['failure_reason'],'incorrect tool')
 
     def test_audit_compares_parent_and_fails_closed(self):
         config=load(); config['agent']['require_bwrap']=False
@@ -313,6 +387,7 @@ class SmallTests(unittest.TestCase):
 
     def test_selector_explores_archive(self):
         config=load()
+        config['promotion']['commit_enabled']=True
         config['selector']['exploit_probability']=0
         pool=[{'agent_id':'old','status':'PARENT','pass_count':100,'children_count':100000,'no_promote_rounds':0},
               {'agent_id':'explore','status':'ARCHIVE','pass_count':0,'children_count':0,'no_promote_rounds':0}]
@@ -326,6 +401,14 @@ class SmallTests(unittest.TestCase):
         h={'suspected_files':['crates/a.rs'],'proposed_change':'add retries'}
         self.assertTrue(diagnosis.similar(h,[{'hypothesis':h}],.8))
         self.assertFalse(diagnosis.similar(h,[],.8))
+
+    def test_extract_skips_invalid_schema_echo(self):
+        h={key:'value' for key in diagnosis.REQUIRED}
+        for key in ('failure_ids','evidence','suspected_files','verification','not_duplicate_of'):
+            h[key]=['value']
+        for invalid in (dict(h,suspected_files=[]),dict(h,verification='not a list')):
+            output='echoed prompt: '+json.dumps(invalid)+'\nFinal response: '+json.dumps([h,dict(h,id='second')])
+            self.assertEqual(len(diagnosis.extract(output)),2)
 
     def test_clean_env_excludes_credentials(self):
         with patch.dict(os.environ,{'SF_KEY':'never-in-child','OTHER_SECRET':'never-either'}):

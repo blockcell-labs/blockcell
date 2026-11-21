@@ -29,6 +29,7 @@ if __name__ == "__main__":
         original(profile)
         cfg = module.load_config()
         cfg['selfImprove'] = {'nudge': {'enabled': False}, 'review': {'enabled': False}}
+        cfg.setdefault('memory', {})['learningSystem'] = {'enabled': False}
         defaults = cfg["agents"]["defaults"]
         defaults["model"] = context["model"]
         for entry in defaults.get("modelPool", []):

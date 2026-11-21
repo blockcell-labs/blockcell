@@ -133,6 +133,7 @@ class Supervisor:
                     aid = f"agent-{p['cycle']:04d}-{p['index']}"
                     parent = self.archive.agent(p["parent_id"])
                     self.archive.add(aid, parent["commit_sha"], parent["agent_id"], p["hypotheses"][p["index"]])
+                    self.archive.update(aid, hypothesis_json=json.dumps(p['hypotheses'][p['index']]), status='CANDIDATE', reason='')
                     p["agent_id"] = aid
                     p["worktree"] = str(self.source.worktree(aid, parent["commit_sha"]))
                     for key in ("decision", "reason", "candidate_results", "high_risk", "selfcheck", "binary", "build_seconds"):
@@ -211,6 +212,8 @@ class Supervisor:
                     novel = any(name not in previous_modules for name in p["names"])
                     p["decision"], p["reason"] = gates.decide(p["parent_results"], p["candidate_results"], self.config,
                         p["high_risk"], p["selfcheck"], novel, p["performance_ok"])
+                    if p['decision'] == 'PROMOTE' and not self.config['promotion'].get('commit_enabled', True):
+                        p['decision'], p['reason'] = 'ARCHIVE', p['reason'] + '; promotion disabled by no-commit policy'
                     self.transition("PROMOTE" if p["decision"] == "PROMOTE" else "RECORD", p)
                 elif stage == "PROMOTE":
                     sha = self.source.promote(p["agent_id"], p["worktree"])
@@ -221,7 +224,7 @@ class Supervisor:
                 elif stage == "RECORD":
                     aid = p["agent_id"]
                     status = {"PROMOTE": "PARENT", "REJECT": "REJECTED"}.get(p["decision"], p["decision"])
-                    if status == "ARCHIVE":
+                    if status == "ARCHIVE" and self.config['promotion'].get('commit_enabled', True):
                         sha = self.source.snapshot(aid, p["worktree"])
                         self.archive.update(aid, commit_sha=sha)
                         self.archive.rekey(aid, sha)

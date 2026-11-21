@@ -7,7 +7,7 @@
     "candidates_per_cycle": 2,
     "max_patch_files": 8,
     "max_patch_lines": 400,
-    "max_cycle_minutes": 240,
+    "max_cycle_minutes": 480,
     "budget": {"per_cycle_usd": 10, "total_usd": 10},
     "stagnation": {"per_parent_rounds": 3, "global_rounds": 8},
     "unfit_compile_rounds": 3
@@ -19,12 +19,13 @@
     "upstream": "https://api.siliconflow.cn/v1",
     "key_env": "SF_KEY",
     "timeout": 900,
+    "token_limit": 100000000,
     "require_bwrap": true,
     "input_usd_per_million": 0.15,
     "output_usd_per_million": 0.6
   },
   "build": {"command": ["cargo", "build", "--release", "-p", "blockcell"], "binary": "release/blockcell", "timeout": 7200},
-  "promotion": {"internal": "auto", "external": "pr_draft", "selfcheck_required": true},
+  "promotion": {"internal": "auto", "external": "pr_draft", "selfcheck_required": true, "commit_enabled": true},
   "diagnosis": {"similarity_threshold": 0.8, "retries": 2},
   "benchmarks": {
     "dataset_version": "3f55126",

@@ -16,6 +16,7 @@ def evaluate(frozen, binary, root, config, split, meter):
     ids = options[split]
     if not ids:
         return {"status": "skipped", "reason": "EAB60 split has no task IDs", "results": []}
+    root = root / ('attempt-' + uuid.uuid4().hex)
     root.mkdir(parents=True, exist_ok=True)
     home = root / "home"
     home.mkdir(exist_ok=True)
@@ -44,7 +45,14 @@ def parse_report(root, ids):
         grade = record["grade"]
         events_path = root / 'evidence' / record['id'] / 'events.json'
         events = json.loads(events_path.read_text()) if events_path.exists() else []
-        provider_failure = any(e.get('kind') == 'model/request-error' and 'HTTP_STATUS=402' in e.get('payload', {}).get('error', '') for e in events)
+        last_response = max((index for index, event in enumerate(events) if event.get('kind') == 'model/response'), default=-1)
+        provider_errors = [e.get('payload', {}).get('error', '') for index, e in enumerate(events)
+                           if e.get('kind') == 'model/request-error' and
+                           (index > last_response or 'HTTP_STATUS=402' in e.get('payload', {}).get('error', ''))]
+        provider_errors = [error for error in provider_errors if 'HTTP_STATUS=402' in error or
+                           (record['id'] not in ('G01', 'G02') and any(marker in error for marker in
+                            ('Stream header timeout', 'HTTP_STATUS=429', 'HTTP_STATUS=500', 'HTTP_STATUS=502', 'HTTP_STATUS=503', 'HTTP_STATUS=504')))]
+        provider_failure = bool(provider_errors)
         unavailable = unavailable or provider_failure
         usages = [e['payload'].get('usage', {}) for e in events if e.get('kind') == 'model/response']
         rows.append({"task_id": record["id"], "passed": grade["status"] == "PASS",
@@ -55,7 +63,8 @@ def parse_report(root, ids):
                      "tool_errors": sum(bool(t.get('is_error')) for t in record.get('tool_results', [])),
                      "trace_path": str(root / 'evidence' / record['id'] / 'events.json'),
                      "agent_output_tail": record.get('final_text', '')[-2000:],
-                     "failure_reason": 'upstream HTTP 402 Payment Required' if provider_failure else '; '.join(
+                     "infrastructure_error": provider_failure,
+                     "failure_reason": '; '.join(provider_errors)[:2000] if provider_failure else '; '.join(
                          grade.get('notes', []) + [c['name'] + ': ' + str(c.get('detail', '')) for c in grade.get('checks', []) if not c['ok']])})
     if {r["task_id"] for r in rows} != set(ids):
         raise ValueError("EAB60 missing requested task IDs")

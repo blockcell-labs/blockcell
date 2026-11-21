@@ -106,6 +106,8 @@ class Evaluator:
         for name in ("coding_eval", "eab60_dev", "bfcl"):
             for report in results.get(name, []):
                 for task in report.get("results", []):
+                    if task.get('infrastructure_error'):
+                        continue
                     if not task["passed"]:
                         key = name + "/" + task["task_id"]
                         record = counts.setdefault(key, {"task_id": key, "failure_frequency": 0})

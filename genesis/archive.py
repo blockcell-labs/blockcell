@@ -82,7 +82,7 @@ class Archive:
             lineage.add(parent_id)
             parent_id = self.agent(parent_id)["parent_id"]
         return [{"hypothesis": json.loads(a["hypothesis_json"]), "reason": a["reason"]}
-                for a in self.agents() if a["parent_id"] in lineage and a["status"] in ("REJECTED", "INCONCLUSIVE")]
+                for a in self.agents() if a["parent_id"] in lineage and a["status"] in ("REJECTED", "INCONCLUSIVE") and json.loads(a["hypothesis_json"])]
 
     def rekey(self, agent_id, sha):
         with self.db:

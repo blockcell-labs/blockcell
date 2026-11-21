@@ -53,6 +53,7 @@ class Proxy:
         self.key = key
         self.meter = meter
         self.request_lock = threading.Lock()
+        self.closing = False
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -72,6 +73,9 @@ class Proxy:
                     self.forward()
 
             def forward(self):
+                if owner.closing:
+                    self.send_error(503, 'proxy closing')
+                    return
                 try:
                     with owner.meter.lock:
                         owner.meter.check()
@@ -163,12 +167,14 @@ class Proxy:
             self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             self.url = f"http://127.0.0.1:{self.server.server_port}/v1"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server.daemon_threads = False
 
     def __enter__(self):
         self.thread.start()
         return self
 
     def __exit__(self, *args):
+        self.closing = True
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()

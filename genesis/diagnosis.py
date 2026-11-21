@@ -18,11 +18,10 @@ def extract(text):
             continue
         items = value if isinstance(value, list) else value.get("hypotheses", [value]) if isinstance(value, dict) else []
         if items and all(isinstance(h, dict) and REQUIRED <= h.keys() for h in items):
-            for h in items:
-                if not all(isinstance(h[k], list) for k in ("failure_ids", "evidence", "suspected_files", "verification", "not_duplicate_of")):
-                    raise ValueError("hypothesis list fields invalid")
-                if not isinstance(h["proposed_change"], str) or not h["suspected_files"]:
-                    raise ValueError("hypothesis change/files missing")
+            if any(not all(isinstance(h[k], list) for k in ("failure_ids", "evidence", "suspected_files", "verification", "not_duplicate_of")) for h in items):
+                continue
+            if any(not isinstance(h["proposed_change"], str) or not h["suspected_files"] for h in items):
+                continue
             return items
     raise ValueError("agent output contains no valid Hypothesis JSON")
 
@@ -34,8 +33,15 @@ def similar(hypothesis, failures, threshold):
 
 
 def diagnose(adapter, parent, worktree, failures, evidence, config):
+    schema = {key: 'string' for key in sorted(REQUIRED)}
+    for key in ('failure_ids', 'evidence', 'suspected_files', 'verification', 'not_duplicate_of'):
+        schema[key] = []
+    schema['lineage_parent'] = parent['agent_id']
     prompt = ("MODE: diagnose\nReturn exactly two distinct hypotheses as JSON array. Each must contain "
-              + ", ".join(sorted(REQUIRED)) + ". Hypothesis B must address a different failure cluster or implementation.\n"
+              + ", ".join(sorted(REQUIRED)) + ". Schema (preserve all value types): " + json.dumps(schema)
+              + ". Hypothesis B must address a different failure cluster or implementation. Diagnose only; do not modify files."
+              + " Propose Blockcell changes only, never changes to these protected paths: "
+              + json.dumps(config['security']['protected_paths']) + ". Do not infer provider outages from empty traces.\n"
               + json.dumps({"parent": parent["agent_id"], "failures": evidence, "negative_experience": failures}, ensure_ascii=False))
     errors = []
     for attempt in range(min(2, config["diagnosis"]["retries"]) + 1):
