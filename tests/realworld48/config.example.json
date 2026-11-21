@@ -1,0 +1,10 @@
+{
+  "model_label": "填实际模型名及固定版本",
+  "agent_command": "/absolute/path/to/agent-wrapper --workspace {workspace} --task-id {task_id} --prompt {prompt}",
+  "timeout_seconds": 600,
+  "concurrency": 1,
+  "api_base_env": "EVAL_API_BASE",
+  "api_key_env": "EVAL_API_KEY",
+  "smoke_tasks": ["t01", "t13", "t43"],
+  "note": "这是适配说明示例；runner 使用命令行参数。API 协议确定后编写 wrapper。key 不放此文件。"
+}

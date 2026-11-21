@@ -1,0 +1,609 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "t01",
+      "category": "代码修复",
+      "difficulty": "easy",
+      "title": "修复运营统计函数",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 stats.py 中 mean(xs)、median(xs)、variance(xs)。xs 为有限数字列表；三个函数都应在空列表时抛出 ValueError。\nmean 是算术平均数，median 为排序后的中位数（偶数项取中间两项平均），variance 为总体方差（除以 N）。不修改输入列表。\n运行现有 test_stats.py 并自行补充边界验证。",
+      "protected": [
+        "SPEC.md",
+        "test_stats.py"
+      ],
+      "output": "stats.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t02",
+      "category": "代码修复",
+      "difficulty": "easy",
+      "title": "修复业务文本词频脚本",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 run.py 的 top_words(path, k=3)，并使 `python3 run.py` 分析同目录 data.txt，每行输出 `word count`。\n单词只由 ASCII 字母 A-Z/a-z 构成，不区分大小写；标点、数字、空白及非 ASCII 字符均作为分隔符。按次数降序，次数相同按单词字典序升序，最多 k 个，返回 [(word,count),...]。\n空文件返回 []；k=0 返回 []；负数 k 抛 ValueError。path 是 UTF-8 文本。",
+      "protected": [
+        "SPEC.md",
+        "data.txt"
+      ],
+      "output": "run.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t03",
+      "category": "代码修复",
+      "difficulty": "medium",
+      "title": "修复逐行折扣账单计算",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 billing.py 的 invoice_total(lines, discount='0', tax='0')，返回两位小数的金额字符串。\nlines 为字典列表，每项为 {'qty':非负整数,'unit_price':非负十进制数字符串}；qty 不接受 bool。discount 和 tax 是闭区间 [0,1] 的十进制数字符串，均须有限。\n先逐行计算 qty*unit_price*(1-discount)，用 Decimal ROUND_HALF_UP 舍入至分；再对该舍入后的每行净额计算税额并同法舍入；最后累加所有行净额和税额。空账单返回 '0.00'。\n所有非法数量/价格/费率（包括缺键、NaN、Infinity）抛 ValueError，不修改输入。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "billing.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t04",
+      "category": "代码修复",
+      "difficulty": "medium",
+      "title": "修复时区跨年日志归档",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 archive.py 的 group_events(events)。输入是字典列表，每项包含字符串 id 和 ts。\nts 应为带 UTC offset 的 ISO-8601 日期时间，可用 Z。将有效事件转换到 Asia/Shanghai，按自然日分组，组内按输入顺序保留 id。\n返回 {'by_day':{'YYYY-MM-DD':[id,...],...},'invalid':[id,...]}。invalid 按输入顺序列出 ts 非字符串、格式无效或未带时区的事件 id。不得修改输入。\nevents.json 是示例。使用 Python zoneinfo。",
+      "protected": [
+        "SPEC.md",
+        "events.json"
+      ],
+      "output": "archive.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t05",
+      "category": "代码修复",
+      "difficulty": "hard",
+      "title": "修复事件重放重复计费",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 ledger.py 的 replay(events)，返回 {'balances':{账户:整数分},'rejected':[事件id,...]}。\n每项有 id（全局唯一事件号）、account（字符串）、ts（整数顺序时间）、kind（charge/refund）、amount（正整数分，bool 非法），refund 还含 ref（原 charge id）。\n相同 id 只处理输入中第一次出现的记录，不再次计费或计入 rejected。去重后按 (ts,id) 升序重放；charge 给账户净收入加 amount。refund 必须引用已成功处理、同账户的 charge，累计退款不能超过该 charge 金额；成功则扣 amount。非法 kind/amount、缺 ref/未知 ref、跨账户/超额退款进入 rejected（重放顺序）。无效事件不建余额账户。只允许回退已处理 charge，不能引用 refund。返回 balances 仅含有成功事件的账户，允许余额为0；不修改输入。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "ledger.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t06",
+      "category": "代码修复",
+      "difficulty": "hard",
+      "title": "修复递归配置覆盖与共享状态",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n修复 config.py 中 merge_config(defaults, override)，两参数均为 JSON 风格字典。字典遇字典递归合并；其余类型均以 override 值整体替换（列表不拼接，null 即 Python None 表示替换为 None，不表示删除）。\n结果应为完全独立的深拷贝，不修改 defaults/override。修改返回值中的任何嵌套容器都不得影响两个参数；不同调用返回值也不共享可变对象。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "config.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t07",
+      "category": "功能实现",
+      "difficulty": "easy",
+      "title": "实现文章 URL slug",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n实现 text_utils.py 中 slugify(text: str, max_len: int=50) -> str。先转小写，将非 [a-z0-9] 连续字符替换为一个 '-'，去掉首尾 '-'，截断到 max_len 后再次去掉末尾 '-'。\n若最终为空，返回 'untitled'（该回退值允许超过 max_len）。max_len 必须为正整数，bool 不接受，非法值抛 ValueError。不做 Unicode 音译。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "text_utils.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t08",
+      "category": "功能实现",
+      "difficulty": "easy",
+      "title": "实现持久化待办命令行",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n用 Python 标准库实现 todo.py，数据保存在脚本同目录 todo.json，不依赖启动时 cwd。\n命令：`python3 todo.py add \"文本\"`（非空白文本，去掉首尾空白，stdout 仅打印新 ID）；`python3 todo.py list`（ID 升序，每行 `id [ ] 文本` 或 `id [x] 文本`）；`python3 todo.py done ID`（完成，stdout 为空，重复完成成功且无副作用）。\nID 从1开始递增，跨进程持久化。不存在的数据文件代表空列表。空文本、非法/未知 ID、错误参数均以非零退出、stderr 诊断，且已有数据文件必须字节不变。成功命令退出0。数据为 JSON，具体内部结构不限。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "todo.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t09",
+      "category": "功能实现",
+      "difficulty": "medium",
+      "title": "实现跨进程库存流水工具",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n实现 stock.py。receipts.csv 为不可改动的初始流水，字段 sku,delta，按 SKU 汇总得初始库存；之后的更改保存在脚本同目录 stock.json，不能修改 receipts.csv。\n命令：`python3 stock.py show` 输出完整库存 JSON 对象（sku 到整数数量），`python3 stock.py in SKU QTY` 入库，`python3 stock.py out SKU QTY` 出库，成功 in/out 的 stdout 输出该 SKU 最新库存整数。\nSKU 为非空白字符串且无首尾空白（否则拒绝），QTY 只能包含 ASCII 数字且数值大于0。不允许负库存；未知 SKU 可入库但不能出库；失败以非零退出并向 stderr 诊断，stock.json 若存在则字节不变，若不存在则不得新建。show 不更改数据文件。数据保存路径与 cwd 无关，跨进程持久化，成功退出0。",
+      "protected": [
+        "SPEC.md",
+        "receipts.csv"
+      ],
+      "output": "stock.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t10",
+      "category": "功能实现",
+      "difficulty": "medium",
+      "title": "实现保留重复行的 CSV 左连接",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n实现 join_csv.py 命令：`python3 join_csv.py CUSTOMERS_CSV ORDERS_CSV OUTPUT_CSV`。\n客户字段为 customer_id,name；订单字段为 order_id,customer_id,amount。按 customer_id 将客户姓名左连接到每一笔订单，输出路径必须不同于两个输入路径（测试满足此条件）。输出表头必须为 order_id,customer_id,amount,customer_name，按订单输入顺序保留全部订单及重复行；不存在客户时 customer_name 为空。金额原文本不变，不做数值计算。空客户 ID 视为未知，即使客户表出现空 ID 也不关联。\n客户表中非空 ID 重复时，退出非零并向 stderr 诊断，不得创建/修改输出文件。其他正常输入必须退出0。支持带 BOM 的 UTF-8、逗号/双引号/换行字段及中文；不得改动输入。提供 customers.csv 和 orders.csv 供自测。",
+      "protected": [
+        "SPEC.md",
+        "customers.csv",
+        "orders.csv"
+      ],
+      "output": "join_csv.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t11",
+      "category": "功能实现",
+      "difficulty": "hard",
+      "title": "实现 TTL 与 LRU 配置缓存",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n实现 cache.py 中 ConfigCache(ttl=30, max_entries=32, clock=time.monotonic)，以及方法 get(path)。get 以 UTF-8 从 JSON 文件加载并返回 JSON 值，路径按 resolve() 后的绝对路径作为缓存键。\n同一键命中时不重新读文件，命中会提升为最近使用；now >= 成功读取时刻+ttl 即过期，需重新加载。容量满时淘汰最久未使用项；ttl=0 意味着每次重新加载。clock 为可注入的零参数秒数函数，用于确定性测试。\n每次返回独立深拷贝，调用方不可污染缓存；读取或 JSON 解析失败应原样传播异常且不缓存失败结果，过期失败后不得回退旧值。ttl 为有限非负 int/float（bool 不接受），max_entries 为正 int（bool 不接受），非法构造参数抛 ValueError。返回值可为任何 JSON 类型。",
+      "protected": [
+        "SPEC.md"
+      ],
+      "output": "cache.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t12",
+      "category": "功能实现",
+      "difficulty": "hard",
+      "title": "实现嵌套 JSONL 日志脱敏工具",
+      "prompt": "在当前任务目录完成下列工作。只使用 Python 3.11+ 标准库。不得修改 SPEC.md 或题目提供的数据/测试文件；允许增加自己的测试。保持指定函数签名/命令接口。\n\n实现 `python3 redact.py INPUT_JSONL OUTPUT_JSONL SUMMARY_JSON`，逐行读取 UTF-8 JSONL。空白行忽略，非法 JSON 行跳过并计数；合法 JSON 顶层允许对象、数组及标量。\n递归遍历对象/数组：键名不区分大小写，email 的值全部替换为 '[EMAIL]'，phone 的值全部替换为 '[PHONE]'，token/authorization/password 的值全部替换为 '[REDACTED]'；这些敏感键不管原值类型都替换整值，不继续遍历原值。其他字段/值包括非敏感文本必须原样保留。\n输出每个合法输入值为一行 JSON，保留原顺序，中文不要求转义方式。summary.json 为 {'processed':合法行数,'skipped':非法非空行数,'redacted':替换字段次数}。不得修改输入；正常转换包括跳过坏行时退出0。不应把原始敏感值打印到 stdout/stderr。示例输入为 logs.jsonl。",
+      "protected": [
+        "SPEC.md",
+        "logs.jsonl"
+      ],
+      "output": "redact.py",
+      "module": "task_code"
+    },
+    {
+      "id": "t13",
+      "title": "年度销售汇总",
+      "category": "数据分析",
+      "difficulty": "easy",
+      "prompt": "财务要核对 2025 年销售。读取 sales.csv，生成 result.json：{\"by_region\":{\"地区\":\"金额\"},\"top_product\":\"SKU\",\"skipped_rows\":整数}。\n先验证每行 date 为真实 ISO 日期、qty 为非负整数、unit_price 为有限非负 Decimal；任一不合法计入 skipped_rows（不分年份），合法但非2025年忽略。销售额 qty*unit_price，汇总后 HALF_UP 保留两位。地区/SKU按原字符串分组，零额也保留；销售额并列的 top_product 取 SKU 字典序最小。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "sales.csv"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t14",
+      "title": "渠道转化率",
+      "category": "数据分析",
+      "difficulty": "easy",
+      "prompt": "读取 funnel.csv，为配置 channels.json 中每个渠道生成 result.json 的 channels 数组，按渠道名排序。每项 {\"channel\":字符串,\"visitors\":整数,\"converted\":整数,\"rate\":\"0.0000\"}。\n按(channel,user)去重计算访问人数，只考虑 event=visit 和 buy。某用户必须存在该渠道 visit，且至少一次 buy 时间大于或等于该用户该渠道首次 visit 才算转化；buy 早于首次访问不算。rate=converted/visitors，HALF_UP四位；无访问为0.0000。输入时间均是UTC ISO。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "funnel.csv",
+        "channels.json"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t15",
+      "title": "支付银行对账",
+      "category": "数据分析",
+      "difficulty": "medium",
+      "prompt": "读取 payments.csv 和 bank.csv，以 transaction_id 对账。相同交易号相同金额的重复行只保留一条；某一侧同交易号出现不同金额则列入 conflicts，该交易不再参与其他分类。\nresult.json 为 {\"matched\":[交易号],\"amount_mismatches\":[{\"id\":交易号,\"payment\":\"金额\",\"bank\":\"金额\"}],\"payment_only\":[交易号],\"bank_only\":[交易号],\"conflicts\":[交易号],\"duplicate_rows\":{\"payments\":数量,\"bank\":数量}}。重复计数指已出现相同(id,金额)的后续行；所有列表按id排序。金额精确 Decimal。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "payments.csv",
+        "bank.csv"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t16",
+      "title": "订阅续费流失分析",
+      "category": "数据分析",
+      "difficulty": "medium",
+      "prompt": "以 observation.json 的观察日 2025-03-31 评估 subscriptions.csv。每行是一位独立订阅用户，start/end 均为包含端点的ISO日期。end>=观察日且start<=观察日算 active（即使已预约取消）；end<观察日算 churned；未来开始的不进 active/churned。renewed=用户renewed字段为true且非未来开始。result.json={\"by_plan\":[{\"plan\":字符串,\"eligible\":整数,\"active\":整数,\"churned\":整数,\"renewed\":整数,\"churn_rate\":\"0.0000\"}]}，eligible=非未来开始人数，churn_rate=churned/eligible，无分母0。计划名排序，保留仅未来开始的计划。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "subscriptions.csv",
+        "observation.json"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t17",
+      "title": "多仓快照合并",
+      "category": "数据分析",
+      "difficulty": "hard",
+      "prompt": "读取 snapshots/a.csv 与 snapshots/b.csv，按(warehouse,sku)合并。取 updated_at 最大版本（UTC），同最大时间若有不同 qty 则记为冲突且该键不进入库存；同值重复无冲突。只对最终采用的负数库存告警。\nresult.json={\"inventory\":[{\"warehouse\":字符串,\"sku\":字符串,\"qty\":整数,\"updated_at\":字符串}],\"conflicts\":[{\"warehouse\":字符串,\"sku\":字符串,\"updated_at\":字符串,\"quantities\":[升序去重整数]}],\"negative_stock\":[{\"warehouse\":字符串,\"sku\":字符串,\"qty\":整数}]}。各数组按(warehouse,sku)排序，更新时间沿用输入ISO格式。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "snapshots/a.csv",
+        "snapshots/b.csv"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t18",
+      "title": "多币种月度利润",
+      "category": "数据分析",
+      "difficulty": "hard",
+      "prompt": "读取 orders.csv(id,date,currency,amount,cost)、refunds.csv(id,order_id,date,amount)、rates.csv(date,currency,cny_rate)，生成 result.json={\"months\":[{\"month\":\"YYYY-MM\",\"revenue\":\"金额\",\"refunds\":\"金额\",\"cost\":\"金额\",\"profit\":\"金额\"}],\"missing_rates\":[{\"kind\":\"order或refund\",\"id\":字符串,\"currency\":字符串,\"date\":字符串}]}。\nCNY恒定1，其他币种取不晚于该事件日期的最近汇率，订单收入与成本均用订单日汇率，退款用退款日和原订单币种，退款归退款发生月，退款不退成本。缺汇率事件整体跳过并报告，不因原订单缺汇率而跳过有汇率的退款。逐事件换算后不舍入，按月求和最后HALF_UP两位；profit=revenue-refunds-cost。所有至少有成功事件的月份输出并排序，missing_rates按(kind,id)排序。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "orders.csv",
+        "refunds.csv",
+        "rates.csv"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t19",
+      "title": "年度付费客户排行",
+      "category": "SQL",
+      "difficulty": "easy",
+      "prompt": "读取 shop.db(customers/ orders)，编写单条只读 SQLite 查询 query.sql，并输出其结果到 result.json 数组，每项 {\"customer_id\":整数,\"name\":字符串,\"total\":\"金额\"}。\n仅 status='paid' 且 created_at>=2025-01-01 且<2026-01-01 的订单，金额字段 amount_cents 为整数分。按客户ID分组（同名不合并），仅有符合订单的客户，按总分降序、客户ID升序，取前三。query.sql 列别名必须是 customer_id,name,total_cents；total_cents为整数。验收会另换数据执行SQL。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "shop.db"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t20",
+      "title": "寻找从未下单的客户",
+      "category": "SQL",
+      "difficulty": "easy",
+      "prompt": "读取 crm.db，编写 query.sql 和 result.json。返回 is_test=0 且没有任何 orders.customer_id 指向的客户，NULL customer_id不匹配任何人，任何状态订单均算下过单。\nquery.sql 必须单条只读 SELECT，列别名 customer_id,name；result.json为相同对象数组，按customer_id升序。隐藏验收包含空订单表。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "crm.db"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t21",
+      "title": "客户最近有效订单",
+      "category": "SQL",
+      "difficulty": "medium",
+      "prompt": "读取 orders.db。订单 status!='cancelled' 为有效；按每客户 created_at最大，若相同取id最大的一单。包括从未有效下单的客户，订单字段均null。query.sql 单条只读SELECT，列别名 customer_id,name,order_id,created_at,amount_cents，按customer_id升序。\nresult.json为对象数组，金额仍是整数分或null，与SQL结果完全一致。隐藏验收会改变订单。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "orders.db"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t22",
+      "title": "商品复购率",
+      "category": "SQL",
+      "difficulty": "medium",
+      "prompt": "读取 commerce.db(products,orders,order_items)，仅status='paid'的订单。每个商品按客户统计不同订单数；一单多行同商品只计一次；购买>=2个不同订单的客户为复购客户。\nquery.sql只读SELECT，列别名product_id,name,buyers,repeat_buyers；保留零销售商品，按product_id升序。result.json为数组，每项还需rate字段=repeat_buyers/buyers，HALF_UP四位，零分母0.0000。隐藏验收会改变数据。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "commerce.db"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t23",
+      "title": "用户表安全迁移",
+      "category": "SQL",
+      "difficulty": "hard",
+      "prompt": "legacy.db含旧users(id,name,email)和orders(id,user_id,total_cents)。请写 migrate.py（运行方式 python3 migrate.py legacy.db）并在现有DB执行。\n迁移后 users列精确为id,display_name,email,email_key，数据原name原样搬到display_name，email_key=trim(email).lower()，email为NULL则email_key为NULL。id主键；users.email_key有名为idx_users_email_key的普通非唯一索引；orders保留全部数据、列，user_id继续REFERENCES users(id)。不可保留users_old临时表。要求事务原子性与重复执行幂等。seed.sql为只读审计来源；不得改它。验收运行迁移两次并在不同数据上重放，不要用硬编码ID或重新造库。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "seed.sql"
+      ],
+      "output": "migrate.py",
+      "module": "task_data"
+    },
+    {
+      "id": "t24",
+      "title": "修复JOIN收入翻倍",
+      "category": "SQL",
+      "difficulty": "hard",
+      "prompt": "report.sql的JOIN将商品分类和退款多对多相乘，修复并保存为query.sql。shop.db含customers(id,name)、orders(id,customer_id,status,amount_cents)、refunds(id,order_id,amount_cents)、order_tags(order_id,tag)。\n统计每客户所有paid订单的净收入=订单amount_cents-该订单全部退款amount_cents，不能因多个tag或多个退款倍增；包含零订单客户，净额允许负数，非paid订单及其退款排除。输出列customer_id,name,net_cents，按customer_id升序；单条只读SQLite查询。无需生成JSON。隐藏验收会替换数据。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "shop.db",
+        "report.sql"
+      ],
+      "output": "query.sql",
+      "module": "task_data"
+    },
+    {
+      "id": "t25",
+      "title": "访问日志IP与5xx",
+      "category": "运维分析",
+      "difficulty": "easy",
+      "prompt": "分析access.log，合法格式为IP - - [时间] \"请求\" 三位HTTP状态 字节数 \"referer\" \"ua\"；状态必须100..599、IP必须为合法IPv4。其他行计bad_lines。\nresult.json={\"top_ips\":[[\"IP\",次数],...],\"count_5xx\":整数,\"bad_lines\":整数}，只统计合法行；top_ips最多3个，按次数降序、相同次数按IP字符串升序。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "access.log"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t26",
+      "title": "CI失败步骤提取",
+      "category": "运维分析",
+      "difficulty": "easy",
+      "prompt": "读取ci/build.log和ci/test.log，每行JSON对象至少ts,job,step,event。只把event=step_end且exit_code整数非零的行作为失败，错误文本或event=output不算；同一(job,step)可能重跑，取ts最大（相同时取路径字典序最大、再行号最大）的step_end最终状态，最终成功则不报告。\nresult.json={\"failures\":[{\"job\":字符串,\"step\":字符串,\"exit_code\":整数,\"source\":\"相对路径:行号\"}],\"bad_lines\":整数}，failures按(job,step)排序；非JSON行计bad_lines，输入其余JSON均合法。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "ci/build.log",
+        "ci/test.log"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t27",
+      "title": "接口p95与错误率",
+      "category": "运维分析",
+      "difficulty": "medium",
+      "prompt": "读取requests.jsonl，每行对象route,status,latency_ms。route必须以/开头字符串，status为100..599整数(布尔不算)，latency_ms为有限非负数字(布尔不算)；坏JSON或不符合计bad_rows。\n去掉route第一个?及其后查询串后分组，按route排序。result.json={\"routes\":[{\"route\":字符串,\"count\":整数,\"p95_ms\":数字,\"error_rate\":\"0.0000\"}],\"bad_rows\":整数}。p95为nearest-rank即排序后第ceil(0.95*n)个样本，错误为status>=500，比例HALF_UP四位。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "requests.jsonl"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t28",
+      "title": "跨服务trace故障归因",
+      "category": "运维分析",
+      "difficulty": "medium",
+      "prompt": "读取services/api.jsonl和services/db.jsonl，均为JSON，每行字段trace_id,span_id,parent_id,service,start,status。start均UTC；仅报告至少一个status=error的trace。根因定义为该trace所有error span中start最早者，同时间取span_id字典序最小。不要将后续上游报错当首因。\nresult.json={\"traces\":[{\"trace_id\":字符串,\"first_failed_span\":字符串,\"service\":字符串,\"source\":\"相对路径:行号\",\"chain\":[根span到首失败span的span_id]}]}，trace按ID排序。parent_id=null为根，输入父子关系无环且完整。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "services/api.jsonl",
+        "services/db.jsonl"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t29",
+      "title": "重试任务最终失败分析",
+      "category": "运维分析",
+      "difficulty": "hard",
+      "prompt": "读取worker/a.jsonl与worker/b.jsonl，按job_id聚合所有事件(ts,job_id,attempt,status)，status取running/retry/failed/succeeded。按ts升序，同时间attempt升序，仍相同按路径和行号升序，最后事件定义最终状态（running/retry是unfinished）。\nresult.json={\"failed\":[{\"job_id\":字符串,\"attempts\":整数,\"last_attempt\":整数,\"source\":\"相对路径:行号\"}],\"succeeded\":整数,\"unfinished\":整数}。attempts为不同attempt数、last_attempt为最后事件attempt；最终成功即使前面失败也不在failed；failed按job_id排序。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "worker/a.jsonl",
+        "worker/b.jsonl"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t30",
+      "title": "磁盘清理dry-run",
+      "category": "运维分析",
+      "difficulty": "hard",
+      "prompt": "模拟磁盘清理，只生成result.json，不得删除/改动tree下内容。policy.json给出now=2025-03-31T00:00:00Z、retention_days=30、protected_prefixes=[\"keep/\"]。\n从tree递归选择普通文件：mtime严格早于now-30天、非保护前缀；所有符号链接一律跳过，不跟随目录符号链接。按相对tree的POSIX路径排序。\nresult.json={\"candidates\":[{\"path\":字符串,\"size\":字节整数}],\"total_bytes\":整数}。输入含隐藏文件也需考虑；边界时刻不清理；symlink目标即使位于tree内也不能额外统计。\n在当前工作目录完成。不得修改任何输入文件或 SPEC.md。金额用两位小数字符串，比例用四位小数字符串；JSON 不允许额外字段。",
+      "protected": [
+        "SPEC.md",
+        "policy.json",
+        "tree/old.log",
+        "tree/boundary.log",
+        "tree/new.log",
+        "tree/.old-cache",
+        "tree/keep/old.log",
+        "tree/nested/stale.txt",
+        "tree/link-old",
+        "tree/link-outside",
+        "tree/link-dir"
+      ],
+      "output": "result.json",
+      "module": "task_data"
+    },
+    {
+      "id": "t31",
+      "title": "精确提取代码待办",
+      "category": "工程维护",
+      "difficulty": "easy",
+      "prompt": "扫描 proj 下所有 .py 文件中的真实 Python 注释，提取含独立单词 TODO 或 FIXME（大小写敏感）的整条注释。排除字符串、README 和 TODOS。输出 result.json 数组，每项 {\"path\":\"相对 proj 路径\",\"line\":整数,\"comment\":\"含 # 的注释原文\"}，按 path 再 line 升序。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "proj/app.py",
+        "proj/db.py",
+        "proj/README.md"
+      ],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t32",
+      "title": "重命名用户查询接口",
+      "category": "工程维护",
+      "difficulty": "easy",
+      "prompt": "将 users/repo.py 中 get_usr 更名为 get_user，同步 users/service.py、users/__init__.py、cli.py 的导入导出与调用；不得保留旧 Python 接口。保证 greet(1)==\"hello alice\"、greet(9)==\"unknown\"、python3 cli.py 1 输出 alice。docs.md 是历史记录，必须原样保留。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "docs.md"
+      ],
+      "module": "task_misc"
+    },
+    {
+      "id": "t33",
+      "title": "为账户模块补回归测试",
+      "category": "工程维护",
+      "difficulty": "medium",
+      "prompt": "保持 bank.py 不变，编写 test_bank.py，使用 Python 标准库 unittest（无需 pytest）。至少6个测试方法，覆盖存款、取款、余额不足、零/负金额、转账成功和失败后双方余额不变。python3 -m unittest -q test_bank 必须通过。验收会用多种故障变异检查测试实际能发现 bug。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "bank.py"
+      ],
+      "module": "task_misc"
+    },
+    {
+      "id": "t34",
+      "title": "提取共享金额格式化函数",
+      "category": "工程维护",
+      "difficulty": "medium",
+      "prompt": "invoice.py 的 invoice_total(values) 与 checkout.py 的 checkout_total(values) 含重复金额格式化。提取到新模块 money.py 的 format_money(value)，两个入口导入并实际调用它；不得在原模块保留 Decimal、quantize 或重复格式化。格式化使用 Decimal(str(value)) 与 ROUND_HALF_UP 保留2位小数，入口先求和再舍入，支持空列表与负数。既有 API 不变。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "module": "task_misc"
+    },
+    {
+      "id": "t35",
+      "title": "为 CSV 导入器补边界测试",
+      "category": "工程维护",
+      "difficulty": "hard",
+      "prompt": "保持 importer.py 不变，编写 test_importer.py，使用标准库 unittest，至少4个测试方法，覆盖 UTF-8 BOM、带逗号及换行的引号字段、qty 无法转换为整数的坏行计数，以及读取完成后资源关闭（patch importer.open 可检查）。python3 -m unittest -q test_importer 必须通过。验收会用行为变异检查测试。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "importer.py"
+      ],
+      "module": "task_misc"
+    },
+    {
+      "id": "t36",
+      "title": "迁移便笺到 SQLite",
+      "category": "工程维护",
+      "difficulty": "hard",
+      "prompt": "将 notes.py 改为 SQLite 持久化，保留命令：python3 notes.py add \"文本\"（打印新 id）、list（打印 JSON 数组，每项 id,text）。新增 migrate：把同目录 legacy.json 导入 notes.db，保留 id，重复执行不重复导入；新 id 大于已有最大 id。SQLite notes 表包含 id INTEGER PRIMARY KEY、text TEXT NOT NULL。输入 legacy.json 不可改动；无效记录（缺 id/text 或 id 非整数或 text 非字符串）时整次迁移回滚、退出非零。不得丢失现有笔记。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "legacy.json"
+      ],
+      "module": "task_misc"
+    },
+    {
+      "id": "t37",
+      "title": "YAML 迁移为 TOML",
+      "category": "资料整理",
+      "difficulty": "easy",
+      "prompt": "把 config.yaml 转成等价 config.toml；字符串、布尔、整数、浮点、数组、嵌套表及表数组类型保持一致。版本和包含引号的字符串不能丢失。仅交付 TOML 即可，可使用任意可用工具。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "config.yaml"
+      ],
+      "output": "config.toml",
+      "module": "task_misc"
+    },
+    {
+      "id": "t38",
+      "title": "会议行动项整理",
+      "category": "资料整理",
+      "difficulty": "easy",
+      "prompt": "阅读 meeting.txt，输出 result.json：{\"actions\":[{\"task\":\"原文任务短语\",\"owner\":姓名或null,\"due\":YYYY-MM-DD或null,\"evidence\":\"meeting.txt:L行号\"}]}。只提取明确承诺执行的事项，不提取建议和已完成事项。按原文顺序；未明确负责人或日期必须用 null，不根据语境猜测。任务短语不含负责人或日期。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "meeting.txt"
+      ],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t39",
+      "title": "生产配置差异审计",
+      "category": "资料整理",
+      "difficulty": "medium",
+      "prompt": "比较 before.json 和 after.json，输出 result.json 数组，按 path 升序；每项 {\"path\":\"/JSON/pointer\",\"kind\":\"added|removed|changed\"}，不输出值。对象递归比较；数组作为整体，顺序变化算 changed；缺失与 null 不等价。路径按 RFC6901 转义 ~ 和 /。包括 token 等敏感字段也仅列路径，禁止泄漏值。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "before.json",
+        "after.json"
+      ],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t40",
+      "title": "发布兼容性清单",
+      "category": "资料整理",
+      "difficulty": "medium",
+      "prompt": "阅读 CHANGELOG.md、api.md、versions.csv。输出 result.json {\"from\":\"1.4\",\"to\":\"2.0\",\"breaking\":[{\"old\":旧API,\"new\":新API或null,\"migration\":迁移类型rename|remove|type_change,\"sources\":[引用,...]}]}。只列1.4到2.0升级中明确不兼容项，按old字典序，sources按CHANGELOG.md:L行号、api.md:L行号、versions.csv:L行号顺序；每项引用各文档中对应证据。新增兼容接口不算破坏性。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "CHANGELOG.md",
+        "api.md",
+        "versions.csv"
+      ],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t41",
+      "title": "仓库元信息查询",
+      "category": "HTTP",
+      "difficulty": "hard",
+      "prompt": "通过 HTTP GET {endpoint}/repo 查询仓库元信息。输出 result.json {\"stars\":整数,\"language\":字符串,\"default_branch\":字符串,\"source\":\"/repo\"}。必须实际请求，不得猜测。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t42",
+      "title": "包版本与 Python 约束查询",
+      "category": "HTTP",
+      "difficulty": "hard",
+      "prompt": "通过 HTTP GET {endpoint}/package 查询包元信息。仅考虑 releases 中 stable=true 的版本，按数字版本排序选最新；输出 result.json {\"version\":字符串,\"author\":原值（允许null）,\"requires_python\":字符串,\"source\":\"/package\"}。必须实际请求。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t43",
+      "title": "分页工单去重汇总",
+      "category": "HTTP",
+      "difficulty": "easy",
+      "prompt": "从 {endpoint}/tickets?page=1 开始按返回 next 相对链接遍历。工单按 id 去重（首次记录优先），id升序。输出 result.json {\"tickets\":[完整去重工单对象],\"counts\":{状态:数量}}。必须实际遍历所有页。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t44",
+      "title": "应对限流导出订单",
+      "category": "HTTP",
+      "difficulty": "easy",
+      "prompt": "从 {endpoint}/orders?page=1 拉取全部订单。首次请求会429，遵循 Retry-After（秒），仅针对429/503最多重试3次；随后按 next 分页。输出 result.json 为按id升序的全部订单数组，amount 保持API中的字符串类型。必须实际请求，不能跳过第一页。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t45",
+      "title": "阅读文档后鉴权查询",
+      "category": "HTTP",
+      "difficulty": "medium",
+      "prompt": "先GET {endpoint}/docs 阅读鉴权和分页规则，再取全部客户。仅对本地API使用文档内演示token，禁止把token写入交付文件或日志。输出 result.json 为按 id 升序的完整客户数组。必须实际读文档和鉴权分页。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t46",
+      "title": "抓取发布公告时间线",
+      "category": "HTTP",
+      "difficulty": "medium",
+      "prompt": "抓取 {endpoint}/news 的本站公告链接，相对URL用站点根解析，忽略外站链接，重复公告去重。抓取各公告页面的 version 和 datetime，把时间转换到UTC输出ISO8601（+00:00）。result.json 数组每项 {\"version\":字符串,\"published_at\":UTC时间,\"source\":\"站内绝对路径\"}，按时间再version升序。必须抓取列表和详情页。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t47",
+      "title": "同步增量客户与 ETag 缓存",
+      "category": "HTTP",
+      "difficulty": "hard",
+      "prompt": "读取 cache.json。先 GET {endpoint}/customers，携带 If-None-Match=cache.etag，正确处理304，随后从 {endpoint}/delta?cursor=cache.cursor 遍历next增量。按id upsert，deleted=true删除；将最终客户按id排序，输出 result.json {\"customers\":[对象],\"cursor\":最终cursor,\"etag\":cache.etag}。输入cache不可修改。必须经历304并完整拉取增量。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [
+        "cache.json"
+      ],
+      "output": "result.json",
+      "module": "task_misc"
+    },
+    {
+      "id": "t48",
+      "title": "探测依赖故障并保留证据",
+      "category": "HTTP",
+      "difficulty": "hard",
+      "prompt": "通过只读GET检查 {endpoint}/health、/deps、/metrics；health首次暂时503，可最多重试3次直到成功，Retry-After秒。结合依赖和指标确定根因。输出 result.json {\"reason\":\"故障依赖名_unavailable\",\"evidence\":[{\"path\":\"/health\",\"status\":最终HTTP状态码},{\"path\":\"/deps\",\"failed\":[失败依赖名按字典序]},{\"path\":\"/metrics\",\"queue_depth\":整数}]}。health恢复不能掩盖依赖故障。必须真实请求所有端点。\n仅在当前任务目录工作；不要修改受保护输入。所有文本使用 UTF-8。",
+      "protected": [],
+      "output": "result.json",
+      "module": "task_misc"
+    }
+  ]
+}

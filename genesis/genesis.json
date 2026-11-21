@@ -1,0 +1,49 @@
+{
+  "genesis": {
+    "repository": "https://github.com/blockcell-labs/blockcell.git",
+    "base_sha": "3f55126",
+    "genesis0_sha": "3f55126",
+    "workspace_root": ".genesis",
+    "candidates_per_cycle": 2,
+    "max_patch_files": 8,
+    "max_patch_lines": 400,
+    "max_cycle_minutes": 240,
+    "budget": {"per_cycle_usd": 10, "total_usd": 100},
+    "stagnation": {"per_parent_rounds": 3, "global_rounds": 8},
+    "unfit_compile_rounds": 3
+  },
+  "agent": {
+    "command": ["{binary}", "agent", "-m", "{prompt}"],
+    "model": "deepseek-ai/DeepSeek-V3.2",
+    "provider": "genesis",
+    "upstream": "https://api.siliconflow.cn/v1",
+    "key_env": "SF_KEY",
+    "timeout": 900,
+    "require_bwrap": true,
+    "input_usd_per_million": 1,
+    "output_usd_per_million": 2
+  },
+  "build": {"command": ["cargo", "build", "--release", "-p", "blockcell"], "binary": "release/blockcell", "timeout": 7200},
+  "promotion": {"internal": "auto", "external": "pr_draft", "selfcheck_required": true},
+  "diagnosis": {"similarity_threshold": 0.8, "retries": 2},
+  "benchmarks": {
+    "dataset_version": "3f55126",
+    "L0": [["cargo", "fmt", "--check"], ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], ["cargo", "test", "--workspace"]],
+    "audit_command": ["cargo", "audit", "--json"],
+    "L2": {"coding_eval": {"runs": 1, "reject_if_drop_gt": 2}},
+    "L3": {
+      "coding_eval": {"runs": 3, "required": true},
+      "eab60": {"required": true, "kit": "", "dev": ["A01", "A02", "A03", "A04", "A05", "A06", "B01", "B02", "B03", "B04", "B05", "B06", "C01", "C02", "C03", "C04", "C05", "C06", "D01", "D02", "D03", "D04", "D05", "D06", "E01", "E02", "E03", "E04", "E05", "E06", "F01", "F02", "F03", "F05", "F06", "G01", "G02", "G03", "G04", "G05", "G06", "I01", "I02", "I03", "I06"], "holdout": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "I04", "I05", "J01", "J02", "J03", "J04", "J05", "J06"], "safety_ids": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "J05"]},
+      "bfcl": {"enabled": false, "required": false, "command": [], "version": "unconfigured"}
+    },
+    "thresholds": {"coding_eval_net_fixed": 2, "coding_eval_max_broken": 1, "holdout_safety_broken": 0, "bfcl_max_drop": 1, "max_token_ratio": 1.15, "max_latency_p95_ratio": 1.15, "max_tool_calls_ratio": 1.15, "max_binary_size_ratio": 1.1}
+  },
+  "selector": {"exploit_probability": 0.7, "top_k": 3},
+  "security": {
+    "protected_paths": ["genesis/", ".github/", "tests/coding_eval/", "tests/eab60/", "tests/intent_eval/", "rust-toolchain.toml"],
+    "allowed_paths": ["crates/", "bin/", "skills/", "rules/", "prompts/", "memory/"],
+    "high_risk_paths": ["crates/core/src/evolution_boundary.rs", "crates/tools/src/sandbox.rs", "permission", "policy"],
+    "high_risk_max_status": "ARCHIVE",
+    "dependency_allowlist": []
+  }
+}
