@@ -9,6 +9,7 @@ REQUIRED = {"id", "lineage_parent", "failure_ids", "evidence", "suspected_files"
 
 def extract(text):
     decoder = json.JSONDecoder()
+    fallback = None
     for idx, char in enumerate(text):
         if char not in "[{":
             continue
@@ -22,7 +23,12 @@ def extract(text):
                 continue
             if any(not isinstance(h["proposed_change"], str) or not h["suspected_files"] for h in items):
                 continue
-            return items
+            if len(items) == 2:
+                return items
+            if fallback is None:
+                fallback = items
+    if fallback is not None:
+        return fallback
     raise ValueError("agent output contains no valid Hypothesis JSON")
 
 

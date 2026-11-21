@@ -23,16 +23,19 @@ class Supervisor:
         self.usage_path = self.root / "usage.json"
         usage = json.loads(self.usage_path.read_text()) if self.usage_path.exists() else {}
         agent = config["agent"]
-        self.meter = Meter(config["genesis"]["budget"]["total_usd"], agent["input_usd_per_million"], agent["output_usd_per_million"], token_limit=agent.get('token_limit', 20000000), on_update=self.save_usage)
+        self.meter = Meter(config["genesis"]["budget"]["total_usd"], agent["input_usd_per_million"], agent["output_usd_per_million"], token_limit=agent.get('token_limit', 20000000), on_update=self.save_usage, concurrency=agent.get('concurrency', 1), retry_429_seconds=agent.get('retry_429_seconds', 300), user_agent=agent.get('user_agent', 'Mozilla/5.0'))
         self.meter.input_tokens = usage.get("input_tokens", 0)
         self.meter.output_tokens = usage.get("output_tokens", 0)
         self.meter.cost = usage.get("cost", 0)
+        self.meter.peak_requests = usage.get('peak_requests', 0)
+        self.meter.requests = usage.get('requests', 0)
+        self.meter.retries_429 = usage.get('retries_429', 0)
         self.adapter = AgentAdapter(config, self.root / "runs" / "agent_calls", self.meter)
         self.evaluator = Evaluator(config, self.archive, self.adapter)
 
     def save_usage(self, meter):
         temp = self.usage_path.with_suffix(".new")
-        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost, "upstream_status": meter.upstream_status}))
+        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost, "upstream_status": meter.upstream_status, "peak_requests": meter.peak_requests, "requests": meter.requests, "retries_429": meter.retries_429}))
         temp.replace(self.usage_path)
 
     def init(self):
@@ -106,6 +109,8 @@ class Supervisor:
                         self.adapter.help(parent["binary"], self.root / "frozen")
                         if not self.evaluator.selfcheck(parent["binary"]):
                             raise RuntimeError("parent selfcheck failed")
+                    except (BudgetExceeded, ProviderUnavailable):
+                        raise
                     except (RuntimeError, TimeoutError, OSError):
                         self.archive.update(parent["agent_id"], status="UNFIT")
                         parent = self.archive.agent("genesis-0")

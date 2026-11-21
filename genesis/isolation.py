@@ -21,7 +21,13 @@ class ProviderUnavailable(RuntimeError):
 
 
 class Meter:
-    def __init__(self, limit, input_rate=0, output_rate=0, token_limit=1000000, on_update=None):
+    def __init__(self, limit, input_rate=0, output_rate=0, token_limit=1000000, on_update=None, concurrency=1, retry_429_seconds=300, user_agent='Mozilla/5.0 (compatible; Genesis/0.1.3)'):
+        if type(concurrency) is not int or not 1 <= concurrency <= 5:
+            raise ValueError('concurrency must be an integer from 1 to 5')
+        self.slots = threading.BoundedSemaphore(concurrency)
+        self.retry_429_seconds = retry_429_seconds
+        self.user_agent = user_agent
+        self.active_requests = self.peak_requests = self.requests = self.retries_429 = 0
         self.limit = limit
         self.input_rate = input_rate
         self.output_rate = output_rate
@@ -33,8 +39,8 @@ class Meter:
         self.upstream_status = None
 
     def check(self):
-        if self.upstream_status == 402:
-            raise ProviderUnavailable('upstream HTTP 402 Payment Required; restore provider access, then resume')
+        if self.upstream_status in (401, 402, 403, 429):
+            raise ProviderUnavailable(f'upstream HTTP {self.upstream_status}; restore provider access, then resume')
         if self.cost >= self.limit or self.input_tokens + self.output_tokens >= self.token_limit:
             raise BudgetExceeded("LLM budget exhausted")
 
@@ -52,7 +58,6 @@ class Proxy:
         self.upstream = upstream.rstrip("/")
         self.key = key
         self.meter = meter
-        self.request_lock = threading.Lock()
         self.closing = False
         owner = self
 
@@ -64,15 +69,28 @@ class Proxy:
 
             def send_error(self, *args, **kwargs):
                 try:
+                    if getattr(self, 'streaming_started', False):
+                        self.wfile.write(('data: ' + json.dumps({'error': {'message': 'upstream unavailable', 'code': args[0]}}) + '\n\ndata: [DONE]\n\n').encode())
+                        self.wfile.flush()
+                        return
                     super().send_error(*args, **kwargs)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
             def do_POST(self):
-                with owner.request_lock:
-                    self.forward()
+                with owner.meter.slots:
+                    with owner.meter.lock:
+                        owner.meter.active_requests += 1
+                        owner.meter.peak_requests = max(owner.meter.peak_requests, owner.meter.active_requests)
+                        owner.meter.requests += 1
+                    try:
+                        self.forward()
+                    finally:
+                        with owner.meter.lock:
+                            owner.meter.active_requests -= 1
 
             def forward(self):
+                sent_headers = False
                 if owner.closing:
                     self.send_error(503, 'proxy closing')
                     return
@@ -97,23 +115,53 @@ class Proxy:
                         return
                     suffix = path.removeprefix("/v1")
                     req = urllib.request.Request(owner.upstream + suffix, data=body, headers={
-                        "Content-Type": "application/json", "Authorization": "Bearer " + owner.key})
-                    for attempt in range(5):
+                        "Content-Type": "application/json", "Authorization": "Bearer " + owner.key,
+                        "User-Agent": owner.meter.user_agent})
+                    waited, attempt = 0, 0
+                    while True:
                         try:
                             response = urllib.request.urlopen(req, timeout=120)
                             break
                         except urllib.error.HTTPError as exc:
-                            if exc.code != 429 or attempt == 4:
+                            if exc.code != 429 or waited >= owner.meter.retry_429_seconds:
                                 raise
+                            try:
+                                retry_after = float(exc.headers.get('Retry-After', 0))
+                            except ValueError:
+                                retry_after = 0
                             exc.close()
-                            time.sleep(min(2 ** attempt, 16))
+                            delay = min(max(min(2 ** min(attempt, 6), 30), retry_after), owner.meter.retry_429_seconds - waited)
+                            with owner.meter.lock:
+                                owner.meter.retries_429 += 1
+                            if payload.get('stream'):
+                                if not sent_headers:
+                                    self.send_response(200)
+                                    self.send_header('Content-Type', 'text/event-stream')
+                                    self.end_headers()
+                                    sent_headers = True
+                                    self.streaming_started = True
+                                remaining = delay
+                                while remaining > 0:
+                                    try:
+                                        self.wfile.write(b': upstream rate limited; retrying\n\n')
+                                        self.wfile.flush()
+                                    except (BrokenPipeError, ConnectionResetError):
+                                        pass
+                                    time.sleep(min(remaining, 10))
+                                    remaining -= min(remaining, 10)
+                            else:
+                                time.sleep(delay)
+                            waited += delay
+                            attempt += 1
+                            owner.meter.check()
                     with response:
                         content_type = response.headers.get("Content-Type", "application/json")
                         disconnected = False
                         try:
-                            self.send_response(response.status)
-                            self.send_header("Content-Type", content_type)
-                            self.end_headers()
+                            if not sent_headers:
+                                self.send_response(response.status)
+                                self.send_header("Content-Type", content_type)
+                                self.end_headers()
                         except (BrokenPipeError, ConnectionResetError):
                             disconnected = True
                         usage = None
@@ -146,12 +194,13 @@ class Proxy:
                 except BudgetExceeded as exc:
                     self.send_error(429, str(exc))
                 except ProviderUnavailable as exc:
-                    self.send_error(402, str(exc))
+                    self.send_error(owner.meter.upstream_status or 503, str(exc))
                 except urllib.error.HTTPError as exc:
-                    if exc.code == 402:
-                        owner.meter.upstream_status = 402
-                        if owner.meter.on_update:
-                            owner.meter.on_update(owner.meter)
+                    if exc.code in (401, 402, 403, 429):
+                        with owner.meter.lock:
+                            owner.meter.upstream_status = exc.code
+                            if owner.meter.on_update:
+                                owner.meter.on_update(owner.meter)
                     self.send_error(exc.code, "upstream request failed")
                 except (BrokenPipeError, ConnectionResetError):
                     return
@@ -178,7 +227,7 @@ class Proxy:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
-        if self.meter.upstream_status == 402:
+        if self.meter.upstream_status in (401, 402, 403, 429):
             self.meter.check()
 
 
@@ -199,6 +248,7 @@ def prepare_home(home, workspace, config, proxy_url):
             "agents": {"defaults": {"workspace": str(workspace), "model": agent["model"], "provider": agent["provider"], "modelPool": []}, "ghost": {"enabled": False}},
             "channels": {}, "autoUpgrade": {"enabled": False},
             "selfImprove": {"nudge": {"enabled": False}, "review": {"enabled": False}},
+            "memory": {"learningSystem": {"enabled": False}},
             "tools": {"exec": {"restrictToWorkspace": True, "allowUnsandboxedShell": False}}}
     (directory / "config.json5").write_text(json.dumps(data, ensure_ascii=False, indent=2))
     return clean_env(home, agent["key_env"])

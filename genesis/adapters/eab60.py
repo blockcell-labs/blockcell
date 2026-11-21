@@ -33,7 +33,7 @@ def evaluate(frozen, binary, root, config, split, meter):
         argv = [sys.executable, str(launcher), str(context)]
         if settings["require_bwrap"]:
             argv = sandbox(["/usr/bin/python3", str(launcher), str(context)], root, home, binary, socket_path, (frozen, launcher, Path(kit).resolve()))
-        command(argv, root, config["genesis"]["max_cycle_minutes"] * 60, env)
+        command(argv, root, config["genesis"]["max_cycle_minutes"] * 60, env, check=meter.check)
     return parse_report(root, ids)
 
 

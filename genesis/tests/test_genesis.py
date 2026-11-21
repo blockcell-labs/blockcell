@@ -14,13 +14,14 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from genesis import diagnosis, gates
 from genesis.archive import Archive
 from genesis.agent_adapter import AgentAdapter
-from genesis.adapters import bfcl, cargo, eab60
+from genesis.adapters import bfcl, cargo, coding_eval, eab60
 from genesis.config import load
 from genesis.evaluator import Evaluator
 from genesis.isolation import Meter, Proxy, ProviderUnavailable, build_sandbox, clean_env
@@ -314,7 +315,7 @@ class SmallTests(unittest.TestCase):
             config=load();config['_root']=str(root);config['agent']['require_bwrap']=False
             config['benchmarks']['L3']['eab60'].update(kit=str(root),dev=['A01'])
             homes=[]
-            def run(argv,cwd,timeout,env):
+            def run(argv,cwd,timeout,env,check=None):
                 homes.append(env['HOME'])
                 self.assertNotIn('SF_KEY',env)
                 (cwd/'reports').mkdir()
@@ -385,6 +386,37 @@ class SmallTests(unittest.TestCase):
             argv=build_sandbox(['cargo','--version'],root,root/'target',root/'home',env)
             self.assertIn('cargo ',command(argv,root,10,env))
 
+    @unittest.skipUnless(shutil.which('bwrap'), 'bubblewrap not installed')
+    def test_agent_runtime_artifacts_are_archived_not_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            binary=root/'fake'
+            binary.write_text('#!/usr/bin/python3\nfrom pathlib import Path\nimport sqlite3,sys\nPath("logs").mkdir()\nPath("logs/agent.log").write_text("runtime")\nPath("memory").mkdir()\nc=sqlite3.connect("memory/memory.db"); c.execute("create table sample(value)"); c.commit(); c.close()\nPath("source.txt").write_text("changed")\nraise SystemExit(int(sys.argv[1]))\n')
+            binary.chmod(0o755)
+            config=load(); config['_root']=str(root)
+            for code in (0,1):
+                workspace=root/str(code); workspace.mkdir()
+                (workspace/'agents').mkdir()
+                (workspace/'agents/source.txt').write_text('keep')
+                config['agent']['command']=['{binary}',str(code)]
+                expected=contextlib.nullcontext() if not code else self.assertRaises(RuntimeError)
+                with expected: AgentAdapter(config,root/'calls',Meter(1)).call(str(binary),'',workspace,'patch')
+                self.assertEqual((workspace/'source.txt').read_text(),'changed')
+                self.assertEqual((workspace/'agents/source.txt').read_text(),'keep')
+                self.assertFalse((workspace/'memory/memory.db').exists())
+                self.assertFalse((workspace/'logs').exists())
+            self.assertEqual(len(list((root/'calls').glob('*/runtime/memory/memory.db'))),2)
+
+    def test_provider_failure_is_not_parent_unfit(self):
+        obj=object.__new__(Evaluator)
+        obj.config=load()
+        obj.adapter=unittest.mock.Mock()
+        obj.adapter.call.side_effect=ProviderUnavailable('upstream HTTP 402')
+        with tempfile.TemporaryDirectory() as directory:
+            obj.config['_root']=directory
+            obj.root=Path(directory)
+            with self.assertRaises(ProviderUnavailable): obj.selfcheck('fake')
+
     def test_selector_explores_archive(self):
         config=load()
         config['promotion']['commit_enabled']=True
@@ -409,6 +441,9 @@ class SmallTests(unittest.TestCase):
         for invalid in (dict(h,suspected_files=[]),dict(h,verification='not a list')):
             output='echoed prompt: '+json.dumps(invalid)+'\nFinal response: '+json.dumps([h,dict(h,id='second')])
             self.assertEqual(len(diagnosis.extract(output)),2)
+        echoed=dict(h,id='old hypothesis')
+        result=diagnosis.extract(json.dumps(echoed)+'\n'+json.dumps([dict(h,id='new A'),dict(h,id='new B')]))
+        self.assertEqual([item['id'] for item in result],['new A','new B'])
 
     def test_clean_env_excludes_credentials(self):
         with patch.dict(os.environ,{'SF_KEY':'never-in-child','OTHER_SECRET':'never-either'}):
@@ -466,9 +501,9 @@ class SmallTests(unittest.TestCase):
             def log_message(self,*args): pass
             def do_POST(self):
                 calls.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
-                self.send_response(429 if len(calls)<3 else 200)
+                self.send_response(429 if len(calls)<10 else 200)
                 self.end_headers()
-                self.wfile.write(json.dumps({'usage':{'prompt_tokens':7,'completion_tokens':3}}).encode())
+                self.wfile.write(b'<html>nginx rate limited</html>' if len(calls)<10 else json.dumps({'usage':{'prompt_tokens':7,'completion_tokens':3}}).encode())
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
         thread=threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
@@ -484,11 +519,103 @@ class SmallTests(unittest.TestCase):
                 with patch('genesis.isolation.time.sleep') as sleep:
                     with urllib.request.urlopen(request('allowed')) as response:
                         self.assertIn(b'usage',response.read())
-                self.assertEqual([c.args[0] for c in sleep.call_args_list],[1,2])
-                self.assertEqual(len(calls),3)
+                self.assertGreaterEqual(sum(c.args[0] for c in sleep.call_args_list),150)
+                self.assertEqual(len(calls),10)
                 self.assertEqual((meter.input_tokens,meter.output_tokens),(7,3))
         finally:
             server.shutdown(); server.server_close(); thread.join()
+
+    def test_proxy_stream_html_retry_and_exhaustion(self):
+        calls={}
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                scenario=payload['scenario']; calls[scenario]=calls.get(scenario,0)+1
+                if scenario=='recover' and calls[scenario]>1:
+                    self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
+                    self.wfile.write(b'data: {"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\ndata: [DONE]\n\n')
+                else:
+                    self.send_response(429); self.end_headers(); self.wfile.write(b'<html>nginx 429</html>')
+                self.server.user_agent=self.headers.get('User-Agent')
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+        thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+        try:
+            for scenario in ('recover','exhausted'):
+                meter=Meter(1,retry_429_seconds=3)
+                expected=contextlib.nullcontext() if scenario=='recover' else self.assertRaises(ProviderUnavailable)
+                with expected, patch('genesis.isolation.time.sleep'):
+                    with Proxy(f'http://127.0.0.1:{server.server_port}/v1','test-only',meter) as proxy:
+                        req=urllib.request.Request(proxy.url+'/chat/completions',data=json.dumps({'stream':True,'scenario':scenario}).encode())
+                        with urllib.request.urlopen(req) as response:
+                            data=response.read()
+                            self.assertEqual(response.status,200)
+                        self.assertIn(b': upstream rate limited; retrying',data)
+                        self.assertIn(b'[DONE]',data)
+                self.assertEqual(meter.upstream_status,None if scenario=='recover' else 429)
+                self.assertEqual((meter.input_tokens,meter.output_tokens),(7,3) if scenario=='recover' else (0,0))
+            self.assertIn('Mozilla/5.0',server.user_agent)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_shared_proxy_concurrency_limit(self):
+        active=peak=0
+        lock=threading.Lock();ready=threading.Event()
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                nonlocal active,peak
+                self.rfile.read(int(self.headers['Content-Length']))
+                with lock:
+                    active+=1;peak=max(peak,active)
+                    if active==5: ready.set()
+                ready.wait(3)
+                self.send_response(200);self.end_headers()
+                self.wfile.write(b'{"usage":{"prompt_tokens":7,"completion_tokens":3}}')
+                with lock: active-=1
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Upstream)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            meter=Meter(1,concurrency=5)
+            with Proxy(f'http://127.0.0.1:{server.server_port}/v1','test',meter) as first, Proxy(f'http://127.0.0.1:{server.server_port}/v1','test',meter) as second:
+                def request(i):
+                    url=(first if i%2 else second).url+'/chat/completions'
+                    with urllib.request.urlopen(urllib.request.Request(url,data=b'{}')) as response: return response.read()
+                with ThreadPoolExecutor(max_workers=10) as pool: list(pool.map(request,range(10)))
+            self.assertEqual(peak,5)
+            self.assertEqual(meter.peak_requests,5)
+            self.assertEqual((meter.input_tokens,meter.output_tokens),(70,30))
+            for invalid in (0,6,True):
+                with self.assertRaises(ValueError): Meter(1,concurrency=invalid)
+        finally:
+            ready.set();server.shutdown();server.server_close();thread.join()
+
+    def test_parallel_coding_tasks_are_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config=load();config['agent']['concurrency']=5
+            config['benchmarks']['L3']['coding_eval']['task_ids']=['t'+str(i) for i in range(5)]
+            folders=[];ready=threading.Barrier(5)
+            def run(argv,cwd,timeout,env,check=None):
+                path=Path(argv[argv.index('--output')+1]);task=argv[argv.index('--task')+1]
+                folders.append(path.parent);ready.wait(5)
+                path.write_text(json.dumps({'results':[{'task_id':task,'passed':True}]}))
+                return ''
+            with patch('genesis.adapters.coding_eval.command',side_effect=run):
+                result=coding_eval.evaluate(root,'binary',root/'report.json',config,root/'wrapper.py')
+            self.assertEqual(len(result['results']),5)
+            self.assertEqual(len(set(folders)),5)
+            config['benchmarks']['L3']['coding_eval']['task_ids']=['t','t']
+            with self.assertRaises(ValueError): coding_eval.evaluate(root,'binary',root/'report.json',config,root/'wrapper.py')
+
+    def test_command_cancels_on_provider_failure(self):
+        count=0
+        def check():
+            nonlocal count
+            count+=1
+            if count>1: raise ProviderUnavailable('HTTP 401')
+        start=time.monotonic()
+        with self.assertRaises(ProviderUnavailable): command([sys.executable,'-c','import time; time.sleep(30)'],Path.cwd(),check=check)
+        self.assertLess(time.monotonic()-start,5)
 
     def test_proxy_disconnected_client_still_charged(self):
         import socket

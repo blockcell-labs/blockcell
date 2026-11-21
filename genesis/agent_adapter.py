@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import uuid
 from pathlib import Path
 
@@ -29,10 +30,17 @@ class AgentAdapter:
             env = prepare_home(home, worktree, self.config, proxy.url)
             values = dict(binary=binary, prompt=prompt, workspace=worktree, task_id=task_id)
             argv = argv_override or [expand(part, **values) for part in settings["command"]]
+            runtime = []
+            if mode in ('diagnose', 'patch', 'review'):
+                names = ['agents', 'logs', '.tool_results', 'skills/.skills_prompt_snapshot.json']
+                for name in ('evo_workflow.db', 'skill_evolution_workflow.db', 'memory/memory.db', 'memory/knowledge_index.db'):
+                    names.extend(name + suffix for suffix in ('', '-wal', '-shm', '-journal'))
+                runtime = [Path(worktree) / name for name in names
+                           if not (Path(worktree) / name).exists() and not (Path(worktree) / name).is_symlink()]
             if settings["require_bwrap"]:
                 argv = sandbox(argv, worktree, home, binary, socket_path)
             try:
-                output = command(argv, worktree, settings["timeout"], env)
+                output = command(argv, worktree, settings["timeout"], env, check=self.meter.check)
                 (run / "output.log").write_text(output)
                 events = []
                 for path in (home / '.blockcell/session_events').glob('*.jsonl'):
@@ -49,6 +57,14 @@ class AgentAdapter:
             except (RuntimeError, TimeoutError) as exc:
                 (run / "error.log").write_text(str(exc))
                 raise
+            finally:
+                for path in runtime:
+                    if not path.parent.resolve().is_relative_to(Path(worktree).resolve()):
+                        continue
+                    if path.exists() or path.is_symlink():
+                        dest = run / 'runtime' / path.relative_to(worktree)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(path), dest)
 
     def help(self, binary, cwd):
         workspace = Path(self.config["_root"]) / "runs" / "help" / uuid.uuid4().hex

@@ -10,7 +10,7 @@ from pathlib import Path
 from .adapters import bfcl, coding_eval, eab60
 from .config import expand
 from .source import command
-from .isolation import Proxy, clean_env
+from .isolation import BudgetExceeded, ProviderUnavailable, Proxy, clean_env
 
 
 class Evaluator:
@@ -48,7 +48,7 @@ class Evaluator:
                 isolated_config["agent"]["upstream"] = proxy.url
                 context_path.write_text(json.dumps(context))
                 result = coding_eval.evaluate(self.frozen, agent["binary"], output, self.config, wrapper,
-                                              env=clean_env(folder / "evaluator-home", settings["key_env"]))
+                                              env=clean_env(folder / "evaluator-home", settings["key_env"]), check=self.adapter.meter.check)
         elif benchmark.startswith("eab60_"):
             result = eab60.evaluate(self.frozen, agent["binary"], folder, self.config, benchmark.removeprefix("eab60_"), self.adapter.meter)
         else:
@@ -97,6 +97,8 @@ class Evaluator:
             else:
                 command([sys.executable, "-B", "check.py"], work, self.config["agent"]["timeout"], env)
             return True
+        except (BudgetExceeded, ProviderUnavailable):
+            raise
         except (RuntimeError, TimeoutError):
             return False
 

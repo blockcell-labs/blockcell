@@ -12,6 +12,9 @@ def expand(template, **values):
 def load(path=None):
     path = Path(path or Path(__file__).with_name("genesis.json"))
     config = json.loads(path.read_text())
+    concurrency = config['agent'].get('concurrency', 1)
+    if type(concurrency) is not int or not 1 <= concurrency <= 5:
+        raise ValueError('concurrency must be an integer from 1 to 5')
     evaluation_config = copy.deepcopy(config)
     evaluation_config['promotion'].pop('commit_enabled', None)
     config["_hash"] = hashlib.sha256(json.dumps(evaluation_config, sort_keys=True).encode()).hexdigest()

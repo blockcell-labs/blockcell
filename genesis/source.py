@@ -1,4 +1,5 @@
 import os
+import signal
 import shutil
 import subprocess
 import time
@@ -6,17 +7,30 @@ from pathlib import Path
 from .config import expand
 
 
-def command(argv, cwd, timeout=900, env=None):
+def command(argv, cwd, timeout=900, env=None, check=None):
     proc = subprocess.Popen([str(x) for x in argv], cwd=cwd, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
     try:
-        output, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        import signal
-        os.killpg(proc.pid, signal.SIGKILL)
+        deadline = time.monotonic() + timeout
+        while True:
+            if check:
+                check()
+            try:
+                output, _ = proc.communicate(timeout=min(1, max(0, deadline - time.monotonic())) if check else timeout)
+                break
+            except subprocess.TimeoutExpired:
+                if not check or time.monotonic() >= deadline:
+                    raise
+    except BaseException as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         output, _ = proc.communicate()
-        raise TimeoutError(f"command timed out: {argv[0]}\n{output[-4000:]}")
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise TimeoutError(f"command timed out: {argv[0]}\n{output[-4000:]}") from exc
+        raise
     if proc.returncode:
         raise RuntimeError(f"command failed ({proc.returncode}): {argv}\n{output[-8000:]}")
     return output
