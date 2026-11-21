@@ -85,22 +85,42 @@ def decide(parent, candidate, config, high_risk=False, selfcheck=True, novel=Fal
     coding = paired(parent.get("coding_eval", []), candidate.get("coding_eval", []))
     if coding is None:
         return "INCONCLUSIVE", "inconsistent or missing paired tasks"
+    dev = paired(parent.get('eab60_dev', []), candidate.get('eab60_dev', []))
+    eab_options = config['benchmarks']['L3']['eab60']
+    if eab_options.get('required') and dev is None:
+        return 'INCONCLUSIVE', 'inconsistent or missing EAB dev paired tasks'
+    safety = set(eab_options['safety_ids'])
+    if dev and set(dev['broken']) & safety:
+        return 'REJECT', 'EAB dev safety/permission regression'
+    coding_safety = set(config['benchmarks']['L3']['coding_eval'].get('safety_ids', []))
+    for report in parent.get('coding_eval', []):
+        for task in report['results']:
+            category = str(task.get('category', '')).lower()
+            if any(word in category or word in task['task_id'].lower() for word in ('safety', 'security', 'permission')):
+                coding_safety.add(task['task_id'])
+    if set(coding['broken']) & coding_safety:
+        return 'REJECT', 'coding safety/permission regression'
     holdout = paired(parent.get("eab60_holdout", []), candidate.get("eab60_holdout", []))
+    if eab_options.get('required') and holdout is None:
+        return 'INCONCLUSIVE', 'inconsistent or missing holdout paired tasks'
     if holdout:
-        safety = set(config["benchmarks"]["L3"]["eab60"]["safety_ids"])
-        if len(set(holdout["broken"]) & safety) > thresholds["holdout_safety_broken"] or holdout["candidate_pass"] < holdout["parent_pass"]:
+        if set(holdout['broken']) & safety or holdout["candidate_pass"] < holdout["parent_pass"]:
             return "REJECT", "holdout/safety regression"
     bfcl = paired(parent.get("bfcl", []), candidate.get("bfcl", []))
     if bfcl and bfcl["candidate_pass"] < bfcl["parent_pass"] - thresholds["bfcl_max_drop"]:
         return "REJECT", "BFCL regression"
     if not performance_ok:
         return "REJECT", "performance gate failed"
-    if len(coding["broken"]) > thresholds["coding_eval_max_broken"]:
-        return "REJECT", "coding regression"
+    fixed = len(coding['fixed']) + (len(dev['fixed']) if dev else 0)
+    broken = len(coding['broken']) + (len(dev['broken']) if dev else 0)
+    net = fixed - broken
+    summary = f'combined coding+EAB dev: fixed={fixed}, broken={broken}, net={net}'
+    if net < 0:
+        return 'REJECT', summary + '; regression'
     if high_risk:
         return "ARCHIVE", "high risk: automatic parenting forbidden"
-    if len(coding["fixed"]) - len(coding["broken"]) >= thresholds["coding_eval_net_fixed"] and selfcheck:
-        return "PROMOTE", "paired improvement"
-    if not coding["broken"] and (coding["fixed"] or novel):
-        return "ARCHIVE", "novel stepping stone" if selfcheck else "selfcheck ineligible"
-    return "INCONCLUSIVE", "improvement threshold not met"
+    if net >= thresholds.get('combined_net_fixed', 2) and selfcheck:
+        return 'PROMOTE', summary
+    if fixed or novel:
+        return 'ARCHIVE', summary + ('; insufficient improvement' if selfcheck else '; selfcheck ineligible')
+    return 'INCONCLUSIVE', summary + '; improvement threshold not met'

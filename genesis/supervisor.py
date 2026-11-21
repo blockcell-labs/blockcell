@@ -119,6 +119,8 @@ class Supervisor:
                     self.transition("PARENT_EVAL", p)
                 elif stage == "PARENT_EVAL":
                     parent = self.archive.agent(p["parent_id"])
+                    baseline_tree = self.root / 'frozen' if parent['agent_id'] == 'genesis-0' else self.source.worktree('audit-' + parent['agent_id'], parent['commit_sha'])
+                    p['parent_L0'] = cargo.baseline(baseline_tree, self.config)
                     p["parent_results"] = self.evaluator.full(parent, cached=True)
                     scores = gates.majority(p["parent_results"]["coding_eval"])
                     self.archive.update(parent["agent_id"], pass_count=sum(scores.values()) if scores else 0)
@@ -146,19 +148,29 @@ class Supervisor:
                     self.transition("PATCH", p)
                 elif stage == "PATCH":
                     parent = self.archive.agent(p["parent_id"])
-                    self.adapter.call(parent["binary"], "MODE: patch\nImplement this hypothesis, keeping protected evaluation files unchanged:\n" + json.dumps(p["hypotheses"][p["index"]]), Path(p["worktree"]), "patch")
+                    limits = self.config['genesis']
+                    self.adapter.call(parent["binary"], "MODE: patch\nImplement this hypothesis, keeping protected evaluation files unchanged. "
+                        + f"Hard limits: at most {limits['max_patch_files']} files and {limits['max_patch_lines']} added+deleted lines, including tests and formatting. "
+                        + "Keep changes small. Offline cargo and a shared target are available: run cargo check -p <changed-crate> and cargo test -p <changed-crate>. "
+                        + "Use cargo fmt on changed files only; do not modify unrelated files. Do not run concurrent cargo commands.\n"
+                        + json.dumps(p["hypotheses"][p["index"]]), Path(p["worktree"]), "patch")
+                    self.transition('FORMAT', p)
+                elif stage == 'FORMAT':
+                    names, _, _ = self.source.diff(p['worktree'])
+                    cargo.format_changed(Path(p['worktree']), names, self.config)
                     self.transition("L0", p)
                 elif stage == "L0":
-                    try:
-                        p["binary"], p["build_seconds"] = self.source.build(p["agent_id"], p["worktree"])
-                    except (RuntimeError, TimeoutError):
-                        p["compile_failures"] += 1
-                        raise
-                    parent = self.archive.agent(p["parent_id"])
-                    audit_parent = self.source.worktree("audit-" + parent["agent_id"], parent["commit_sha"])
-                    output = cargo.evaluate(Path(p["worktree"]), self.config, audit_parent)
                     folder = self.root / "runs" / p["agent_id"]
                     folder.mkdir(parents=True, exist_ok=True)
+                    with cargo.runtime(p['worktree'], folder / 'L0-runtime'):
+                        try:
+                            p["binary"], p["build_seconds"] = self.source.build(p["agent_id"], p["worktree"])
+                        except (RuntimeError, TimeoutError):
+                            p["compile_failures"] += 1
+                            raise
+                        parent = self.archive.agent(p["parent_id"])
+                        audit_parent = self.source.worktree("audit-" + parent["agent_id"], parent["commit_sha"])
+                        output = cargo.evaluate(Path(p["worktree"]), self.config, audit_parent)
                     (folder / "L0.log").write_text(output)
                     self.archive.update(p["agent_id"], binary=p["binary"])
                     self.transition("L1", p)
@@ -278,7 +290,7 @@ class Supervisor:
                 self.transition("STOPPED", p)
                 break
             except (RuntimeError, TimeoutError, ValueError, OSError) as exc:
-                if stage in ("PATCH", "L0", "L1", "REVIEW", "L2", "L3", "L4"):
+                if stage in ("PATCH", "FORMAT", "L0", "L1", "REVIEW", "L2", "L3", "L4"):
                     p["decision"], p["reason"] = "REJECT", stage + ": " + str(exc)
                     self.transition("RECORD", p)
                 else:

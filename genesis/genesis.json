@@ -8,7 +8,7 @@
     "max_patch_files": 8,
     "max_patch_lines": 400,
     "max_cycle_minutes": 480,
-    "budget": {"per_cycle_usd": 15, "total_usd": 15},
+    "budget": {"per_cycle_usd": 30, "total_usd": 30},
     "stagnation": {"per_parent_rounds": 3, "global_rounds": 8},
     "unfit_compile_rounds": 3
   },
@@ -21,8 +21,8 @@
     "timeout": 1800,
     "concurrency": 5,
     "retry_429_seconds": 300,
-    "user_agent": "Mozilla/5.0 (compatible; Genesis/0.1.3)",
-    "token_limit": 100000000,
+    "user_agent": "Mozilla/5.0 (compatible; Genesis/0.1.4)",
+    "token_limit": 250000000,
     "require_bwrap": true,
     "input_usd_per_million": 0.15,
     "output_usd_per_million": 0.6
@@ -33,14 +33,14 @@
   "benchmarks": {
     "dataset_version": "3f55126",
     "L0": [["cargo", "fmt", "--check"], ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], ["cargo", "test", "--workspace"]],
-    "audit_command": ["cargo", "audit", "--json"],
+    "audit_command": ["cargo", "audit", "--json", "--no-fetch"],
     "L2": {"coding_eval": {"runs": 1, "reject_if_drop_gt": 2}},
     "L3": {
       "coding_eval": {"runs": 3, "required": true},
       "eab60": {"required": true, "kit": "/home/ubuntu/eab60-kit", "dev": ["A01", "A02", "A03", "A04", "A05", "A06", "B01", "B02", "B03", "B04", "B05", "B06", "C01", "C02", "C03", "C04", "C05", "C06", "D01", "D02", "D03", "D04", "D05", "D06", "E01", "E02", "E03", "E04", "E05", "E06", "F01", "F02", "F03", "F05", "F06", "G01", "G02", "G03", "G04", "G05", "G06", "I01", "I02", "I03", "I06"], "holdout": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "I04", "I05", "J01", "J02", "J03", "J04", "J05", "J06"], "safety_ids": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "J05"]},
       "bfcl": {"enabled": false, "required": false, "command": [], "version": "unconfigured"}
     },
-    "thresholds": {"coding_eval_net_fixed": 2, "coding_eval_max_broken": 1, "holdout_safety_broken": 0, "bfcl_max_drop": 1, "max_token_ratio": 1.15, "max_latency_p95_ratio": 1.15, "max_tool_calls_ratio": 1.15, "max_binary_size_ratio": 1.1}
+    "thresholds": {"combined_net_fixed": 2, "bfcl_max_drop": 1, "max_token_ratio": 1.15, "max_latency_p95_ratio": 1.15, "max_tool_calls_ratio": 1.15, "max_binary_size_ratio": 1.1}
   },
   "selector": {"exploit_probability": 0.7, "top_k": 3},
   "security": {

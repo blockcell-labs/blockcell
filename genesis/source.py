@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import expand
 
 
-def command(argv, cwd, timeout=900, env=None, check=None):
+def command(argv, cwd, timeout=900, env=None, check=None, output_path=None):
     proc = subprocess.Popen([str(x) for x in argv], cwd=cwd, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
@@ -31,6 +31,8 @@ def command(argv, cwd, timeout=900, env=None, check=None):
         if isinstance(exc, subprocess.TimeoutExpired):
             raise TimeoutError(f"command timed out: {argv[0]}\n{output[-4000:]}") from exc
         raise
+    if output_path:
+        Path(output_path).write_text(output)
     if proc.returncode:
         raise RuntimeError(f"command failed ({proc.returncode}): {argv}\n{output[-8000:]}")
     return output

@@ -22,7 +22,7 @@ from genesis import diagnosis, gates
 from genesis.archive import Archive
 from genesis.agent_adapter import AgentAdapter
 from genesis.adapters import bfcl, cargo, coding_eval, eab60
-from genesis.config import load
+from genesis.config import load, evaluation_hash
 from genesis.evaluator import Evaluator
 from genesis.isolation import Meter, Proxy, ProviderUnavailable, build_sandbox, clean_env
 from genesis.selector import Selector
@@ -51,7 +51,7 @@ elif 'MODE: patch' in prompt:
     if fault=='compile': Path('crates/broken').write_text('broken')
     if fault=='protected': Path('.github/workflow').write_text('tampered')
     if fault=='tamper': Path('tests/coding_eval/eval.txt').write_text('tampered')
-    if fault=='highrisk': Path('crates/tools/src/sandbox.rs').write_text('changed')
+    if fault=='highrisk': Path('crates/tools/src/sandbox.rs').write_text('pub fn changed() {}')
 '''
 
 
@@ -114,6 +114,14 @@ class RepositoryCase(unittest.TestCase):
         self.supervisor.run(1)
         self.assertEqual([a['status'] for a in self.candidates()],['REJECTED']*2)
         self.assertTrue(all('L0' in a['reason'] for a in self.candidates()))
+
+    def test_patch_prompt_limits_and_format_stage(self):
+        with patch.object(self.supervisor.adapter, 'call', wraps=self.supervisor.adapter.call) as calls, patch.object(cargo, 'format_changed', wraps=cargo.format_changed) as formatting:
+            self.supervisor.run(1)
+        prompts = [call.args[1] for call in calls.call_args_list if call.args[1].startswith('MODE: patch')]
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(all('8 files' in prompt and '400 added+deleted lines' in prompt and 'cargo check' in prompt and 'cargo test' in prompt for prompt in prompts))
+        self.assertEqual(formatting.call_count, 2)
 
     def test_no_commit_policy_archives_without_writing_history(self):
         self.config['promotion']['commit_enabled']=False
@@ -672,6 +680,213 @@ class SmallTests(unittest.TestCase):
             self.assertEqual((meter.input_tokens,meter.output_tokens),(0,0))
         finally:
             server.shutdown(); server.server_close(); thread.join()
+
+
+class Framework014Case(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.config = load()
+        self.config['_root'] = str(self.root / 'state')
+        (self.root / 'state').mkdir()
+        self.config['agent']['require_bwrap'] = False
+        self.config['benchmarks']['audit_command'] = []
+
+    def score(self, coding, dev, holdout=None):
+        report = lambda values: [{'status': 'ok', 'results': [dict(task_id=key, passed=value) for key, value in values.items()]}]
+        return {'coding_eval': report(coding), 'eab60_dev': report(dev), 'eab60_holdout': report(holdout or {'H01': True})}
+
+    def test_combined_promotion_and_archive(self):
+        parent = self.score({'c1': False, 'c2': False}, {'d1': False, 'd2': False})
+        for coding, dev, decision in [({'c1': True, 'c2': True}, {'d1': False, 'd2': False}, 'PROMOTE'),
+                                      ({'c1': False, 'c2': False}, {'d1': True, 'd2': True}, 'PROMOTE'),
+                                      ({'c1': True, 'c2': False}, {'d1': True, 'd2': False}, 'PROMOTE'),
+                                      ({'c1': False, 'c2': False}, {'d1': True, 'd2': False}, 'ARCHIVE'),
+                                      ({'c1': False, 'c2': False}, {'d1': False, 'd2': False}, 'INCONCLUSIVE')]:
+            with self.subTest(coding=coding, dev=dev):
+                candidate = self.score(coding, dev)
+                self.assertEqual(gates.decide(parent, candidate, self.config)[0], decision)
+        candidate = self.score({'c1': True, 'c2': True}, {'d1': True, 'd2': True})
+        self.assertEqual(gates.decide(parent, candidate, self.config, selfcheck=False)[0], 'ARCHIVE')
+        self.assertEqual(gates.decide(parent, candidate, self.config, performance_ok=False)[0], 'REJECT')
+
+    def test_safety_holdout_and_non_safety_tradeoff(self):
+        parent = self.score({'security_case': True, 'c1': False, 'c2': False, 'c3': False}, {'H02': True})
+        candidate = self.score({'security_case': False, 'c1': True, 'c2': True, 'c3': True}, {'H02': True})
+        self.assertIn('safety', gates.decide(parent, candidate, self.config)[1])
+        candidate['coding_eval'][0]['results'][0]['passed'] = True
+        candidate['eab60_dev'][0]['results'][0]['passed'] = False
+        self.assertIn('safety', gates.decide(parent, candidate, self.config)[1])
+        candidate['eab60_dev'][0]['results'][0]['passed'] = True
+        candidate['eab60_holdout'][0]['results'][0]['passed'] = False
+        self.assertIn('holdout', gates.decide(parent, candidate, self.config)[1])
+        parent = self.score({'old': True, 'c1': False, 'c2': False}, {'d1': False})
+        candidate = self.score({'old': False, 'c1': True, 'c2': True}, {'d1': True})
+        self.assertEqual(gates.decide(parent, candidate, self.config)[0], 'PROMOTE')
+        candidate['eab60_dev'][0]['results'] = []
+        self.assertEqual(gates.decide(parent, candidate, self.config)[0], 'INCONCLUSIVE')
+
+    def test_evaluation_hash_ignores_gates_not_provider_or_evaluation(self):
+        original = evaluation_hash(self.config)
+        self.config['genesis']['budget']['total_usd'] = 99
+        self.config['benchmarks']['thresholds']['combined_net_fixed'] = 3
+        self.config['benchmarks']['L0'] = []
+        self.assertEqual(evaluation_hash(self.config), original)
+        self.config['agent']['model'] = 'changed'
+        self.assertNotEqual(evaluation_hash(self.config), original)
+        self.config['agent']['model'] = load()['agent']['model']
+        self.config['benchmarks']['L3']['coding_eval']['runs'] += 1
+        self.assertNotEqual(evaluation_hash(self.config), original)
+
+    def test_targeted_format_preserves_untouched_modules(self):
+        if not shutil.which('rustfmt'):
+            self.skipTest('rustfmt unavailable')
+        worktree = self.root / 'work'
+        worktree.mkdir()
+        (worktree / 'lib.rs').write_text('mod untouched;\npub fn answer( )->u8{42}\n')
+        untouched = 'pub fn untouched( )->u8{1}\n'
+        (worktree / 'untouched.rs').write_text(untouched)
+        with self.assertRaises(RuntimeError):
+            cargo.format_changed(worktree, ['lib.rs'], self.config, check=True)
+        cargo.format_changed(worktree, ['lib.rs', 'deleted.rs', 'notes.txt'], self.config)
+        cargo.format_changed(worktree, ['lib.rs'], self.config, check=True)
+        self.assertEqual((worktree / 'untouched.rs').read_text(), untouched)
+        self.config['benchmarks']['L0'] = [['cargo', 'fmt', '--check']]
+        def checked_command(argv, *args, **kwargs):
+            return 'lib.rs\n' if argv[0] == 'git' else command(argv, *args, **kwargs)
+        with patch.object(cargo, 'baseline', return_value=[{'passed': False}]), patch.object(cargo, 'command', side_effect=checked_command):
+            cargo.evaluate(worktree, self.config, worktree)
+            (worktree / 'lib.rs').write_text('fn malformed(\n')
+            with self.assertRaises(RuntimeError):
+                cargo.evaluate(worktree, self.config, worktree)
+        self.assertEqual(cargo.format_changed(worktree, [], self.config), '')
+        (self.root / 'outside.rs').write_text('fn hidden() {}')
+        (worktree / 'escape.rs').symlink_to(self.root / 'outside.rs')
+        with self.assertRaisesRegex(RuntimeError, 'escaped'):
+            cargo.format_changed(worktree, ['escape.rs'], self.config)
+
+    def test_parent_relative_clippy_rejects_new_diagnostics(self):
+        worktree = self.root / 'work'
+        worktree.mkdir()
+        self.config['benchmarks']['L0'] = [['cargo', 'clippy', '--', '-D', 'warnings']]
+        baseline = [{'passed': False, 'relaxed': True, 'relative': {'passed': True, 'diagnostics': {'existing': 2}}}]
+        current = {'passed': True, 'diagnostics': {'existing': 2}, 'tail': ''}
+        with patch.object(cargo, 'baseline', return_value=baseline), patch.object(cargo, 'command', return_value=''), patch.object(cargo, 'capture', return_value=current) as captured:
+            cargo.evaluate(worktree, self.config, worktree)
+            self.assertIn('--cap-lints=warn', captured.call_args.args[0])
+            current['diagnostics']['new lint'] = 1
+            with self.assertRaisesRegex(RuntimeError, 'new L0 failures'):
+                cargo.evaluate(worktree, self.config, worktree)
+            current.update(passed=False, diagnostics={}, tail='linker failed')
+            with self.assertRaisesRegex(RuntimeError, 'new L0 failures'):
+                cargo.evaluate(worktree, self.config, worktree)
+
+    def test_diagnostic_counts_survive_line_moves(self):
+        message = {'reason': 'compiler-message', 'message': {'level': 'error', 'code': {'code': 'clippy::lint'}, 'message': 'lint', 'spans': [dict(file_name=str(self.root / 'x.rs'), is_primary=True, text=[dict(text='x()', highlight_start=1, highlight_end=4)])]}}
+        first = cargo.diagnostics(json.dumps(message), self.root)
+        message['message']['level'] = 'warning'
+        message['message']['spans'][0]['line_start'] = 100
+        self.assertEqual(cargo.diagnostics(json.dumps(message), self.root), first)
+        output = '\n'.join([json.dumps(message)] * 2)
+        self.assertEqual(sum(cargo.diagnostics(output, self.root).values()), 2)
+
+    def test_baseline_records_strict_and_complete_lints_then_caches(self):
+        self.config['benchmarks']['L0'] = [['cargo', 'clippy', '--', '-D', 'warnings']]
+        strict = {'passed': False, 'diagnostics': {'existing': 1}}
+        relaxed = {'passed': True, 'diagnostics': {'existing': 1, 'downstream': 1}}
+        with patch.object(cargo, 'command', return_value='sha\n'), patch.object(cargo, 'capture', side_effect=[strict, relaxed]) as capture:
+            baseline = cargo.baseline(self.root, self.config)
+            self.assertFalse(baseline[0]['passed'])
+            self.assertTrue(baseline[0]['relative']['passed'])
+            self.assertEqual(cargo.baseline(self.root, self.config), baseline)
+            self.assertEqual(capture.call_count, 2)
+
+    def test_audit_reads_full_failure_report_not_truncated_exception(self):
+        data = {'vulnerabilities': {'list': [{'advisory': {'id': 'OLD', 'description': 'x' * 20000}}]}}
+        def failed(argv, worktree, config, env, output_path=None):
+            output_path.write_text(json.dumps(data))
+            raise RuntimeError('command failed\ntruncated suffix')
+        with patch.object(cargo, 'execute', side_effect=failed):
+            ids, _ = cargo.audit(self.root, self.config, cargo.environment(self.config))
+        self.assertEqual(ids, {'OLD'})
+
+    def test_runtime_manifest_survives_interrupted_patch(self):
+        workspace = self.root / 'work'
+        workspace.mkdir()
+        (workspace / 'logs').mkdir()
+        (workspace / 'logs/original').write_text('preserve existing')
+        self.config['agent']['command'] = ['/bin/true']
+        adapter = AgentAdapter(self.config, self.root / 'calls', Meter(1))
+        def interrupted(*args, **kwargs):
+            (workspace / 'agents').mkdir()
+            (workspace / 'agents/generated').write_text('generated')
+            (workspace / 'crate/.blockcell').mkdir(parents=True)
+            (workspace / 'crate/.blockcell/tasks.json').write_text('{}')
+            raise RuntimeError('interrupted')
+        with patch('genesis.agent_adapter.command', side_effect=interrupted), patch('genesis.agent_adapter.shutil.move', side_effect=OSError('simulate forced kill before cleanup')):
+            with self.assertRaises(OSError):
+                adapter.call('/bin/true', '', workspace, 'patch')
+        adapter.call('/bin/true', '', workspace, 'patch')
+        self.assertFalse((workspace / 'agents').exists())
+        self.assertFalse((workspace / 'crate/.blockcell').exists())
+        self.assertEqual((workspace / 'logs/original').read_text(), 'preserve existing')
+
+    def test_cargo_runtime_preserves_source_and_archives_only_new_blockcell_dirs(self):
+        workspace = self.root / 'work'
+        (workspace / 'crate').mkdir(parents=True)
+        (workspace / '.blockcell').mkdir()
+        (workspace / '.blockcell/source').write_text('original')
+        with self.assertRaisesRegex(RuntimeError, 'check failed'):
+            with cargo.runtime(workspace, self.root / 'artifacts'):
+                (workspace / 'crate/.blockcell').mkdir()
+                (workspace / 'crate/.blockcell/tasks.json').write_text('{}')
+                (workspace / 'crate/source.rs').write_text('fn answer() {}')
+                raise RuntimeError('check failed')
+        self.assertTrue((self.root / 'artifacts/crate/.blockcell/tasks.json').exists())
+        self.assertTrue((workspace / 'crate/source.rs').exists())
+        self.assertTrue((workspace / '.blockcell/source').exists())
+
+    def test_patch_sandbox_offline_cargo_and_no_credentials(self):
+        if not shutil.which('bwrap') or not shutil.which('cargo'):
+            self.skipTest('bubblewrap/cargo unavailable')
+        self.config['agent']['require_bwrap'] = True
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        (workspace / 'src').mkdir()
+        (workspace / 'Cargo.toml').write_text('[package]\nname="sandbox-check"\nversion="0.1.0"\nedition="2021"\n')
+        (workspace / 'src/lib.rs').write_text('#[test] fn works() { assert_eq!(2+2,4); }\n')
+        host_cargo = self.root / 'host-cargo'
+        host_cargo.mkdir()
+        real_cargo = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+        for name in ('bin', 'registry'):
+            if (real_cargo / name).exists():
+                (host_cargo / name).symlink_to(real_cargo / name, target_is_directory=True)
+        dependency = self.root / 'git-dependency'
+        dependency.mkdir()
+        (dependency / 'src').mkdir()
+        (dependency / 'Cargo.toml').write_text('[package]\nname="offline-dependency"\nversion="0.1.0"\nedition="2021"\n')
+        (dependency / 'src/lib.rs').write_text('pub fn answer() -> u8 { 42 }\n')
+        command(['git', 'init', '--quiet'], dependency)
+        command(['git', 'add', '--', 'Cargo.toml', 'src/lib.rs'], dependency)
+        command(['git', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '--quiet', '-m', 'dependency'], dependency)
+        revision = command(['git', 'rev-parse', 'HEAD'], dependency).strip()
+        with (workspace / 'Cargo.toml').open('a') as manifest:
+            manifest.write(f'\n[dependencies]\noffline-dependency = {{git="{dependency.as_uri()}", rev="{revision}"}}\n')
+        env = clean_env(self.root / 'fetch-home', 'SF_KEY')
+        env['CARGO_HOME'] = str(host_cargo)
+        command(['cargo', 'fetch', '--manifest-path', str(workspace / 'Cargo.toml')], workspace, env=env)
+        (host_cargo / 'credentials.toml').write_text('SHOULD_NOT_BE_VISIBLE')
+        self.config['agent']['command'] = ['/bin/sh', '-c', 'test "$CARGO_NET_OFFLINE" = true && test -z "$SF_KEY" && test ! -e "$CARGO_HOME/credentials.toml" && test ! -e /home/ubuntu/.cn_key && test ! -e /home/ubuntu/.sf_key && cargo check --offline && cargo test --offline']
+        self.config['agent']['command'] = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-net', '--bind', '/tmp', '/tmp', '--bind', str(workspace), str(workspace)] + self.config['agent']['command']
+        meter = Meter(1)
+        adapter = AgentAdapter(self.config, self.root / 'calls', meter)
+        with patch.dict(os.environ, {'CARGO_HOME': str(host_cargo), 'SF_KEY': 'fake-supervisor-only'}):
+            output = adapter.call('/bin/true', 'MODE: patch', workspace, 'patch')
+        self.assertIn('test result: ok.', output)
+        self.assertTrue((self.root / 'state/target/debug').exists())
+        self.assertFalse((workspace / 'target').exists())
+        self.assertFalse((workspace / '.genesis-cargo').exists())
 
 
 if __name__=='__main__': unittest.main()

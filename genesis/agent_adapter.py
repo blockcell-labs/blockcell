@@ -1,9 +1,12 @@
 import os
+import hashlib
 import json
 import shutil
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
+from .adapters import cargo
 from .isolation import Proxy, prepare_home, sandbox
 from .config import expand
 from .source import command
@@ -31,16 +34,38 @@ class AgentAdapter:
             values = dict(binary=binary, prompt=prompt, workspace=worktree, task_id=task_id)
             argv = argv_override or [expand(part, **values) for part in settings["command"]]
             runtime = []
+            nested_before = None
             if mode in ('diagnose', 'patch', 'review'):
-                names = ['agents', 'logs', '.tool_results', 'skills/.skills_prompt_snapshot.json']
+                names = ['agents', 'logs', '.tool_results', 'skills/.skills_prompt_snapshot.json', '.genesis-cargo', 'target']
                 for name in ('evo_workflow.db', 'skill_evolution_workflow.db', 'memory/memory.db', 'memory/knowledge_index.db'):
                     names.extend(name + suffix for suffix in ('', '-wal', '-shm', '-journal'))
-                runtime = [Path(worktree) / name for name in names
-                           if not (Path(worktree) / name).exists() and not (Path(worktree) / name).is_symlink()]
+                manifests = self.run_root / 'runtime_manifests'
+                manifests.mkdir(exist_ok=True)
+                manifest = manifests / (hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest() + '.json')
+                if manifest.exists():
+                    saved = json.loads(manifest.read_text())
+                    runtime = [Path(path) for path in (saved['paths'] if isinstance(saved, dict) else saved)]
+                    nested_before = [Path(path) for path in saved['nested_before']] if isinstance(saved, dict) else None
+                else:
+                    runtime = [Path(worktree) / name for name in names
+                               if not (Path(worktree) / name).exists() and not (Path(worktree) / name).is_symlink()]
+                    pending = manifest.with_suffix('.new')
+                    nested_before = list(Path(worktree).resolve().rglob('.blockcell'))
+                    pending.write_text(json.dumps({'paths': [str(path) for path in runtime], 'nested_before': [str(path) for path in nested_before]}))
+                    pending.replace(manifest)
             if settings["require_bwrap"]:
-                argv = sandbox(argv, worktree, home, binary, socket_path)
+                target = None
+                if mode == 'patch':
+                    target = Path(self.config['_root']) / 'target'
+                    target.mkdir(exist_ok=True)
+                    cargo_home = Path(worktree) / '.genesis-cargo'
+                    env.update(CARGO_HOME=str(cargo_home), CARGO_TARGET_DIR=str(Path(worktree) / 'target'),
+                               CARGO_NET_OFFLINE='true', CARGO_BUILD_JOBS='2',
+                               PATH=str(cargo_home / 'bin') + ':/usr/local/bin:/usr/bin:/bin')
+                argv = sandbox(argv, worktree, home, binary, socket_path, rust_target=target)
             try:
-                output = command(argv, worktree, settings["timeout"], env, check=self.meter.check)
+                with cargo.runtime(worktree, run / 'test-runtime', nested_before) if mode in ('diagnose', 'patch', 'review') else nullcontext():
+                    output = command(argv, worktree, settings["timeout"], env, check=self.meter.check)
                 (run / "output.log").write_text(output)
                 events = []
                 for path in (home / '.blockcell/session_events').glob('*.jsonl'):

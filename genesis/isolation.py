@@ -254,7 +254,7 @@ def prepare_home(home, workspace, config, proxy_url):
     return clean_env(home, agent["key_env"])
 
 
-def sandbox(argv, workspace, home, binary, socket_path, readonly=()):
+def sandbox(argv, workspace, home, binary, socket_path, readonly=(), rust_target=None):
     if not shutil.which("bwrap"):
         raise RuntimeError("bubblewrap missing: install with sudo apt-get install bubblewrap; refusing untrusted agent execution")
     helper = Path(__file__).with_name("sandbox_bridge.py").resolve()
@@ -268,6 +268,17 @@ def sandbox(argv, workspace, home, binary, socket_path, readonly=()):
              "--ro-bind", str(socket_path), "/genesis_proxy.sock", "--chdir", str(workspace)]
     for path in readonly:
         args += ["--ro-bind", str(path), str(path)]
+    if rust_target is not None:
+        host_cargo = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+        rustup = Path(os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')))
+        cargo_home = Path(home) / 'cargo'
+        cargo_home.mkdir(exist_ok=True)
+        args += ['--bind', str(cargo_home), str(Path(workspace) / '.genesis-cargo'),
+                 '--ro-bind', str(rustup), str(rustup),
+                 '--bind', str(rust_target), str(Path(workspace) / 'target')]
+        for name in ('bin', 'registry', 'git'):
+            if (host_cargo / name).exists():
+                args += ['--ro-bind', str(host_cargo / name), str(Path(workspace) / '.genesis-cargo' / name)]
     return args + ["/usr/bin/python3", "/genesis_bridge.py", *argv]
 
 
