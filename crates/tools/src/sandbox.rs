@@ -554,6 +554,7 @@ impl SandboxProvider for NativeSandboxProvider {
                 command.args(bwrap_args).arg("--").arg(&program).args(&args);
                 command
             }
+            #[cfg(target_os = "linux")]
             SandboxBackend::LinuxLandlockSeccomp => {
                 if !readonly_roots.is_empty() {
                     return Err(Error::PermissionDenied(
@@ -573,6 +574,10 @@ impl SandboxProvider for NativeSandboxProvider {
                     command.pre_exec(move || apply_linux_sandbox(&roots));
                 }
                 command
+            }
+            #[cfg(not(target_os = "linux"))]
+            SandboxBackend::LinuxLandlockSeccomp => {
+                return Err(Error::PermissionDenied(APPROVAL_REQUIRED.to_string()));
             }
             SandboxBackend::ApprovalRequired => {
                 return Err(Error::PermissionDenied(APPROVAL_REQUIRED.to_string()));
@@ -606,11 +611,6 @@ fn landlock_abi() -> Option<i32> {
 fn apply_linux_sandbox(writable_roots: &[PathBuf]) -> std::io::Result<()> {
     apply_landlock(writable_roots)?;
     apply_network_seccomp()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn apply_linux_sandbox(_writable_roots: &[PathBuf]) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]

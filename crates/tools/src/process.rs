@@ -48,6 +48,7 @@ pub(crate) async fn run_command_bounded(
     let mut child = command
         .spawn()
         .map_err(|e| Error::Tool(format!("Failed to execute command: {e}")))?;
+    #[cfg(unix)]
     let pid = child.id();
     let stdout = child
         .stdout
