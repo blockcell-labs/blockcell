@@ -7,7 +7,8 @@ class Selector:
         self.rng = rng or random.Random()
 
     def select(self, agents, force_archive=False):
-        pool = [a for a in agents if a["status"] in ("PARENT", "ARCHIVE")]
+        pool = [a for a in agents if a["status"] in ("PARENT", "ARCHIVE")
+                and a.get('parent_eligible', a['status'] == 'PARENT')]
         if not self.config['promotion'].get('commit_enabled', True):
             pool = [a for a in pool if a['status'] == 'PARENT']
         if force_archive:

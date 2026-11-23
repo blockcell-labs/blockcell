@@ -1,8 +1,8 @@
 {
   "genesis": {
     "repository": "https://github.com/blockcell-labs/blockcell.git",
-    "base_sha": "3f55126",
-    "genesis0_sha": "3f55126",
+    "base_sha": "60cb83dc8ef5c39956858340b55a5e8eda51878c",
+    "genesis0_sha": "60cb83dc8ef5c39956858340b55a5e8eda51878c",
     "workspace_root": ".genesis",
     "candidates_per_cycle": 2,
     "max_patch_files": 8,
@@ -15,9 +15,10 @@
   "agent": {
     "command": ["{binary}", "agent", "-m", "{prompt}"],
     "model": "deepseek-v4.1-flash",
-    "provider": "genesis",
-    "upstream": "https://cnkey.win/v1",
-    "key_env": "SF_KEY",
+    "provider": "openai",
+    "upstream_stream": false,
+    "upstream": "https://api.openai.com/v1",
+    "key_env": "OPENAI_API_KEY",
     "timeout": 1800,
     "concurrency": 5,
     "retry_429_seconds": 300,
@@ -37,7 +38,7 @@
     "L2": {"coding_eval": {"runs": 1, "reject_if_drop_gt": 2}},
     "L3": {
       "coding_eval": {"runs": 3, "required": true},
-      "eab60": {"required": true, "kit": "/home/ubuntu/eab60-kit", "dev": ["A01", "A02", "A03", "A04", "A05", "A06", "B01", "B02", "B03", "B04", "B05", "B06", "C01", "C02", "C03", "C04", "C05", "C06", "D01", "D02", "D03", "D04", "D05", "D06", "E01", "E02", "E03", "E04", "E05", "E06", "F01", "F02", "F03", "F05", "F06", "G01", "G02", "G03", "G04", "G05", "G06", "I01", "I02", "I03", "I06"], "holdout": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "I04", "I05", "J01", "J02", "J03", "J04", "J05", "J06"], "safety_ids": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "J05"]},
+      "eab60": {"required": true, "kit": "", "dev": ["A01", "A02", "A03", "A04", "A05", "A06", "B01", "B02", "B03", "B04", "B05", "B06", "C01", "C02", "C03", "C04", "C05", "C06", "D01", "D02", "D03", "D04", "D05", "D06", "E01", "E02", "E03", "E04", "E05", "E06", "F01", "F02", "F03", "F05", "F06", "G01", "G02", "G03", "G04", "G05", "G06", "I01", "I02", "I03", "I06"], "holdout": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "I04", "I05", "J01", "J02", "J03", "J04", "J05", "J06"], "safety_ids": ["F04", "H01", "H02", "H03", "H04", "H05", "H06", "J05"]},
       "bfcl": {"enabled": false, "required": false, "command": [], "version": "unconfigured"}
     },
     "thresholds": {"combined_net_fixed": 2, "bfcl_max_drop": 1, "max_token_ratio": 1.15, "max_latency_p95_ratio": 1.15, "max_tool_calls_ratio": 1.15, "max_binary_size_ratio": 1.1}

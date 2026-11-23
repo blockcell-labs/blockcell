@@ -2595,7 +2595,7 @@ async fn exec_uses_path_approved_working_dir_as_bubblewrap_writable_root() {
         return;
     }
 
-    let temp = tempfile::tempdir_in("/tmp").expect("create temp root");
+    let temp = tempfile::tempdir_in(crate::test_support::fixture_root()).expect("create temp root");
     let allowed = temp.path().join("allowed-workdir");
     std::fs::create_dir_all(&allowed).expect("create allow-write working directory");
     let paths = Paths::with_base(temp.path().join("blockcell"));
@@ -2713,7 +2713,7 @@ fn read_allow_write_deny_policy(path: &Path) -> String {
 
 #[tokio::test]
 async fn test_workspace_internal_deny_rule_is_enforced() {
-    let base = std::path::PathBuf::from("/tmp").join(format!(
+    let base = crate::test_support::fixture_root().join(format!(
         "blockcell-workspace-deny-policy-{}",
         uuid::Uuid::new_v4()
     ));
@@ -2842,7 +2842,7 @@ async fn active_skill_resources_are_readable_without_confirmation_but_not_writab
 }
 
 fn standard_skill_runtime_fixture() -> (tempfile::TempDir, AgentRuntime, ActiveSkillContext) {
-    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let root = tempfile::tempdir_in(crate::test_support::fixture_root()).unwrap();
     let paths = Paths::with_base(root.path().join("base"));
     paths.ensure_dirs().unwrap();
     let dir = paths.managed_builtin_skills_dir().join("folder");
@@ -5183,11 +5183,10 @@ async fn explicit_stream_done_reports_provider_success() {
     assert_eq!(status[0].fail_count, 0);
 }
 
-/// 测试用运行时目录。放在 `/tmp` 而不是 `std::env::temp_dir()`：macOS 的
-/// `/var/folders/...` canonicalize 后是 `/private/var/...`，命中路径策略的内置敏感
-/// 目录，会让工作区内的正常路径被判为 Deny，用例会误报成策略拒绝。
+/// 测试用运行时目录：使用仓库内的唯一目录，兼容离线构建沙箱和路径策略。
 fn test_runtime_paths(prefix: &str) -> Paths {
-    let base = std::path::PathBuf::from("/tmp").join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    let base =
+        crate::test_support::fixture_root().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&base).expect("create temp runtime dir");
     Paths::with_base(base)
 }
@@ -5371,11 +5370,7 @@ fn test_runtime_with_default_tools() -> AgentRuntime {
     let mut config = Config::default();
     config.agents.defaults.model = "test/mock".to_string();
     config.agents.defaults.provider = Some("test".to_string());
-    // 注意：`std::env::temp_dir()` 在 macOS 上位于 `/var/folders/...`，canonicalize 后
-    // 落到 `/private/var/...`，而 `/private/var` 命中路径策略的内置敏感目录，会让工作区
-    // 文件被判为 Deny。这里改用 `/tmp`（canonicalize 为 `/private/tmp`，不在敏感列表内），
-    // 使工作区路径能正常通过路径策略。
-    let base = std::path::PathBuf::from("/tmp").join(format!(
+    let base = crate::test_support::fixture_root().join(format!(
         "blockcell-default-tools-runtime-{}",
         uuid::Uuid::new_v4()
     ));
@@ -8425,7 +8420,7 @@ async fn full_access_skill_script_approval_is_session_and_content_bound() {
 #[cfg(unix)]
 #[tokio::test]
 async fn canonical_active_directory_preserves_skill_identity_in_approval() {
-    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let root = tempfile::tempdir_in(crate::test_support::fixture_root()).unwrap();
     let target = root.path().join("target");
     std::fs::create_dir(&target).unwrap();
     let base = root.path().join("alias");
@@ -9087,13 +9082,7 @@ impl blockcell_tools::Tool for VerificationGateShell {
 fn verification_gate_runtime(
     verification_after_edit: bool,
 ) -> (AgentRuntime, Arc<VerificationGateProvider>, PathBuf) {
-    // macOS's per-user temp directory is under protected /private/var.
-    // Use /tmp for this fixture so real path policy allows the test edits.
-    let temp_root = if cfg!(target_os = "macos") {
-        PathBuf::from("/tmp")
-    } else {
-        std::env::temp_dir()
-    };
+    let temp_root = crate::test_support::fixture_root();
     let base = temp_root.join(format!(
         "blockcell-verification-gate-{}",
         uuid::Uuid::new_v4()
@@ -10748,7 +10737,7 @@ async fn completed_exec_job_is_injected_at_the_next_pre_step() {
     intent_router.enabled = false;
     intent_router.load_all_tools = true;
 
-    let base = std::path::PathBuf::from("/tmp").join(format!(
+    let base = crate::test_support::fixture_root().join(format!(
         "blockcell-job-notification-runtime-{}",
         uuid::Uuid::new_v4()
     ));
@@ -12341,9 +12330,7 @@ async fn repeated_policy_rejections_ask_the_model_to_wrap_up() {
     let provider = Arc::new(RejectionStreakProvider {
         calls: Mutex::new(Vec::new()),
     });
-    // 工作区放 /tmp：macOS 的 /var/folders 会 canonicalize 到 /private/var，
-    // 命中内置敏感目录，工作区内的正常路径也会被拒。
-    let base = std::path::PathBuf::from("/tmp").join(format!(
+    let base = crate::test_support::fixture_root().join(format!(
         "blockcell-rejection-streak-{}",
         uuid::Uuid::new_v4()
     ));

@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import sys
 from pathlib import Path
 
 from ..source import command
@@ -18,14 +19,14 @@ def evaluate(binary, output, cwd, config, meter):
     settings = config["agent"]
     sockets = Path(config["_root"]) / "sockets"
     sockets.mkdir(exist_ok=True)
-    socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] else None
+    socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] and sys.platform != 'darwin' else None
     home = output.parent / "home"
     with Proxy(settings["upstream"], os.environ.get(settings["key_env"], ""), meter, socket_path) as proxy:
         env = prepare_home(home, output.parent, config, proxy.url)
         if settings["require_bwrap"]:
             readonly = [cwd, *map(Path, options.get("readonly_paths", []))]
             readonly += [Path(part) for part in argv if Path(part).is_absolute() and Path(part).is_file() and not Path(part).is_relative_to(output.parent) and part != str(binary)]
-            argv = sandbox(argv, output.parent, home, binary, socket_path, readonly)
+            argv = sandbox(argv, output.parent, home, binary, socket_path, readonly, proxy_url=proxy.url)
         command(argv, output.parent, config["genesis"]["max_cycle_minutes"] * 60, env)
     data = json.loads(output.read_text())
     if not isinstance(data.get("results"), list) or not data["results"]:

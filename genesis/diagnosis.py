@@ -1,7 +1,7 @@
 import difflib
 import json
 
-from .isolation import ProviderUnavailable
+from .isolation import BudgetExceeded, ProviderUnavailable
 
 
 REQUIRED = {"id", "lineage_parent", "failure_ids", "evidence", "suspected_files", "root_cause", "proposed_change", "expected_effect", "verification", "risk", "not_duplicate_of"}
@@ -61,7 +61,7 @@ def diagnose(adapter, parent, worktree, failures, evidence, config):
             if any(similar(h, failures, config["diagnosis"]["similarity_threshold"]) for h in hypotheses):
                 raise ValueError("duplicate failed hypothesis")
             return hypotheses, errors
-        except ProviderUnavailable:
+        except (BudgetExceeded, ProviderUnavailable):
             raise
         except (ValueError, RuntimeError, TimeoutError) as exc:
             errors.append(str(exc))

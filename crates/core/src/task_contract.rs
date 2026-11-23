@@ -46,10 +46,10 @@ impl TaskContract {
     pub fn validate(&self) -> crate::Result<()> {
         if self.deliverables.len() > 32 {
             return Err(crate::Error::Validation(
-                "At most 32 deliverables are allowed".into(),
+                r#"task_contract.deliverables accepts at most 32 items. Example: [{"path":"report.json"}]"#.into(),
             ));
         }
-        for item in &self.deliverables {
+        for (index, item) in self.deliverables.iter().enumerate() {
             let path = Path::new(&item.path);
             if item.path.is_empty()
                 || item.path.len() > 4096
@@ -58,7 +58,9 @@ impl TaskContract {
                     .components()
                     .any(|part| matches!(part, Component::ParentDir))
             {
-                return Err(crate::Error::Validation("Invalid deliverable path".into()));
+                return Err(crate::Error::Validation(format!(
+                    r#"task_contract.deliverables[{index}].path must contain 1–4096 bytes with no NUL or parent directory component. Example: "report.json""#
+                )));
             }
         }
         Ok(())

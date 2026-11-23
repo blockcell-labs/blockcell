@@ -1,6 +1,6 @@
 //! Execution annotations describe intent; only a completed result proves success.
 use blockcell_core::{task_contract::TaskContract, Error, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Execution lifecycle is supplied by the tool, never inferred from caller fields.
@@ -65,12 +65,36 @@ pub struct ExecutionAnnotations {
     pub verification: Option<VerificationIntent>,
 }
 
+fn parse_annotation<T: DeserializeOwned>(value: &Value, field: &str, hint: &str) -> Result<T> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let mut field = if path == "." {
+            field.to_owned()
+        } else {
+            format!("{field}.{path}")
+        };
+        let detail = error.inner().to_string();
+        if let Some(missing) = detail
+            .strip_prefix("missing field `")
+            .and_then(|rest| rest.split('`').next())
+        {
+            field.push('.');
+            field.push_str(missing);
+        }
+        Error::Validation(format!("{field}: {detail}. {hint}"))
+    })
+}
+
 impl ExecutionAnnotations {
     pub fn parse(params: &Value) -> Result<Self> {
         let task_contract = params
             .get("task_contract")
             .map(|value| {
-                let contract: TaskContract = serde_json::from_value(value.clone())?;
+                let contract: TaskContract = parse_annotation(
+                    value,
+                    "task_contract",
+                    r#"Use task_contract.verification = allowed, required, deferred or forbidden, and task_contract.deliverables as an array of objects. Example: {"verification":"required","deliverables":[{"path":"report.json"}]}"#,
+                )?;
                 contract.validate()?;
                 Ok::<_, Error>(contract)
             })
@@ -78,10 +102,14 @@ impl ExecutionAnnotations {
         let verification = params
             .get("verification")
             .map(|value| {
-                let intent: VerificationIntent = serde_json::from_value(value.clone())?;
+                let intent: VerificationIntent = parse_annotation(
+                    value,
+                    "verification",
+                    r#"For a recognized check, omit verification and pass command alone. For an explicit annotation, use verification.kind = test, build, lint, syntax or artifact, with a non-empty verification.target. For unittest or pytest use {"kind":"test","target":"tests/test_slug.py"}."#,
+                )?;
                 if intent.target.trim().is_empty() || intent.target.len() > 4096 {
                     return Err(Error::Validation(
-                        "Verification requires a bounded, non-empty target".into(),
+                        r#"verification.target must be a non-empty string of at most 4096 bytes, for example "tests/test_slug.py". Omit verification to infer intent from a recognized command."#.into(),
                     ));
                 }
                 Ok(intent)
@@ -93,7 +121,7 @@ impl ExecutionAnnotations {
                 .is_some_and(|contract| !contract.verification.permits_execution())
         {
             return Err(Error::Validation(
-                "Verification cannot be executed with a forbidden/deferred task contract".into(),
+                "task_contract.verification is forbidden or deferred. Choose a non-verification action and omit the verification annotation.".into(),
             ));
         }
         Ok(Self {
@@ -110,18 +138,24 @@ pub fn task_contract_schema() -> Value {
     },"additionalProperties":false})
 }
 
-pub fn add_annotation_schema(parameters: &mut Value, supports_verification: bool) {
+pub fn add_annotation_schema(
+    parameters: &mut Value,
+    supports_verification: bool,
+    expose_contract: bool,
+) {
     let Some(properties) = parameters
         .get_mut("properties")
         .and_then(Value::as_object_mut)
     else {
         return;
     };
-    properties.insert("task_contract".into(), task_contract_schema());
+    if expose_contract {
+        properties.insert("task_contract".into(), task_contract_schema());
+    }
     if !supports_verification {
         return;
     }
-    properties.insert("verification".into(), json!({"type":"object","description":"Set only when this command actually verifies the named target. Use a recognized test/build/lint/syntax runner whose exit status preserves check failures. The kind must match the runner. A declaration alone, an unknown custom script, or a status-masking command does not establish verification evidence. Omit when not verifying. Never execute verification forbidden/deferred by the user.","properties":{"kind":{"type":"string","enum":["test","build","lint","syntax","artifact"]},"target":{"type":"string"}},"required":["kind","target"],"additionalProperties":false}));
+    properties.insert("verification".into(), json!({"type":"object","description":"Optional. For ordinary checks, pass command alone so the recognized runner determines the kind. If explicitly annotating, provide both kind and target. Use kind test for unittest and pytest. Preserve failure exit status and never execute checks forbidden or deferred by the user.","properties":{"kind":{"type":"string","enum":["test","build","lint","syntax","artifact"]},"target":{"type":"string"}},"required":["kind","target"],"additionalProperties":false}));
 }
 
 pub fn completed_successfully(result: &Value) -> bool {
@@ -130,6 +164,57 @@ pub fn completed_successfully(result: &Value) -> bool {
         && result
             .get("timed_out")
             .is_none_or(|timed_out| timed_out == false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotation_errors_explain_how_to_correct_the_call() {
+        for (params, expected, example) in [
+            (
+                json!({"verification":{"kind":"unittest","target":"test_slug.py"}}),
+                "verification.kind",
+                r#"{"kind":"test","target":"tests/test_slug.py"}"#,
+            ),
+            (
+                json!({"verification":{"kind":"test"}}),
+                "verification.target",
+                "omit verification and pass command alone",
+            ),
+            (
+                json!({"task_contract":{"output_files":["report.json"]}}),
+                "task_contract.deliverables",
+                r#"[{"path":"report.json"}]"#,
+            ),
+            (
+                json!({"task_contract":{"deliverables":[{"path":42}]}}),
+                "task_contract.deliverables[0].path",
+                r#"[{"path":"report.json"}]"#,
+            ),
+        ] {
+            let error = ExecutionAnnotations::parse(&params)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains(example), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_contract_is_parsed_and_prohibitions_are_enforced() {
+        let mut params = json!({"task_contract":{"verification":"deferred","deliverables":[{"path":"report.json"}]}});
+        let contract = ExecutionAnnotations::parse(&params)
+            .unwrap()
+            .task_contract
+            .unwrap();
+        assert!(!contract.verification.permits_execution());
+        assert_eq!(contract.deliverables[0].path, "report.json");
+
+        params["verification"] = json!({"kind":"test","target":"tests"});
+        assert!(ExecutionAnnotations::parse(&params).is_err());
+    }
 }
 
 #[cfg(test)]

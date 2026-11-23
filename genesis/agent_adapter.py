@@ -2,6 +2,7 @@ import os
 import hashlib
 import json
 import shutil
+import sys
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
@@ -26,7 +27,7 @@ class AgentAdapter:
         settings = self.config["agent"]
         sockets = Path(self.config["_root"]) / "sockets"
         sockets.mkdir(exist_ok=True)
-        socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] else None
+        socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] and sys.platform != 'darwin' else None
         key = os.environ.get(settings["key_env"], "")
         before = (self.meter.input_tokens, self.meter.output_tokens, self.meter.cost)
         with Proxy(settings["upstream"], key, self.meter, socket_path, settings["model"]) as proxy:
@@ -61,8 +62,8 @@ class AgentAdapter:
                     cargo_home = Path(worktree) / '.genesis-cargo'
                     env.update(CARGO_HOME=str(cargo_home), CARGO_TARGET_DIR=str(Path(worktree) / 'target'),
                                CARGO_NET_OFFLINE='true', CARGO_BUILD_JOBS='2',
-                               PATH=str(cargo_home / 'bin') + ':/usr/local/bin:/usr/bin:/bin')
-                argv = sandbox(argv, worktree, home, binary, socket_path, rust_target=target)
+                               PATH=env.get('PATH', '/usr/local/bin:/usr/bin:/bin') + os.pathsep + str(cargo_home / 'bin'))
+                argv = sandbox(argv, worktree, home, binary, socket_path, rust_target=target, proxy_url=proxy.url)
             try:
                 with cargo.runtime(worktree, run / 'test-runtime', nested_before) if mode in ('diagnose', 'patch', 'review') else nullcontext():
                     output = command(argv, worktree, settings["timeout"], env, check=self.meter.check)

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sys
 import uuid
@@ -16,6 +17,42 @@ def evaluate(frozen, binary, root, config, split, meter):
     ids = options[split]
     if not ids:
         return {"status": "skipped", "reason": "EAB60 split has no task IDs", "results": []}
+    if len(set(ids)) != len(ids):
+        raise ValueError('EAB60 task IDs must be unique')
+    if len(ids) == 1:
+        return _evaluate_attempt(frozen, binary, root, config, ids, meter)
+    from ..config import evaluation_hash
+    identity = evaluation_hash(config) + ':' + hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+    checkpoints = root / 'task-checkpoints'
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    rows = []
+    status = 'ok'
+    for case_id in ids:
+        meter.check()
+        case_hash = hashlib.sha256(case_id.encode()).hexdigest()
+        checkpoint = checkpoints / (case_hash + '.json')
+        result = None
+        if checkpoint.exists():
+            saved = json.loads(checkpoint.read_text())
+            if saved.get('identity') == identity:
+                result = saved['result']
+                if {row.get('task_id') for row in result.get('results', [])} != {case_id}:
+                    raise ValueError('invalid EAB60 task checkpoint')
+        if result is None:
+            result = _evaluate_attempt(frozen, binary, root / ('case-' + case_hash), config, [case_id], meter)
+            if result['status'] == 'ok':
+                pending = checkpoint.with_suffix('.new')
+                pending.write_text(json.dumps({'identity': identity, 'result': result}, ensure_ascii=False))
+                pending.replace(checkpoint)
+        rows.extend(result['results'])
+        if result['status'] != 'ok':
+            status = 'inconclusive'
+    return {'status': status, 'results': rows}
+
+
+def _evaluate_attempt(frozen, binary, root, config, ids, meter):
+    options = config['benchmarks']['L3']['eab60']
+    kit = options.get('kit') or os.environ.get('EAB60_KIT')
     root = root / ('attempt-' + uuid.uuid4().hex)
     root.mkdir(parents=True, exist_ok=True)
     home = root / "home"
@@ -25,15 +62,18 @@ def evaluate(frozen, binary, root, config, split, meter):
     settings = config["agent"]
     sockets = Path(config["_root"]) / "sockets"
     sockets.mkdir(exist_ok=True)
-    socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] else None
+    socket_path = sockets / (uuid.uuid4().hex + ".sock") if settings["require_bwrap"] and sys.platform != 'darwin' else None
     launcher = Path(__file__).resolve().parents[1] / "eab_launcher.py"
     with Proxy(settings["upstream"], os.environ.get(settings["key_env"], ""), meter, socket_path, settings['model']) as proxy:
         context = root / "context.json"
-        context.write_text(json.dumps({"runner": str(frozen / "tests/eab60/run_all.py"), "model": settings["model"], "proxy_url": proxy.url, "ids": ids}))
+        context.write_text(json.dumps({"runner": str(frozen / "tests/eab60/run_all.py"), "model": settings["model"], "proxy_url": proxy.url, "ids": ids,
+                                       'binary': str(binary), 'root': str(root), 'isolated': settings['require_bwrap']}))
         argv = [sys.executable, str(launcher), str(context)]
-        if settings["require_bwrap"]:
-            argv = sandbox(["/usr/bin/python3", str(launcher), str(context)], root, home, binary, socket_path, (frozen, launcher, Path(kit).resolve()))
+        if settings["require_bwrap"] and sys.platform != 'darwin':
+            argv = sandbox(["/usr/bin/python3", str(launcher), str(context)], root, home, binary, socket_path,
+                           (frozen, launcher.parent, Path(kit).resolve()))
         command(argv, root, config["genesis"]["max_cycle_minutes"] * 60, env, check=meter.check)
+        meter.check()
     return parse_report(root, ids)
 
 

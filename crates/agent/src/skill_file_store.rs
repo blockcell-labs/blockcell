@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn failed_snapshot_preserves_completed_snapshots() {
-        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let base = tempfile::tempdir_in(crate::test_support::fixture_root()).unwrap();
         let paths = Paths::with_base(base.path().to_path_buf());
         let store = SkillFileStore::open(&paths).unwrap();
         store.create("example", "Example", "Instructions").unwrap();

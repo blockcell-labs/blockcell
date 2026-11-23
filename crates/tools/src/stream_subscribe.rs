@@ -1732,8 +1732,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_stream_unsubscribe_stops_owned_subscription() {
-        let workspace = PathBuf::from(format!(
-            "/tmp/blockcell-stream-public-unsubscribe-{}",
+        let workspace = std::env::temp_dir().join(format!(
+            "blockcell-stream-public-unsubscribe-{}",
             uuid::Uuid::new_v4()
         ));
         {
@@ -1759,8 +1759,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_stream_restore_reports_empty_store() {
-        let workspace = PathBuf::from(format!(
-            "/tmp/blockcell-stream-public-restore-{}",
+        let workspace = std::env::temp_dir().join(format!(
+            "blockcell-stream-public-restore-{}",
             uuid::Uuid::new_v4()
         ));
 
@@ -1771,8 +1771,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_stream_restore_rejects_corrupt_persistence() {
-        let workspace = PathBuf::from(format!(
-            "/tmp/blockcell-stream-public-corrupt-{}",
+        let workspace = std::env::temp_dir().join(format!(
+            "blockcell-stream-public-corrupt-{}",
             uuid::Uuid::new_v4()
         ));
         let path = StreamManager::persistence_path(&workspace);
@@ -1786,8 +1786,8 @@ mod tests {
 
     #[tokio::test]
     async fn automatic_restore_propagates_corrupt_persistence_and_remains_retryable() {
-        let workspace = PathBuf::from(format!(
-            "/tmp/blockcell-stream-auto-corrupt-{}",
+        let workspace = std::env::temp_dir().join(format!(
+            "blockcell-stream-auto-corrupt-{}",
             uuid::Uuid::new_v4()
         ));
         let path = StreamManager::persistence_path(&workspace);

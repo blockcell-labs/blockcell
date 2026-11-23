@@ -7,17 +7,26 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..source import command
-from ..isolation import build_sandbox, clean_env
+from ..isolation import BudgetExceeded, build_sandbox, clean_env
 
 
 @contextmanager
 def runtime(worktree, destination, before=None):
     root = Path(worktree).resolve()
     before = set(root.rglob('.blockcell')) if before is None else set(before)
+    local_target = root / 'target'
+    target_existed = local_target.exists() or local_target.is_symlink()
     try:
         yield
     finally:
-        for path in set(root.rglob('.blockcell')) - before:
+        generated = set(root.rglob('.blockcell')) - before
+        # Rust tests also write cwd-relative target/test-runtime, independently
+        # of CARGO_TARGET_DIR. Preserve preexisting trees and never follow a
+        # shared cache link; only archive a directory created by this step.
+        if not target_existed and local_target.is_dir() and not local_target.is_symlink():
+            generated = {p for p in generated if not p.is_relative_to(local_target)}
+            generated.add(local_target)
+        for path in generated:
             if path.is_symlink() or not path.parent.resolve().is_relative_to(root):
                 continue
             target = Path(destination) / path.relative_to(root)
@@ -104,6 +113,8 @@ def capture(argv, worktree, config, path):
     passed = True
     try:
         output = execute(argv, worktree, config, environment(config), path)
+    except BudgetExceeded:
+        raise
     except RuntimeError as exc:
         passed = False
         output = path.read_text() if path.exists() else str(exc)
@@ -114,7 +125,14 @@ def capture(argv, worktree, config, path):
 
 def baseline(worktree, config):
     sha = command(['git', 'rev-parse', 'HEAD'], worktree).strip()
-    key = hashlib.sha256(json.dumps(config['benchmarks']['L0'], sort_keys=True).encode()).hexdigest()[:16]
+    package = Path(__file__).resolve().parents[1]
+    runtime = {name: hashlib.sha256((package / name).read_bytes()).hexdigest()
+               for name in ('native_sandbox.py', 'isolation.py', 'preflight.py')}
+    from ..preflight import toolchain_bin
+    identity = {'commands': config['benchmarks']['L0'], 'runtime': runtime,
+                'isolated': config['agent']['require_bwrap'], 'toolchain': toolchain_bin(),
+                'schema': 2}
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
     folder = Path(config['_root']) / 'L0-baselines' / (sha + '-' + key)
     folder.mkdir(parents=True, exist_ok=True)
     saved = folder / 'checks.json'
@@ -167,6 +185,8 @@ def audit(worktree, config, env):
     path.unlink(missing_ok=True)
     try:
         output = execute(argv, worktree, config, env, path)
+    except BudgetExceeded:
+        raise
     except RuntimeError as exc:
         output = path.read_text() if path.exists() else str(exc).split('\n', 1)[-1]
     data = json.loads(output)

@@ -29,6 +29,10 @@ class Archive:
         CREATE TABLE IF NOT EXISTS cycle_state (
           id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL, payload TEXT NOT NULL);
         """)
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(agents)')}
+        if 'parent_eligible' not in columns:
+            self.db.execute('ALTER TABLE agents ADD COLUMN parent_eligible INTEGER NOT NULL DEFAULT 0')
+            self.db.execute("UPDATE agents SET parent_eligible=1 WHERE status='PARENT'")
         self.db.commit()
 
     def agent(self, agent_id):
@@ -40,8 +44,8 @@ class Archive:
 
     def add(self, agent_id, sha, parent=None, hypothesis=None, status="CANDIDATE", binary=""):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO agents(agent_id,commit_sha,parent_id,hypothesis_json,status,created_at,binary) VALUES(?,?,?,?,?,?,?)",
-                            (agent_id, sha, parent, json.dumps(hypothesis or {}), status, datetime.now(timezone.utc).isoformat(), binary))
+            self.db.execute("INSERT OR IGNORE INTO agents(agent_id,commit_sha,parent_id,hypothesis_json,status,created_at,binary,parent_eligible) VALUES(?,?,?,?,?,?,?,?)",
+                            (agent_id, sha, parent, json.dumps(hypothesis or {}), status, datetime.now(timezone.utc).isoformat(), binary, int(status == 'PARENT')))
 
     def update(self, agent_id, **fields):
         allowed = set(self.agent(agent_id)) - {"agent_id"}

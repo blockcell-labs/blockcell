@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -7,37 +8,79 @@ from . import diagnosis, gates, report
 from .adapters import cargo
 from .agent_adapter import AgentAdapter
 from .archive import Archive
+from .config import evaluation_hash
 from .evaluator import Evaluator
 from .isolation import BudgetExceeded, Meter, ProviderUnavailable
 from .selector import Selector
-from .source import Source, command
+from .source import Source, command, cycle_deadline
+from .locking import WorkspaceLock, exclusive
 
 
 class Supervisor:
     def __init__(self, config):
         self.config = config
         self.root = Path(config["_root"])
-        self.archive = Archive(self.root)
+        # Opening an archive may migrate its schema, so it also requires the
+        # workspace lock before any SQLite mutation can occur.
+        with WorkspaceLock(self.root):
+            self.archive = Archive(self.root)
         self.source = Source(config)
         self.selector = Selector(config)
         self.usage_path = self.root / "usage.json"
         usage = json.loads(self.usage_path.read_text()) if self.usage_path.exists() else {}
         agent = config["agent"]
         self.meter = Meter(config["genesis"]["budget"]["total_usd"], agent["input_usd_per_million"], agent["output_usd_per_million"], token_limit=agent.get('token_limit', 20000000), on_update=self.save_usage, concurrency=agent.get('concurrency', 1), retry_429_seconds=agent.get('retry_429_seconds', 300), user_agent=agent.get('user_agent', 'Mozilla/5.0'))
+        self.meter.transport_command = agent.get('http_transport_command')
+        self.meter.upstream_stream = agent.get('upstream_stream', True)
         self.meter.input_tokens = usage.get("input_tokens", 0)
         self.meter.output_tokens = usage.get("output_tokens", 0)
         self.meter.cost = usage.get("cost", 0)
         self.meter.peak_requests = usage.get('peak_requests', 0)
         self.meter.requests = usage.get('requests', 0)
         self.meter.retries_429 = usage.get('retries_429', 0)
+        self.meter.missing_usage_requests = usage.get('missing_usage_requests', 0)
+        self.meter.reserved_cost = usage.get('reserved_cost', 0)
+        self.meter.reservations = usage.get('reservations', [])
+        self.meter.last_proxy_error = usage.get('last_proxy_error')
+        self.meter.last_invalid_usage = usage.get('last_invalid_usage')
         self.adapter = AgentAdapter(config, self.root / "runs" / "agent_calls", self.meter)
         self.evaluator = Evaluator(config, self.archive, self.adapter)
 
     def save_usage(self, meter):
         temp = self.usage_path.with_suffix(".new")
-        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost, "upstream_status": meter.upstream_status, "peak_requests": meter.peak_requests, "requests": meter.requests, "retries_429": meter.retries_429}))
+        temp.write_text(json.dumps({"input_tokens": meter.input_tokens, "output_tokens": meter.output_tokens, "cost": meter.cost, "reserved_cost": meter.reserved_cost, "reservations": meter.reservations, "last_proxy_error": meter.last_proxy_error, "last_invalid_usage": meter.last_invalid_usage, "upstream_status": meter.upstream_status, "peak_requests": meter.peak_requests, "requests": meter.requests, "retries_429": meter.retries_429, "missing_usage_requests": meter.missing_usage_requests}))
         temp.replace(self.usage_path)
 
+    def reload_usage(self):
+        if self.usage_path.exists():
+            usage = json.loads(self.usage_path.read_text())
+            for name in ('input_tokens', 'output_tokens', 'cost', 'peak_requests', 'requests', 'retries_429', 'missing_usage_requests'):
+                setattr(self.meter, name, usage.get(name, 0))
+            self.meter.reserved_cost = usage.get('reserved_cost', 0)
+            self.meter.reservations = usage.get('reservations', [])
+            self.meter.last_proxy_error = usage.get('last_proxy_error')
+            self.meter.last_invalid_usage = usage.get('last_invalid_usage')
+
+    @exclusive
+    def reserve_unknown_usage(self, amount, reason):
+        """Reserve budget, never fabricate tokens or claim a reconciled bill."""
+        if (type(amount) not in (int, float) or not math.isfinite(amount) or amount <= 0
+                or not isinstance(reason, str) or not reason.strip()):
+            raise ValueError('a positive finite reservation and nonempty reason are required')
+        count = self.meter.missing_usage_requests
+        if not count:
+            raise ValueError('no outstanding unknown usage requests')
+        self.meter.reservations.append({'unknown_requests': count, 'reserved_usd': amount,
+                                        'reason': reason.strip(), 'time': time.time(),
+                                        'actual_cost_unknown': True,
+                                        'usage_diagnostic': self.meter.last_invalid_usage,
+                                        'proxy_diagnostic': self.meter.last_proxy_error})
+        self.meter.reserved_cost += amount
+        self.meter.missing_usage_requests = 0
+        self.save_usage(self.meter)
+        return self.meter.reservations[-1]
+
+    @exclusive
     def init(self):
         sha = self.source.initialize()
         current = self.archive.agent("genesis-0")
@@ -51,6 +94,7 @@ class Supervisor:
         print(f"Genesis-0 SHA: {sha}\nFrozen worktree: {self.root / 'frozen'}")
         print(self.adapter.help(self.archive.agent("genesis-0")["binary"], self.root / "frozen"))
 
+    @exclusive
     def baseline(self):
         agent = self.archive.agent("genesis-0")
         if not agent:
@@ -64,10 +108,21 @@ class Supervisor:
         with (self.root / "transitions.jsonl").open("a") as stream:
             stream.write(json.dumps({"state": stage, "cycle": payload.get("cycle"), "agent_id": payload.get("agent_id"), "time": time.time()}) + "\n")
 
+    def check_parent(self, parent):
+        if not parent or parent.get('status') == 'UNFIT':
+            raise RuntimeError('parent is unavailable or unfit')
+        self.adapter.help(parent['binary'], self.root / 'frozen')
+        if not self.evaluator.selfcheck(parent['binary']):
+            raise RuntimeError('parent selfcheck failed')
+
+    @exclusive
     def run(self, cycles=1, resume=False):
+        stage, p = self.archive.state()
+        if stage == 'BUILD_GENESIS0':
+            self.init()
+            stage, p = self.archive.state()
         if not self.archive.agent("genesis-0"):
             raise RuntimeError("run init first")
-        stage, p = self.archive.state()
         if resume and p.get('blocked_at'):
             p['cycle_started'] += time.time() - p.pop('blocked_at')
             p.pop('blocked_reason', None)
@@ -82,12 +137,21 @@ class Supervisor:
             self.transition("IDLE", p)
         while True:
             stage, p = self.archive.state()
+            self.meter.limit = self.config['genesis']['budget']['total_usd']
+            if stage not in ('IDLE', 'STOPPED') and 'cycle_cost' in p:
+                self.meter.limit = min(self.meter.limit, p['cycle_cost'] + self.config['genesis']['budget']['per_cycle_usd'])
             if stage == "STOPPED":
                 if resume:
                     break
                 self.transition("IDLE", p)
                 continue
+            remaining = None
+            if stage != 'IDLE' and 'cycle_started' in p:
+                remaining = p['cycle_started'] + self.config['genesis']['max_cycle_minutes'] * 60 - time.time()
+            deadline_token = cycle_deadline.set(time.monotonic() + remaining if remaining is not None else None)
             try:
+                if remaining is not None and remaining <= 0:
+                    raise BudgetExceeded('cycle time limit')
                 if stage == "IDLE":
                     if p.get("cycle", 0) >= p.get("target_cycle", 0):
                         break
@@ -96,8 +160,8 @@ class Supervisor:
                         self.transition("STOPPED", p)
                         break
                     p.update(cycle=p.get("cycle", 0) + 1, index=0, promoted=False,
-                             compile_failures=0, cycle_cost=self.meter.cost, cycle_started=time.time())
-                    self.meter.limit = min(self.config["genesis"]["budget"]["total_usd"], self.meter.cost + self.config["genesis"]["budget"]["per_cycle_usd"])
+                             compile_failures=0, cycle_cost=self.meter.spent, cycle_started=time.time())
+                    self.meter.limit = min(self.config["genesis"]["budget"]["total_usd"], self.meter.spent + self.config["genesis"]["budget"]["per_cycle_usd"])
                     self.transition("SELECT_PARENT", p)
                 elif stage == "SELECT_PARENT":
                     force = any(a["no_promote_rounds"] >= self.config["genesis"]["stagnation"]["per_parent_rounds"] for a in self.archive.agents())
@@ -106,18 +170,32 @@ class Supervisor:
                     except RuntimeError:
                         parent = self.archive.agent("genesis-0")
                     try:
-                        self.adapter.help(parent["binary"], self.root / "frozen")
-                        if not self.evaluator.selfcheck(parent["binary"]):
-                            raise RuntimeError("parent selfcheck failed")
+                        self.check_parent(parent)
                     except (BudgetExceeded, ProviderUnavailable):
                         raise
-                    except (RuntimeError, TimeoutError, OSError):
-                        self.archive.update(parent["agent_id"], status="UNFIT")
-                        parent = self.archive.agent("genesis-0")
-                        self.adapter.help(parent["binary"], self.root / "frozen")
+                    except (RuntimeError, TimeoutError, OSError) as exc:
+                        if parent:
+                            self.archive.update(parent['agent_id'], status='UNFIT')
+                        if parent and parent['agent_id'] != 'genesis-0':
+                            parent = self.archive.agent('genesis-0')
+                            try:
+                                self.check_parent(parent)
+                            except (BudgetExceeded, ProviderUnavailable):
+                                raise
+                            except (RuntimeError, TimeoutError, OSError) as fallback_error:
+                                if parent:
+                                    self.archive.update(parent['agent_id'], status='UNFIT')
+                                p['stop_reason'] = 'fallback parent failed: ' + str(fallback_error)
+                                self.transition('STOPPED', p)
+                                break
+                        else:
+                            p['stop_reason'] = 'no qualified parent: ' + str(exc)
+                            self.transition('STOPPED', p)
+                            break
                     p["parent_id"] = parent["agent_id"]
                     self.transition("PARENT_EVAL", p)
                 elif stage == "PARENT_EVAL":
+                    p['evaluation_hash'] = evaluation_hash(self.config)
                     parent = self.archive.agent(p["parent_id"])
                     baseline_tree = self.root / 'frozen' if parent['agent_id'] == 'genesis-0' else self.source.worktree('audit-' + parent['agent_id'], parent['commit_sha'])
                     p['parent_L0'] = cargo.baseline(baseline_tree, self.config)
@@ -165,6 +243,8 @@ class Supervisor:
                     with cargo.runtime(p['worktree'], folder / 'L0-runtime'):
                         try:
                             p["binary"], p["build_seconds"] = self.source.build(p["agent_id"], p["worktree"])
+                        except (BudgetExceeded, ProviderUnavailable):
+                            raise
                         except (RuntimeError, TimeoutError):
                             p["compile_failures"] += 1
                             raise
@@ -222,6 +302,10 @@ class Supervisor:
                     p["selfcheck"] = self.evaluator.selfcheck(p["binary"])
                     self.transition("DECIDE", p)
                 elif stage == "DECIDE":
+                    if p.get('evaluation_hash') != evaluation_hash(self.config):
+                        p['decision'], p['reason'] = 'INCONCLUSIVE', 'evaluation inputs changed during cycle'
+                        self.transition('RECORD', p)
+                        continue
                     previous_modules = set()
                     for a in self.archive.agents():
                         if a["agent_id"] != p["agent_id"]:
@@ -246,7 +330,8 @@ class Supervisor:
                         self.archive.update(aid, commit_sha=sha)
                         self.archive.rekey(aid, sha)
                     scores = gates.majority(p.get("candidate_results", {}).get("coding_eval", []))
-                    self.archive.update(aid, status=status, reason=p["reason"], pass_count=sum(scores.values()) if scores else 0)
+                    eligible = status in ('PARENT', 'ARCHIVE') and not p.get('high_risk', False) and p.get('selfcheck', False)
+                    self.archive.update(aid, status=status, reason=p["reason"], parent_eligible=int(eligible), pass_count=sum(scores.values()) if scores else 0)
                     folder = self.root / "runs" / aid
                     folder.mkdir(parents=True, exist_ok=True)
                     (folder / "decision.json").write_text(json.dumps(p, ensure_ascii=False, indent=2))
@@ -278,7 +363,7 @@ class Supervisor:
                 if "cycle_started" in p and stage not in ("IDLE", "FINISH_CYCLE"):
                     if time.time() - p["cycle_started"] > self.config["genesis"]["max_cycle_minutes"] * 60:
                         raise BudgetExceeded("cycle time limit")
-                    if self.meter.cost - p["cycle_cost"] >= self.config["genesis"]["budget"]["per_cycle_usd"]:
+                    if self.meter.spent - p["cycle_cost"] >= self.config["genesis"]["budget"]["per_cycle_usd"]:
                         raise BudgetExceeded("cycle budget exhausted")
             except ProviderUnavailable as exc:
                 p['blocked_reason'] = str(exc)
@@ -295,4 +380,6 @@ class Supervisor:
                     self.transition("RECORD", p)
                 else:
                     raise
+            finally:
+                cycle_deadline.reset(deadline_token)
         return report.write(self.archive, self.root)

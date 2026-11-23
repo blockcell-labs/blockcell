@@ -47,7 +47,7 @@ async fn r4_anthropic_native_stream_counts_input_and_output_in_session_and_paren
     let parent = Arc::new(BudgetTracker::new(&config.budget));
     let dir = tempfile::Builder::new()
         .prefix("blockcell-r4-usage-")
-        .tempdir_in("/tmp")
+        .tempdir_in(crate::test_support::fixture_root())
         .unwrap();
     let mut runtime =
         test_runtime_with_provider_and_paths(Paths::with_base(dir.path().into()), provider, config);

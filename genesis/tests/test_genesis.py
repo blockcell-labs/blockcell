@@ -55,6 +55,29 @@ elif 'MODE: patch' in prompt:
 '''
 
 
+class ConfigTests(unittest.TestCase):
+    def test_openai_environment_overrides_change_evaluation_identity(self):
+        with patch.dict(os.environ, {}, clear=True):
+            original = load()
+        with patch.dict(os.environ, {
+            'OPENAI_BASE_URL': 'https://compatible.example/v1',
+            'OPENAI_MODEL': 'test-model',
+            'OPENAI_API_KEY': 'secret-not-for-config',
+        }, clear=True):
+            configured = load()
+        self.assertEqual(configured['agent']['upstream'], 'https://compatible.example/v1')
+        self.assertEqual(configured['agent']['model'], 'test-model')
+        self.assertNotEqual(configured['_hash'], original['_hash'])
+        self.assertNotIn('secret-not-for-config', json.dumps(configured))
+
+    def test_empty_openai_overrides_preserve_configured_values(self):
+        with patch.dict(os.environ, {}, clear=True):
+            original = load()
+        with patch.dict(os.environ, {'OPENAI_BASE_URL': '', 'OPENAI_MODEL': ''}, clear=True):
+            configured = load()
+        self.assertEqual(configured, original)
+
+
 class RepositoryCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -75,7 +98,7 @@ class RepositoryCase(unittest.TestCase):
         self.log = self.base / 'calls.jsonl'
         body = 'LOG='+repr(str(self.log))+'\nFAULT='+repr(str(self.fault))+'\n'+AGENT
         build = self.base / 'build.py'
-        build.write_text("import os,sys\nfrom pathlib import Path\nif Path('crates/broken').exists(): sys.exit(1)\nlevel=Path('crates/level.txt').read_text()\np=Path(os.environ['CARGO_TARGET_DIR'])/'release/blockcell'\np.parent.mkdir(parents=True,exist_ok=True)\np.write_text('#!/usr/bin/python3\\nVERSION='+level+'\\n'+"+repr(body)+")\np.chmod(0o755)\n")
+        build.write_text("import os,sys\nfrom pathlib import Path\nif Path('crates/broken').exists(): sys.exit(1)\nlevel=Path('crates/level.txt').read_text()\np=Path(os.environ['CARGO_TARGET_DIR'])/'release/blockcell'\np.parent.mkdir(parents=True,exist_ok=True)\np.write_text('#!'+sys.executable+'\\nVERSION='+level+'\\n'+"+repr(body)+")\np.chmod(0o755)\n")
         evaluate = self.base / 'eval.py'
         evaluate.write_text("import json,sys,subprocess\nfrom pathlib import Path\nv=int(subprocess.check_output([sys.argv[1],'--score']))\nfault=Path("+repr(str(self.fault))+").read_text()\nrows=[{'task_id':f't{i}','passed':i<2+v*2,'input_tokens':10,'output_tokens':10,'duration_ms':10,'tool_calls':1} for i in range(12)]\nif fault=='regression' and v: \n for r in rows: r['passed']=False\nPath(sys.argv[2]).write_text(json.dumps({'status':'ok','results':rows}))\n")
         self.config = load()
@@ -204,7 +227,7 @@ class RepositoryCase(unittest.TestCase):
         self.assertEqual(self.supervisor.archive.state()[0],'PROMOTE')
         self.supervisor.run(resume=True)
         branches=command(['git','branch','--list','genesis/gen-*'],self.supervisor.source.repo).splitlines()
-        self.assertEqual(len(branches),2)
+        self.assertEqual(len(branches),0)
         self.assertEqual(len(self.candidates()),2)
         self.assertTrue(all(a['status']=='PARENT' for a in self.candidates()))
         self.supervisor.run(resume=True)
@@ -213,7 +236,8 @@ class RepositoryCase(unittest.TestCase):
     def test_parent_cache_rekeyed(self):
         self.supervisor.run(1)
         child=self.candidates()[0]
-        result=self.supervisor.archive.cached(child,'coding_eval',0,self.config)
+        cache_config = dict(self.config, _hash=evaluation_hash(self.config))
+        result=self.supervisor.archive.cached(child,'coding_eval',0,cache_config)
         self.assertEqual(sum(t['passed'] for t in result['results']),4)
 
     def test_git_pointer_tampering_rejected(self):
@@ -225,6 +249,25 @@ class RepositoryCase(unittest.TestCase):
 
 
 class SmallTests(unittest.TestCase):
+    def test_git_pointer_accepts_canonical_repository_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / 'real'
+            real.mkdir()
+            alias = root / 'alias'
+            alias.symlink_to(real, target_is_directory=True)
+            worktree = alias / 'worktrees' / 'candidate'
+            worktree.mkdir(parents=True)
+            gitdir = real / 'repository/.git/worktrees/candidate'
+            gitdir.mkdir(parents=True)
+            (worktree / '.git').write_text('gitdir: ' + str(gitdir.resolve()) + '\n')
+            config = load()
+            config['_root'] = str(alias)
+            Source(config).validate(worktree)
+            (worktree / '.git').write_text('gitdir: ' + str(root / 'untrusted') + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'git pointer'):
+                Source(config).validate(worktree)
+
     @unittest.skipUnless(shutil.which('bwrap'), 'bubblewrap not installed')
     def test_bfcl_external_command_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -233,10 +276,10 @@ class SmallTests(unittest.TestCase):
             output=root/'output/report.json'; output.parent.mkdir()
             binary=root/'binary'; binary.write_text('#!/bin/sh\necho fake-help\n'); binary.chmod(0o755)
             external=root/'external.py'
-            external.write_text("import json,os,sys,subprocess\nfrom pathlib import Path\nassert 'SF_KEY' not in os.environ\nsubprocess.check_call([sys.argv[1],'--help'])\nPath(sys.argv[2]).write_text(json.dumps({'results':[{'task_id':'bfcl-1','passed':True}]}))\n")
+            external.write_text("import json,os,sys,subprocess\nfrom pathlib import Path\nassert 'OPENAI_API_KEY' not in os.environ\nsubprocess.check_call([sys.argv[1],'--help'])\nPath(sys.argv[2]).write_text(json.dumps({'results':[{'task_id':'bfcl-1','passed':True}]}))\n")
             config=load(); config['_root']=str(root)
             config['benchmarks']['L3']['bfcl'].update(enabled=True,command=[sys.executable,str(external),'{binary}','{output}'])
-            with patch.dict(os.environ,{'SF_KEY':'supervisor-only'}):
+            with patch.dict(os.environ,{'OPENAI_API_KEY':'supervisor-only'}):
                 result=bfcl.evaluate(str(binary),output,frozen,config,Meter(1))
             self.assertTrue(result['results'][0]['passed'])
 
@@ -325,7 +368,7 @@ class SmallTests(unittest.TestCase):
             homes=[]
             def run(argv,cwd,timeout,env,check=None):
                 homes.append(env['HOME'])
-                self.assertNotIn('SF_KEY',env)
+                self.assertNotIn('OPENAI_API_KEY',env)
                 (cwd/'reports').mkdir()
                 (cwd/'reports/results.json').write_text(json.dumps([{'id':'A01','grade':{'status':'PASS'}}]))
             with patch('genesis.adapters.eab60.command',side_effect=run):
@@ -378,11 +421,11 @@ class SmallTests(unittest.TestCase):
             workspace=root/'workspace'; workspace.mkdir()
             sentinel=root/'host-secret'; sentinel.write_text('not mounted')
             binary=root/'fake'
-            binary.write_text('#!/usr/bin/python3\nimport os,socket\nfrom pathlib import Path\nassert "SF_KEY" not in os.environ\nassert not Path('+repr(str(sentinel))+').exists()\ns=socket.socket(); s.settimeout(.1)\ntry: s.connect(("1.1.1.1",80))\nexcept OSError: print("isolated")\nelse: raise AssertionError("network escaped")\n')
+            binary.write_text('#!/usr/bin/python3\nimport os,socket\nfrom pathlib import Path\nassert "OPENAI_API_KEY" not in os.environ\nassert not Path('+repr(str(sentinel))+').exists()\ns=socket.socket(); s.settimeout(.1)\ntry: s.connect(("1.1.1.1",80))\nexcept OSError: print("isolated")\nelse: raise AssertionError("network escaped")\n')
             binary.chmod(0o755)
             config=load(); config['_root']=str(root)
             config['agent']['command']=['{binary}']
-            with patch.dict(os.environ,{'SF_KEY':'supervisor-only'}):
+            with patch.dict(os.environ,{'OPENAI_API_KEY':'supervisor-only'}):
                 output=AgentAdapter(config,root/'calls',Meter(1)).call(str(binary),'',workspace)
             self.assertIn('isolated',output)
 
@@ -390,7 +433,7 @@ class SmallTests(unittest.TestCase):
     def test_build_sandbox_preserves_rust_toolchain(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
-            env=clean_env(root/'home','SF_KEY')
+            env=clean_env(root/'home','OPENAI_API_KEY')
             argv=build_sandbox(['cargo','--version'],root,root/'target',root/'home',env)
             self.assertIn('cargo ',command(argv,root,10,env))
 
@@ -430,7 +473,7 @@ class SmallTests(unittest.TestCase):
         config['promotion']['commit_enabled']=True
         config['selector']['exploit_probability']=0
         pool=[{'agent_id':'old','status':'PARENT','pass_count':100,'children_count':100000,'no_promote_rounds':0},
-              {'agent_id':'explore','status':'ARCHIVE','pass_count':0,'children_count':0,'no_promote_rounds':0}]
+              {'agent_id':'explore','status':'ARCHIVE','parent_eligible':1,'pass_count':0,'children_count':0,'no_promote_rounds':0}]
         self.assertEqual(Selector(config,random.Random(1)).select(pool)['agent_id'],'explore')
 
     def test_bad_json_and_empty_hypotheses(self):
@@ -454,9 +497,9 @@ class SmallTests(unittest.TestCase):
         self.assertEqual([item['id'] for item in result],['new A','new B'])
 
     def test_clean_env_excludes_credentials(self):
-        with patch.dict(os.environ,{'SF_KEY':'never-in-child','OTHER_SECRET':'never-either'}):
-            env=clean_env('/independent','SF_KEY')
-        self.assertNotIn('SF_KEY',env)
+        with patch.dict(os.environ,{'OPENAI_API_KEY':'never-in-child','OTHER_SECRET':'never-either'}):
+            env=clean_env('/independent','OPENAI_API_KEY')
+        self.assertNotIn('OPENAI_API_KEY',env)
         self.assertNotIn('OTHER_SECRET',env)
         self.assertEqual(env['HOME'],'/independent')
 
@@ -601,6 +644,7 @@ class SmallTests(unittest.TestCase):
     def test_parallel_coding_tasks_are_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);config=load();config['agent']['concurrency']=5
+            config['agent']['require_bwrap']=False  # This fixture tests the legacy runner command protocol.
             config['benchmarks']['L3']['coding_eval']['task_ids']=['t'+str(i) for i in range(5)]
             folders=[];ready=threading.Barrier(5)
             def run(argv,cwd,timeout,env,check=None):
@@ -816,7 +860,7 @@ class Framework014Case(unittest.TestCase):
         workspace.mkdir()
         (workspace / 'logs').mkdir()
         (workspace / 'logs/original').write_text('preserve existing')
-        self.config['agent']['command'] = ['/bin/true']
+        self.config['agent']['command'] = [sys.executable, '-c', 'pass']
         adapter = AgentAdapter(self.config, self.root / 'calls', Meter(1))
         def interrupted(*args, **kwargs):
             (workspace / 'agents').mkdir()
@@ -826,8 +870,8 @@ class Framework014Case(unittest.TestCase):
             raise RuntimeError('interrupted')
         with patch('genesis.agent_adapter.command', side_effect=interrupted), patch('genesis.agent_adapter.shutil.move', side_effect=OSError('simulate forced kill before cleanup')):
             with self.assertRaises(OSError):
-                adapter.call('/bin/true', '', workspace, 'patch')
-        adapter.call('/bin/true', '', workspace, 'patch')
+                adapter.call(sys.executable, '', workspace, 'patch')
+        adapter.call(sys.executable, '', workspace, 'patch')
         self.assertFalse((workspace / 'agents').exists())
         self.assertFalse((workspace / 'crate/.blockcell').exists())
         self.assertEqual((workspace / 'logs/original').read_text(), 'preserve existing')
@@ -873,15 +917,15 @@ class Framework014Case(unittest.TestCase):
         revision = command(['git', 'rev-parse', 'HEAD'], dependency).strip()
         with (workspace / 'Cargo.toml').open('a') as manifest:
             manifest.write(f'\n[dependencies]\noffline-dependency = {{git="{dependency.as_uri()}", rev="{revision}"}}\n')
-        env = clean_env(self.root / 'fetch-home', 'SF_KEY')
+        env = clean_env(self.root / 'fetch-home', 'OPENAI_API_KEY')
         env['CARGO_HOME'] = str(host_cargo)
         command(['cargo', 'fetch', '--manifest-path', str(workspace / 'Cargo.toml')], workspace, env=env)
         (host_cargo / 'credentials.toml').write_text('SHOULD_NOT_BE_VISIBLE')
-        self.config['agent']['command'] = ['/bin/sh', '-c', 'test "$CARGO_NET_OFFLINE" = true && test -z "$SF_KEY" && test ! -e "$CARGO_HOME/credentials.toml" && test ! -e /home/ubuntu/.cn_key && test ! -e /home/ubuntu/.sf_key && cargo check --offline && cargo test --offline']
+        self.config['agent']['command'] = ['/bin/sh', '-c', 'test "$CARGO_NET_OFFLINE" = true && test -z "$OPENAI_API_KEY" && test ! -e "$CARGO_HOME/credentials.toml" && test ! -e /home/ubuntu/.openai_key && cargo check --offline && cargo test --offline']
         self.config['agent']['command'] = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-net', '--bind', '/tmp', '/tmp', '--bind', str(workspace), str(workspace)] + self.config['agent']['command']
         meter = Meter(1)
         adapter = AgentAdapter(self.config, self.root / 'calls', meter)
-        with patch.dict(os.environ, {'CARGO_HOME': str(host_cargo), 'SF_KEY': 'fake-supervisor-only'}):
+        with patch.dict(os.environ, {'CARGO_HOME': str(host_cargo), 'OPENAI_API_KEY': 'fake-supervisor-only'}):
             output = adapter.call('/bin/true', 'MODE: patch', workspace, 'patch')
         self.assertIn('test result: ok.', output)
         self.assertTrue((self.root / 'state/target/debug').exists())

@@ -1076,10 +1076,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_process_provider_rejects_oversized_output() {
-        let provider = ProcessProvider::new("test.output_limit", "sh").with_args(vec![
-            "-c".to_string(),
-            "head -c 1100000 /dev/zero".to_string(),
-        ]);
+        let provider = ProcessProvider::new("test.output_limit", "sh")
+            .with_args(vec!["-c".to_string(), "printf '%1100000s' x".to_string()]);
 
         let error = provider
             .execute(serde_json::json!({}))

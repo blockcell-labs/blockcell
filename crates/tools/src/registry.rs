@@ -461,6 +461,7 @@ impl ToolRegistry {
                 crate::evidence::add_annotation_schema(
                     &mut parameters,
                     tool.supports_verification(),
+                    !matches!(schema.name.as_str(), "edit_file" | "write_file"),
                 );
             }
             parameters
@@ -662,7 +663,7 @@ impl ToolRegistry {
             self.get(name)
                 .is_some_and(|tool| tool.accepts_execution_annotations())
         }) {
-            rules.push(("execution_annotations".into(), "- **Task requirements and evidence**: When the user names required output files or constrains verification, record those requirements with `task_contract` on your first execution/write call or `update_plan`. Record only explicit requirements; current user instructions take precedence. Never run tests/builds/checks that the user prohibits or defers. When executing a check, set `verification` with its kind and target, preserve failure exit status, and report exactly what was checked; the kind must match the recognized runner. A declaration alone or an unknown custom script does not establish verification evidence. Under a forbidden/deferred contract, use file tools or simple read-only commands; do not switch to scripts, shell input or delegated agents.".into()));
+            rules.push(("execution_annotations".into(), "- **Task requirements and evidence**: Use `update_plan.task_contract` to record explicitly requested deliverables or verification constraints. Current user instructions take precedence. Never run checks the user prohibits or defers. For ordinary checks, pass only `command` to `exec`. If explicitly annotating `verification`, provide both kind and target and match the recognized runner. Use kind `test` for unittest and pytest. Preserve failure exit status and report exactly what was checked. A declaration alone or an unknown custom script does not establish verification evidence. Under a forbidden/deferred contract, use file tools or simple read-only commands. Do not switch to scripts, shell input or delegated agents.".into()));
         }
         rules.sort_by(|a, b| a.0.cmp(&b.0));
         rules.into_iter().map(|(_, rule)| rule).collect()
@@ -737,6 +738,27 @@ mod tests {
     use async_trait::async_trait;
     use blockcell_core::Result;
     use serde_json::json;
+
+    #[test]
+    fn model_schema_simplifies_execution_annotations() {
+        let registry = ToolRegistry::with_defaults();
+        for tool in ["edit_file", "write_file"] {
+            let schema = registry.full_model_schema(tool).unwrap();
+            assert!(schema["function"]["parameters"]["properties"]
+                .get("task_contract")
+                .is_none());
+        }
+        let exec = registry.full_model_schema("exec").unwrap();
+        let verification = &exec["function"]["parameters"]["properties"]["verification"];
+        assert!(verification["description"]
+            .as_str()
+            .unwrap()
+            .contains("unittest"));
+        let plan = registry.full_model_schema("update_plan").unwrap();
+        assert!(plan["function"]["parameters"]["properties"]
+            .get("task_contract")
+            .is_some());
+    }
 
     struct NoRequiredTool;
 

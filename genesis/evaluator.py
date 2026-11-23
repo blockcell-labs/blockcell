@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from .adapters import bfcl, coding_eval, eab60
-from .config import expand
+from .config import evaluation_hash, expand
 from .source import command
 from .isolation import BudgetExceeded, ProviderUnavailable, Proxy, clean_env
 
@@ -22,8 +22,10 @@ class Evaluator:
         self.frozen = self.root / "frozen"
 
     def evaluate(self, agent, benchmark, idx, cached=False):
+        identity = evaluation_hash(self.config)
+        cache_config = dict(self.config, _hash=identity)
         if cached:
-            result = self.archive.cached(agent, benchmark, idx, self.config)
+            result = self.archive.cached(agent, benchmark, idx, cache_config)
             if result is not None:
                 return result
         folder = self.root / "runs" / agent["agent_id"] / benchmark / str(idx)
@@ -56,23 +58,24 @@ class Evaluator:
         for row in result.get("results", []):
             if not isinstance(row.get("task_id"), str) or type(row.get("passed")) is not bool:
                 raise ValueError("invalid task scorecard")
-            row.setdefault("duration_ms", row.get("duration_seconds", 0) * 1000)
-            for key in ("tool_calls", "tool_errors", "input_tokens", "output_tokens"):
-                row.setdefault(key, 0)
+            if 'duration_seconds' in row:
+                row.setdefault('duration_ms', row['duration_seconds'] * 1000)
             row.setdefault("failure_reason", row.get("failure_category") or "")
             row.setdefault("trace_path", "")
         tasks = result.get("results", [])
-        durations = sorted(t["duration_ms"] for t in tasks)
+        durations = sorted(t['duration_ms'] for t in tasks if 'duration_ms' in t)
         result["pass_count"] = sum(t["passed"] for t in tasks)
         result["success_rate"] = result["pass_count"] / len(tasks) if tasks else 0
-        result["tokens_total"] = sum(t["input_tokens"] + t["output_tokens"] for t in tasks)
+        result["tokens_total"] = sum(t.get('input_tokens', 0) + t.get('output_tokens', 0) for t in tasks)
         result["latency_p50"] = durations[max(0, math.ceil(len(tasks) * .5) - 1)] if tasks else 0
         result["latency_p95"] = durations[max(0, math.ceil(len(tasks) * .95) - 1)] if tasks else 0
         result.setdefault("regression_ids", [])
         result.setdefault("safety_violations", [])
-        result.setdefault("cost_usd", sum((t["input_tokens"] * self.config["agent"]["input_usd_per_million"] + t["output_tokens"] * self.config["agent"]["output_usd_per_million"]) / 1000000 for t in tasks))
+        result.setdefault("cost_usd", sum((t.get('input_tokens', 0) * self.config["agent"]["input_usd_per_million"] + t.get('output_tokens', 0) * self.config["agent"]["output_usd_per_million"]) / 1000000 for t in tasks))
         output.write_text(json.dumps(result, ensure_ascii=False, indent=2))
-        self.archive.record(agent, benchmark, idx, result, self.config, output)
+        if identity != evaluation_hash(self.config):
+            raise RuntimeError('evaluation inputs changed during benchmark')
+        self.archive.record(agent, benchmark, idx, result, cache_config, output)
         return result
 
     def full(self, agent, cached=False):
@@ -87,6 +90,8 @@ class Evaluator:
         shutil.copytree(Path(__file__).parent / "fixtures/selfcheck", work)
         try:
             self.adapter.call(binary, "MODE: selfcheck\nModify subject.py so answer() returns 42. Do not change check.py. Run check.py.", work, "selfcheck")
+            if any(path.is_symlink() for path in work.rglob('*')):
+                raise RuntimeError('selfcheck workspace contains a candidate symlink')
             fixture = Path(__file__).parent / "fixtures/selfcheck/check.py"
             # Always restore the trusted assertion after candidate execution.
             shutil.copy2(fixture, work / "check.py")

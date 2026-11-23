@@ -3,32 +3,60 @@ import signal
 import shutil
 import subprocess
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from .config import expand
+from .isolation import BudgetExceeded
+
+
+cycle_deadline = ContextVar('cycle_deadline', default=None)
+
+
+def remaining_cycle_time():
+    deadline = cycle_deadline.get()
+    return float('inf') if deadline is None else deadline - time.monotonic()
 
 
 def command(argv, cwd, timeout=900, env=None, check=None, output_path=None):
+    deadline = time.monotonic() + timeout
+    cycle_limit = cycle_deadline.get()
+    cycle_limited = cycle_limit is not None and cycle_limit <= deadline
+    if cycle_limited:
+        deadline = cycle_limit
+    if cycle_limited and time.monotonic() >= deadline:
+        raise BudgetExceeded('cycle time limit')
     proc = subprocess.Popen([str(x) for x in argv], cwd=cwd, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
     try:
-        deadline = time.monotonic() + timeout
         while True:
             if check:
                 check()
             try:
-                output, _ = proc.communicate(timeout=min(1, max(0, deadline - time.monotonic())) if check else timeout)
+                remaining = max(0, deadline - time.monotonic())
+                output, _ = proc.communicate(timeout=min(1, remaining) if check else remaining)
                 break
             except subprocess.TimeoutExpired:
                 if not check or time.monotonic() >= deadline:
                     raise
     except BaseException as exc:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        output, _ = proc.communicate()
+        try:
+            output, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            output, _ = proc.communicate()
+        if output_path:
+            Path(output_path).write_text(output)
         if isinstance(exc, subprocess.TimeoutExpired):
+            if cycle_limited:
+                raise BudgetExceeded('cycle time limit') from exc
             raise TimeoutError(f"command timed out: {argv[0]}\n{output[-4000:]}") from exc
         raise
     if output_path:
@@ -74,6 +102,7 @@ class Source:
         home.mkdir(exist_ok=True)
         env = clean_env(home, self.config["agent"]["key_env"])
         env["CARGO_TARGET_DIR"] = str(self.target)
+        env['CARGO_NET_OFFLINE'] = 'true'
         started = time.monotonic()
         argv = [expand(str(x), worktree=worktree, target=self.target) for x in self.config["build"]["command"]]
         if agent_id != "genesis-0" and self.config["agent"]["require_bwrap"]:
@@ -106,14 +135,8 @@ class Source:
 
     def promote(self, agent_id, path):
         self.validate(path)
-        branch = "genesis/gen-" + agent_id.removeprefix("agent-")
-        existing = command(["git", "branch", "--list", branch], self.repo).strip()
-        if existing:
-            return command(["git", "rev-parse", branch], self.repo).strip()
-        self.snapshot(agent_id, path)
-        sha = command(["git", "rev-parse", "HEAD"], path).strip()
-        command(["git", "branch", branch, sha], path)
-        return sha
+        # Detached worktrees and archive SHAs retain lineage without creating branches.
+        return self.snapshot(agent_id, path)
 
     def snapshot(self, agent_id, path):
         self.validate(path)
@@ -126,5 +149,11 @@ class Source:
         path = Path(path)
         pointer = path / ".git"
         expected = self.repo / ".git/worktrees" / path.name
-        if pointer.is_symlink() or not pointer.is_file() or pointer.read_text().strip() != "gitdir: " + str(expected):
+        if pointer.is_symlink() or not pointer.is_file():
+            raise RuntimeError("candidate altered trusted worktree git pointer")
+        value = pointer.read_text().strip()
+        gitdir = Path(value.removeprefix('gitdir: '))
+        if not gitdir.is_absolute():
+            gitdir = path / gitdir
+        if not value.startswith('gitdir: ') or gitdir.resolve() != expected.resolve():
             raise RuntimeError("candidate altered trusted worktree git pointer")

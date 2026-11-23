@@ -464,7 +464,7 @@ pub fn command_rejection_reason(params: &Value) -> Option<&'static str> {
     if kinds.windows(2).any(|pair| pair[0] != pair[1]) {
         Some("mixed verification kinds in one command")
     } else {
-        Some("declared verification kind does not match the recognized runner")
+        Some("verification.kind does not match the recognized runner. Omit verification to infer the kind, or use kind test for unittest or pytest")
     }
 }
 
@@ -591,6 +591,18 @@ mod tests {
             );
         }
         assert!(command_intent(&json!({"command":"python3 -m json.tool x", "verification":{"kind":"test","target":"x"}})).is_none());
+    }
+
+    #[test]
+    fn command_only_infers_python_test_kind() {
+        for command in [
+            "python3 -m unittest discover",
+            "python3 -m pytest tests",
+            "pytest",
+        ] {
+            let intent = command_intent(&json!({"command": command})).unwrap();
+            assert_eq!(intent.kind, VerificationKind::Test);
+        }
     }
 
     #[test]

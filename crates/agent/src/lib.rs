@@ -52,6 +52,8 @@ pub mod system_event_orchestrator;
 pub mod system_event_store;
 pub mod task_manager;
 pub mod task_notification;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod token;
 pub mod unified_security_scanner;
 pub mod write_guard;
